@@ -16,8 +16,9 @@
 
 import type { TypeSafeChoiceQuestion } from '../classify/typesafe-client.js';
 import { decide, decideEach, type BatchItem } from './decide.js';
+import { cacheKey } from './cache.js';
 import { NEEDS_YOU_PRIORITIES } from './registry.js';
-import type { DecideOptions, Decision } from './types.js';
+import type { DecideOptions, Decision, DecisionFallbackReason } from './types.js';
 
 export type NeedsYouPriority = (typeof NEEDS_YOU_PRIORITIES)[number];
 export type AttentionSeverity = 'info' | 'warn' | 'high';
@@ -43,6 +44,8 @@ export interface RankedAttentionItem<I extends AttentionItem = AttentionItem> {
   readonly priority: NeedsYouPriority;
   readonly path: 'jev' | 'fallback';
   readonly confidence: number;
+  /** Lets the polled view retry transport failures sooner than completed answers. */
+  readonly reason?: DecisionFallbackReason;
 }
 
 const SEVERITY_RANK: Readonly<Record<AttentionSeverity, number>> = { high: 0, warn: 1, info: 2 };
@@ -140,7 +143,7 @@ export async function prioritizeNeedsYou<I extends AttentionItem>(
   const ranked = items.map((item, i): RankedAttentionItem<I> => {
     const d = decisions[i];
     return d
-      ? { item, priority: d.value, path: d.path, confidence: d.confidence }
+      ? { item, priority: d.value, path: d.path, confidence: d.confidence, ...(d.reason ? { reason: d.reason } : {}) }
       : { item, priority: needsYouPriorityHeuristic(item, nowMs), path: 'fallback', confidence: 1 };
   });
   return ranked.sort(compareRanked);
@@ -225,21 +228,48 @@ export async function worthInterrupting(
  * The Needs-you list is rebuilt on every Verse poll, which is exactly the
  * "hot path" the contract keeps Jev off. So the view never awaits Jev: it
  * orders synchronously with whatever ranking is already known for THIS exact
- * set of items, and — when the set changed — kicks off one background
- * `prioritizeNeedsYou` (single-flight, throttled) whose answer the next poll
+ * set of items, and — when the facts change or expire — kicks off one background
+ * `prioritizeNeedsYou` (single-flight per signature) whose answer the next poll
  * uses. Unkeyed, the background pass falls back with no network and the
  * deterministic order is returned unchanged.
  */
-const REFRESH_MIN_INTERVAL_MS = 60_000;
-let known: { signature: string; priorities: ReadonlyMap<string, NeedsYouPriority> } | null = null;
-let inflight: string | null = null;
-let lastRefreshAt = 0;
+const ANSWER_RETRY_MS = 15 * 60_000;
+const TRANSPORT_RETRY_MS = 60_000;
+const MAX_ORDERING_ENTRIES = 128;
+interface OrderingAttempt {
+  at: number;
+  retryMs: number;
+  priorities: ReadonlyMap<string, NeedsYouPriority>;
+}
+const attempts = new Map<string, OrderingAttempt>();
+const inflight = new Set<string>();
+let generation = 0;
 
-function signatureOf(items: readonly AttentionItem[]): string {
-  return items
-    .map((i) => [i.id, i.severity ?? '', i.title, i.expiresAt ?? ''].join('|'))
-    .sort()
-    .join('\n');
+function signatureOf(items: readonly AttentionItem[], nowMs: number): string {
+  // Keep only a hash, never the classified text. Minute-by-minute waiting age
+  // is deliberately excluded; real deadline urgency changes invalidate immediately.
+  const facts = items.map((i) => JSON.stringify([
+    i.id, i.title, i.detail?.slice(0, 400) ?? '', i.kind ?? '', i.severity ?? 'info',
+    i.blocking === true, i.since ?? '', i.expiresAt ?? '', needsYouPriorityHeuristic(i, nowMs),
+  ])).sort();
+  return cacheKey(facts);
+}
+
+function rememberAttempt(signature: string, ranked: readonly RankedAttentionItem[], at: number): void {
+  // Successful low-confidence answers deserve the same quiet interval as winners.
+  // Transport, disabled/unkeyed and budget failures must recover after one minute.
+  const transient = ranked.some((r) => r.path === 'fallback'
+    && r.reason !== 'below-threshold' && r.reason !== 'no-answer' && r.reason !== 'escalate-only');
+  attempts.delete(signature);
+  attempts.set(signature, {
+    at, retryMs: transient ? TRANSPORT_RETRY_MS : ANSWER_RETRY_MS,
+    priorities: new Map(ranked.filter((r) => r.path === 'jev').map((r) => [r.item.id, r.priority])),
+  });
+  while (attempts.size > MAX_ORDERING_ENTRIES) {
+    const oldest = attempts.keys().next().value;
+    if (oldest === undefined) break;
+    attempts.delete(oldest);
+  }
 }
 
 /**
@@ -250,9 +280,12 @@ function signatureOf(items: readonly AttentionItem[]): string {
 export function orderNeedsYouWithJev<I extends AttentionItem>(sorted: readonly I[], nowMs: number = Date.now()): I[] {
   try {
     if (sorted.length < 2) return [...sorted];
-    const signature = signatureOf(sorted);
-    if (known && known.signature === signature) {
-      const priorities = known.priorities;
+    const signature = signatureOf(sorted, nowMs);
+    const attempt = attempts.get(signature);
+    if (attempt && nowMs >= attempt.at && nowMs - attempt.at < attempt.retryMs) {
+      attempts.delete(signature);
+      attempts.set(signature, attempt);
+      const priorities = attempt.priorities;
       const position = new Map(sorted.map((item, i) => [item.id, i] as const));
       return [...sorted].sort((a, b) => {
         const sev = SEVERITY_RANK[a.severity ?? 'info'] - SEVERITY_RANK[b.severity ?? 'info'];
@@ -263,19 +296,17 @@ export function orderNeedsYouWithJev<I extends AttentionItem>(sorted: readonly I
         return (position.get(a.id) ?? 0) - (position.get(b.id) ?? 0);
       });
     }
-    if (inflight !== signature && nowMs - lastRefreshAt >= REFRESH_MIN_INTERVAL_MS) {
-      inflight = signature;
-      lastRefreshAt = nowMs;
+    attempts.delete(signature);
+    if (!inflight.has(signature) && inflight.size < MAX_ORDERING_ENTRIES) {
+      inflight.add(signature);
+      const startedGeneration = generation;
       void prioritizeNeedsYou(sorted, { nowMs })
         .then((ranked) => {
-          // Only Jev-won priorities are worth remembering; an all-fallback
-          // answer would just restate the deterministic order.
-          const won = ranked.filter((r) => r.path === 'jev');
-          if (won.length > 0) known = { signature, priorities: new Map(won.map((r) => [r.item.id, r.priority])) };
+          if (startedGeneration === generation) rememberAttempt(signature, ranked, nowMs);
         })
         .catch(() => undefined)
         .finally(() => {
-          if (inflight === signature) inflight = null;
+          if (startedGeneration === generation) inflight.delete(signature);
         });
     }
     return [...sorted];
@@ -286,7 +317,7 @@ export function orderNeedsYouWithJev<I extends AttentionItem>(sorted: readonly I
 
 /** Test seam. */
 export function resetNeedsYouOrderingForTests(): void {
-  known = null;
-  inflight = null;
-  lastRefreshAt = 0;
+  generation++;
+  attempts.clear();
+  inflight.clear();
 }

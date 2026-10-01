@@ -93,7 +93,8 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
     }
     const level = LEVEL_OF_STATUS[status.kind] ?? 'unknown';
     const left = bindingLeftPercent(row);
-    const value = row.engine === 'codex' && row.credits !== null && !row.lastReading && !row.signedOut ? (row.creditSpendControlReached === true ? 'credits held' : 'credits') : level === 'out' ? (status.kind === 'spent' ? 'spent' : status.label.toLowerCase())
+    const creditValue = row.creditState === 'none' || row.credits !== null ? estimatedCreditValue(row.creditBalance, row.plan) : null;
+    const value = row.engine === 'codex' && row.credits !== null && !row.lastReading && !row.signedOut ? (row.creditSpendControlReached === true ? 'credits held' : creditValue === null ? 'credits' : `≈${creditValue}`) : level === 'out' ? (status.kind === 'spent' ? 'spent' : status.label.toLowerCase())
       : left === null ? (opts.pendingSeatIds?.includes(row.seatId) ? 'reading…' : status.kind === 'unavailable' ? 'unavailable' : 'no usage') : `${usedPercentText(left)} left${row.lastReading ? ' · last' : ''}`;
     const detail = row.windows.map((w) => {
       const used = w.limitReached ? 'limit reached' : w.usedPercent === null ? 'no reading' : `${usedPercentText(w.usedPercent)} used`;
@@ -103,7 +104,6 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
     });
     if (row.credits !== null && !row.lastReading && !row.signedOut) detail.push(row.credits, 'Credit units are independent of subscription usage; autonomous credit spending is not admitted.');
     if (row.engine === 'codex' && row.creditState === 'none') detail.push('Native provider reports no available credits.');
-    const creditValue = row.creditState === 'none' || row.credits !== null ? estimatedCreditValue(row.creditBalance, row.plan) : null;
     if (creditValue !== null) detail.push(`Estimated credit value ${creditValue} · personal-plan $0.04/credit reference; not attributed spend.`);
     if (row.windows.length === 0) detail.push('Usage is not reported by this resource.');
     if (row.lastReading) detail.push('Last known usage · latest check failed.');
@@ -117,7 +117,7 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
       leftPercent: row.windows.some((w) => w.binding && w.limitReached) || status.kind === 'spent' ? 0 : left,
       level: left === null && level === 'ok' ? 'unknown' : level,
       value,
-      summary: `${row.label}: ${status.label}${status.detail ? ` · ${status.detail}` : ''}`,
+      summary: `${row.label}: ${status.label}${status.detail ? ` · ${status.detail}` : ''}${value.startsWith('≈') ? ` · estimated credit value ${creditValue}` : ''}`,
       detail,
     });
   }

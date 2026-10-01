@@ -140,8 +140,9 @@ describe('Codex credits are independent of the quota battery', () => {
       creditBalance: '2048.4196250000', connection: { connection: 'exhausted' } as CapacityRow['connection'],
       windows: [win({ usedPercent: 100, limitReached: true })] });
     const result = barRows([account], { healthRead: true, now: NOW })[0]!;
-    expect(result.value).toBe('credits'); expect(result.leftPercent).toBe(0);
+    expect(result.value).toBe('≈$81.94'); expect(result.leftPercent).toBe(0);
     expect(result.summary).toContain('Credits available');
+    expect(result.summary).toContain('estimated credit value $81.94');
     expect(result.detail).toContain('2048.4196250000 credits available');
     expect(result.detail.some((line) => line.includes('Estimated credit value $81.94'))).toBe(true);
     expect(result.detail.some((line) => line.includes('autonomous credit spending is not admitted'))).toBe(true);
@@ -154,7 +155,15 @@ describe('Codex credits are independent of the quota battery', () => {
   });
   it('never publishes stale or signed-out credits as currently available', () => {
     for (const patch of [{ signedOut: true }, { lastReading: true }]) {
-      expect(barRows([row({ engine: 'codex', credits: '12 credits available', ...patch })], { healthRead: true, now: NOW })[0]!.value).not.toBe('credits');
+      const result = barRows([row({ engine: 'codex', plan: 'pro', creditBalance: '12', credits: '12 credits available', ...patch })], { healthRead: true, now: NOW })[0]!;
+      expect(result.value).not.toBe('credits');
+      expect(result.value).not.toMatch(/^≈/);
     }
+  });
+  it('keeps unsupported plan balances in provider units without inventing a dollar rate', () => {
+    const result = barRows([row({ engine: 'codex', plan: 'enterprise', creditBalance: '12', credits: '12 credits available' })], { healthRead: true, now: NOW })[0]!;
+    expect(result.value).toBe('credits');
+    expect(result.summary).not.toContain('estimated credit value');
+    expect(result.detail.join(' ')).not.toContain('Estimated credit value');
   });
 });

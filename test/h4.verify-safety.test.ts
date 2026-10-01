@@ -22,6 +22,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { transpileModule, ModuleKind, ScriptTarget } from 'typescript';
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
@@ -32,6 +33,9 @@ import {
   type SafetyReport,
   type CoreSourceReader,
 } from '../src/cli/verify-safety.js';
+import {
+  embeddedSafetySourceReader, VERIFY_SAFETY_SOURCE_KEYS, VERIFY_SAFETY_SOURCE_SYMBOL,
+} from '../src/cli/verify-safety-sources.js';
 
 // ---------------------------------------------------------------------------
 // stdout/stderr capture + HOME snapshot helpers (local to this suite)
@@ -341,6 +345,89 @@ describe('H4 · verify-safety · checks + output shape', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Native source text is compiled JavaScript, just like build-sea's dist inputs.
+describe('H4 · artifact-owned native source snapshot', () => {
+  const identity = JSON.stringify({ schemaVersion: 1, packageVersion: '3.22.0',
+    revision: 'a'.repeat(40), dirty: false, provenance: 'git' });
+  const identitySymbol = Symbol.for('ashlr.build-identity.v1');
+  let priorSource: PropertyDescriptor | undefined;
+  let priorIdentity: PropertyDescriptor | undefined;
+
+  beforeEach(() => {
+    priorSource = Object.getOwnPropertyDescriptor(globalThis, VERIFY_SAFETY_SOURCE_SYMBOL);
+    priorIdentity = Object.getOwnPropertyDescriptor(globalThis, identitySymbol);
+  });
+  afterEach(() => {
+    for (const [key, prior] of [[VERIFY_SAFETY_SOURCE_SYMBOL, priorSource], [identitySymbol, priorIdentity]] as const) {
+      if (prior) Object.defineProperty(globalThis, key, prior);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  });
+  function snapshot() {
+    const sources: Record<string, { text: string; sha256: string }> = {};
+    for (const key of VERIFY_SAFETY_SOURCE_KEYS) {
+      const text = transpileModule(readRealCore(key), {
+        compilerOptions: { module: ModuleKind.ESNext, target: ScriptTarget.ES2022 },
+      }).outputText;
+      sources[key] = { text, sha256: createHash('sha256').update(text).digest('hex') };
+    }
+    return { schemaVersion: 1, buildIdentityJson: identity, sources };
+  }
+  function install(value: unknown) {
+    Reflect.set(globalThis, identitySymbol, identity);
+    Reflect.set(globalThis, VERIFY_SAFETY_SOURCE_SYMBOL, JSON.stringify(value));
+  }
+
+  it('runs all real structural checks on compiled embedded texts without state writes or fetch', async () => {
+    install(snapshot());
+    const before = snapshotTree(fx.home);
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = () => { calls++; throw new Error('unexpected fetch'); };
+    try {
+      const result = await captureOut(() => cmdVerifySafety(['--json']));
+      expect(result.value).toBe(0);
+      expect(JSON.parse(result.out).checks).toHaveLength(5);
+      expect(snapshotTree(fx.home)).toEqual(before);
+      expect(calls).toBe(0);
+    } finally { globalThis.fetch = realFetch; }
+  });
+
+  it.each(['missing', 'missing-identity', 'tampered', 'unknown-key', 'wrong-build', 'wrong-schema', 'malformed'] as const)(
+    'fails %s embedded data instead of substituting healthy sibling sources', (kind) => {
+      const value = snapshot();
+      if (kind === 'missing') delete value.sources['daemon/loop'];
+      if (kind === 'tampered') value.sources['daemon/loop']!.text += '\napplyProposal();';
+      if (kind === 'unknown-key') value.sources['other/core'] = value.sources['daemon/loop']!;
+      if (kind === 'wrong-build') value.buildIdentityJson = identity.replace('a'.repeat(40), 'b'.repeat(40));
+      if (kind === 'wrong-schema') value.schemaVersion = 2;
+      install(value);
+      if (kind === 'missing-identity') Reflect.deleteProperty(globalThis, identitySymbol);
+      if (kind === 'malformed') Reflect.set(globalThis, VERIFY_SAFETY_SOURCE_SYMBOL, '{');
+      const report = runSafetyChecks();
+      expect(report.ok).toBe(false);
+      expect(report.checks.filter((c) => !c.pass)).toHaveLength(4);
+      expect(report.checks.filter((c) => !c.pass).every((c) => c.detail.includes('snapshot'))).toBe(true);
+    },
+  );
+
+  it('still detects a forbidden primitive when a broken text has a matching digest', () => {
+    const value = snapshot();
+    value.sources['daemon/loop']!.text = "import { applyProposal } from '../inbox/apply.js';\napplyProposal();\n";
+    value.sources['daemon/loop']!.sha256 = createHash('sha256').update(value.sources['daemon/loop']!.text).digest('hex');
+    install(value);
+    const report = runSafetyChecks();
+    expect(report.ok).toBe(false);
+    expect(report.checks.filter((c) => !c.pass).map((c) => c.id)).toEqual(['daemon-no-primitive']);
+  });
+
+  it('refuses unknown requested keys after validating the complete snapshot', () => {
+    const read = embeddedSafetySourceReader(JSON.stringify(snapshot()), identity);
+    expect(read('sandbox/policy')).toContain('function assertMayMutate');
+    expect(() => read('../unrelated-release')).toThrow('Unknown native safety source key');
+  });
+});
+
 // Helper: read the REAL committed core source the way the production default
 // reader does (so the broken-reader tests fail exactly ONE check and leave the
 // rest passing against the real build).

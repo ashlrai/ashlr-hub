@@ -297,6 +297,99 @@ describe('Needs-you prioritization and interrupts', () => {
     expect(orderNeedsYouWithJev(sorted, now).map((i) => i.id)).toEqual(['info-1', 'info-2']);
   });
 
+  async function completeOrdering(sorted: readonly AttentionItem[], at: number, calls: number): Promise<void> {
+    orderNeedsYouWithJev(sorted, at);
+    await vi.waitFor(() => expect(fake.fetch).toHaveBeenCalledTimes(calls), { interval: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  it('unchanged low-confidence polls stay deterministic without paying again each minute', async () => {
+    fake.answerAll({ confidence: 0.3 });
+    const sorted = [items[2]!, items[1]!, items[3]!, items[0]!];
+    await completeOrdering(sorted, now, 1);
+    for (let minute = 1; minute < 15; minute++) {
+      expect(orderNeedsYouWithJev(sorted, now + minute * 60_000)).toEqual(sorted);
+    }
+    expect(fake.fetch).toHaveBeenCalledTimes(1);
+    expect(readLedger()).toHaveLength(4);
+  });
+
+  it('all-fallback answers retry at fifteen minutes and can recover to Jev ordering', async () => {
+    const sorted = [items[3]!, items[0]!];
+    fake.answerAll({ confidence: 0.3 });
+    await completeOrdering(sorted, now, 1);
+    fake.respond(() => ({ item_1: choice('whenever', 0.95), item_2: choice('now', 0.95) }));
+    orderNeedsYouWithJev(sorted, now + 15 * 60_000 - 1);
+    expect(fake.fetch).toHaveBeenCalledTimes(1);
+    await completeOrdering(sorted, now + 15 * 60_000, 2);
+    expect(orderNeedsYouWithJev(sorted, now + 15 * 60_000).map((i) => i.id)).toEqual(['info-1', 'info-2']);
+  });
+
+  it('a cached winner refreshes when a deadline enters the immediate urgency band', async () => {
+    const sorted = [{ ...items[0]!, expiresAt: new Date(now + 2 * 3_600_000 + 60_000).toISOString() }, items[3]!];
+    fake.respond(() => ({ item_1: choice('whenever', 0.95), item_2: choice('now', 0.95) }));
+    await completeOrdering(sorted, now, 1);
+    expect(orderNeedsYouWithJev(sorted, now).map((i) => i.id)).toEqual(['info-2', 'info-1']);
+    await completeOrdering(sorted, now + 60_000, 2);
+  });
+
+  it.each([
+    { detail: 'A new consequential failure' },
+    { blocking: true },
+    { kind: 'approval' },
+    { since: '2026-09-27T11:01:00.000Z' },
+  ])('changed semantic facts invalidate the attempt immediately: %j', async (change) => {
+    fake.answerAll({ confidence: 0.3 });
+    const sorted = [items[0]!, items[3]!];
+    await completeOrdering(sorted, now, 1);
+    await completeOrdering([{ ...sorted[0]!, ...change }, sorted[1]!], now + 1, 2);
+  });
+
+  it.each(['network', 'timeout'])('%s failures retry after sixty seconds rather than the answer interval', async (failure) => {
+    const sorted = [items[3]!, items[0]!];
+    fake.respond(() => { throw failure === 'timeout' ? new DOMException('timed out', 'AbortError') : new Error('offline'); });
+    await completeOrdering(sorted, now, 1);
+    expect(readLedger().every((row) => row.reason === failure)).toBe(true);
+    fake.answerAll({ confidence: 0.95 });
+    expect(orderNeedsYouWithJev(sorted, now + 59_999)).toEqual(sorted);
+    expect(fake.fetch).toHaveBeenCalledTimes(1);
+    await completeOrdering(sorted, now + 60_000, 2);
+  });
+
+  it('unkeyed ordering keeps the deterministic list and recovers after a minute', async () => {
+    const sorted = [items[3]!, items[0]!];
+    unkeyed();
+    expect(orderNeedsYouWithJev(sorted, now)).toEqual(sorted);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    process.env[TYPESAFE_API_KEY_ENV] = FAKE_TYPESAFE_KEY;
+    fake.answerAll({ confidence: 0.95 });
+    expect(orderNeedsYouWithJev(sorted, now + 59_999)).toEqual(sorted);
+    expect(fake.fetch).not.toHaveBeenCalled();
+    await completeOrdering(sorted, now + 60_000, 1);
+  });
+
+  it('the same signature has one background attempt even during repeated reads', async () => {
+    fake.answerAll({ confidence: 0.3 });
+    const sorted = [items[3]!, items[0]!];
+    for (let i = 0; i < 50; i++) expect(orderNeedsYouWithJev(sorted, now)).toEqual(sorted);
+    await vi.waitFor(() => expect(fake.fetch).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(orderNeedsYouWithJev(sorted, now + 60_000)).toEqual(sorted);
+    expect(fake.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('bounded LRU evicts the oldest of 129 signatures and retains recently read ones', async () => {
+    fake.answerAll({ confidence: 0.3 });
+    const list = (id: number) => [{ ...items[0]!, id: `attention-${id}`, title: `Attention item ${id}` }, items[3]!];
+    for (let i = 0; i < 128; i++) await completeOrdering(list(i), now, i + 1);
+    orderNeedsYouWithJev(list(0), now); // Keep zero recent; one is now oldest.
+    await completeOrdering(list(128), now, 129);
+    clearDecisionCache(); // Prove ordering-cache eviction independently of transport caching.
+    expect(orderNeedsYouWithJev(list(0), now)).toEqual(list(0));
+    expect(fake.fetch).toHaveBeenCalledTimes(129);
+    await completeOrdering(list(1), now, 130);
+  });
+
   it('a high or blocking item always interrupts, with no call', async () => {
     fake.respond(() => ({ interrupt: noul(0.01) }));
     const d = await worthInterrupting(items[2]!, { quietHours: true }, { cfg, nowMs: now });

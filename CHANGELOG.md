@@ -9,6 +9,26 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.22.1] — 2026-10-01
+
+### Fixed
+
+- Stop repeated Jev requests for unchanged attention items after completed
+  low-confidence answers. Refresh on meaningful facts and urgency changes;
+  retry transient failures sooner, with bounded caching and single-flight.
+- Bundle the native structural diagnostic's five source texts with the exact
+  build identity and verified hashes so it can inspect its own artifact.
+  Missing or invalid snapshots fail the diagnostic without disk fallback.
+- Show qualified personal-plan Codex credit dollar estimates directly in the
+  resource bar. Preserve independent quota meters, provider holds, stale
+  readings and plans whose dollar equivalence is unknown.
+
+### Changed
+
+- Expand and collapse Fleet goals and backlog independently, preserving full
+  source order and accurate active, paused and planning counts. Distinguish
+  pending reads and unavailable data from an empty list.
+
 ## [3.22.0] — 2026-10-01
 
 ### Added
