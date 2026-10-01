@@ -5,8 +5,8 @@ A Tauri v2 desktop app that wraps **Ashlr Verse** (the operator console at
 the console; resident autonomy requires its separate local setup and grant.
 
 The versioned [v3.21.0 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.21.0/Ashlr_3.21.0_aarch64_locally-signed.dmg)
-is the publication target for this release candidate. The build is locally
-signed, not Apple Developer ID notarized. macOS may require **Open
+is the publication target for this release candidate. The build is
+locally signed, not Apple Developer ID notarized. macOS may require **Open
 Anyway** on first launch. The desktop CI workflow remains disabled during the
 Linux quarantine; its retained draft-only policy is separate from this local
 macOS release. The Linux CLI and web dashboard remain supported.
