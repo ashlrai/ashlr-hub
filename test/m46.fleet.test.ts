@@ -604,6 +604,55 @@ describe('fleet quota ledger', () => {
     expect(readdirSync(join(tmpHome, '.ashlr', 'fleet')).some((name) => name.endsWith('.tmp'))).toBe(false);
   });
 
+  it.each(['grok-cli', 'devin-cli'] as const)('admits native %s with absent limits without creating quota storage', (backend) => {
+    const cfg = withFoundry({ allowedBackends: [backend] });
+    expect(reserveFleetQuotaUse(backend, cfg, 'native-unlimited')).toEqual({
+      kind: 'unlimited', launchAuthorized: true,
+      reservations: [{ backend, status: 'unlimited', used: 0, limit: null }],
+    });
+    expect(existsSync(join(tmpHome, '.ashlr', 'fleet'))).toBe(false);
+  });
+
+  it.each(['grok-cli', 'devin-cli'] as const)('enforces durable native %s reservations and exact ledger readback', (backend) => {
+    const cfg = withFoundry({
+      allowedBackends: [backend],
+      limits: { [backend]: { window: '1h', max: 2 } },
+    });
+    expect(reserveFleetQuotaUse(backend, cfg, 'native-first')).toMatchObject({
+      kind: 'reserved', launchAuthorized: true,
+      reservations: [{ backend, status: 'reserved', used: 1, limit: 2 }],
+    });
+    expect(reserveFleetQuotaUse(backend, cfg, 'native-first')).toEqual({
+      kind: 'duplicate', launchAuthorized: false, backend,
+    });
+    expect(reserveFleetQuotaUse(backend, cfg, 'native-second')).toMatchObject({
+      kind: 'reserved', launchAuthorized: true,
+      reservations: [{ backend, status: 'reserved', used: 2, limit: 2 }],
+    });
+    expect(loadReservationLedger().events.map((event) => event.backend)).toEqual([backend, backend]);
+    expect(inspectFleetQuotaAuthority(backend, cfg)).toBe('healthy');
+    expect(evalFleetQuotaAuthority(backend, cfg)).toBe('over');
+    const before = readFileSync(fleetQuotaReservationPath());
+    expect(reserveFleetQuotaUse(backend, cfg, 'native-third')).toEqual({
+      kind: 'exhausted', launchAuthorized: false, backend, used: 2, limit: 2,
+    });
+    expect(readFileSync(fleetQuotaReservationPath()).equals(before)).toBe(true);
+  });
+
+  it('refuses an unknown backend without partially reserving a native batch', () => {
+    const cfg = withFoundry({
+      allowedBackends: ['grok-cli'],
+      limits: { 'grok-cli': { window: '1h', max: 2 } },
+    });
+    expect(reserveFleetQuotaUses([
+      { backend: 'grok-cli', dispatchId: 'native-batch' },
+      { backend: 'unknown-native' as EngineId, dispatchId: 'unknown-batch' },
+    ], cfg)).toEqual({ kind: 'invalid', launchAuthorized: false });
+    expect(existsSync(fleetQuotaReservationPath())).toBe(false);
+    expect(reserveFleetQuotaUse('unknown-native' as EngineId, baseConfig(), 'unknown-unlimited'))
+      .toEqual({ kind: 'invalid', launchAuthorized: false });
+  });
+
   it('reports exhausted reserved authority even before actual-attempt telemetry exists', () => {
     const cfg = withFoundry({
       allowedBackends: ['claude'],

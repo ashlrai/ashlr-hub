@@ -13,6 +13,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Fixed
 
+- Admit the shipped Grok and Devin CLI engine identities in fleet quota
+  reservations, while keeping their ledgers separate from API engine usage.
 - Distinguish a live preparing Fleet tick from idle without inflating working
   agent counts, and label the last completed tick separately from current progress.
 - Stop repeated Jev requests for unchanged attention items after completed
