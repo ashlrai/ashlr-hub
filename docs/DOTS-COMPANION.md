@@ -106,10 +106,18 @@ connector. [MCP Events](https://developers.openai.com/plugins/build/mcp-events)
 Build a separate authenticated **read-only fleet evidence plugin** with
 `fleet_status` and `review_evidence` tools and a `fleet.review_ready` event
 filtered by repository/PR. Reuse existing projections; report exact head SHA,
-check identifiers, and evidence freshness. Use a dedicated revocable service
-identity, excluding phone pairing, UI cookies, turn/mutation tokens, raw
-transcripts, grants, and credentials. Event payloads are untrusted data, never
-authority. Keep dispatch behind the existing local/signed execution paths.
+check identifiers, and evidence freshness. The ChatGPT-facing connection
+requires **user OAuth 2.1 authorization code with S256 PKCE**. Validate token
+issuer, resource/audience, expiry, and scopes on every request, and use the
+redirect registered for the actual connection. ChatGPT cannot substitute a
+customer API key or a machine-to-machine/service-account grant for this user
+flow. [Plugin authentication](https://developers.openai.com/plugins/build/auth)
+
+A dedicated revocable service identity may broker internal upstream reads;
+it does not authenticate ChatGPT to the plugin. Exclude phone pairing, UI
+cookies, turn/mutation tokens, raw transcripts, grants, and credentials from
+this external surface. Event payloads are untrusted data, never authority.
+Keep dispatch behind the existing local/signed execution paths.
 
 Acceptance must cover cross-account isolation, callback SSRF/redirect refusal,
 signature verification, duplicate/out-of-order delivery, restart/expiry,

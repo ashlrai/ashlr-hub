@@ -30,7 +30,7 @@ Download the [v3.18.0 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/rele
 from the [published release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.18.0).
 It includes the CLI and the same console. This DMG is locally signed, not
 Apple Developer ID notarized; macOS may require **Open Anyway** on first launch.
-For a source build and local signing, follow [Releasing locally](RELEASING-LOCALLY.md).
+For a source build and local signing, follow [Releasing locally](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
 There is no Linux or Windows desktop package in this release; use the CLI above.
 
 ### Make your first useful turn
@@ -43,7 +43,7 @@ There is no Linux or Windows desktop package in this release; use the CLI above.
    Each vendor signs in through its own CLI; Verse does not take its password.
 3. Ask for a small, checkable change. Review its diff and results in the
    workbench before accepting it. Use **⌘K** to find actions and **⌘J** for
-   **Needs you**. The full interface is in the [Verse guide](VERSE.md).
+   **Needs you**. The full interface is in the [Verse guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
 
 Choose **Work for me** to delegate a task in its own workspace, review agents,
 or manage the resident fleet. Standing instructions guide the Leader's fleet
@@ -63,7 +63,7 @@ surface; [set it up](REMOTE-PHONE.md) rather than exposing the main loopback
 console. Resident autonomy is macOS-only and starts dormant. Inspect the
 **installed** release with `ashlr authority status` and
 `ashlr authority setup --dry-run --json`, then use the
-[autonomy setup guide](AUTONOMY-SETUP.md) if you want to sign a standing grant.
+[autonomy setup guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTONOMY-SETUP.md) if you want to sign a standing grant.
 A source checkout or a static guide cannot establish the current service state
 on your Mac.
 
@@ -71,7 +71,7 @@ on your Mac.
 
 This path is for evaluating the local experiment kernel from a trusted source
 checkout. Source commands may differ from the published npm package; confirm
-with the [release record](RELEASING.md) and your selected binary's help.
+with the [release record](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING.md) and your selected binary's help.
 
 | What you want to do | Supported path |
 |--------------------|----------------|
@@ -140,7 +140,7 @@ commissioning guide above before authorizing generation.
 
 `ashlr init`, `ashlr serve`, `ashlr enroll` and `ashlr daemon` remain compatibility
 surfaces beneath Verse. For their command and safety contracts, use the
-[Hub reference](HUB-REFERENCE.md). The current first-run console is
+[Hub reference](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md). The current first-run console is
 `ashlr verse` at `/verse/`; older `/` and `/next/` dashboard guidance should not
 be used as a Verse onboarding path.
 
@@ -154,7 +154,7 @@ ashlr authority resident status --json
 ```
 
 A grant, service installation and live resident process each require their own
-verification. The [autonomy setup guide](AUTONOMY-SETUP.md) covers signing,
+verification. The [autonomy setup guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTONOMY-SETUP.md) covers signing,
 starting, stopping and scope. The [phone guide](REMOTE-PHONE.md) covers the
 separate protected gateway. Neither path makes the main loopback server public.
 

@@ -6,7 +6,7 @@
 
 **[verse.ashlr.ai](https://verse.ashlr.ai)**
 
-[Install](#install) · [See the workbench](#what-it-is) · [Read the guide](docs/VERSE.md) · [Explore the ecosystem](https://verse.ashlr.ai/ecosystem) · [Star Verse on GitHub](https://github.com/ashlrai/ashlr-hub)
+[Install](#install) · [See the workbench](#what-it-is) · [Read the guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) · [Explore the ecosystem](https://verse.ashlr.ai/ecosystem) · [Star Verse on GitHub](https://github.com/ashlrai/ashlr-hub)
 
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
@@ -389,7 +389,7 @@ dated, GitHub-sourced star history of these six repositories and their sum.
 | **[AshlrCode](https://github.com/ashlrai/ashlrcode)** | Run a multi-provider coding agent in the terminal. |
 | **[Morphkit](https://github.com/ashlrai/morphkit)** | Turn a TypeScript/React app into a SwiftUI project. |
 
-The [ecosystem map](docs/ECOSYSTEM-MAP.md) records older composition ideas; it
+The [ecosystem map](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ECOSYSTEM-MAP.md) records older composition ideas; it
 is a dated planning snapshot, not a claim that every integration is live. Each
 repository has its own install instructions, release state and star count.
 

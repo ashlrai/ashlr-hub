@@ -8,7 +8,8 @@ stress helper (`test/helpers/h3-stress.ts`).
 **Primary goal is PROOF.** H3 is a STRESS-TEST milestone. It drives MANY
 concurrent tasks/items through the REAL bounding / selection / accounting code
 and asserts the in-process caps hold under load: the daily USD budget cap, the
-per-tick item cap, the concurrency cap (`parallel <= 8`), the per-task budget
+per-tick journal cap, the configured daemon concurrency limit (and separate
+swarm BUILD cap of 8), the per-task budget
 reservation (`sum(authorized) <= pool`), the exact daily reset (no double-count,
 no lost spend), and id uniqueness under same-millisecond bursts.
 
@@ -62,7 +63,8 @@ instant + observable:
    the budget gate + in-tick short-circuit (loop.ts:176-193, 297-300, 330-332),
    `perTickItems` top-K select (loop.ts:257-260), `tickSpent` accounting
    (loop.ts:297, 371, 418), `resetDayIfNeeded` (state.ts:157-165), the
-   `parallel` clamp (loop.ts:64-66), and `buildBudget`/`sliceBudget`/`MAX_PARALLEL`
+   configured daemon `parallel` limit and durable journal capacity of 64,
+   and `buildBudget`/`sliceBudget`/`MAX_PARALLEL`
    (runner.ts:179, 206-265, 1085-1088).
 
 2. **Observe concurrency, don't race it.** Each mocked unit records its
@@ -171,8 +173,10 @@ Drives the REAL `bounded()` (loop.ts) AND the REAL `runSwarm` internal
 `MAX_PARALLEL` clamp (runner.ts) under flood, via `makeConcurrencyProbe`:
 - `bounded(tasks, limit)` with MANY tasks never runs more than `limit`
   simultaneously — observed `peak() <= limit` for limits 1..N;
-- the daemon `parallel` cap is clamped to `<= 8` (loop.ts:64-66): a cfg requesting
-  `parallel: 100` results in an OBSERVED peak `<= 8` over a flooded tick;
+- the daemon honors a positive safe-integer `parallel` preference: requesting
+  `parallel: 17` produces an OBSERVED peak of 17, with no units left in flight;
+  a requested 70-item flood dispatches exactly the durable journal capacity of
+  64 items in that tick, leaving the rest for subsequent ticks;
 - `runSwarm`'s BUILD phase honors `MAX_PARALLEL = 8` (runner.ts:179, 1085-1088)
   with `runGoal` MOCKED + probed: observed peak `<= 8` regardless of plan size;
 - the per-task budget RESERVATION (`sliceBudget`, runner.ts:206-265) keeps
@@ -261,11 +265,13 @@ Drives the REAL atomic stores under concurrent writers, via `spawnConcurrent`:
    of authorized per-task budgets in each concurrent batch stays `<= total` (the
    `sum(authorized) <= pool` bound the old 8×25%=200% overshoot violated).
 
-2. **CONCURRENCY-CAP-HOLDS** — No more than `limit` units run simultaneously, and
-   the daemon/swarm parallelism is clamped to `<= 8`. *Proven:* `makeConcurrencyProbe`
-   samples in-flight count inside MOCKED units flooded through the REAL `bounded()`
-   (loop.ts:82-105) and the REAL `runSwarm` BUILD phase (`MAX_PARALLEL`, runner.ts:179);
-   assert observed `peak() <= limit` and `peak() <= 8` for a cfg requesting more.
+2. **CONCURRENCY-CAP-HOLDS** — No more than the requested daemon `limit` units
+   run simultaneously; the separate swarm BUILD cap remains 8. *Proven:*
+   `makeConcurrencyProbe` samples in-flight count inside MOCKED units flooded
+   through the REAL `bounded()` pool and the REAL `runSwarm` BUILD phase:
+   daemon `parallel: 17` reaches a peak of 17 and drains fully, while selection
+   admits 64 of 70 requested items to the durable journal. The swarm BUILD phase
+   still asserts `peak() <= 8` for a plan requesting more.
 
 3. **DAILY-RESET-EXACT** — The daily spend reset zeroes exactly once at the day
    boundary and never double-counts or loses spend. *Proven:* `resetDayIfNeeded`

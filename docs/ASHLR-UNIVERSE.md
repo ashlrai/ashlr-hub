@@ -2633,7 +2633,7 @@ the command never retries execution. JSON output is tagged `diagnostic-only`:
 neither a successful exit nor internally consistent counters authenticate the
 report, prove process settlement, assign a score, or accept a candidate. Keep the
 original evaluation and custody evidence for those decisions. See the
-[measurement benchmark plan](../artifacts/hub-verification-benchmark-plan.md)
+[measurement benchmark plan](https://github.com/ashlrai/ashlr-hub/blob/master/artifacts/hub-verification-benchmark-plan.md)
 for the workload and remaining optimization acceptance requirements.
 
 ### Capture preparation measurements
