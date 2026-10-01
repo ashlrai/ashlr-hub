@@ -2871,7 +2871,14 @@ export async function runEngineSandboxed(
                       !autonomousVendorIdentityCurrent(repairSpawn.overlay) || !latest ||
                       latest.seatId !== fresh.seatId || latest.executable !== fresh.executable ||
                       latest.nativeStatePath !== fresh.nativeStatePath) {
-                      finishAutonomousSpawn(repairSpawn,{output:''});return null;
+                      const finished = finishAutonomousSpawn(repairSpawn, { output: '' });
+                      if (finished.violations.length > 0) {
+                        await recordAutonomousViolations({ engine, sourceRepo: opts.sourceRepo, runId: id, operations: finished.violations });
+                      }
+                      if (finished.violationsKnown !== true) {
+                        await recordSandboxEvidenceUnknown({ engine, sourceRepo: opts.sourceRepo, runId: id, evidence: finished.kernelEvidence });
+                      }
+                      return null;
                     }
                     builtRepairCmd = {...fresh.cmd,bin:repairSpawn.bin};
                   }
@@ -2891,7 +2898,9 @@ export async function runEngineSandboxed(
                     if (repairSpawn) {
                       const finished = finishAutonomousSpawn(repairSpawn,{output:r ? `${r.output}\n${r.error ?? ''}` : '',tripwireKill:r ? engineResultTripwireKill(r) : false});
                       if (finished.violations.length) await recordAutonomousViolations({engine,sourceRepo:opts.sourceRepo,runId:id,operations:finished.violations});
-                      if (!finished.violationsKnown) await recordSandboxEvidenceUnknown({engine,sourceRepo:opts.sourceRepo,runId:id,evidence:finished.kernelEvidence});
+                      if (finished.violationsKnown !== true) {
+                        await recordSandboxEvidenceUnknown({ engine, sourceRepo: opts.sourceRepo, runId: id, evidence: finished.kernelEvidence });
+                      }
                     }
                   }
                   if (!r) return null;

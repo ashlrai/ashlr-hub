@@ -210,8 +210,8 @@ describe('producers pass finishAutonomousSpawn().violationsKnown into the ledger
     return sites.length;
   }
 
-  it('sandboxed-engine: the normal finish and the throw-path finish both record it', () => {
-    expect(eachFinishRecordsUnknown(source('src/core/run/sandboxed-engine.ts'))).toBe(2);
+  it('sandboxed-engine: initial, refused repair, completed repair and throw-path finishes record it', () => {
+    expect(eachFinishRecordsUnknown(source('src/core/run/sandboxed-engine.ts'))).toBe(4);
   });
 
   it('fleet manager: the confined judge spawn records it', () => {
