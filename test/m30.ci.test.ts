@@ -125,8 +125,18 @@ describe('M30 CI workflow', () => {
     expect(ciYml.match(/os:\s*macos-latest/g)).toHaveLength(1);
     for (const shard of ['1/3', '2/3', '3/3']) {
       expect(ciYml).toContain(`label: ubuntu, authority ${shard}`);
-      expect(ciYml).toContain(`test_args: "--shard=${shard}"`);
+      expect(ciYml).toContain(`test_args: "--shard=${shard} --exclude=test/m342.dispatch-production-ledger.test.ts"`);
     }
+    // The excluded file remains exhaustive authority in exactly one serial step.
+    const ledgerSteps = ciYml.match(/^ {6}- name: Test complete dispatch production ledger \(hermetic\)[\s\S]*?(?=^ {6}- name:)/gm) ?? [];
+    expect(ledgerSteps).toHaveLength(1);
+    expect(ledgerSteps[0]).toContain("if: matrix.label == 'ubuntu, authority 3/3'");
+    expect(ledgerSteps[0]!.trim().split('\n').slice(-3)).toEqual([
+      '        run: >-',
+      '          npm run test:ci -- --maxWorkers=1 --fileParallelism=false',
+      '          test/m342.dispatch-production-ledger.test.ts',
+    ]);
+    expect(ledgerSteps[0]).not.toMatch(/--(?:exclude|testNamePattern|bail|shard|project)|(?:^|\s)-t(?:\s|$)/);
     for (const partition of ['1/3', '2/3', '3/3']) {
       expect(ciYml).toContain(`label: windows, portability ${partition}`);
     }
@@ -475,7 +485,12 @@ describe('M30 CI workflow', () => {
       expect(entry).not.toContain('native_launchd:');
     }
 
-    expect([...declaredFiles].sort()).toEqual([...expectedFiles].sort());
+    // Three exclusions plus the one complete Ubuntu invocation are explicit
+    // file mentions; existing native portability declarations remain unchanged.
+    expect([...declaredFiles].sort()).toEqual([
+      ...expectedFiles,
+      ...Array<string>(4).fill('test/m342.dispatch-production-ledger.test.ts'),
+    ].sort());
     expect(windowsPortabilityThree).toContain('--reporter=dot');
     expect(windowsPortabilityOverflow).toContain('--reporter=dot');
     expect(ciYml.match(/--reporter=dot/g)).toHaveLength(2);
@@ -488,6 +503,7 @@ describe('M30 CI workflow', () => {
       (file, index) => declaredFiles.indexOf(file) !== index,
     );
     expect([...duplicateFiles].sort()).toEqual([
+      ...Array<string>(4).fill('test/m342.dispatch-production-ledger.test.ts'),
       terminalRetentionTest,
       observerSchedulerTest,
       externalSkillMaturityTest,

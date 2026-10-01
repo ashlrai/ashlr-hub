@@ -417,7 +417,8 @@ describe('defaults for new chats', () => {
     const before = readFileSync(file);
     expect(readControlDefaults(root)).toEqual({ global: {}, seats: {} });
     expect(() => writeControlDefaults(root, { effort: 'high' })).toThrow(/no changes saved/);
-    expect(readFileSync(file)).toEqual(before);
+    // Compare every byte without allocating a matcher traversal for the 1 MiB fixture.
+    expect(readFileSync(file).equals(before)).toBe(true);
   });
 
   it('refuses a serialization that would exceed the byte bound without losing valid rows', () => {
