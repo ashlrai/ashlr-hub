@@ -43,7 +43,7 @@
 import type { VerseEvent } from '../../data/api-types.js';
 import { getAuthSnapshot, getReadClientProof } from '../../data/auth-store.js';
 import { isRemoteMobileMode } from '../../data/remote-mode.js';
-import { parseVerseEventFrame, VERSE_EVENT_TYPES } from './verse-events.js';
+import { parseVerseEventFrame, VERSE_EVENT_TYPES } from './verse-event-frame.js';
 import { fetchVerseSessionDetail, invalidateVerseLists, verseSessionPath } from './verse-queries.js';
 import {
   applyVerseEvents,

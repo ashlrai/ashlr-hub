@@ -13,6 +13,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Fixed
 
+- Load the sidebar metadata channel after chat mounts, keeping reconnection
+  code out of first-paint JavaScript while preserving shared resource updates.
+
+
 - Keep unresolved Devin usage reserved after local dismissal, expiry or PR
   closure. Separate reported usage and operator adjustments from held exposure
   in the resource bar, drawer and CLI; cost estimates cover recorded usage.

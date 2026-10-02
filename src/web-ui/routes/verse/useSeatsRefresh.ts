@@ -59,7 +59,7 @@ import { getQuerySnapshot, refetchQuery, runQuery } from '../../data/cache.js';
 import { apiGet } from '../../data/client.js';
 import { oneShotFetcher } from './health/health-queries.js';
 import { VERSE_BOOTSTRAP_KEY, verseBootstrapQuery } from './verse-queries.js';
-import { onVerseAccountReadingsChanged } from './verse-events.js';
+import { onVerseAccountReadingsChanged } from './verse-list-channel.js';
 
 /** Steady-state cached reads follow the collector's cadence. */
 export const SEATS_POLL_MS = 30_000;

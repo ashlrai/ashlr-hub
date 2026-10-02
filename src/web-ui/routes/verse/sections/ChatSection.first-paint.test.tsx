@@ -92,7 +92,7 @@ describe('check-first-paint-budget: a root folded into a group chunk', () => {
 describe('the heavy parts of Chat stay out of its first-paint chunk', () => {
   it('ChatSection has no static import of the workspace, chat list, dock derivations or verse-model', () => {
     const imports = staticImports(read('sections/ChatSection.tsx'));
-    for (const lazy of ['../Workspace.js', '../Sidebar.js', '../chat/tasks-model.js', '../chat/turn-files.js', '../verse-model.js', '../dock/DockHost.js', '../NewChatDialog.js']) {
+    for (const lazy of ['../Workspace.js', '../Sidebar.js', '../chat/tasks-model.js', '../chat/turn-files.js', '../verse-model.js', '../dock/DockHost.js', '../NewChatDialog.js', '../verse-events.js', '../verse-list-channel.js']) {
       expect(imports, lazy).not.toContain(lazy);
     }
   });
@@ -111,8 +111,50 @@ describe('ChatSection before its chunks land', () => {
   afterEach(() => {
     vi.doUnmock('../Workspace.js');
     vi.doUnmock('../Sidebar.js');
+    vi.doUnmock('../verse-list-channel.js');
     vi.resetModules();
     vi.unstubAllGlobals();
+  });
+
+  it('never acquires a metadata connection when Chat unmounts before its channel module arrives', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const open = vi.fn(() => vi.fn());
+    vi.resetModules();
+    vi.doMock('../Workspace.js', () => ({ Workspace: () => null }));
+    vi.doMock('../Sidebar.js', () => ({ Sidebar: () => null }));
+    vi.doMock('../verse-list-channel.js', async () => {
+      await gate;
+      return { openVerseListChannel: open, onVerseAccountReadingsChanged: () => () => undefined };
+    });
+    const { ChatSection } = await import('./ChatSection.js');
+    const { ToastProvider } = await import('../../../components/primitives/Toast.js');
+    const mounted = render(<ToastProvider><ChatSection /></ToastProvider>);
+    mounted.unmount();
+    await act(async () => { release(); await gate; });
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it('releases one acquired metadata owner exactly once and leaves rejected loads retryable', async () => {
+    const { openDeferredVerseListChannel } = await import('./ChatSection.js');
+    const release = vi.fn();
+    const open = vi.fn(() => release);
+    const dispose = openDeferredVerseListChannel(async () => ({ openVerseListChannel: open }));
+    await act(async () => undefined);
+    expect(open).toHaveBeenCalledTimes(1);
+    dispose();
+    dispose();
+    expect(release).toHaveBeenCalledTimes(1);
+    const retry = vi.fn().mockRejectedValueOnce(new Error('Chunk unavailable')).mockResolvedValueOnce({ openVerseListChannel: open });
+    openDeferredVerseListChannel(retry)();
+    await act(async () => undefined);
+    const recovered = openDeferredVerseListChannel(retry);
+    await act(async () => undefined);
+    expect(retry).toHaveBeenCalledTimes(2);
+    expect(open).toHaveBeenCalledTimes(2);
+    recovered();
+    expect(release).toHaveBeenCalledTimes(2);
   });
 
   it('paints the list and workspace skeletons, then the real columns replace them', async () => {
