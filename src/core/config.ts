@@ -552,8 +552,8 @@ function sanitizeExecutionIdentityConfigBoundary(config: AshlrConfig): AshlrConf
         continue;
       }
       const maxConcurrent = plan['maxConcurrent'];
-      const validPositiveConcurrent = Number.isSafeInteger(maxConcurrent) && Number(maxConcurrent) >= 1 &&
-        Number(maxConcurrent) <= 32;
+      // A configured preference is not proof of observed execution capacity.
+      const validPositiveConcurrent = Number.isSafeInteger(maxConcurrent) && Number(maxConcurrent) >= 1;
       let safePlan: NonNullable<typeof safeIdentities>[number]['plan'] | null = null;
       if (plan['kind'] === 'subscription' &&
           (plan['class'] === 'codex-max' || plan['class'] === 'codex-custom') &&

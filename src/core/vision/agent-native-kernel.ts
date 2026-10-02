@@ -335,7 +335,7 @@ function validIdentityResource(value: unknown): boolean {
     typeof row['executionIdentityDigest'] !== 'string' ||
     !IDENTITY_DIGEST_RE.test(row['executionIdentityDigest']) || !ENGINES.has(String(row['engine'])) ||
     !IDENTITY_STATES.has(String(row['state'])) || !integer(row['trustedSlots'], 0, MAX_IDENTITIES) ||
-    !integer(row['maxConcurrent'], 0, MAX_IDENTITIES) ||
+    !integer(row['maxConcurrent'], 0, Number.MAX_SAFE_INTEGER) ||
     (row['usedPercent'] !== null && (typeof row['usedPercent'] !== 'number' ||
       !Number.isFinite(row['usedPercent']) || row['usedPercent'] < 0 || row['usedPercent'] > 100)) ||
     (row['observedAt'] !== null && !timestamp(row['observedAt'])) ||
