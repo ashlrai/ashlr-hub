@@ -5,6 +5,7 @@
  * settings instead of dumping arbitrary config. Secret-like values are omitted;
  * API credentials are represented only by env var names.
  */
+import { resolveDaemonCountPreferences } from './daemon/count-preferences.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -57,15 +58,15 @@ export interface EffectiveConfigSnapshot {
   };
   daemon: {
     dailyBudgetUsd: EffectiveConfigValue<number>;
-    perTickItems: EffectiveConfigValue<number>;
-    parallel: EffectiveConfigValue<number>;
+    perTickItems: EffectiveConfigValue<number | null>;
+    parallel: EffectiveConfigValue<number | null>;
     intervalMs: EffectiveConfigValue<number>;
     mode: EffectiveConfigValue<'batch' | 'continuous'>;
-    maxConcurrent: EffectiveConfigValue<number>;
+    maxConcurrent: EffectiveConfigValue<number | null>;
     concurrency: {
-      local: EffectiveConfigValue<number>;
-      cloud: EffectiveConfigValue<number>;
-      total: EffectiveConfigValue<number>;
+      local: EffectiveConfigValue<number | null>;
+      cloud: EffectiveConfigValue<number | null>;
+      total: EffectiveConfigValue<number | null>;
     };
     idleBackoffMs: EffectiveConfigValue<number>;
     contextRollup: {
@@ -127,12 +128,12 @@ interface RawConfigRead {
 
 interface ResolvedDaemonConfig {
   dailyBudgetUsd: number;
-  perTickItems: number;
-  parallel: number;
+  perTickItems: number | null;
+  parallel: number | null;
   intervalMs: number;
   mode: 'batch' | 'continuous';
-  maxConcurrent: number;
-  concurrency: { local: number; cloud: number; total: number };
+  maxConcurrent: number | null;
+  concurrency: { local: number | null; cloud: number | null; total: number | null };
   idleBackoffMs: number;
   contextRollup: {
     enabled: boolean;
@@ -198,24 +199,15 @@ function positiveNumber(input: unknown, fallback: number, integer = false): numb
 
 function resolveDaemon(cfg: AshlrConfig): ResolvedDaemonConfig {
   const o = cfg.daemon ?? {};
-  const concLocal = positiveNumber(o.concurrency?.local, 2, true);
-  const concCloud = positiveNumber(o.concurrency?.cloud, 6, true);
-  const concTotal = positiveNumber(o.concurrency?.total, 8, true);
-  const maxConcurrent = positiveNumber(
-    o.maxConcurrent,
-    typeof o.concurrency?.total === 'number' && o.concurrency.total > 0 ? Math.floor(o.concurrency.total) : 8,
-    true,
-  );
+  const counts = resolveDaemonCountPreferences(o);
   return {
-    dailyBudgetUsd: positiveNumber(o.dailyBudgetUsd, 1.0),
-    perTickItems: positiveNumber(o.perTickItems, 3, true),
-    parallel: typeof o.parallel === 'number' && Number.isFinite(o.parallel) && o.parallel > 0
-      ? Math.min(Math.floor(o.parallel), 8)
-      : 2,
+    dailyBudgetUsd: typeof o.dailyBudgetUsd === 'number' && Number.isFinite(o.dailyBudgetUsd) && o.dailyBudgetUsd >= 0 && o.dailyBudgetUsd <= Number.MAX_SAFE_INTEGER ? o.dailyBudgetUsd : 1,
+    perTickItems: counts.perTickItems,
+    parallel: counts.parallel,
     intervalMs: positiveNumber(o.intervalMs, 5 * 60_000),
     mode: o.mode === 'continuous' ? 'continuous' : 'batch',
-    maxConcurrent,
-    concurrency: { local: concLocal, cloud: concCloud, total: concTotal },
+    maxConcurrent: counts.maxConcurrent,
+    concurrency: counts.concurrency,
     idleBackoffMs: positiveNumber(o.idleBackoffMs, 5_000),
     contextRollup: {
       enabled: o.contextRollup?.enabled !== false,

@@ -129,6 +129,7 @@ import {
   type VerseAuditResult,
   type VerseCapKey,
   type VerseCaps,
+  type VerseUncappedCountKey,
   type VerseCapsUpdate,
   type VerseCapsUpdateResult,
   type VerseControlErrorCode,
@@ -360,9 +361,8 @@ export function readVerseCaps(cfg: AshlrConfig): VerseCaps {
   const daemon = cfg.daemon ?? {};
   const defaulted: VerseCapKey[] = [];
 
-  const scalar = (key: 'dailyBudgetUsd' | 'perTickItems' | 'parallel' | 'intervalMs'): number => {
-    const configured = key === 'perTickItems' || key === 'parallel'
-      ? positiveCapacity(daemon[key]) : finitePositive(daemon[key]);
+  const scalar = (key: 'dailyBudgetUsd' | 'intervalMs'): number => {
+    const configured = finitePositive(daemon[key]);
     if (configured === null || key === 'dailyBudgetUsd' && (configured < 0 || configured > Number.MAX_SAFE_INTEGER)) {
       defaulted.push(key);
       return VERSE_CAPS_DEFAULTS[key];
@@ -370,23 +370,30 @@ export function readVerseCaps(cfg: AshlrConfig): VerseCaps {
     return configured;
   };
 
+  const uncappedCountKeys: VerseUncappedCountKey[] = [];
+  const count = (key: VerseUncappedCountKey, raw: unknown, fallback: number | null): number | null => {
+    if (raw === null) { uncappedCountKeys.push(key); return null; }
+    const configured = positiveCapacity(raw);
+    if (configured === null && !key.startsWith('concurrency.')) defaulted.push(key as VerseCapKey);
+    return configured ?? fallback;
+  };
   const dailyBudgetUsd = scalar('dailyBudgetUsd');
-  const perTickItems = scalar('perTickItems');
-  const parallel = scalar('parallel');
+  const perTickItems = count('perTickItems', daemon.perTickItems, VERSE_CAPS_DEFAULTS.perTickItems);
+  const parallel = count('parallel', daemon.parallel, VERSE_CAPS_DEFAULTS.parallel);
   const intervalMs = scalar('intervalMs');
 
   const mode: 'batch' | 'continuous' = daemon.mode === 'continuous' ? 'continuous' : 'batch';
   if (daemon.mode !== 'batch' && daemon.mode !== 'continuous') defaulted.push('mode');
 
-  const maxConcurrent = positiveCapacity(daemon.maxConcurrent);
-  if (maxConcurrent === null) defaulted.push('maxConcurrent');
+  const maxConcurrent = count('maxConcurrent', daemon.maxConcurrent, null);
 
   const concurrency = {
-    local: positiveCapacity(daemon.concurrency?.local),
-    cloud: positiveCapacity(daemon.concurrency?.cloud),
-    total: positiveCapacity(daemon.concurrency?.total),
+    local: count('concurrency.local', daemon.concurrency?.local, null),
+    cloud: count('concurrency.cloud', daemon.concurrency?.cloud, null),
+    total: count('concurrency.total', daemon.concurrency?.total, null),
   };
-  if (concurrency.local === null && concurrency.cloud === null && concurrency.total === null) {
+  if (concurrency.local === null && concurrency.cloud === null && concurrency.total === null &&
+      !uncappedCountKeys.some((key) => key.startsWith('concurrency.'))) {
     defaulted.push('concurrency');
   }
 
@@ -405,6 +412,8 @@ export function readVerseCaps(cfg: AshlrConfig): VerseCaps {
   return {
     dailyBudgetUsd,
     perTickItems,
+    supportsUncappedCounts: true,
+    uncappedCountKeys: uncappedCountKeys.sort(),
     journalItemCapacity: DAEMON_SPEND_GUARD_ITEM_CAPACITY,
     parallel,
     intervalMs,
@@ -517,6 +526,9 @@ export function parseVerseCapsUpdate(body: Record<string, unknown>): VerseCapsPa
     integer: boolean,
   ): string | null => {
     if (!(key in body)) return null;
+    if (body[key] === null && (key === 'perTickItems' || key === 'parallel' || key === 'maxConcurrent')) {
+      update[key] = null; return null;
+    }
     const result = bounded(body[key], key, bounds, integer);
     if (typeof result === 'string') return result;
     update[key] = result;
@@ -552,9 +564,10 @@ export function parseVerseCapsUpdate(body: Record<string, unknown>): VerseCapsPa
     if (Object.keys(raw).length === 0) {
       return { ok: false, error: 'concurrency must name at least one tier' };
     }
-    const concurrency: { local?: number; cloud?: number; total?: number } = {};
+    const concurrency: { local?: number | null; cloud?: number | null; total?: number | null } = {};
     for (const key of ['local', 'cloud', 'total'] as const) {
       if (!(key in raw)) continue;
+      if (raw[key] === null) { concurrency[key] = null; continue; }
       const result = bounded(raw[key], `concurrency.${key}`, VERSE_CAPS_BOUNDS.concurrency, true);
       if (typeof result === 'string') return { ok: false, error: result };
       concurrency[key] = result;
@@ -635,7 +648,13 @@ export function applyVerseCapsUpdate(
   const daemon: Partial<DaemonConfig> = { ...(cfg.daemon ?? {}) };
   const applied: VerseCapKey[] = [];
 
-  for (const key of ['dailyBudgetUsd', 'perTickItems', 'parallel', 'intervalMs'] as const) {
+  for (const key of ['dailyBudgetUsd', 'intervalMs'] as const) {
+    const value = update[key];
+    if (value === undefined) continue;
+    daemon[key] = value;
+    if (before[key] !== value || before.defaulted.includes(key)) applied.push(key);
+  }
+  for (const key of ['perTickItems', 'parallel'] as const) {
     const value = update[key];
     if (value === undefined) continue;
     daemon[key] = value;
@@ -647,7 +666,7 @@ export function applyVerseCapsUpdate(
   }
   if (update.maxConcurrent !== undefined) {
     daemon.maxConcurrent = update.maxConcurrent;
-    if (before.maxConcurrent !== update.maxConcurrent) applied.push('maxConcurrent');
+    if (before.maxConcurrent !== update.maxConcurrent || before.defaulted.includes('maxConcurrent')) applied.push('maxConcurrent');
   }
   if (update.concurrency !== undefined) {
     const next = { ...(daemon.concurrency ?? {}) };
@@ -730,7 +749,7 @@ export function applyVerseCapsUpdate(
  */
 function readFreshVerseCaps(fallback: AshlrConfig): VerseCaps {
   try { return readVerseCaps(loadConfigReadOnlyStrict()); }
-  catch { return { ...readVerseCaps(fallback), goalPreferences: unavailableGoalPreferences(), leaderPreferences: unavailableLeaderPreferences(),
+  catch { return { ...readVerseCaps(fallback), supportsUncappedCounts: false, uncappedCountKeys: [], goalPreferences: unavailableGoalPreferences(), leaderPreferences: unavailableLeaderPreferences(),
     goalFocusMode: undefined, goalFocusActiveThreshold: undefined }; }
 }
 
@@ -1583,12 +1602,14 @@ export async function handleVerseControlApi(
           sendInvalid(res, parsed.error);
           return true;
         }
+        const strictCapsUpdate = parsed.update.goalPreferences !== undefined || parsed.update.goalFocusMode !== undefined ||
+          parsed.update.leaderPreferences !== undefined || parsed.update.perTickItems !== undefined ||
+          parsed.update.parallel !== undefined || parsed.update.maxConcurrent !== undefined || parsed.update.concurrency !== undefined;
         let current: AshlrConfig;
         try {
-          current = parsed.update.goalPreferences !== undefined || parsed.update.goalFocusMode !== undefined || parsed.update.leaderPreferences !== undefined
-            ? loadConfigReadOnlyStrict() : freshConfig(ctx.cfg);
+          current = strictCapsUpdate ? loadConfigReadOnlyStrict() : freshConfig(ctx.cfg);
         } catch {
-          sendError(res, 'VERSE_UNAVAILABLE', 'Live configuration is invalid or unavailable; goal preferences were not saved.');
+          sendError(res, 'VERSE_UNAVAILABLE', 'Live configuration is invalid or unavailable; preferences were not saved.');
           return true;
         }
         if ((parsed.update.goalPreferences !== undefined || parsed.update.goalFocusMode !== undefined)
@@ -1616,8 +1637,7 @@ export async function handleVerseControlApi(
           applied,
           live: true,
           // Re-read from disk so the client sees exactly what was persisted.
-          caps: parsed.update.goalPreferences !== undefined || parsed.update.leaderPreferences !== undefined || parsed.update.goalFocusMode !== undefined
-            ? readFreshVerseCaps(next) : readVerseCaps(freshConfig(next)),
+          caps: strictCapsUpdate ? readFreshVerseCaps(next) : readVerseCaps(freshConfig(next)),
         };
         sendJson(res, 200, result);
         return true;

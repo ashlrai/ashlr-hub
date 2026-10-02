@@ -1,3 +1,4 @@
+import { assertSelectedOutcomeAdmission, selectedOutcomeAdmissionCurrent, SelectedOutcomeAdmissionRefusal } from './outcome-admission.js';
 /**
  * sandboxed-engine.ts — M45: run an external agent CLI (Claude Code / Codex)
  * INSIDE a throwaway git worktree and capture ONLY its diff as a PENDING inbox
@@ -250,6 +251,8 @@ export interface RunEngineSandboxedOptions {
   seatId?: string;
   /** Internal synchronous fence for the explicitly bound Grok account before each native spawn. */
   selectedGrokAdmission?: () => boolean;
+  /** Caller-owned current outcome revision, ignored for immutable signed shadows. */
+  selectedOutcomeAdmission?: () => boolean;
   /** Internal whole-attempt generation for mutating-tool evidence. */
   effectGeneration?: string;
   /**
@@ -1961,8 +1964,10 @@ export async function runEngineSandboxed(
     ...over,
   });
   const actionCounts: RunActionCounts = {};
+  const runCancelled = (): boolean => opts.signal?.aborted === true ||
+    (!opts.localShadowBinding && !selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission));
 
-  if (opts.signal?.aborted) {
+  if (runCancelled()) {
     recordSandboxedRunAgentAction({
       engine,
       engineModel,
@@ -2104,7 +2109,7 @@ export async function runEngineSandboxed(
     delegationScopeSummary = summarizeDelegationScope(delegationScope);
   }
 
-  if (opts.signal?.aborted) {
+  if (runCancelled()) {
     recordSandboxedRunAgentAction({
       engine,
       engineModel,
@@ -2149,8 +2154,11 @@ export async function runEngineSandboxed(
   registeredExecutionLease = authority.executionLease;
   const releaseExecutionFence = (): void => authority.releaseFence();
   // Reads `opts.signal` at call time — after the rebinding below it is the lease's.
-  const reacquireCaptureAuthority = (): Promise<CaptureAuthorityRefusal | null> =>
-    authority.reacquire(opts.signal);
+  const reacquireCaptureAuthority = async (): Promise<CaptureAuthorityRefusal | null> => {
+    if (runCancelled()) return { kind: 'sandbox-unavailable', reason: 'run cancelled before proposal filing' };
+    const refusal = await authority.reacquire(opts.signal);
+    return refusal ?? (runCancelled() ? { kind: 'sandbox-unavailable', reason: 'run cancelled before proposal filing' } : null);
+  };
 
   if (executionAuthorityFailure) {
     authority.releaseAll();
@@ -2453,7 +2461,7 @@ export async function runEngineSandboxed(
     const usage = newUsage();
     let hasReportedUsage = false;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      if (opts.signal?.aborted) {
+      if (runCancelled()) {
         res = { ok: false, output: '', error: 'run cancelled', terminationReason: 'cancelled' };
         break;
       }
@@ -2471,6 +2479,7 @@ export async function runEngineSandboxed(
       incrementRunActionCount(actionCounts, 'spawnAttempts');
       const _spawnStart = Date.now();
       res = await spawnEngine(cmd, spawnCfg, {
+        ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
         env: spawnEnv,
         timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         launcher: launcher ?? undefined,
@@ -2549,7 +2558,7 @@ export async function runEngineSandboxed(
         error: measureAgentDiagnosticText(res.error),
       });
 
-      if (opts.signal?.aborted || res.terminationReason === 'cancelled') break;
+      if (runCancelled() || res.terminationReason === 'cancelled') break;
 
       if (res.ok) break;
 
@@ -2674,13 +2683,13 @@ export async function runEngineSandboxed(
       return failedAfterAuthoritativeTermination(res, true);
     }
 
-    if (terminationReason === 'error-exit' && opts.signal?.aborted) {
+    if (terminationReason === 'error-exit' && runCancelled()) {
       return failedAfterAuthoritativeTermination(res, false);
     }
 
     if (
       terminationReason === 'cancelled' ||
-      (opts.signal?.aborted && terminationReason !== 'error-exit')
+      (runCancelled() && terminationReason !== 'error-exit')
     ) {
       return cancelledAfterSpawn();
     }
@@ -2711,7 +2720,7 @@ export async function runEngineSandboxed(
             actionCounts,
             beforeFiling: reacquireCaptureAuthority,
           });
-          if (opts.signal?.aborted || captured.state.status === 'aborted') {
+          if (runCancelled() || captured.state.status === 'aborted') {
             return cancelledAfterSpawn(captured);
           }
           proposalId = captured.proposalId;
@@ -2724,7 +2733,7 @@ export async function runEngineSandboxed(
             );
           }
         } catch {
-          if (opts.signal?.aborted) return cancelledAfterSpawn();
+          if (runCancelled()) return cancelledAfterSpawn();
           if ((actionCounts.proposalCaptureAttempts ?? 0) <= captureAttemptsBefore) {
             incrementRunActionCount(actionCounts, 'proposalCaptureAttempts');
           }
@@ -2804,7 +2813,7 @@ export async function runEngineSandboxed(
               goal,
               cfg,
             }, opts.signal);
-            if (opts.signal?.aborted) return cancelledAfterSpawn();
+            if (runCancelled()) return cancelledAfterSpawn();
             // M331: verify-to-green — bounded repair loop (DEFAULT OFF). When
             // the gate fails, re-invoke the SAME engine inside the SAME confined
             // worktree (identical contained env + OS sandbox launcher — worktree
@@ -2821,7 +2830,7 @@ export async function runEngineSandboxed(
                 initialFailure: String(_gateResult.reason ?? ''),
                 ...(opts.signal ? { signal: opts.signal } : {}),
                 verify: async () => {
-                  if (opts.signal?.aborted) return { pass: false, reason: 'cancelled' };
+                  if (runCancelled()) return { pass: false, reason: 'cancelled' };
                   const d = wt.sandboxDiff(sb);
                   incrementRunActionCount(actionCounts, 'completenessGateRuns');
                   const g = await completenessGateInSlot(leaseRepoKey, {
@@ -2830,11 +2839,11 @@ export async function runEngineSandboxed(
                     goal,
                     cfg,
                   }, opts.signal);
-                  if (opts.signal?.aborted) return { pass: false, reason: 'cancelled' };
+                  if (runCancelled()) return { pass: false, reason: 'cancelled' };
                   return { pass: g.pass, reason: String(g.reason ?? '') };
                 },
                 repair: async (failureTail: string) => {
-                  if (opts.signal?.aborted) return null;
+                  if (runCancelled()) return null;
                   const maxSteps = opts.budget?.maxSteps;
                   if (maxSteps !== undefined && usage.steps >= Math.max(0, maxSteps)) {
                     return null;
@@ -2889,6 +2898,7 @@ export async function runEngineSandboxed(
                   let r: SpawnEngineResult | null = null;
                   try {
                     r = await spawnEngine(repairCmd, cfg, {
+                      ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
                       env:repairSpawn?.env ?? env,
                       timeoutMs:_v2g.perRunTimeoutMs ?? 180_000,
                       launcher:repairSpawn?.launcher ?? launcher ?? undefined,
@@ -2928,7 +2938,7 @@ export async function runEngineSandboxed(
               if (processCleanupFailure) {
                 return failedAfterAuthoritativeTermination(processCleanupFailure, true);
               }
-              if (opts.signal?.aborted || _v2gOut.stopped === 'cancelled') {
+              if (runCancelled() || _v2gOut.stopped === 'cancelled') {
                 return cancelledAfterSpawn();
               }
               if (_v2gOut.green) {
@@ -2958,11 +2968,11 @@ export async function runEngineSandboxed(
             }
           }
           if (_m275ShouldFile) {
-          if (opts.signal?.aborted) return cancelledAfterSpawn();
+          if (runCancelled()) return cancelledAfterSpawn();
           // V3.10 U6: outward authority comes back HERE — after the gate and
           // any verify-to-green repair, immediately before persistence.
           const captureRefusal = await reacquireCaptureAuthority();
-          if (opts.signal?.aborted) return cancelledAfterSpawn();
+          if (runCancelled()) return cancelledAfterSpawn();
           if (captureRefusal !== null) throw new CaptureAuthorityRefusedError(captureRefusal, effDiff);
           const filedOutcomeForMetadata = proposalOutcome('filed', 'proposal filed', effDiff);
           const inbox = selectInboxStore(cfg);
@@ -3019,7 +3029,7 @@ export async function runEngineSandboxed(
                 'proposal capture requires persistence reconciliation',
                 effDiff,
               );
-              if (opts.signal?.aborted) {
+              if (runCancelled()) {
                 return cancelledAfterSpawn({
                   state: withProposalOutcome(
                     mk({ status: 'done', result: proposalOutcomeResult.reason, usage }),
@@ -3068,7 +3078,7 @@ export async function runEngineSandboxed(
             } catch {
               // telemetry is best-effort — never fails the run
             }
-            if (opts.signal?.aborted) {
+            if (runCancelled()) {
               return cancelledAfterSpawn({
                 state: withProposalOutcome(
                   mk({ status: 'done', result: proposalOutcomeResult.reason, usage }),
@@ -3135,7 +3145,7 @@ export async function runEngineSandboxed(
                 'proposal-capture-error',
                 'proposal capture failed before durable proposal filing',
               );
-          if (opts.signal?.aborted) {
+          if (runCancelled()) {
             return cancelledAfterSpawn({
               state: withProposalOutcome(
                 mk({ status: 'done', result: captureFailureOutcome.reason, usage }),
@@ -3284,6 +3294,8 @@ export async function runApiModelSandboxed(
   opts: RunEngineSandboxedOptions,
 ): Promise<SandboxedEngineResult> {
   const actionCounts: RunActionCounts = {};
+  const runCancelled = (): boolean => opts.signal?.aborted === true ||
+    (!opts.localShadowBinding && !selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission));
   const writeApiModelTerminalAction = opts.deferTerminalAction
     ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
     : writeSandboxedRunAgentAction;
@@ -3387,7 +3399,7 @@ export async function runApiModelSandboxed(
     ...over,
   });
 
-  if (opts.signal?.aborted) {
+  if (runCancelled()) {
     recordSandboxedRunAgentAction({
       engine,
       engineModel,
@@ -3549,7 +3561,7 @@ export async function runApiModelSandboxed(
     delegationScopeSummary = summarizeDelegationScope(delegationScope);
   }
 
-  if (opts.signal?.aborted) {
+  if (runCancelled()) {
     recordSandboxedRunAgentAction({
       engine,
       engineModel,
@@ -3595,8 +3607,11 @@ export async function runApiModelSandboxed(
   });
   const releaseExecutionFence = (): void => authority.releaseFence();
   // Reads `opts.signal` at call time — after the rebinding below it is the lease's.
-  const reacquireCaptureAuthority = (): Promise<CaptureAuthorityRefusal | null> =>
-    authority.reacquire(opts.signal);
+  const reacquireCaptureAuthority = async (): Promise<CaptureAuthorityRefusal | null> => {
+    if (runCancelled()) return { kind: 'sandbox-unavailable', reason: 'run cancelled before proposal filing' };
+    const refusal = await authority.reacquire(opts.signal);
+    return refusal ?? (runCancelled() ? { kind: 'sandbox-unavailable', reason: 'run cancelled before proposal filing' } : null);
+  };
 
   if (executionAuthorityFailure) {
     authority.releaseAll();
@@ -3718,12 +3733,24 @@ export async function runApiModelSandboxed(
           // below needs it on the ordinary one — which is the path the local
           // fleet actually takes.
         : {
-            onRequestStart: noteProviderContacted,
+            onRequestStart: () => {
+              assertSelectedOutcomeAdmission(opts.selectedOutcomeAdmission);
+              noteProviderContacted();
+            },
             cfg,
             ...(harnessOut.topP !== undefined ? { topP: harnessOut.topP } : {}),
             ...(harnessOut.reasoningEffort !== undefined ? { reasoningEffort: harnessOut.reasoningEffort } : {}),
           },
     );
+
+    // Shadow transport is immutable: no added metadata requests there.
+    // Other runtimes keep their existing unknown-window behavior.
+    if (!shadowBinding) assertSelectedOutcomeAdmission(opts.selectedOutcomeAdmission);
+    const contextWindowTokens = engine === 'local-coder' && !shadowBinding
+      ? await client.getContextWindowTokens?.(opts.signal) : undefined;
+    if (runCancelled()) throw new SelectedOutcomeAdmissionRefusal();
+    if (engine === 'local-coder' && !shadowBinding && client.getContextWindowTokens && contextWindowTokens === undefined)
+      emitSinkEvent(streamSink, { kind: 'log', taskId: 't1', text: 'Local runtime context window not reported; no context size inferred.' });
 
     // Engineer tools scoped to the sandbox worktree — write/exec enabled so the
     // model can make real file edits inside the throwaway branch.
@@ -3745,7 +3772,7 @@ export async function runApiModelSandboxed(
     const reserveModelStep: ReserveModelStep = (promptTokenReservation) => {
       const remainingTokens = budget.maxTokens - usage.tokensIn - usage.tokensOut;
       if (
-        opts.signal?.aborted === true ||
+        runCancelled() ||
         usage.steps >= budget.maxSteps ||
         !Number.isSafeInteger(promptTokenReservation) ||
         promptTokenReservation < 0 ||
@@ -3863,6 +3890,8 @@ export async function runApiModelSandboxed(
         });
       },
       systemPrefix: m264SystemPrefix,
+      ...(contextWindowTokens !== undefined ? { contextWindowTokens } : {}),
+      ...(!shadowBinding && opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
       // Direct API runs expose only reversible sandbox write tools. A fresh
       // generation lets a discarded sandbox be reconstructed; callers under a
       // durable run lease supply that exact lease generation instead.
@@ -3929,7 +3958,7 @@ export async function runApiModelSandboxed(
       };
     };
 
-    if (opts.signal?.aborted) {
+    if (runCancelled()) {
       return cancelledAfterTask();
     }
 
@@ -3957,7 +3986,7 @@ export async function runApiModelSandboxed(
             actionCounts,
             contextSummary: m264ContextSummary,
           });
-          if (opts.signal?.aborted || captured.state.status === 'aborted') {
+          if (runCancelled() || captured.state.status === 'aborted') {
             return cancelledAfterTask(captured);
           }
           proposalId = captured.proposalId;
@@ -3967,7 +3996,7 @@ export async function runApiModelSandboxed(
               ? proposalOutcome('api-model-task-failed', task.error ?? 'api-model run failed')
               : captured.proposalOutcome;
         } catch {
-          if (opts.signal?.aborted) return cancelledAfterTask();
+          if (runCancelled()) return cancelledAfterTask();
           // Capture normally returns a structured failure, but preserve the same
           // terminal contract if an import seam or future dependency throws.
           if ((actionCounts.proposalCaptureAttempts ?? 0) <= captureAttemptsBefore) {
@@ -4049,7 +4078,7 @@ export async function runApiModelSandboxed(
           actionCounts,
           contextSummary: m264ContextSummary,
         });
-        if (opts.signal?.aborted || captured.state.status === 'aborted') {
+        if (runCancelled() || captured.state.status === 'aborted') {
           return cancelledAfterTask(captured);
         }
         proposalId = captured.proposalId;
@@ -4059,7 +4088,7 @@ export async function runApiModelSandboxed(
           proposalOutcomeResult = proposalOutcome('empty-diff', `api-model engine "${engine}" completed without file changes`);
         }
       } catch {
-        if (opts.signal?.aborted) return cancelledAfterTask();
+        if (runCancelled()) return cancelledAfterTask();
         proposalOutcomeResult = proposalOutcome(
           'proposal-capture-error',
           'api-model proposal capture failed before durable proposal filing',
@@ -4106,6 +4135,11 @@ export async function runApiModelSandboxed(
       ...(providerContacted ? { providerContacted: true } : {}),
     };
   } catch (error) {
+    if (error instanceof SelectedOutcomeAdmissionRefusal) {
+      recordSandboxedRunAgentAction({ engine, engineModel, tier, runId: id, sourceRepo: opts.sourceRepo,
+        workItemId: opts.workItemId, workSource: opts.workSource, status: 'aborted', actionCounts });
+      return { state: withProposalOutcome(mk({ status: 'aborted', result: 'run cancelled before provider request', terminationReason: 'cancelled' }), undefined, actionCounts) };
+    }
     streamFailed = true;
     emitSinkEvent(streamSink, {
       kind: 'log',
@@ -4116,7 +4150,7 @@ export async function runApiModelSandboxed(
     throw error;
   } finally {
     if (!streamFailed) {
-      const terminal = opts.signal?.aborted
+      const terminal = runCancelled()
         ? 'cancelled'
         : streamedTask?.status === 'done'
           ? 'done'

@@ -44,7 +44,7 @@ function freshTmpHome(): string {
 let buildPlaybook: (
   goal: string,
   cfg: AshlrConfig,
-  opts?: { limit?: number },
+  opts?: { limit?: number; selectedOutcomeAdmission?: () => boolean },
 ) => Promise<Playbook>;
 let playbookText: (p: Playbook, maxChars: number) => string;
 
@@ -539,5 +539,30 @@ describe('playbookText — pure function', () => {
     const text = playbookText(p, 1000);
     expect(typeof text).toBe('string');
     expect(text.length).toBeGreaterThan(0);
+  });
+});
+
+
+describe('playbook — outcome contact fence', () => {
+  it('retirement during Ollama discovery prevents synthesis and LM Studio fallback contact', async () => {
+    await ensureImported(); writeHubEntries(tmpHome, [makeEntry({ title: 'fixture goal', text: 'fixture goal previous approach' })]);
+    let current = true;
+    const fetchMock = vi.fn(async () => { await Promise.resolve(); current = false; return new Response(JSON.stringify({ models: [{ name: 'fixture:3b' }] })); });
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await buildPlaybook('fixture goal', makeConfig(), { selectedOutcomeAdmission: () => current });
+    expect(fetchMock).toHaveBeenCalledOnce(); expect(String(fetchMock.mock.calls[0]?.[0])).toMatch(/\/api\/tags$/);
+    expect(result.entries.length).toBeGreaterThan(0); expect(result.synthesis).toContain('Past approaches');
+  });
+  it('retirement during LM Studio discovery prevents its inference', async () => {
+    await ensureImported(); writeHubEntries(tmpHome, [makeEntry({ title: 'fixture goal', text: 'fixture goal previous approach' })]);
+    let current = true;
+    const fetchMock = vi.fn(async (url: unknown) => {
+      if (String(url).endsWith('/api/tags')) return new Response(JSON.stringify({ models: [] }));
+      await Promise.resolve(); current = false; return new Response(JSON.stringify({ data: [{ id: 'fixture-model' }] }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await buildPlaybook('fixture goal', makeConfig(), { selectedOutcomeAdmission: () => current });
+    expect(fetchMock).toHaveBeenCalledTimes(2); expect(result.synthesis).toContain('Past approaches');
+    expect(fetchMock.mock.calls.every(call => !String(call[0]).endsWith('/chat/completions'))).toBe(true);
   });
 });

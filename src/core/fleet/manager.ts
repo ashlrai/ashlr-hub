@@ -1,3 +1,4 @@
+import { assertSelectedOutcomeAdmission, SelectedOutcomeAdmissionRefusal } from '../run/outcome-admission.js';
 /**
  * M120: Fleet Manager / CEO agent — frontier-model oversight layer.
  *
@@ -176,6 +177,8 @@ function safeManagerSemanticEvents(
 
 /** Optional controls for callers that use the judge as ephemeral selection signal. */
 export interface JudgeProposalOptions {
+  /** Optional caller-owned outcome revision fence; never persisted. */
+  selectedOutcomeAdmission?: () => boolean;
   /**
    * When false, suppress the durable judge trace. Use only for candidate
    * selection where no real proposal/outcome will ever exist.
@@ -194,6 +197,7 @@ type JudgeComplete = (
   system: string,
   user: string,
   signal?: AbortSignal,
+  selectedOutcomeAdmission?: () => boolean,
 ) => Promise<string>;
 
 function judgeAbortReason(signal: AbortSignal): Error {
@@ -743,7 +747,7 @@ export async function judgeProposal(
     if (rubric.answeredBy) clientStats.model = rubric.answeredBy;
   }
   if (rubric === null) {
-    const judged = await judgeRubricFromModel(client.complete, effectiveJudgeSystem, userPrompt, options.signal, cfg);
+    const judged = await judgeRubricFromModel(client.complete, effectiveJudgeSystem, userPrompt, options.signal, cfg, options.selectedOutcomeAdmission);
     if (judged === 'network') return fallback('network');
     if (judged === 'parse') return fallback('parse');
     rubric = { ...judged, answeredBy: clientStats?.model ?? null };
@@ -836,12 +840,15 @@ async function judgeRubricFromModel(
   userPrompt: string,
   signal?: AbortSignal,
   cfg?: AshlrConfig,
+  selectedOutcomeAdmission?: () => boolean,
 ): Promise<Omit<JudgeRubric, 'answeredBy'> | 'network' | 'parse'> {
   let raw: string;
   let fullReasoning = '';
   try {
-    raw = await complete(system, userPrompt, signal);
-  } catch {
+    assertSelectedOutcomeAdmission(selectedOutcomeAdmission);
+    raw = await complete(system, userPrompt, signal, ...(selectedOutcomeAdmission ? [selectedOutcomeAdmission] : []));
+  } catch (error) {
+    if (error instanceof SelectedOutcomeAdmissionRefusal) throw error;
     throwIfJudgeCancelled(signal);
     return 'network';
   }
@@ -861,7 +868,8 @@ async function judgeRubricFromModel(
     // value>=3 / correctness>=4 rule as isCompleteStructuredRubric). Any
     // fallback — unkeyed, offline, unsure — continues to the reprompt below
     // exactly as before. See src/core/decide/verdict.ts.
-    const extracted = await extractJudgeRubric(raw, { ...(cfg ? { cfg } : {}), ...(signal ? { signal } : {}) })
+    assertSelectedOutcomeAdmission(selectedOutcomeAdmission);
+    const extracted = await extractJudgeRubric(raw, { ...(cfg ? { cfg } : {}), ...(signal ? { signal } : {}), ...(selectedOutcomeAdmission ? { selectedOutcomeAdmission } : {}) })
       .catch(() => null);
     throwIfJudgeCancelled(signal);
     if (extracted && extracted.path === 'jev' && extracted.value) {
@@ -877,7 +885,8 @@ async function judgeRubricFromModel(
     }
     try {
       const retryPrompt = userPrompt + JUDGE_RETRY_SUFFIX;
-      const raw2 = await complete(system, retryPrompt, signal);
+      assertSelectedOutcomeAdmission(selectedOutcomeAdmission);
+      const raw2 = await complete(system, retryPrompt, signal, ...(selectedOutcomeAdmission ? [selectedOutcomeAdmission] : []));
       const retryParsed = parseJudgeResponse(raw2);
       obj = retryParsed.obj;
       parseSource = retryParsed.source;
@@ -1071,6 +1080,7 @@ async function ollamaDirectComplete(
   maxTokens: number,
   temperature: number,
   signal?: AbortSignal,
+  selectedOutcomeAdmission?: () => boolean,
 ): Promise<string> {
   throwIfJudgeCancelled(signal);
   const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
@@ -1087,6 +1097,7 @@ async function ollamaDirectComplete(
   const onAbort = () => controller.abort(signal?.reason);
   signal?.addEventListener('abort', onAbort, { once: true });
   try {
+    assertSelectedOutcomeAdmission(selectedOutcomeAdmission);
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1168,10 +1179,10 @@ function buildClaudeCliComplete(
   // pre-M320 single-shot behavior.
   if (model !== CLAUDE5_FABLE_API_ID) return primary;
   const fallback = buildClaudeCliCompleteSingle(cfg, CLAUDE_JUDGE_FALLBACK_MODEL, stats);
-  return async (system: string, user: string, signal?: AbortSignal): Promise<string> => {
-    const out = await primary(system, user, signal);
+  return async (system: string, user: string, signal?: AbortSignal, selectedOutcomeAdmission?: () => boolean): Promise<string> => {
+    const out = await primary(system, user, signal, selectedOutcomeAdmission);
     if (out || signal?.aborted) return out;
-    return fallback(system, user, signal);
+    return fallback(system, user, signal, selectedOutcomeAdmission);
   };
 }
 
@@ -1180,7 +1191,7 @@ function buildClaudeCliCompleteSingle(
   model: string,
   stats?: JudgeCallStats,
 ): JudgeComplete {
-  return async (system: string, user: string, signal?: AbortSignal): Promise<string> => {
+  return async (system: string, user: string, signal?: AbortSignal, selectedOutcomeAdmission?: () => boolean): Promise<string> => {
     try {
       // M337 (review fix): reset the shared holder EVERY call — a failed or
       // usage-less call must record NOTHING, never the previous proposal's
@@ -1208,6 +1219,7 @@ function buildClaudeCliCompleteSingle(
         timeoutMs: 300_000,
         ...(env ? { env } : {}),
         ...(signal ? { signal } : {}),
+        ...(selectedOutcomeAdmission ? { selectedOutcomeAdmission } : {}),
       }); // 5 min for frontier
       if (!result.ok || !result.output) return '';
       // claude --output-format json → { result: "<text>", total_cost_usd, usage, ... }
@@ -1269,7 +1281,7 @@ async function spawnJudge(
   engine: 'claude' | 'grok-cli' | 'codex',
   cmd: import('../types.js').EngineCommand,
   cfg: AshlrConfig,
-  opts: { timeoutMs: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal },
+  opts: { timeoutMs: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal; selectedOutcomeAdmission?: () => boolean },
 ): Promise<JudgeSpawnResult> {
   let autonomous = false;
   try { autonomous = confinementProfileFor(engine as EngineId, cfg).autonomous === true; } catch { autonomous = true; }
@@ -1278,6 +1290,7 @@ async function spawnJudge(
       timeoutMs: opts.timeoutMs,
       ...(opts.env ? { env: opts.env } : {}),
       ...(opts.signal ? { signal: opts.signal } : {}),
+      ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
     });
   }
   const refused = (why: string): JudgeSpawnResult => ({ ok: false, output: '', error: `judge refused: ${why}` });
@@ -1318,6 +1331,7 @@ async function spawnJudge(
         env,
         launcher: spawn.launcher,
         ...(opts.signal ? { signal: opts.signal } : {}),
+        ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
       });
       return result;
     } finally {
@@ -1424,7 +1438,7 @@ function grokJudgeModel(cfg: AshlrConfig): string {
  * which judgeProposal turns into a fail-closed 'review'.
  */
 function buildGrokCliComplete(cfg: AshlrConfig, model: string, stats?: JudgeCallStats): JudgeComplete {
-  return async (system: string, user: string, signal?: AbortSignal): Promise<string> => {
+  return async (system: string, user: string, signal?: AbortSignal, selectedOutcomeAdmission?: () => boolean): Promise<string> => {
     if (stats) {
       delete stats.model;
       delete stats.durationMs;
@@ -1444,6 +1458,7 @@ function buildGrokCliComplete(cfg: AshlrConfig, model: string, stats?: JudgeCall
       const result = await spawnJudge('grok-cli', cmd, cfg, {
         timeoutMs: 300_000,
         ...(signal ? { signal } : {}),
+        ...(selectedOutcomeAdmission ? { selectedOutcomeAdmission } : {}),
       });
       if (!result.ok || !result.output) return '';
       const parsed = extractGrokStreamText(result.output);
@@ -1479,7 +1494,7 @@ function buildCodexCliComplete(
   model: string,
   stats?: JudgeCallStats,
 ): JudgeComplete {
-  return async (system: string, user: string, signal?: AbortSignal): Promise<string> => {
+  return async (system: string, user: string, signal?: AbortSignal, selectedOutcomeAdmission?: () => boolean): Promise<string> => {
     try {
       // M337 (review fix): reset the shared holder EVERY call (see the claude
       // single-shot builder above).
@@ -1501,6 +1516,7 @@ function buildCodexCliComplete(
       const result = await spawnJudge('codex', cmd, cfg, {
         timeoutMs: 300_000,
         ...(signal ? { signal } : {}),
+        ...(selectedOutcomeAdmission ? { selectedOutcomeAdmission } : {}),
       }); // 5 min for frontier
       if (!result.ok || !result.output) return '';
       // codex output is plain text — model + latency only (no parseable usage).
@@ -1656,8 +1672,8 @@ function resolveJudgeClient(
     ? `local:${localModel}`
     : localModel;
   return {
-    complete: (system: string, user: string, signal?: AbortSignal) =>
-      ollamaDirectComplete(localBaseUrl, localModel, system, user, 512, 0, signal),
+    complete: (system: string, user: string, signal?: AbortSignal, selectedOutcomeAdmission?: () => boolean) =>
+      ollamaDirectComplete(localBaseUrl, localModel, system, user, 512, 0, signal, selectedOutcomeAdmission),
     judgeEngine: localJudgeEngine,
     stats,
   };

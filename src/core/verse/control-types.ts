@@ -75,7 +75,14 @@ export interface VerseFoundryLimit {
   max: number;
 }
 
-/** `cfg.daemon.concurrency` — null per tier means "not configured, using the default". */
+/** Count choices that can explicitly remove the operator ceiling. */
+export const VERSE_UNCAPPED_COUNT_KEYS = [
+  'perTickItems', 'parallel', 'maxConcurrent',
+  'concurrency.local', 'concurrency.cloud', 'concurrency.total',
+] as const;
+export type VerseUncappedCountKey = typeof VERSE_UNCAPPED_COUNT_KEYS[number];
+
+/** Null may mean unset or explicitly uncapped; inspect uncappedCountKeys. */
 export interface VerseCapsConcurrency {
   local: number | null;
   cloud: number | null;
@@ -91,18 +98,22 @@ export interface VerseCaps {
   /** HARD daily spend ceiling (USD). 0 means the daemon is stopped by budget. */
   dailyBudgetUsd: number;
   /** Backlog items processed per tick. */
-  perTickItems: number;
+  perTickItems: number | null;
+  /** Server supports explicit null count preferences; absent on older servers, false when config could not be read. */
+  supportsUncappedCounts?: boolean;
+  /** Only explicit null choices from the current config; unset/defaulted values are never listed. */
+  uncappedCountKeys?: VerseUncappedCountKey[];
   /** Actual per-tick durable-journal admission; absent on older servers. */
   journalItemCapacity?: number;
   /** Concurrent sandboxed swarms per tick (batch mode). */
-  parallel: number;
+  parallel: number | null;
   /** Tick interval in loop mode (ms). */
   intervalMs: number;
   /** Daemon execution mode. */
   mode: 'batch' | 'continuous';
-  /** Ceiling on in-flight dispatches in continuous mode; null when unset. */
+  /** Ceiling on in-flight dispatches in continuous mode; null when unset or explicitly uncapped. */
   maxConcurrent: number | null;
-  /** Per-tier concurrency budgets; null per tier when unset. */
+  /** Per-tier concurrency budgets; null per tier when unset or explicitly uncapped. */
   concurrency: VerseCapsConcurrency;
   /** Subscription-window throttle percentage (1–100). */
   subscriptionMaxPercent: number;
@@ -141,12 +152,12 @@ export type VerseCapKey =
 /** POST /api/verse/caps — a partial update. Unknown keys are rejected. */
 export interface VerseCapsUpdate {
   dailyBudgetUsd?: number;
-  perTickItems?: number;
-  parallel?: number;
+  perTickItems?: number | null;
+  parallel?: number | null;
   intervalMs?: number;
   mode?: 'batch' | 'continuous';
-  maxConcurrent?: number;
-  concurrency?: { local?: number; cloud?: number; total?: number };
+  maxConcurrent?: number | null;
+  concurrency?: { local?: number | null; cloud?: number | null; total?: number | null };
   subscriptionMaxPercent?: number;
   /** Replaces the named engines' limits; engines not listed are left alone. */
   foundryLimits?: VerseFoundryLimit[];

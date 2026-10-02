@@ -1615,3 +1615,32 @@ describe('telemetry sink (OTLP) — honest error logging (M19; replaces M9 repor
     expect(combined).not.toContain('test-pat-not-logged');
   });
 });
+
+
+describe('builtin outcome admission — real client, fake transport', () => {
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); cleanupTestRuns(); });
+  it('retirement during awaited client discovery prevents planner contact', async () => {
+    let current = true;
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => { await Promise.resolve(); current = false; return { models: [{ name: 'fixture' }] }; } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const state = await runGoal('preserve outcome', makeConfig(), { engine: 'builtin', tools: false, noMemory: true, noCapture: true, selectedOutcomeAdmission: () => current });
+    createdRunIds.push(state.id);
+    expect(state.status).toBe('aborted'); expect(state.usage.tokensIn).toBe(0); expect(state.usage.tokensOut).toBe(0);
+    expect(fetchMock).toHaveBeenCalled(); expect(fetchMock.mock.calls.every(call => !String(call[0]).endsWith('/api/chat'))).toBe(true);
+  });
+  it('retirement after the contacted plan preserves usage but prevents child and synthesis contacts', async () => {
+    let current = true;
+    const { fetchMock, chatCalls } = scriptedOllama(JSON.stringify([{ id: 'a', goal: 'A', deps: [] }]), { tokIn: 12, tokOut: 7 });
+    const original = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (...args) => {
+      const response = await original(...args);
+      if (String(args[0]).endsWith('/api/chat')) current = false;
+      return response;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const state = await runGoal('preserve outcome', makeConfig(), { engine: 'builtin', tools: false, noMemory: true, noCapture: true, selectedOutcomeAdmission: () => current });
+    createdRunIds.push(state.id);
+    expect(chatCalls()).toBe(1); expect(state.status).toBe('aborted');
+    expect(state.usage).toMatchObject({ tokensIn: 12, tokensOut: 7 });
+  });
+});

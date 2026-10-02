@@ -1,6 +1,6 @@
 {
   "name": "@ashlr/hub",
-  "version": "3.22.2",
+  "version": "3.23.0",
   "description": "Local-first command center for agentic engineers.",
   "publishConfig": {
     "access": "public"
@@ -42,6 +42,9 @@
     "CHANGELOG.md",
     "docs/README.md",
     "docs/QUICKSTART.md",
+    "docs/AUTOMATIC-OUTCOMES.md",
+    "docs/VERSE.md",
+    "docs/AUTONOMY-SETUP.md",
     "docs/DEMO.md",
     "docs/ARCHITECTURE.md",
     "docs/MISSION-OS.md",

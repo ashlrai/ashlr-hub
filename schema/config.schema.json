@@ -1168,24 +1168,24 @@
           "description": "Token allowance for proven zero-dollar producers. Default 50000; model and runtime context limits still apply. Metered producers retain the USD-derived allowance."
         },
         "perTickItems": {
-          "type": "integer", "minimum": 1, "maximum": 9007199254740991,
-          "description": "Requested backlog items per tick. Default 3; queue, durable journal, account, and resource admission still apply."
+          "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991,
+          "description": "Requested backlog items per tick. Null removes the operator ceiling; absent defaults to 3; queue, durable journal, account, and resource admission still apply."
         },
         "parallel": {
-          "type": "integer", "minimum": 1, "maximum": 9007199254740991,
-          "description": "Requested batch concurrency. Default 2; available work and actual resource admission still apply."
+          "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991,
+          "description": "Requested batch concurrency. Null removes the operator ceiling; absent defaults to 2; available work and actual resource admission still apply."
         },
         "maxConcurrent": {
-          "type": "integer", "minimum": 1, "maximum": 9007199254740991,
-          "description": "Requested continuous concurrency. Defaults to concurrency.total or 8; actual admission still applies."
+          "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991,
+          "description": "Requested continuous concurrency. Explicit null removes the operator ceiling and overrides total; absent defaults to concurrency.total or 8; actual admission still applies."
         },
         "concurrency": {
           "type": "object", "additionalProperties": false,
-          "description": "Requested per-tier concurrency. Defaults local 2, cloud 6, total 8; does not expand signed scope or provider capacity.",
+          "description": "Requested per-tier concurrency. Null removes an operator ceiling; absent defaults local 2, cloud 6, total 8; does not expand signed scope or provider capacity.",
           "properties": {
-            "local": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
-            "cloud": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
-            "total": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+            "local": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 },
+            "cloud": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 },
+            "total": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 }
           }
         },
         "agentOsObserver": {

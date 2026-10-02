@@ -75,7 +75,12 @@ function normalizeDigest(value: unknown): `sha256:${string}` | undefined {
   return undefined;
 }
 
-export function normalizeNumericLoopbackOllamaBaseUrl(baseUrl: string): string | undefined {
+export function normalizeNumericLoopbackOllamaBaseUrl(
+  baseUrl: string,
+  // Ordinary metadata discovery may use the shipped localhost endpoint.
+  // Signed shadow identity checks retain the numeric-only default.
+  options: { allowDefaultLocalhost?: boolean } = {},
+): string | undefined {
   let parsed: URL;
   try {
     parsed = new URL(baseUrl);
@@ -86,7 +91,8 @@ export function normalizeNumericLoopbackOllamaBaseUrl(baseUrl: string): string |
     parsed.protocol !== 'http:' ||
     parsed.username !== '' ||
     parsed.password !== '' || parsed.search !== '' || parsed.hash !== '' ||
-    !(/^127(?:\.\d{1,3}){3}$/.test(parsed.hostname) || ['[::1]', '::1'].includes(parsed.hostname)) ||
+    !(/^127(?:\.\d{1,3}){3}$/.test(parsed.hostname) || ['[::1]', '::1'].includes(parsed.hostname) ||
+      (options.allowDefaultLocalhost === true && parsed.hostname === 'localhost' && parsed.port === '11434')) ||
     !['/', '/v1', '/v1/'].includes(parsed.pathname)
   ) return undefined;
   if (/^127(?:\.\d{1,3}){3}$/.test(parsed.hostname)) {

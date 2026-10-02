@@ -684,3 +684,52 @@ describe('flag-off parity', () => {
     expect(plan1.unassigned.map((i) => i.id)).toEqual(plan2.unassigned.map((i) => i.id));
   });
 });
+
+
+describe('host pool admission for fabric dispatch', () => {
+  it('releases each host slot after rejected and successful work and drains all assignments', async () => {
+    const items = Array.from({ length: 5 }, (_, i) => makeItem({ id: `host-${i}` }));
+    const plan = { assignments: items.map(item => ({ item, backend: 'builtin' as const })), unassigned: [], slotsMap: new Map([['builtin' as const, 5]]) };
+    let active = 0; let peak = 0; let releases = 0;
+    const results = await runConcurrentDispatch(plan, async item => {
+      peak = Math.max(peak, active);
+      await new Promise(resolve => setTimeout(resolve, 1));
+      if (item.id === items[0]!.id) throw new Error('synthetic failure');
+      return item.id;
+    }, () => false, { admission: {
+      canStart: () => active < 2,
+      start: () => { active++; },
+      finish: () => { active--; releases++; },
+    } });
+    expect(peak).toBe(2);
+    expect(active).toBe(0);
+    expect(releases).toBe(5);
+    expect(results.map(row => row.item.id)).toEqual(items.map(item => item.id));
+    expect(results.filter(row => row.settled?.status === 'rejected')).toHaveLength(1);
+  });
+
+  it('never contacts a zero-slot or permanently held assignment and settles without polling', async () => {
+    const item = makeItem({ id: 'held' });
+    const dispatch = vi.fn();
+    const plan = { assignments: [{ item, backend: 'builtin' as const }], unassigned: [], slotsMap: new Map([['builtin' as const, 0]]) };
+    const admission = { canStart: () => true, start: vi.fn(), finish: vi.fn() };
+    expect(await runConcurrentDispatch(plan, dispatch, () => false, { admission })).toMatchObject([{ attempted: false }]);
+    plan.slotsMap.set('builtin', 1);
+    expect(await runConcurrentDispatch(plan, dispatch, () => false, { admission: { ...admission, canStart: () => false } })).toMatchObject([{ attempted: false }]);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(admission.start).not.toHaveBeenCalled();
+  });
+
+  it('honors Stop before queued assignments after an in-flight completion', async () => {
+    const items = [makeItem({ id: 'first' }), makeItem({ id: 'later' })];
+    const plan = { assignments: items.map(item => ({ item, backend: 'builtin' as const })), unassigned: [], slotsMap: new Map([['builtin' as const, 1]]) };
+    let stopped = false; let active = 0;
+    const dispatch = vi.fn(async () => { stopped = true; });
+    const results = await runConcurrentDispatch(plan, dispatch, () => stopped, { admission: {
+      canStart: () => active < 1, start: () => { active++; }, finish: () => { active--; },
+    } });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(active).toBe(0);
+    expect(results.map(row => row.attempted)).toEqual([true, false]);
+  });
+});

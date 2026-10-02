@@ -2194,6 +2194,8 @@ export interface RunOptions {
   seatId?: string;
   /** Internal synchronous same-seat authority fence; never serialized or passed to a model. */
   selectedGrokAdmission?: () => boolean;
+  /** Internal caller-owned outcome revision fence; never persisted or sent to a model. */
+  selectedOutcomeAdmission?: () => boolean;
   /** Partial budget overrides (merged over defaults). */
   budget?: Partial<RunBudget>;
   /** Max independent tasks to execute in parallel. */
@@ -2287,6 +2289,8 @@ export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   /** Message text content. */
   content: string;
+  /** Assistant tool calls retained together with their correlated results. */
+  toolCalls?: { id: string; name: string; arguments: unknown }[];
   /** Tool-call id this message responds to (for role 'tool'). */
   toolCallId?: string;
   /** Tool/function name (for role 'tool'). */
@@ -2333,6 +2337,8 @@ export interface ProviderClient {
   supportsTools: boolean;
   /** Explicit opt-in required before a governed caller may contact this client. */
   authority?: ProviderClientAuthority;
+  /** Optional metadata-only discovery for the exact endpoint/model; unknown is undefined. */
+  getContextWindowTokens?(signal?: AbortSignal): Promise<number | undefined>;
   /** Send a chat exchange (optionally with tool specs) and get a result. */
   chat(
     messages: ChatMessage[],
@@ -3120,6 +3126,8 @@ export interface SwarmRun {
 
 /** Options accepted by `runSwarm` / the `ashlr swarm` CLI. */
 export interface SwarmOptions {
+  /** Nonserializable caller outcome revision, shared by planner and every child. */
+  selectedOutcomeAdmission?: () => boolean;
   /** Optional owner cancellation shared by planning and every task run. */
   signal?: AbortSignal;
   /** Partial budget overrides (merged over defaults) — the HARD total ceiling. */
@@ -4563,10 +4571,10 @@ export interface DaemonConfig {
   dailyBudgetUsd: number;
   /** Positive safe integer token allowance for proven zero-dollar producers; defaults to the normal run allowance. */
   perItemMaxTokens?: number;
-  /** Max number of backlog items processed per tick (per-tick item cap). */
-  perTickItems: number;
-  /** Bounded concurrency: max sandboxed swarms run simultaneously in a tick. */
-  parallel: number;
+  /** Per-tick item preference; null uses eligible inventory within actual admission. Absent defaults to 3. */
+  perTickItems: number | null;
+  /** Batch concurrency preference; null has no operator ceiling. Absent defaults to 2. */
+  parallel: number | null;
   /** Interval between ticks in `daemon start` loop mode (ms). */
   intervalMs: number;
   /**
@@ -4578,28 +4586,15 @@ export interface DaemonConfig {
    *                when the backlog is empty. Bound by budget + kill-switch + pool caps.
    */
   mode?: 'batch' | 'continuous';
-  /**
-   * M116: absolute ceiling on in-flight dispatches for continuous mode (ignored
-   * in batch mode, which uses `parallel`). Defaults to concurrency.total when
-   * set, or 8 otherwise. Raise to saturate a powerful machine.
-   */
-  maxConcurrent?: number;
-  /**
-   * M116: per-tier concurrency budgets for the tiered worker pool. All fields
-   * optional; absent tiers fall back to sensible defaults. Effective in BOTH
-   * batch and continuous modes — in batch mode these cap `parallel` per tier.
-   *
-   * 'local' tier  — engines whose EngineTier is 'local' (on-device models).
-   *                 GPU/RAM bound; keep low (default 2).
-   * 'cloud' tier  — engines whose EngineTier is 'frontier' or 'mid' (subscription
-   *                 cloud agents). I/O bound; can run many concurrently (default 6).
-   * 'total'       — hard cap across all tiers (default 8, raised from the old
-   *                 hard-coded 8). maxConcurrent takes precedence over this.
-   */
+  /** Continuous count preference. Explicit null overrides total with no operator
+   * ceiling; absent inherits concurrency.total (default 8). Actual admission remains. */
+  maxConcurrent?: number | null;
+  /** Per-tier preferences: absence retains local2/cloud6/total8, null removes
+   * only the operator ceiling. maxConcurrent, including null, overrides total. */
   concurrency?: {
-    local?: number;
-    cloud?: number;
-    total?: number;
+    local?: number | null;
+    cloud?: number | null;
+    total?: number | null;
   };
   /**
    * M116: how long (ms) the continuous loop backs off when the backlog is empty
@@ -5432,6 +5427,17 @@ export interface GoalMissionBindingV1 {
   nodeKey: string;
 }
 
+/** Immutable provenance for a Goal materialized by the durable outcome coordinator.
+ * A binding identifies scope and node basis; it never grants provider/merge authority. */
+export interface GoalOutcomeBindingV1 {
+  schemaVersion: 1;
+  outcomeId: string;
+  nodeId: string;
+  nodeBasisDigest: string;
+  scopeRevision: number;
+  scopeDigest: string;
+}
+
 /**
  * M28: a single MILESTONE within a Goal. Each milestone is an ordered unit of
  * work that authors/links a versioned SpecArtifact and is advanced by a single
@@ -5489,6 +5495,7 @@ export interface Goal {
   owner?: string;
   /** Exact graph/node contract that created this goal; absent on legacy goals. */
   mission?: GoalMissionBindingV1;
+  outcome?: GoalOutcomeBindingV1;
   /** The high-level objective text the goal was created from. */
   objective: string;
   /**

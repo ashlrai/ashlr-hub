@@ -19,7 +19,7 @@
  *   - `VerseCapsUpdateResult.applied` is `VerseCapKey[]` (which caps changed),
  *     not the whole `VerseCaps`; the new caps come back on `.caps`.
  *   - `maxConcurrent` and each `concurrency.*` are `number | null` — null
- *     means "not configured", which is an honest state, not a zero.
+ *     means unset or explicit Automatic, disambiguated by uncappedCountKeys.
  *
  * The local alias names the cockpit already used (`VerseCapsPatch`,
  * `VerseCapsApplyResult`, `VerseScopePatch`, `VerseAuditPage`) are kept as
@@ -135,3 +135,6 @@ export function limitForEngine(
 ): VerseFoundryLimit | null {
   return limits?.find((l) => l.engine === engine) ?? null;
 }
+
+export { VERSE_UNCAPPED_COUNT_KEYS } from '../../../../core/verse/control-types.js';
+export type { VerseUncappedCountKey } from '../../../../core/verse/control-types.js';

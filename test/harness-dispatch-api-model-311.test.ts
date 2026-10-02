@@ -27,12 +27,16 @@ describe('runApiModelSandboxed applies the local-lane harness to the client', ()
   let tmpRepo: string;
   let clientArgs: unknown[][];
   let reservedCaps: number[];
+  let contextWindows: Array<number | undefined>;
+  let discoverContext: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     tmpRepo = mkdtempSync(join(tmpdir(), 'ashlr-h311-api-'));
     mkdirSync(join(tmpRepo, '.git'), { recursive: true });
     clientArgs = [];
     reservedCaps = [];
+    contextWindows = [];
+    discoverContext = vi.fn(async () => undefined as number | undefined);
     vi.doMock('../src/core/sandbox/policy.js', async (importOriginal) => ({
       ...await importOriginal<typeof import('../src/core/sandbox/policy.js')>(),
       assertMayMutate: () => {},
@@ -57,15 +61,16 @@ describe('runApiModelSandboxed applies the local-lane harness to the client', ()
     vi.doMock('../src/core/run/provider-client.js', () => ({
       buildOpenAICompatibleClient: (...args: unknown[]) => {
         clientArgs.push(args);
-        return { id: 'openai-compat', model: args[2], supportsTools: true };
+        return { id: 'openai-compat', model: args[2], supportsTools: true, getContextWindowTokens: discoverContext };
       },
     }));
     vi.doMock('../src/core/run/agent-loop.js', () => ({
       runTask: async (
         task: { status: string; result?: string },
         _client: unknown,
-        ctx: { reserveModelStep?: (n: number) => { maxOutputTokens: number; finalize(s: string, u?: { tokensIn: number; tokensOut: number }): void } | undefined },
+        ctx: { contextWindowTokens?: number; reserveModelStep?: (n: number) => { maxOutputTokens: number; finalize(s: string, u?: { tokensIn: number; tokensOut: number }): void } | undefined },
       ) => {
+        contextWindows.push(ctx.contextWindowTokens);
         const reservation = ctx.reserveModelStep?.(500);
         if (reservation) {
           reservedCaps.push(reservation.maxOutputTokens);
@@ -93,12 +98,13 @@ describe('runApiModelSandboxed applies the local-lane harness to the client', ()
     vi.resetModules();
   });
 
-  async function run(h?: DispatchHarness): Promise<void> {
+  async function run(h?: DispatchHarness, engine: EngineId = 'llama-server' as EngineId, selectedOutcomeAdmission?: () => boolean) {
     const { runApiModelSandboxed } = await import(
       '../src/core/run/sandboxed-engine.js?bust=' + randomUUID()
     ) as typeof import('../src/core/run/sandboxed-engine.js');
-    await runApiModelSandboxed('llama-server' as EngineId, 'increment x', { foundry: {} } as never, {
+    return await runApiModelSandboxed(engine, 'increment x', { foundry: {} } as never, {
       sourceRepo: tmpRepo, propose: false, ...(h ? { harness: h } : {}),
+      ...(selectedOutcomeAdmission ? { selectedOutcomeAdmission } : {}),
     });
   }
 
@@ -121,5 +127,33 @@ describe('runApiModelSandboxed applies the local-lane harness to the client', ()
     expect(transport).not.toHaveProperty('topP');
     expect(transport).not.toHaveProperty('reasoningEffort');
     expect(reservedCaps).toEqual([4096]);
+  });
+  it('passes the qualified local-coder window without changing the governed output cap', async () => {
+    discoverContext.mockResolvedValue(65536);
+    await run(undefined, 'local-coder');
+    expect(discoverContext).toHaveBeenCalledOnce();
+    expect(contextWindows).toEqual([65536]);
+    expect(reservedCaps).toEqual([4096]);
+  });
+  it('does not infer a local-coder window when the runtime has not reported it', async () => {
+    await run(undefined, 'local-coder');
+    expect(discoverContext).toHaveBeenCalledOnce();
+    expect(contextWindows).toEqual([undefined]);
+    expect(reservedCaps).toEqual([4096]);
+  });
+  it('cancels an outcome retired during awaited metadata setup without entering the model loop', async () => {
+    let current = true;
+    discoverContext.mockImplementation(async () => { await Promise.resolve(); current = false; return 65536; });
+    const result = await run(undefined, 'local-coder', () => current);
+    expect(result.state).toMatchObject({ status: 'aborted', terminationReason: 'cancelled', usage: { tokensIn: 0, tokensOut: 0, steps: 0 } });
+    expect(contextWindows).toEqual([]);
+    expect(reservedCaps).toEqual([]);
+    expect(result.providerContacted).not.toBe(true);
+  });
+  it('preserves other provider behavior without an added metadata call', async () => {
+    discoverContext.mockResolvedValue(65536);
+    await run();
+    expect(discoverContext).not.toHaveBeenCalled();
+    expect(contextWindows).toEqual([undefined]);
   });
 });

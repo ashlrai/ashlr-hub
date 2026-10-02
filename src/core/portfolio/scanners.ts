@@ -33,6 +33,7 @@ import { listIssues, githubStatus } from '../integrations/github.js';
 import { isTrivialItem, isNonCodePath } from './value-filter.js';
 import { scoreItem } from './scoring.js';
 import { listGoals } from '../goals/store.js';
+import { readOutcomeGoalForScan } from '../goals/outcome-runtime.js';
 import { createProposalMilestoneCompletionPredicate } from '../goals/completion.js';
 import { goalProjectMatchesRepo } from '../goals/project-match.js';
 import {
@@ -1844,10 +1845,27 @@ export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'
     if (allGoals.length === 0) return [];
 
     const isMilestoneComplete = createProposalMilestoneCompletionPredicate();
-    const focus = goalFocusSnapshot(allGoals, _cfg, { repo, isMilestoneComplete });
+    const focus = goalFocusSnapshot(allGoals.filter(goal => goal.outcome === undefined), _cfg, { repo, isMilestoneComplete });
+    const outcomeItems: WorkItem[] = [];
     const candidates: Array<{ goal: Goal; milestone: Milestone; item: WorkItem }> = [];
     let zeroMilestoneExpansions = 0;
     for (let goal of allGoals) {
+      if (goal.outcome !== undefined) {
+        // Outcome goals never enter the legacy planner/focus path. Dependencies,
+        // scope and durable claims are owned by the existing outcome coordinator.
+        const context = readOutcomeGoalForScan(goal, repo);
+        if (!context) continue;
+        const milestone = context.goal.milestones[0]!;
+        const item = makeItem(repo, 'goal', `goal:${goal.id}:${milestone.id}`,
+          boundedGoalDisplayTitle(goal.objective, milestone.title),
+          `Outcome: ${context.state.scope.desiredOutcome}. Task: ${goal.objective}. ${milestone.detail}`, 4, 2,
+          ['goal', goal.id, milestone.id, 'outcome', context.state.id, context.node.id]);
+        // Deliberate canonical discriminator identity (152 bytes), within the existing
+        // 180-byte WorkItem protocol, so claim/run/proposal joins use the actual item ID.
+        item.id = `goal:${goal.id}:${milestone.id}`;
+        outcomeItems.push(item);
+        continue;
+      }
       // Exact checkout, or (under a standing grant) the fleet mirror of the
       // same GitHub repo — goals/project-match.ts.
       if (!goalProjectMatchesRepo(goal.project, repo)) {
@@ -1899,9 +1917,9 @@ export async function scanGoals(repo: string, _cfg?: Pick<AshlrConfig, 'foundry'
     }
     if (focus.shouldDeferNewGoalWork && candidates.length > 1) {
       candidates.sort(compareGoalFocusCandidates);
-      return [candidates[0]!.item];
+      return [...outcomeItems, candidates[0]!.item];
     }
-    return candidates.map((candidate) => candidate.item);
+    return [...outcomeItems, ...candidates.map((candidate) => candidate.item)];
   } catch {
     return [];
   }

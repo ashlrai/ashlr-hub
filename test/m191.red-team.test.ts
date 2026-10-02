@@ -590,3 +590,33 @@ describe('M191 — standalone (no gate wiring)', () => {
     expect(src).toContain("from '../util/scrub.js'");
   });
 });
+
+
+describe('red-team selected outcome admission', () => {
+  it('refuses a paused scope before resolving or calling the model', async () => {
+    const complete = vi.fn(async () => '[]');
+    const resolve = vi.fn(() => ({ complete, model: 'mock-opus' }));
+    vi.doMock('../src/core/fleet/manager.js', () => ({ resolveFrontierJudgeClient: resolve }));
+    const { redTeamProposal } = await import('../src/core/fleet/red-team.js?' + randomUUID());
+    await redTeamProposal(makeProposal(), makeConfig(), { selectedOutcomeAdmission: () => false });
+    expect(resolve).not.toHaveBeenCalled();
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it('propagates the live predicate and refuses Jev extraction after a contacted response', async () => {
+    let current = true;
+    const admission = () => current;
+    const complete = vi.fn(async (_sys, _user, _signal, predicate) => {
+      expect(predicate).toBe(admission);
+      current = false;
+      return 'unstructured report that needs typed extraction';
+    });
+    const extract = vi.fn(async () => ({ path: 'jev', value: 'high' }));
+    vi.doMock('../src/core/fleet/manager.js', () => ({ resolveFrontierJudgeClient: () => ({ complete, model: 'mock-opus' }) }));
+    vi.doMock('../src/core/decide/verdict.js', () => ({ extractRedTeamSeverity: extract }));
+    const { redTeamProposal } = await import('../src/core/fleet/red-team.js?' + randomUUID());
+    await redTeamProposal(makeProposal(), makeConfig(), { selectedOutcomeAdmission: admission });
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(extract).not.toHaveBeenCalled();
+  });
+});

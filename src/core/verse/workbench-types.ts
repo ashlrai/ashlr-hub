@@ -1580,6 +1580,13 @@ export interface VerseAppLaunchResponse {
  */
 export const WORKBENCH_ROUTE_FAMILIES = [
   {
+    id: 'outcomes',
+    owner: 'outcome-editor',
+    module: 'src/core/verse/outcomes-api.ts',
+    handler: 'handleOutcomesApi',
+    prefixes: ['/api/verse/outcomes'],
+  },
+  {
     id: 'activity',
     owner: 'C1',
     module: 'src/core/verse/activity-api.ts',

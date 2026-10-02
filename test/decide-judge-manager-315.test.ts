@@ -115,3 +115,16 @@ describe('manager judge — Jev extraction before the reprompt', () => {
     expect(fake.fetch).not.toHaveBeenCalled();
   });
 });
+
+
+describe('outcome retirement during critic response', () => {
+  it('prevents late Jev extraction and a paid recovery request after a contacted judge retires the outcome', async () => {
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    let current = true;
+    const complete = vi.fn(async () => { await Promise.resolve(); current = false; return 'unstructured review'; });
+    await expect(judgeProposal(proposal(), {} as never, { model: 'fixture-judge', complete }, {
+      cache: false, selectedOutcomeAdmission: () => current,
+    })).rejects.toMatchObject({ name: 'SelectedOutcomeAdmissionRefusal' });
+    expect(complete).toHaveBeenCalledOnce(); expect(fake.fetch).not.toHaveBeenCalled();
+  });
+});

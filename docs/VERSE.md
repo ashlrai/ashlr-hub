@@ -14,6 +14,13 @@ destinations and keyboard shortcuts remain available. The saved workspace is
 restored on launch. Selecting either workspace does not start or stop agents,
 change permission mode, sign a grant or activate the resident daemon.
 
+**Automatic** connects both workspaces: describe the work in a new chat, or save
+a desired outcome in Fleet for the Leader to plan across enrolled repositories.
+Model and account selection is optional. Outcomes retain revision history,
+pause/edit controls, and task-bound run, proposal, and verified merge evidence.
+See [Automatic work](AUTOMATIC-OUTCOMES.md) for the complete flow and recovery
+semantics. The older `vision approve` CLI remains a separate explicit workflow.
+
 **Review** opens the relevant existing surfaces: changes and sources for the
 current chat, usage, agent review, Needs you, fleet decisions and the module map.
 It preserves the current chat and draft, and does not launch work.

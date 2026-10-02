@@ -100,7 +100,7 @@ export function effectiveThreshold(kind: DecisionKind, override?: number): numbe
 
 type TransportOptions = Pick<
   DecideOptions<unknown>,
-  'cfg' | 'model' | 'timeoutMs' | 'signal' | 'endpoint' | 'cache' | 'cacheSalt'
+  'cfg' | 'model' | 'timeoutMs' | 'signal' | 'endpoint' | 'cache' | 'cacheSalt' | 'selectedOutcomeAdmission'
 >;
 
 type Asked =
@@ -139,12 +139,13 @@ async function askJev(
     {
       timeoutMs: opts.timeoutMs ?? DECISION_KINDS[kind].timeoutMs,
       ...(opts.signal ? { signal: opts.signal } : {}),
+      ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
       ...(opts.endpoint ? { endpoint: opts.endpoint } : {}),
     },
   );
   if (!result.ok) {
     // A request left the machine unless we stopped before dispatch.
-    const called = result.reason !== 'no-key' && result.reason !== 'disabled';
+    const called = result.reason !== 'no-key' && result.reason !== 'disabled' && result.reason !== 'admission-refused';
     return { ok: false, reason: result.reason, called };
   }
   if (useCache) cacheSet(key, result);

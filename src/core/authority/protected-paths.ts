@@ -83,6 +83,9 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/daemon/activation-permit.ts',
   'src/core/daemon/tick-hooks.ts',
   'src/core/daemon/loop.ts',
+  // Resolves operator count preferences used by both tick admission and routing.
+  'src/core/daemon/count-preferences.ts',
+  'src/core/daemon/outcome-*.ts',
   'src/core/daemon/post-merge-halt.ts',
   'src/core/daemon/liveness.ts',
   // Resident service (docs/RESIDENT-RUNTIME.md): the only launchd mutation
@@ -122,6 +125,11 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/vision/leader-seat.ts',
   // Explicit operator preferences are inputs to scheduling/admission gates.
   'src/core/goals/preferences.ts',
+  // Outcome bindings decide which task may dispatch and which verified merge
+  // releases dependencies; they share the existing host authority boundary.
+  'src/core/goals/outcome-*.ts',
+  'src/core/vision/leader-outcomes.ts',
+  'src/core/verse/outcomes-*.ts',
   'src/core/vision/leader-preferences.ts',
   // Sandbox, policy and routing
   'src/core/sandbox/**',

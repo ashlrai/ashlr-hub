@@ -22,6 +22,7 @@ import {
   constants,
   existsSync,
   fstatSync,
+  fsyncSync,
   linkSync,
   lstatSync,
   mkdirSync,
@@ -38,6 +39,7 @@ import type {
   AshlrConfig,
   Goal,
   GoalMissionBindingV1,
+  GoalOutcomeBindingV1,
   GoalStatus,
   Milestone,
   MilestoneStatus,
@@ -47,6 +49,7 @@ import {
   acquireLocalStoreLock,
   releaseLocalStoreLock,
 } from '../fleet/local-store-lock.js';
+import { fsyncDirectory } from '../util/durability.js';
 
 // Re-export so existing importers of `goalsDir` from the store keep working;
 // the canonical definition now lives in config.ts (single source of truth for
@@ -290,6 +293,15 @@ function isValidGoalMissionBinding(value: unknown): value is GoalMissionBindingV
     typeof value['nodeKey'] === 'string' && MISSION_BINDING_KEY_RE.test(value['nodeKey']);
 }
 
+export function isValidGoalOutcomeBinding(value: unknown): value is GoalOutcomeBindingV1 {
+  if (!isRecord(value)) return false;
+  const keys = ['schemaVersion', 'outcomeId', 'nodeId', 'nodeBasisDigest', 'scopeRevision', 'scopeDigest'];
+  return Object.keys(value).length === keys.length && Object.keys(value).every(key => keys.includes(key)) &&
+    value['schemaVersion'] === 1 && typeof value['outcomeId'] === 'string' && MISSION_BINDING_KEY_RE.test(value['outcomeId']) &&
+    ['nodeId', 'nodeBasisDigest', 'scopeDigest'].every(key => typeof value[key] === 'string' && /^[a-f0-9]{64}$/.test(value[key] as string)) &&
+    Number.isSafeInteger(value['scopeRevision']) && (value['scopeRevision'] as number) >= 1;
+}
+
 function isValidMilestone(parsed: unknown): parsed is Milestone {
   if (!isRecord(parsed)) return false;
   const createdAt = parsed['createdAt'];
@@ -324,6 +336,9 @@ function isValidGoalRecordWithOptions(
     typeof parsed['objective'] !== 'string' ||
     (parsed['owner'] !== undefined && typeof parsed['owner'] !== 'string') ||
     (parsed['mission'] !== undefined && !isValidGoalMissionBinding(parsed['mission'])) ||
+    (parsed['outcome'] !== undefined && (!isValidGoalOutcomeBinding(parsed['outcome']) ||
+      parsed['id'] !== `outcome-${parsed['outcome'].nodeId}` || !isValidGoalMissionBinding(parsed['mission']) ||
+      parsed['mission'].missionKey !== parsed['outcome'].outcomeId)) ||
     !(project === null || (typeof project === 'string' && isAbsolute(project))) ||
     typeof parsed['status'] !== 'string' ||
     !GOAL_STATUSES.has(parsed['status'] as GoalStatus) ||
@@ -332,6 +347,9 @@ function isValidGoalRecordWithOptions(
     !isValidTimestamp(updatedAt) ||
     (!allowTopLevelUpdatedAtRegression && !timestampsAreOrdered(createdAt, updatedAt))
   ) return false;
+
+  if (parsed['outcome'] !== undefined && (milestones.length !== 1 ||
+      !isRecord(milestones[0]) || milestones[0]['id'] !== `milestone-${parsed['outcome'].nodeId}`)) return false;
 
   const milestoneIds = new Set<string>();
   const milestoneOrders = new Set<number>();
@@ -460,10 +478,30 @@ export function createGoalIfAbsent(
     ...(owner !== undefined ? { owner } : {}),
     ...(opts?.mission !== undefined ? { mission: structuredClone(opts.mission) } : {}),
   };
+  return installGoalIfAbsent(goal);
+}
+
+/** Create an outcome node and its concrete milestone in one immutable initial install.
+ * Caller validates the live outcome source; this store validates detached linkage only. */
+export function createOutcomeGoalIfAbsent(input: {
+  objective: string; project: string; mission: GoalMissionBindingV1; outcome: GoalOutcomeBindingV1;
+  milestone: { title: string; detail: string };
+}, opts: GoalPersistenceOptions & { cfg?: Pick<AshlrConfig, 'user'> } = {}): CreateGoalIfAbsentResult {
+  const now = nowIso(opts.now);
+  const goal: Goal = { id: `outcome-${input.outcome.nodeId}`, objective: input.objective, project: input.project,
+    mission: structuredClone(input.mission), outcome: structuredClone(input.outcome), status: 'active',
+    createdAt: now, updatedAt: now,
+    ...(opts.cfg?.user?.id ?? opts.cfg?.user?.name ? { owner: opts.cfg?.user?.id ?? opts.cfg?.user?.name } : {}),
+    milestones: [{ id: `milestone-${input.outcome.nodeId}`, title: input.milestone.title, detail: input.milestone.detail,
+      order: 0, status: 'pending', specId: null, swarmId: null, proposalId: null, createdAt: now, updatedAt: now }] };
+  return installGoalIfAbsent(goal, opts.stillAuthorized);
+}
+
+function installGoalIfAbsent(goal: Goal, stillAuthorized: () => boolean = () => true): CreateGoalIfAbsentResult {
   let tmp: string | null = null;
   let lock: ReturnType<typeof acquireLocalStoreLock> = null;
   try {
-    if (goal.mission !== undefined && !isValidGoalMissionBinding(goal.mission)) {
+    if (!isValidGoalRecord(goal)) {
       return { status: 'failed', goal };
     }
     const dir = goalsDir();
@@ -472,8 +510,13 @@ export function createGoalIfAbsent(
     if (!lock) return { status: 'failed', goal };
     const target = goalPath(dir, goal.id);
     tmp = `${target}.create-${process.pid}-${randomBytes(8).toString('hex')}.tmp`;
+    if (stillAuthorized() !== true) return { status: 'failed', goal };
     writeFileSync(tmp, JSON.stringify(goal, null, 2), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    const descriptor = openSync(tmp, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+    if (stillAuthorized() !== true) return { status: 'failed', goal };
     linkSync(tmp, target);
+    fsyncDirectory(dir);
     return { status: 'created', goal };
   } catch (error) {
     const code = typeof error === 'object' && error !== null && 'code' in error
@@ -705,6 +748,12 @@ function saveGoalUnlocked(
       const before = existing.mission === undefined ? null : JSON.stringify(existing.mission);
       const after = goal.mission === undefined ? null : JSON.stringify(goal.mission);
       if (before !== after) return false;
+      const outcomeBefore = existing.outcome === undefined ? null : JSON.stringify(existing.outcome);
+      const outcomeAfter = goal.outcome === undefined ? null : JSON.stringify(goal.outcome);
+      if (outcomeBefore !== outcomeAfter) return false;
+      if (existing.outcome !== undefined && (!isValidGoalRecord(goal) || existing.objective !== goal.objective ||
+          existing.project !== goal.project || existing.milestones[0]?.id !== goal.milestones[0]?.id ||
+          existing.milestones[0]?.title !== goal.milestones[0]?.title || existing.milestones[0]?.detail !== goal.milestones[0]?.detail)) return false;
     }
     const requestedStamp = nowIso(opts?.now);
     goal.updatedAt = existing && requestedStamp <= existing.updatedAt

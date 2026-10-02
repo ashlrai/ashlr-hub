@@ -43,6 +43,8 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/outcome-daemon-loop.test.ts', // actual resident ticks with disposable Git repositories and protected private stores
+  'test/outcome-proposal-admission.test.ts', // protected selected proposals and a real disposable Git repo at the legacy merge boundary
   'test/test-ci-sharded.test.ts', // real bounded child-process shards in private temporary homes
   'test/web-ui-browser-safe-imports.test.ts', // recursive real source reads and TypeScript runtime-import graph; cases retain explicit original 5s deadlines
   'test/remote-gateway-auth.test.ts', // real loopback gateway and Mac-only Unix socket pairing ceremony

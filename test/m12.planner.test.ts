@@ -378,3 +378,25 @@ describe('planSwarm — cancellation and usage', () => {
     expect(plan.usage).not.toHaveProperty('estCostUsd');
   });
 });
+
+
+describe('planSwarm — selected outcome admission', () => {
+  it('refuses after awaited client setup without calling the planner or returning a fallback plan', async () => {
+    const { getActiveClient } = await import('../src/core/run/provider-client.js');
+    let current = true;
+    vi.mocked(getActiveClient).mockImplementationOnce(async () => {
+      await Promise.resolve(); current = false;
+      return { id: 'mock', supportsTools: false, chat: mockChatFn };
+    });
+    const { planSwarm: plan } = await import('../src/core/swarm/planner.js');
+    await expect(plan({ goal: 'same outcome' }, makeConfig(), undefined, undefined, undefined, () => current))
+      .rejects.toMatchObject({ name: 'SelectedOutcomeAdmissionRefusal', usage: { tokensIn: 0, tokensOut: 0 } });
+    expect(mockChatFn).not.toHaveBeenCalled();
+  });
+  it.each([() => false, () => { throw new Error('private refusal'); }])('holds before any client setup', async selectedOutcomeAdmission => {
+    const { getActiveClient } = await import('../src/core/run/provider-client.js');
+    const { planSwarm: plan } = await import('../src/core/swarm/planner.js');
+    await expect(plan({ goal: 'held' }, makeConfig(), undefined, undefined, undefined, selectedOutcomeAdmission)).rejects.toMatchObject({ name: 'SelectedOutcomeAdmissionRefusal' });
+    expect(getActiveClient).not.toHaveBeenCalled(); expect(mockChatFn).not.toHaveBeenCalled();
+  });
+});

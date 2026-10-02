@@ -713,3 +713,47 @@ describe('operator Leader preference controls', () => {
     expect(parseVerseCapsUpdate({ leaderPreferences }).ok).toBe(false);
   });
 });
+
+
+describe('explicit Automatic count choices', () => {
+  const automatic = { perTickItems: null, parallel: null, maxConcurrent: null,
+    concurrency: { local: null, cloud: null, total: null } } as const;
+  const keys = ['concurrency.cloud', 'concurrency.local', 'concurrency.total', 'maxConcurrent', 'parallel', 'perTickItems'];
+
+  it('distinguishes explicit null from absent defaults and persists all six choices', () => {
+    const initial = baseConfig({ daemon: { dailyBudgetUsd: 0, perTickItems: 2, parallel: 4,
+      maxConcurrent: 10, concurrency: { local: 4, cloud: 6, total: 10 } }, foundry: { subscriptionMaxPercent: 70 } });
+    const parsed = parseVerseCapsUpdate(automatic);
+    expect(parsed.ok).toBe(true); if (!parsed.ok) return;
+    const next = applyVerseCapsUpdate(initial, parsed.update);
+    saveConfig(next.cfg);
+    const caps = readVerseCaps(loadConfigReadOnly());
+    expect(caps).toMatchObject({ ...automatic, supportsUncappedCounts: true, uncappedCountKeys: keys, dailyBudgetUsd: 0, subscriptionMaxPercent: 70 });
+    expect(next.applied.sort()).toEqual(['concurrency', 'maxConcurrent', 'parallel', 'perTickItems']);
+    for (const key of ['perTickItems', 'parallel', 'maxConcurrent', 'concurrency']) expect(caps.defaulted).not.toContain(key);
+    const omitted = readVerseCaps(baseConfig());
+    expect(omitted).toMatchObject({ perTickItems: 3, parallel: 2, maxConcurrent: null,
+      concurrency: { local: null, cloud: null, total: null }, uncappedCountKeys: [] });
+    expect(omitted.defaulted).toEqual(expect.arrayContaining(['perTickItems', 'parallel', 'maxConcurrent', 'concurrency']));
+    expect(initial.daemon?.perTickItems).toBe(2);
+  });
+
+  it('records pinning unset maxConcurrent to null and preserves an unmentioned tier', () => {
+    const initial = baseConfig({ daemon: { concurrency: { cloud: 6, total: 10 } } });
+    const first = applyVerseCapsUpdate(initial, { maxConcurrent: null, concurrency: { local: null } });
+    expect(first.applied).toEqual(['maxConcurrent', 'concurrency']);
+    expect(readVerseCaps(first.cfg)).toMatchObject({ maxConcurrent: null,
+      concurrency: { local: null, cloud: 6, total: 10 }, uncappedCountKeys: ['concurrency.local', 'maxConcurrent'] });
+    expect(applyVerseCapsUpdate(first.cfg, { maxConcurrent: null, concurrency: { local: null } }).applied).toEqual([]);
+    expect(readVerseCaps(applyVerseCapsUpdate(first.cfg, { maxConcurrent: 17 }).cfg)).toMatchObject({ maxConcurrent: 17, uncappedCountKeys: ['concurrency.local'] });
+  });
+
+  it.each(['dailyBudgetUsd', 'intervalMs', 'subscriptionMaxPercent'])('rejects null %s without treating it as a count', (key) => {
+    expect(parseVerseCapsUpdate({ [key]: null }).ok).toBe(false);
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('keeps invalid count %s rejected', (value) => {
+    for (const key of ['perTickItems', 'parallel', 'maxConcurrent']) expect(parseVerseCapsUpdate({ [key]: value }).ok).toBe(false);
+    for (const key of ['local', 'cloud', 'total']) expect(parseVerseCapsUpdate({ concurrency: { [key]: value } }).ok).toBe(false);
+  });
+});

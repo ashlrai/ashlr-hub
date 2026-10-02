@@ -1,3 +1,4 @@
+import { assertSelectedOutcomeAdmission, SelectedOutcomeAdmissionRefusal } from '../run/outcome-admission.js';
 /**
  * taste-critic.ts — M183: Frontier (Opus) TASTE critic for SELECTION.
  *
@@ -52,6 +53,7 @@ export interface TasteContext {
 }
 
 export interface ScoreTasteOptions {
+  selectedOutcomeAdmission?: () => boolean;
   signal?: AbortSignal;
 }
 
@@ -251,7 +253,7 @@ export async function scoreTaste(
 
   // Resolve the frontier client via the M176 resolver (same as automerge-pass).
   let client: {
-    complete: (system: string, user: string, signal?: AbortSignal) => Promise<string>;
+    complete: (system: string, user: string, signal?: AbortSignal, selectedOutcomeAdmission?: () => boolean) => Promise<string>;
   } | null = null;
   try {
     const { resolveFrontierJudgeClient } = await import('./manager.js');
@@ -271,8 +273,10 @@ export async function scoreTaste(
 
   let raw: string;
   try {
-    raw = await client.complete(TASTE_SYSTEM_PROMPT, userPrompt, options.signal);
+    assertSelectedOutcomeAdmission(options.selectedOutcomeAdmission);
+    raw = await client.complete(TASTE_SYSTEM_PROMPT, userPrompt, options.signal, options.selectedOutcomeAdmission);
   } catch (err) {
+    if (err instanceof SelectedOutcomeAdmissionRefusal) throw err;
     if (options.signal?.aborted) throw tasteAbortReason(options.signal);
     return neutralScore(
       `Frontier call failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -286,7 +290,8 @@ export async function scoreTaste(
   // critic said, accepted only at >= 0.9 confidence; any fallback (unkeyed,
   // offline, unsure) keeps the previous behaviour exactly.
   if (!parsed || !statedVerdict(raw)) {
-    const extracted = await extractTasteScore(raw, { cfg, ...(options.signal ? { signal: options.signal } : {}) })
+    assertSelectedOutcomeAdmission(options.selectedOutcomeAdmission);
+    const extracted = await extractTasteScore(raw, { cfg, ...(options.signal ? { signal: options.signal } : {}), ...(options.selectedOutcomeAdmission ? { selectedOutcomeAdmission: options.selectedOutcomeAdmission } : {}) })
       .catch(() => null);
     if (extracted && extracted.path === 'jev' && extracted.value) {
       const e = extracted.value;

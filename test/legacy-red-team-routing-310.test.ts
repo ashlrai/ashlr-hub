@@ -23,6 +23,8 @@ vi.mock('../src/core/inbox/merge.js', () => ({
 
 const mockListProposals = vi.fn();
 vi.mock('../src/core/inbox/store.js', () => ({
+  // Legacy proposals in this suite are ephemeral; no protected inbox row exists.
+  loadProposal: () => null,
   listProposalsDetailed: (...args: unknown[]) => ({ proposals: mockListProposals(...args), sourceState: 'healthy', complete: true }),
 }));
 

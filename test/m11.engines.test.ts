@@ -920,6 +920,26 @@ describe('spawnEngine — never throws on failure', () => {
     expect(result.error).not.toContain('taskkill');
   });
 
+  it.each([() => false, () => { throw new Error('private callback error'); }])('refuses a retired or unknown outcome at the exact CLI spawn without launching', async selectedOutcomeAdmission => {
+    const { spawn } = await import('node:child_process');
+    const result = await spawnEngine({ bin: 'aw', args: ['auto', GOAL] }, makeConfig(), { selectedOutcomeAdmission });
+    expect(result).toMatchObject({ ok: false, terminationReason: 'cancelled' });
+    expect(result.error).not.toContain('private callback error');
+    expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+  });
+
+  it('rechecks outcome authority before a Codex configuration recovery spawn', async () => {
+    const { spawn } = await import('node:child_process');
+    let current = true;
+    const pending = spawnEngine({ bin: 'codex', args: ['exec', '--json', GOAL] }, makeConfig(), {
+      selectedOutcomeAdmission: () => current,
+    });
+    current = false;
+    getSpawnControl().resolve(1, null, '', 'unknown variant `ultra` for model_reasoning_effort');
+    await expect(pending).resolves.toMatchObject({ ok: false, terminationReason: 'cancelled', configRecoveryAttempts: 1 });
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1);
+  });
+
   it('retries Codex once with a supported effort after an incompatible global preference', async () => {
     const { spawn } = await import('node:child_process');
     const controls: FakeChildControl[] = [];

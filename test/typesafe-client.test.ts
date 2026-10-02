@@ -414,3 +414,12 @@ describe('answer accessors', () => {
     expect(noulAnswer(res, 'a')?.noul).toBe(0.5);
   });
 });
+
+
+describe('Jev selected outcome admission', () => {
+  it.each([() => false, () => { throw new Error('private scope detail'); }])('refuses before the actual request without a charged call', async selectedOutcomeAdmission => {
+    const result = await askTypeSafe(REQUEST, cfg, { endpoint: ENDPOINT, selectedOutcomeAdmission });
+    expect(result).toMatchObject({ ok: false, reason: 'admission-refused' }); expect(fetchMock).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain('private scope detail');
+  });
+});

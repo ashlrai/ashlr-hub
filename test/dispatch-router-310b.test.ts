@@ -602,6 +602,11 @@ describe('operator Grok preference and finite dispatch capacity', () => {
     expect(planLanes({ ...input, leaderPreferences: resolveLeaderPreferences(), policy: policy({ engines: ['local'] }) })['grok-cli'].slots).toBe(0);
   });
   it('uses existing configured pool/batch defaults and finite journal capacity without allocating workers', () => {
+    expect(grokDispatchBatchCapacity({ daemon: { perTickItems: null, parallel: null } } as AshlrConfig)).toBe(64);
+    expect(grokDispatchBatchCapacity({ daemon: { mode: 'continuous', perTickItems: null, maxConcurrent: null, concurrency: { cloud: null, total: 1 } } } as AshlrConfig)).toBe(64);
+    expect(grokDispatchBatchCapacity({ daemon: { mode: 'continuous', perTickItems: null, maxConcurrent: 5, concurrency: { cloud: null, total: null } } } as AshlrConfig)).toBe(5);
+    expect(grokDispatchBatchCapacity({ daemon: { perTickItems: null, parallel: null, maxConcurrent: null, concurrency: { cloud: 1, total: null } } } as AshlrConfig)).toBe(1);
+    expect(grokDispatchBatchCapacity({ daemon: { perTickItems: null, parallel: 2, maxConcurrent: null, concurrency: { cloud: null, total: null } } } as AshlrConfig)).toBe(2);
     expect(grokDispatchBatchCapacity({} as AshlrConfig)).toBe(2);
     expect(grokDispatchBatchCapacity({ daemon: { perTickItems: 20, parallel: 17 } } as AshlrConfig)).toBe(17);
     expect(grokDispatchBatchCapacity({ daemon: { perTickItems: Number.MAX_SAFE_INTEGER, parallel: Number.MAX_SAFE_INTEGER } } as AshlrConfig)).toBe(64);

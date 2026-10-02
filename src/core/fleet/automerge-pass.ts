@@ -36,6 +36,7 @@
  * proposal which already has a fleet PR is never landed a second time here.
  */
 
+import { outcomeProposalStillCurrent } from '../daemon/outcome-proposal-admission.js';
 import type { AshlrConfig, Proposal } from '../types.js';
 import {
   listProposalsDetailed,
@@ -175,7 +176,7 @@ export async function runAuthorizedFrontierJudge(
     return refused();
   }
   const authorized = (): boolean => ownsOutwardMutationFence(fence) &&
-    !killSwitchOn() && isEnrolled(repo);
+    !killSwitchOn() && isEnrolled(repo) && outcomeProposalStillCurrent(proposal);
   let requested = false;
   let verdict: ManagerVerdict | null = null;
   let decisionPersisted = false;
@@ -183,7 +184,9 @@ export async function runAuthorizedFrontierJudge(
     if (!authorized()) return refused();
     requested = true;
     try {
-      verdict = await judgeProposal(proposal, cfg, judgeClient);
+      verdict = await judgeProposal(proposal, cfg, judgeClient, {
+        selectedOutcomeAdmission: () => outcomeProposalStillCurrent(proposal),
+      });
     } catch {
       verdict = null;
     }
@@ -341,7 +344,7 @@ function runAuthorizedPostJudgePersistence(
     return refused();
   }
   const authorized = (): boolean => ownsOutwardMutationFence(fence) &&
-    !killSwitchOn() && isEnrolled(repo);
+    !killSwitchOn() && isEnrolled(repo) && outcomeProposalStillCurrent(proposal);
   try {
     if (!authorized()) return refused();
     const mergeable = verdict?.considered === true &&
@@ -807,6 +810,7 @@ async function legacyRedTeam(
   }
   const rt = await redTeamProposal(p, cfg, {
     judge: { producerModel: p.engineModel, requireIndependent: true, allowedJudgeEngines: lanes },
+    selectedOutcomeAdmission: () => outcomeProposalStillCurrent(p),
   });
   const frontier = (rt as { frontier?: unknown } | null)?.frontier;
   if (lanes.length > 0 && (frontier === 'answered' || frontier === 'failed')) {
@@ -1057,6 +1061,14 @@ export async function runAutoMergePass(
 
   for (const p of pending) {
     if (killSwitchOn()) break;
+    if (p.workItemId?.startsWith('goal:outcome-') || p.workItemGenerationId?.startsWith('outcome:')) {
+      recordSafetySkip(out, p.id, 'outcome-standing', 'Outcome proposals require current standing host progression; the legacy automatic merge path is held.');
+      continue;
+    }
+    if (!outcomeProposalStillCurrent(p)) {
+      recordSafetySkip(out, p.id, 'outcome-current', 'Outcome is paused, retired or unavailable; proposal stays pending.');
+      continue;
+    }
     // Pre-filter: decide whether this proposal is eligible to be judged/merged
     // this pass. The decision is trust-basis-aware (M175).
     //
@@ -1365,7 +1377,7 @@ export async function runAutoMergePass(
         } = await import('../classify/completion-claims.js');
         // The classifier judges the CLAIM only. The file count is read from the
         // diff we already hold — never inferred, and never asked of a model.
-        const assessment = await classifyCompletionClaim(p.summary, cfg as unknown as import('../types.js').AshlrConfig);
+        const assessment = await classifyCompletionClaim(p.summary, cfg as unknown as import('../types.js').AshlrConfig, { selectedOutcomeAdmission: () => outcomeProposalStillCurrent(p) });
         const verdict = turnIntegrity(assessment.claim, changedFileCountFromDiff(p.diff));
         if (verdict === 'unsupported-claim' || verdict === 'silent-change') {
           shouldSkip = true;
@@ -1425,6 +1437,7 @@ export async function runAutoMergePass(
     // ── End M193 ──────────────────────────────────────────────────────────
 
     try {
+      if (!outcomeProposalStillCurrent(p)) continue;
       const res = await autoMergeProposal(p.id, cfg);
       out.results.push(res);
       if (res.merged) {

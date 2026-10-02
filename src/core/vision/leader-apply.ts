@@ -759,6 +759,8 @@ export interface LeaderApplyDeps {
    * cloud backlog, playbooks, automations. Absent = those kinds are refused.
    */
   powers?: LeaderPowersPorts;
+  /** Durable in-scope planning only; absent ports refuse outcome actions. */
+  outcomes?: import('./leader-outcomes.js').LeaderOutcomesPort;
 }
 
 let enrolledCache: string[] | null = null;
@@ -841,6 +843,7 @@ export async function loadDefaultLeaderDeps(): Promise<LeaderApplyDeps> {
       }).catch(() => { /* Needs-you in Verse still shows it */ });
     },
     powers,
+    outcomes: await (await import('./leader-outcomes.js')).loadDefaultLeaderOutcomesPort(() => effective.currentStandingPolicy()),
   };
 }
 
@@ -958,6 +961,7 @@ export function classifyLeaderAction(draft: AnyLeaderActionDraft, ctx: LeaderPol
   switch (draft.kind) {
     case 'escalate':
       return escalate('The Leader asked Mason directly.');
+    case 'outcome.refine':
     case 'goal.focus':
     case 'goal.pause':
     case 'goal.reorder':
@@ -1283,6 +1287,12 @@ async function executeAction(deps: LeaderApplyDeps, action: LeaderAction): Promi
         detail: null,
       };
     }
+    case 'outcome.refine': {
+      if (!deps.outcomes || !leaderGoalHygieneApplies(deps.standingPolicy())) return { status: 'refused', reason: 'Current autonomous class A outcome planning authority is unavailable.' };
+      const result = deps.outcomes.refine(action.id, action.params, action.createdAt);
+      return result.ok ? { status: 'applied', inverse: { op: 'pause-outcome-plan', ...result.applied }, restore: [], detail: null }
+        : { status: 'refused', reason: result.reason };
+    }
     case 'goal.create': {
       // No await between this fresh policy/classification and atomic per-goal
       // install. This is not a cross-process global quota transaction.
@@ -1473,8 +1483,11 @@ async function applyClaimed(deps: LeaderApplyDeps, claimed: Claimed, opts: { app
   if (!row.ok) {
     // The change is made but could not be recorded: undo it at once. An
     // authority change that is not on the ledger must not stand.
-    await runInverse(deps, { action: next, restore }, outcome.inverse, true);
-    next = { ...action, status: 'failed', statusReason: `The ledger did not record the change, so it was undone (${row.reason}).`, inverse: null } as LeaderAction;
+    const inverseResult = await runInverse(deps, { action: next, restore }, outcome.inverse, true);
+    const reason = outcome.inverse.op === 'pause-outcome-plan'
+      ? `The ledger did not record the plan; ${inverseResult.detail} (${row.reason}).`
+      : `The ledger did not record the change, so it was undone (${row.reason}).`;
+    next = { ...action, status: 'failed', statusReason: reason, inverse: null } as LeaderAction;
     restore = [];
     if (!settleClaim(claimed, { action: next, restore })) return currentAction(next.id, next);
     return next;
@@ -1498,7 +1511,7 @@ async function applyClaimed(deps: LeaderApplyDeps, claimed: Claimed, opts: { app
     note: current.vetoNote,
     inverse: projectInverse(outcome.inverse),
     restored: result.restored,
-    detail: `${vetoed ? 'Vetoed while it was being applied' : 'The apply lost its claim'}; the change was undone: ${result.detail}`,
+    detail: `${vetoed ? 'Vetoed while it was being applied' : 'The apply lost its claim'}; ${outcome.inverse.op === 'pause-outcome-plan' ? 'the plan inverse ran' : 'the change was undone'}: ${result.detail}`,
     at: new Date(deps.now()).toISOString(),
   };
   try { deps.appendLedger({ kind: 'leader:vetoed', data: record, actor: vetoed ? 'mason' : 'leader', grantId: deps.standingPolicy()?.grantId ?? null, repo: actionRepo(action) }); } catch { /* best-effort */ }
@@ -1821,7 +1834,7 @@ export interface LeaderVetoResult {
 }
 
 /** Inverses a veto may run from the local store alone (they can only lower autonomy). */
-const LOWERING_ONLY_OPS: ReadonlySet<LeaderInverse['op']> = new Set(['cancel-task', 'retire-standard', 'cancel-experiment', 'archive-goal']);
+const LOWERING_ONLY_OPS: ReadonlySet<LeaderInverse['op']> = new Set(['cancel-task', 'retire-standard', 'cancel-experiment', 'archive-goal', 'pause-outcome-plan']);
 
 function directivesNotAbove(restored: LeaderDirectivesV1 | null, current: LeaderDirectivesV1 | null): boolean {
   if (currentGrokLanes(restored) > currentGrokLanes(current)) return false;
@@ -1934,6 +1947,11 @@ async function runInverse(
         }
       }
       return { restored: exact, detail: exact ? 'Goals restored exactly.' : `Goals changed since; ${notes.join('; ')}.`, ran: true };
+    }
+    case 'pause-outcome-plan': {
+      if (!deps.outcomes) return { restored: false, detail: 'The outcome planning port is unavailable.', ran: false };
+      const result = deps.outcomes.pausePlan(action.id, inverse);
+      return { restored: false, ...result };
     }
     case 'archive-goal': {
       const goal = deps.goals.load(inverse.goalId);

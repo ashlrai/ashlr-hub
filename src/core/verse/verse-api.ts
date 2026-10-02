@@ -394,6 +394,9 @@ function notLandedOr(err: unknown, file: string): typeof NOT_LANDED {
  * contract test fails if the two disagree.
  */
 const WORKBENCH_IMPORTS: Readonly<Record<WorkbenchRouteFamilyId, () => Promise<WorkbenchImport>>> = {
+  outcomes: async () => {
+    try { return (await import('./outcomes-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'outcomes-api.js'); }
+  },
   activity: async () => {
     try { return (await import('./activity-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'activity-api.js'); }
   },

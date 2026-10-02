@@ -309,3 +309,11 @@ describe('key file fallback', () => {
     expect(fake.calls[0]!.authorization).toBe(`Bearer ${FAKE_TYPESAFE_KEY}-file`);
   });
 });
+
+
+it('outcome refusal is a recorded no-contact fallback, never a paid call', async () => {
+  const result = await intent('same selected outcome', { selectedOutcomeAdmission: () => false });
+  expect(result).toMatchObject({ path: 'fallback', reason: 'admission-refused' });
+  expect(fake.fetch).not.toHaveBeenCalled();
+  expect(readLedger().at(-1)).toMatchObject({ called: false, reason: 'admission-refused' });
+});

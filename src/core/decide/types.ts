@@ -123,6 +123,8 @@ export interface DecideOptions<T> {
   readonly model?: TypeSafeModel;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  /** Optional in-process caller fence; excluded from request/cache payloads. */
+  readonly selectedOutcomeAdmission?: () => boolean;
   /** Test/self-host override, forwarded to the client. */
   readonly endpoint?: string;
   /** Default true. Set false for inputs that never repeat. */

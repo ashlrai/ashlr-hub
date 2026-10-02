@@ -941,3 +941,22 @@ describe('M183 — safety merge gate is untouched', () => {
     expect(flagSection).toContain('safety floor');
   });
 });
+
+
+describe('taste critic outcome retirement', () => {
+  it('refuses an already retired outcome before critic contact', async () => {
+    const complete = vi.fn(); vi.doMock('../src/core/fleet/manager.js', () => ({ resolveFrontierJudgeClient: () => ({ model: 'fixture-judge', complete }) }));
+    const { scoreTaste } = await import('../src/core/fleet/taste-critic.js?outcome-before=' + randomUUID());
+    await expect(scoreTaste(makeProposal(), {}, makeConfig(), { selectedOutcomeAdmission: () => false })).rejects.toMatchObject({ name: 'SelectedOutcomeAdmissionRefusal' });
+    expect(complete).not.toHaveBeenCalled();
+  });
+  it('a contacted critic retiring the outcome cannot start typed extraction', async () => {
+    let current = true;
+    const complete = vi.fn(async () => { await Promise.resolve(); current = false; return 'unstructured taste'; });
+    vi.doMock('../src/core/fleet/manager.js', () => ({ resolveFrontierJudgeClient: () => ({ model: 'fixture-judge', complete }) }));
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock);
+    const { scoreTaste } = await import('../src/core/fleet/taste-critic.js?outcome-after=' + randomUUID());
+    await expect(scoreTaste(makeProposal(), {}, makeConfig(), { selectedOutcomeAdmission: () => current })).rejects.toMatchObject({ name: 'SelectedOutcomeAdmissionRefusal' });
+    expect(complete).toHaveBeenCalledOnce(); expect(fetchMock).not.toHaveBeenCalled(); vi.unstubAllGlobals();
+  });
+});
