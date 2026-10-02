@@ -92,7 +92,7 @@ describe('check-first-paint-budget: a root folded into a group chunk', () => {
 describe('the heavy parts of Chat stay out of its first-paint chunk', () => {
   it('ChatSection has no static import of the workspace, chat list, dock derivations or verse-model', () => {
     const imports = staticImports(read('sections/ChatSection.tsx'));
-    for (const lazy of ['../Workspace.js', '../Sidebar.js', '../chat/tasks-model.js', '../chat/turn-files.js', '../verse-model.js', '../dock/DockHost.js', '../NewChatDialog.js', '../verse-events.js', '../verse-list-channel.js']) {
+    for (const lazy of ['../Workspace.js', '../Sidebar.js', '../chat/tasks-model.js', '../chat/turn-files.js', '../chat/start-chat.js', '../verse-model.js', '../dock/DockHost.js', '../NewChatDialog.js', '../verse-events.js', '../verse-list-channel.js']) {
       expect(imports, lazy).not.toContain(lazy);
     }
   });
