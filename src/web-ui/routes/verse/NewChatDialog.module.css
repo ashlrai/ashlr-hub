@@ -176,6 +176,6 @@
   overflow-wrap: anywhere;
 }
 
-.prompt { min-height: 96px; padding: var(--space-2); line-height: var(--text-sm-line); resize: vertical; }
+.prompt { min-height: calc(var(--control-h) * 3); padding: var(--space-2); line-height: var(--text-sm-line); resize: vertical; }
 
 .fields { display: grid; gap: var(--space-4); border: 0; padding: 0; margin: 0; min-width: 0; }
