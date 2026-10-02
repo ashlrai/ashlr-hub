@@ -31,10 +31,13 @@ describe('M522 — production-promotion operator boundary', () => {
     // from reading as a publication path for later versions.
     const currentNote = releaseDocs.split('\n\n')[1] ?? '';
     expect(currentNote).toContain('**Current release process');
-    expect(currentNote).toContain('releases are manual\n> and local');
-    expect(currentNote).toContain('[Releasing without CI](RELEASING-LOCALLY.md)');
-    expect(currentNote).toMatch(/not a\s+(?:>\s+)?publication path for any later version/u);
-    expect(currentNote).toMatch(/strictly above\s+(?:>\s+)?`3\.3\.2`/u);
+    expect(currentNote).toContain('current manual release lane');
+    expect(currentNote).toContain('[Releasing locally](RELEASING-LOCALLY.md)');
+    expect(currentNote).toContain('Hosted');
+    expect(currentNote).toContain('pull-request checks run');
+    expect(currentNote).toContain('interactive web 2FA');
+    expect(releaseDocs.split('> **Verified distribution state')[0]).toMatch(/not a publishing path\s+(?:>\s+)?for later versions/u);
+    expect(releaseDocs).toMatch(/strictly above\s+(?:>\s+)?`3\.3\.2`/u);
   });
 
   it('documents the protected observation-only admission without inventing authority', () => {

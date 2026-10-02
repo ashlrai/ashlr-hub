@@ -33,6 +33,7 @@ import type {
 import type { VerseParsedEvent } from '../src/core/verse/adapters/index.js';
 import type { VerseCreateOptions, VerseEngineHandle, VerseSeatLaunch } from '../src/core/verse/session-engine.js';
 import { resetVerseEngine, invalidateVerseSeatCache, expandHomePrefix, setVerseDevinSeatOptionsForTest } from '../src/core/verse/verse-api.js';
+import { verseAccountReadingsDigest } from '../src/core/verse/verse-api.js';
 import { setVerseAccountCollector, type VerseAccountCollector } from '../src/core/verse/accounts.js';
 import { resetDevinCliProbeForTest } from '../src/core/devin/cli-probe.js';
 import { readAuthHeaders, readSseAuth, startServer } from './helpers/authenticated-web-server.js';
@@ -910,5 +911,45 @@ describe('POST /api/verse/sessions/:id/terminate (3.15, Devin chats)', () => {
 
     const missing = await request(port, 'POST', url('nope'), mutate, JSON.stringify({ confirm: true }));
     expect(missing.status).toBe(404);
+  });
+});
+
+
+describe('account completion digest and stream', () => {
+  it('uses only a same-root pure publication getter, suppressing unsupported and failed reads', () => {
+    let revision: string | null = '1:1';
+    const collector = {
+      accountsRoot: path.join(tmpHome, '.ashlr', 'account-connections'),
+      readingRevision: () => revision,
+      status: () => { throw new Error('must not read lifecycle metadata'); },
+      connections: () => { throw new Error('must not enrich historical accounts'); },
+    } as unknown as VerseAccountCollector;
+    setVerseAccountCollector(collector);
+    const first = verseAccountReadingsDigest(cfg);
+    expect(first).toMatch(/^[a-f0-9]{64}$/);
+    expect(verseAccountReadingsDigest(cfg)).toBe(first);
+    revision = '1:2'; expect(verseAccountReadingsDigest(cfg)).not.toBe(first);
+    revision = null; expect(verseAccountReadingsDigest(cfg)).toBeNull();
+    setVerseAccountCollector({ ...collector, accountsRoot: path.join(tmpHome, 'another-root') });
+    revision = '1:3'; expect(verseAccountReadingsDigest(cfg)).toBeNull();
+    setVerseAccountCollector({ ...collector, readingRevision: () => { throw Error('unavailable'); } });
+    expect(verseAccountReadingsDigest(cfg)).toBeNull();
+  });
+
+  it('requires read authorization and emits only changed:true for independent actual publications', async () => {
+    let revision = '1:1';
+    setVerseAccountCollector({ accountsRoot: path.join(tmpHome, '.ashlr', 'account-connections'),
+      readingRevision: () => revision } as unknown as VerseAccountCollector);
+    const { port, handle } = await boot({ allowDispatch: false });
+    expect(await request(port, 'GET', '/api/events?topics=verse-account-readings')).toMatchObject({ status: 401 });
+    const auth = await readSseAuth(handle);
+    const out = await collectSse(port, `/api/events${auth.query}&topics=verse-account-readings`, auth.headers,
+      frames => frames.length >= 2, () => { setTimeout(() => { revision = '1:2'; }, 100); }, 4000);
+    expect(out.frames.map(frame => ({ event: frame.event, data: frame.data }))).toEqual([
+      { event: 'verse-account-readings', data: { changed: true } },
+      { event: 'verse-account-readings', data: { changed: true } },
+    ]);
+    expect(JSON.stringify(out.frames)).not.toContain(tmpHome);
+    expect(engine.sessions.size).toBe(0);
   });
 });

@@ -82,7 +82,7 @@ import { writePrivateFileAtomically } from '../util/private-file-write.js';
 // ---------------------------------------------------------------------------
 
 /** The engine id the local fleet dispatches through. */
-export const LOCAL_FLEET_ENGINE = 'llama-server' as EngineId;
+export const LOCAL_FLEET_ENGINE: EngineId = 'llama-server';
 
 /**
  * Engines whose sandboxed dispatch holds the process-wide outward mutation
@@ -111,9 +111,6 @@ export const FENCE_SERIALIZED_ENGINES: ReadonlySet<EngineId> = new Set<EngineId>
  * be a lie.
  */
 export const LOCAL_FLEET_FAIL_CLOSED_CONCURRENCY = 1;
-
-/** Ceiling on derived parallelism, so a misreporting runtime cannot uncap us. */
-export const LOCAL_FLEET_MAX_CONCURRENCY = 32;
 
 /** Default hang watchdog. A local agent that has produced nothing in 20 minutes is wedged. */
 export const DEFAULT_LOCAL_FLEET_TASK_TIMEOUT_MS = 20 * 60_000;
@@ -205,6 +202,11 @@ function plainObject(value: unknown): Record<string, unknown> | null {
 function positiveInt(value: unknown): number | null {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 1) return null;
   return Math.floor(value);
+}
+
+/** Serving capacity is a measured count, never a rounded or unsafe number. */
+function servingSlots(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 function boundedMs(value: unknown, fallback: number, min: number, max: number): number {
@@ -403,7 +405,7 @@ export function capacityFromRuntimeSnapshot(
   snapshot: LlamaRuntimeSnapshot,
   nowMs = Date.now(),
 ): ServingRuntimeCapacity {
-  const limit = fleetConcurrencyLimit(snapshot);
+  const limit = servingSlots(fleetConcurrencyLimit(snapshot));
   const state: ServingRuntimeState = snapshot.state === 'up'
     ? 'up'
     : snapshot.state === 'down' ? 'down' : 'unknown';
@@ -421,7 +423,7 @@ export function capacityFromRuntimeSnapshot(
     runtime: 'llama-server',
     endpoint: text(endpoint, 120),
     state,
-    slots: limit === null ? null : Math.min(limit, LOCAL_FLEET_MAX_CONCURRENCY),
+    slots: limit,
     busySlots: snapshot.slots.busy,
     model: snapshot.modelName ?? snapshot.model ?? null,
     managed: snapshot.managed === true,
@@ -587,11 +589,11 @@ function deriveUncappedLocalFleetConcurrency(
   opts?: { fenceSerialized?: boolean },
 ): LocalFleetConcurrency {
   const configured = positiveInt(configuredLocal);
-  const slots = capacity.state === 'up' ? (positiveInt(capacity.slots) ?? 0) : 0;
+  const slots = capacity.state === 'up' ? (servingSlots(capacity.slots) ?? 0) : 0;
 
   if (opts?.fenceSerialized === true) {
     return {
-      slots: Math.min(slots, LOCAL_FLEET_MAX_CONCURRENCY),
+      slots,
       configuredLocal: configured,
       effective: 1,
       limiter: 'mutation-fence',
@@ -614,7 +616,10 @@ function deriveUncappedLocalFleetConcurrency(
     };
   }
 
-  const ceiling = Math.min(slots, LOCAL_FLEET_MAX_CONCURRENCY);
+  // Dispatch pools count active work, and allocate workers from admitted
+  // tasks rather than this number. Keep the real runtime capacity visible;
+  // explicit operator/lane limits and the shared execution pool still bind.
+  const ceiling = slots;
   if (configured === null) {
     return {
       slots: ceiling,

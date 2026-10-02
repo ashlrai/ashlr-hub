@@ -438,3 +438,23 @@ describe('current Codex credits publication', () => {
     expect(handle.snapshot().accounts[0]?.codexCredits).toBeNull();
   });
 });
+
+
+describe('pure account publication revision', () => {
+  it('publishes independent successful and unavailable account settlements without snapshot reads', async () => {
+    let first!: (value: ReturnType<typeof codex>) => void;
+    let second!: (value: { status: string; reason: string }) => void;
+    probes.codex.mockImplementationOnce(() => new Promise(resolve => { first = resolve; }))
+      .mockImplementationOnce(() => new Promise(resolve => { second = resolve; }));
+    const handle = start({ config: config(['codex', 'codex']) });
+    await settle();
+    expect(handle.readingRevision?.()).toBe(0);
+    first(codex()); await settle();
+    expect(handle.readingRevision?.()).toBe(1);
+    second({ status: 'failed', reason: 'probe-native-unavailable' }); await settle();
+    expect(handle.readingRevision?.()).toBe(2);
+    for (let i = 0; i < 20; i++) expect(handle.readingRevision?.()).toBe(2);
+    expect(probes.codex).toHaveBeenCalledTimes(2);
+    expect(handle.snapshot().accounts.map(row => row.state)).toEqual(['observed', 'unavailable']);
+  });
+});

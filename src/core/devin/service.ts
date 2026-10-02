@@ -440,6 +440,7 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
     origin: req.origin,
     requestedBy: req.origin === 'fleet' ? 'fleet' : 'mason',
     sessionId: null,
+    launchOrgId: connected.orgId,
     sessionUrl: null,
     state: 'queued',
     stateReason: 'Starting a Devin session.',
@@ -564,6 +565,9 @@ export async function messageDevinTask(taskId: string, message: string, deps: De
   if (text === '' || text.length > 4000) return { ok: false, status: 409, error: 'Write a message of at most 4000 characters.' };
   const connected = await connectedClient(deps);
   if ('error' in connected) return { ok: false, status: 409, error: connected.error };
+  if (task.launchOrgId !== undefined && task.launchOrgId !== connected.orgId) {
+    return { ok: false, status: 409, error: 'This Devin session belongs to a different organization. Restore its original connection before replying.' };
+  }
   try {
     await connected.client.sendMessage(connected.orgId, task.sessionId, text);
     noteApiSuccess();

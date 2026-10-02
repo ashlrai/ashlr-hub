@@ -9,6 +9,50 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.22.2] — Unreleased
+
+### Fixed
+
+- Load the sidebar metadata channel after chat mounts, keeping reconnection
+  code out of first-paint JavaScript while preserving shared resource updates.
+
+
+- Keep unresolved Devin usage reserved after local dismissal, expiry or PR
+  closure. Separate reported usage and operator adjustments from held exposure
+  in the resource bar, drawer and CLI; cost estimates cover recorded usage.
+- Pin new Devin launches to their organization and reconcile uncertain creates
+  only against a unique, complete tagged session listing and matching exact
+  terminal reading. Legacy launches without an organization pin remain held.
+- Stabilize the conversation date fixture across midnight and add coverage
+  for midnight and New Year day separators without changing chat behavior.
+- Refresh desktop resource cards when a collector finishes, using one shared
+  authenticated event stream. Preserve cached values and polling fallback;
+  events carry only an invalidation signal, not account balances or identities.
+- Allow an explicit, previewed choice of immediate Leader permissions for the
+  original starting stage within the grant's overall permission ceiling.
+  Leaving the choice untouched preserves existing stage permissions.
+- Keep grant scope choices when collapsing and reopening the editor. Preserve
+  account permissions and uncapped volume choices; require a fresh reviewed
+  preview after source changes before Touch ID approval.
+- Show the signed Leader ceiling separately from each stage's actual allowed
+  actions, including an explicit advisory-only starting stage.
+- Admit the registered parallel local engine through the fleet quota ledger.
+  Hold local work when a reachable runtime reports no valid serving capacity;
+  do not treat the display fallback as permission to dispatch.
+
+### Changed
+
+- Accept explicitly configured Devin concurrency and daily session counts
+  beyond the former 10/200 ceilings, using safe integers consistently in the
+  store, HTTP and CLI. Preserve defaults, zero opt-outs and financial controls.
+- Derive local lane width from reported serving slots instead of fixed
+  four-slot and 32-slot ceilings. Preserve explicit operator quotas, presence
+  limits and shared execution controls; allocate workers from available work.
+- Custody helper 1.2.0 can reauthorize one existing GitHub App or Claude token
+  after an ad-hoc helper update, without exporting or replacing the credential.
+  It requires a separate operator installation and human Keychain approval;
+  publishing the Hub does not activate the fleet.
+
 ## [3.22.1] — 2026-10-01
 
 ### Fixed

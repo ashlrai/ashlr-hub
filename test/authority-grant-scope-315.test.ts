@@ -7,6 +7,8 @@ import { describe, expect, it } from 'vitest';
 
 import { applyGrantScopeEdit, editableEngines, editableSeatPolicies, grantScopeDiff, parseGrantScopeEdit } from '../src/core/authority/grant-scope.js';
 import { canonicalJson } from '../src/core/authority/canonical-json.js';
+import { computeEffectivePolicy } from '../src/core/authority/effective-config.js';
+import { describeGrantScope } from '../src/core/authority/standing-grant.js';
 import { editGrant, makeGrant } from './helpers/authority-310b.js';
 
 describe('parseGrantScopeEdit', () => {
@@ -74,7 +76,8 @@ describe('applyGrantScopeEdit', () => {
 describe('grantScopeDiff', () => {
   it('without a grant in force every scope line is new', () => {
     const lines = grantScopeDiff(null, makeGrant());
-    expect(lines.filter((l) => !l.field.startsWith('seat-')).map((l) => l.field)).toEqual(['repos', 'engines', 'leader', 'spend-mode', 'metered', 'merge-caps', 'volume-policy', 'expiry']);
+    expect(lines.filter((l) => !l.field.startsWith('seat-') && l.field !== 'stage-leader').map((l) => l.field)).toEqual(['repos', 'engines', 'leader', 'spend-mode', 'metered', 'merge-caps', 'volume-policy', 'expiry']);
+    expect(lines.filter((l) => l.field === 'stage-leader')).toHaveLength(makeGrant().rollout.stages.length);
     expect(lines.filter((l) => l.direction === 'wider').length).toBeGreaterThanOrEqual(4);
   });
 
@@ -104,6 +107,43 @@ describe('grantScopeDiff', () => {
   });
 });
 
+
+describe('explicit starting-stage Leader permissions', () => {
+  it('refuses malformed, unknown and nonstarting stage choices', () => {
+    for (const choice of [null, [], {}, { stageId: 'shadow', classes: ['C'] }, { stageId: 'shadow', classes: ['A'], allStages: true }, { stageId: '../shadow', classes: [] }]) expect(parseGrantScopeEdit({ startingStageLeaderClasses: choice }).ok).toBe(false);
+    expect(applyGrantScopeEdit(makeGrant(), { startingStageLeaderClasses: { stageId: 'full', classes: ['A'] } }).ok).toBe(false);
+    // Narrowing repos removes shadow: its retained choice must not bind to full.
+    expect(applyGrantScopeEdit(makeGrant(), { repos: ['ashlrai/measurably'], startingStageLeaderClasses: { stageId: 'shadow', classes: ['A'] } }).ok).toBe(false);
+  });
+  it('changes only an explicitly selected starting stage within the global ceiling', () => {
+    const base = makeGrant();
+    const before = canonicalJson(base);
+    expect(applyGrantScopeEdit(base, { leaderClasses: ['A', 'B'] })).toEqual({ ok: true, payload: base });
+    const result = applyGrantScopeEdit(base, { startingStageLeaderClasses: { stageId: 'shadow', classes: ['B', 'A'] } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.payload.rollout.stages[0]!.leaderClasses).toEqual(['A', 'B']);
+    expect(result.payload.rollout.stages.slice(1)).toEqual(base.rollout.stages.slice(1));
+    expect(result.payload.leader).toEqual(base.leader);
+    expect(canonicalJson(base)).toBe(before);
+    expect(applyGrantScopeEdit(base, { leaderClasses: ['A'], startingStageLeaderClasses: { stageId: 'shadow', classes: ['B'] } }).ok).toBe(false);
+    const held = applyGrantScopeEdit(result.payload, { startingStageLeaderClasses: { stageId: 'shadow', classes: [] } });
+    expect(held.ok && held.payload.rollout.stages[0]!.leaderClasses).toEqual([]);
+  });
+  it('reports stage-only widening and narrowing and computes actual effective permissions', () => {
+    const base = makeGrant();
+    const result = applyGrantScopeEdit(base, { startingStageLeaderClasses: { stageId: 'shadow', classes: ['A', 'B'] } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(grantScopeDiff(base, result.payload)).toEqual([{ field: 'stage-leader', label: 'shadow: Leader permissions', before: 'none', after: 'A, B', direction: 'wider' }]);
+    expect(grantScopeDiff(result.payload, base)).toEqual([{ field: 'stage-leader', label: 'shadow: Leader permissions', before: 'A, B', after: 'none', direction: 'narrower' }]);
+    const input = { grant: result.payload, position: { stageIndex: 0, stageId: 'shadow', enteredAt: base.issuedAt }, config: null, nowMs: Date.now() };
+    expect(computeEffectivePolicy({ ...input, switch: 'autonomous' }).leader.classes).toEqual(['A', 'B']);
+    expect(computeEffectivePolicy({ ...input, switch: 'propose' }).leader.classes).toEqual([]);
+    expect(describeGrantScope(base)).toContain('Leader at starting stage shadow: advisory only');
+    expect(describeGrantScope(result.payload)).toContain('Leader at starting stage shadow: A+B');
+  });
+});
 
 describe('explicit signed volume choices', () => {
   it('preserves legacy bytes and volume policy on unrelated edits', () => {

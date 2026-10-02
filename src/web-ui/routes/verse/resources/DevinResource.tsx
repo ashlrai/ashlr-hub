@@ -24,7 +24,7 @@ import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { MonogramTile } from '../apps/MonogramTile.js';
 import { describeContextError, useTokenGate } from '../context/use-token-gate.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
-import { acuLevel, devinHeadline, devinModelsLines, devinReadinessRow, DEVIN_USAGE_LINK, formatAcu, safeDevinHref, waitingTasks } from '../devin/devin-model.js';
+import { acuLevel, devinHeadline, devinModelsLines, devinReadinessRow, devinUsageEvidence, DEVIN_USAGE_LINK, formatAcu, safeDevinHref, waitingTasks } from '../devin/devin-model.js';
 import { DEVIN_POLL_MS, devinQuery, messageDevinTask } from '../devin/devin-queries.js';
 import { ReadinessLines } from './ReadinessLines.js';
 import { ResourceFacts } from './ResourceFacts.js';
@@ -122,8 +122,10 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
   const { status, budget } = overview;
   const head = devinHeadline(status);
   const live = status.enabled && status.connected;
-  const level = acuLevel(budget);
-  const leftPercent = budget.acuBudgetTotal > 0 ? Math.max(0, Math.min(100, (budget.acuRemaining / budget.acuBudgetTotal) * 100)) : 0;
+  const usage = devinUsageEvidence(budget);
+  const available = usage?.free ?? Math.max(0, budget.acuRemaining - Math.max(0, budget.acuInFlight));
+  const level = acuLevel({ ...budget, acuRemaining: available });
+  const leftPercent = budget.acuBudgetTotal > 0 ? Math.max(0, Math.min(100, (available / budget.acuBudgetTotal) * 100)) : 0;
   const waiting = waitingTasks(overview.tasks);
   const modelLines = overview.cli && overview.cli.state !== 'missing' ? devinModelsLines(overview.models) : null;
   return (
@@ -149,24 +151,27 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
       {live ? (
         <>
           <p className={styles.creditsHead}>
-            <span className={styles.creditsAmount}>{formatAcu(budget.acuRemaining)} of {formatAcu(budget.acuBudgetTotal)} left</span>
-            <span className={styles.pill} data-tone="neutral" title="Your configured allowance minus tracked ACU usage; not a provider-reported remaining balance.">tracked budget</span>
+            <span className={styles.creditsAmount}>{formatAcu(available)} of {formatAcu(budget.acuBudgetTotal)} {usage ? 'available' : 'left'}</span>
+            <span className={styles.pill} data-tone="neutral" title="Your configured allowance minus recorded usage and unresolved exposure; not a provider-reported credit balance or subscription quota.">tracked budget</span>
             {budget.paused ? <span className={styles.pill} data-tone="warning">paused</span> : null}
           </p>
           <div className={styles.meter} data-level={level} data-single>
             <span
               className={styles.meterTrack}
               role="img"
-              aria-label={`Devin ACUs: ${formatAcu(budget.acuUsed)} used of ${formatAcu(budget.acuBudgetTotal)}, ${formatAcu(budget.acuRemaining)} left`}
+              aria-label={usage ? `Devin tracked budget: ${formatAcu(usage.reported)} reported usage plus adjustment, ${formatAcu(usage.held)} held exposure, ${formatAcu(available)} available of ${formatAcu(budget.acuBudgetTotal)}` : `Devin ACUs: ${formatAcu(budget.acuUsed)} accounted for of ${formatAcu(budget.acuBudgetTotal)}, ${formatAcu(available)} left; usage and reservations are not separated by this server`}
             >
               <span className={styles.meterFill} data-kind="left" style={{ width: `${Math.round(leftPercent)}%` }} />
             </span>
             <span className={styles.meterValue} aria-hidden="true">{Math.round(leftPercent)}% left</span>
           </div>
           <p className={styles.subtle}>
-            {budget.running} running · {budget.sessionsToday} today · {formatAcu(budget.acuToday)} today · about ${budget.estimatedUsdUsed}
-            <span className={styles.pill} data-tone="neutral" title={budget.estimateNote}>estimate</span>
+            {budget.running} running · {budget.sessionsToday} today · {formatAcu(budget.acuToday)} today, used or held
           </p>
+          {usage ? <p className={styles.subtle}>
+            {formatAcu(usage.reported)} reported usage + adjustment · {formatAcu(usage.held)} held exposure · about ${budget.estimatedUsdUsed} for recorded usage
+            <span className={styles.pill} data-tone="neutral" title={budget.estimateNote}>estimate</span>
+          </p> : <p className={styles.fine}>This server combines reservations and usage. Recorded cost coverage is unavailable.</p>}
           {!budget.canLaunch.ok ? (
             <p className={styles.status} data-tone="warning"><span className={styles.statusDot} aria-hidden="true" /><span>{budget.canLaunch.reason}</span></p>
           ) : null}

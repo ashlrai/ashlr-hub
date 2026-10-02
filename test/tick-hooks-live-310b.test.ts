@@ -300,6 +300,26 @@ describe('beforeTick — fail closed', () => {
 });
 
 describe('lanes, presence and the router seam', () => {
+  it.each([33, 64])('passes %s fresh measured slots into the standing dispatch pool', async (slots) => {
+    presenceNow = { present: false, reason: 'Away', evidenceAt: NOW_ISO };
+    const hooks = createLiveTickHooks({ deps: {
+      ...h.deps,
+      probeLocalRuntime: async () => ({ reachable: true, slots, contextPerSlot: 65_536, detail: 'wide runtime' }),
+    } });
+    hooks.effectiveConfig(CFG);
+    hooks.standingBacklog([item({ id: 'easy-wide', effort: 1 })]);
+    expect((await hooks.beforeTick(hookCtx)).laneCaps.local).toBe(slots);
+  });
+
+  it('holds the standing local lane when a reachable runtime reports no capacity', async () => {
+    const hooks = createLiveTickHooks({ deps: {
+      ...h.deps,
+      probeLocalRuntime: async () => ({ reachable: true, slots: null, contextPerSlot: 65_536, detail: 'capacity unavailable' }),
+    } });
+    hooks.effectiveConfig(CFG);
+    expect((await hooks.beforeTick(hookCtx)).laneCaps.local).toBe(0);
+  });
+
   it('caps the Ollama fallback to one effective local serving slot', async () => {
     const reading = await probeLocalRuntimeDefault(CFG, {
       v: 1, publishedAt: NOW_ISO,

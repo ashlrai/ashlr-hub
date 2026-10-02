@@ -18,6 +18,8 @@ export interface ResourceConnectionConfig {
 }
 export interface ResourceConnectionMonitor {
   snapshot(): ResourceConnectionsSnapshot;
+  /** Pure publication counter; includes settled failures, never reads identity/history. */
+  readingRevision?(): number;
   /** Pure lifecycle read; no historical enrichment, metadata IO or provider work. */
   isStopped?(): boolean;
   close(): Promise<void>;
@@ -92,6 +94,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
     provider: row.provider, state: 'checking', authentication: 'unknown', health: 'unknown', planType: null,
     observedAt: null, expiresAt: null, windows: [], codexCredits: null, reason: 'connection-not-checked', onDemandEnabled: null, executionSupported: row.provider !== 'grok' });
   let rows = config.accounts.map(blank);
+  let readingRevision = 0;
   // Only a successful, account-checked Codex probe may supply a retained
   // window. A failed check can display that prior reading until its original
   // expiry, but it cannot renew the reading or attest current authentication.
@@ -212,6 +215,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
     if (uncertain) abort.abort();
     if (!closing && !abort.signal.aborted) {
       rows[index] = row;
+      readingRevision += 1;
       if (checkedHint) options.readingCache?.remember(account, row, checkedHint, beforeEpoch);
     }
   }
@@ -247,6 +251,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
   if (!abort.signal.aborted) pending = cycle();
   return {
     isStopped: () => abort.signal.aborted,
+    readingRevision: () => readingRevision,
     snapshot: () => {
       const nowMs = Date.now();
       return { sampledAt: new Date(nowMs).toISOString(), refreshing,

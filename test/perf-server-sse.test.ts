@@ -14,7 +14,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReadProjectionReader } from '../src/core/web/read-projections.js';
 
-const verse = vi.hoisted(() => ({ digest: 'a:idle:1', sessions: [{ id: 'a' }] as unknown[], posts: 0 }));
+const verse = vi.hoisted(() => ({ digest: 'a:idle:1', sessions: [{ id: 'a' }] as unknown[], posts: 0, readings: null as string | null }));
 
 vi.mock('../src/core/verse/verse-api.js', () => ({
   isVerseApiPath: (path: string) => path.startsWith('/api/verse/'),
@@ -27,6 +27,7 @@ vi.mock('../src/core/verse/verse-api.js', () => ({
     return true;
   }),
   verseSessionsDigest: () => verse.digest,
+  verseAccountReadingsDigest: () => verse.readings,
   verseSessionsSnapshot: () => verse.sessions,
   resetVerseEngine: vi.fn(),
   peekVerseEngine: () => null,
@@ -70,6 +71,7 @@ function makeSseRes() {
   };
   return {
     res: res as unknown as ServerResponse,
+    chunks,
     events: (): string[] => chunks.join('').split('\n').filter((l) => l.startsWith('event: ')).map((l) => l.slice(7)),
   };
 }
@@ -90,6 +92,7 @@ beforeEach(() => {
   verse.digest = 'a:idle:1';
   verse.sessions = [{ id: 'a' }];
   verse.posts = 0;
+  verse.readings = null;
   reads.runs = 0;
   reads.swarms = 0;
   reads.proposals = 0;
@@ -179,5 +182,33 @@ describe('topics', () => {
     });
     await turn();
     expect(reader.read).toHaveBeenCalled();
+  });
+});
+
+
+describe('account reading invalidations', () => {
+  it('publishes only memory changes outside a hung dashboard, without sending private state', async () => {
+    vi.useFakeTimers();
+    try {
+      const { res, events, chunks } = makeSseRes();
+      await api.handleApi(makeReq('/api/events?topics=verse-account-readings'), res, cfg, {
+        token: 't', allowDispatch: false, readSession: session, readProjections: hungProjections,
+      });
+      expect(events()).toEqual([]);
+      verse.readings = 'first-account-private-digest';
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(events()).toEqual(['verse-account-readings']);
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(events()).toHaveLength(1);
+      verse.readings = 'second-account-private-digest';
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(events()).toHaveLength(2);
+      verse.readings = null;
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(events()).toHaveLength(2);
+      expect(reads.runs + reads.swarms).toBe(0);
+      expect(chunks.join('')).not.toContain('private-digest');
+      expect(chunks.join('').split('data: ').slice(1).map(row => JSON.parse(row.split('\n')[0]!))).toEqual([{ changed: true }, { changed: true }]);
+    } finally { api.drainSseConnections(); vi.useRealTimers(); }
   });
 });

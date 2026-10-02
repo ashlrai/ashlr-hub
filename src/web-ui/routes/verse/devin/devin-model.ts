@@ -33,8 +33,20 @@ export function narrowDevinOverview(raw: unknown): DevinOverviewResponse | null 
   for (const key of ['acuBudgetTotal', 'acuUsed', 'acuRemaining', 'acuToday', 'acuInFlight', 'estimatedUsdUsed', 'sessionsToday', 'running']) {
     if (typeof budget[key] !== 'number' || !Number.isFinite(budget[key])) return null;
   }
+  for (const key of ['reportedAcuUsed', 'unconfirmedAcuExposure']) {
+    if (budget[key] !== undefined && (typeof budget[key] !== 'number' || !Number.isFinite(budget[key]) || budget[key] < 0)) return null;
+  }
   if (!Array.isArray(tasks) || !tasks.every((t) => isRecord(t) && typeof t['id'] === 'string' && typeof t['state'] === 'string')) return null;
   return raw as unknown as DevinOverviewResponse;
+}
+
+/** Older servers combine unknown reservations with usage: never infer readings from that total. */
+export function devinUsageEvidence(budget: DevinBudgetView): { reported: number; held: number; free: number } | null {
+  const reported = budget.reportedAcuUsed;
+  const held = budget.unconfirmedAcuExposure;
+  if (typeof reported !== 'number' || !Number.isFinite(reported) || reported < 0 ||
+    typeof held !== 'number' || !Number.isFinite(held) || held < 0) return null;
+  return { reported, held, free: Math.max(0, Math.round((budget.acuBudgetTotal - reported - held) * 100) / 100) };
 }
 
 /**

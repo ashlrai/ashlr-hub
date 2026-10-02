@@ -81,7 +81,22 @@ describe('ashlr devin', () => {
     const text = h.out.join('\n');
     expect(text).toContain('Chat: n/a');
     expect(text).toContain('Fleet: Off');
-    expect(text).toMatch(/ACUs: 0 ACUs of 50 ACUs used/);
+    expect(text).toMatch(/ACUs: 0 ACUs of 50 ACUs accounted for/);
+  });
+
+  it('does not price an uncertain create reservation as reported spend', async () => {
+    const h = harness({ listTasks: () => [{
+      sessionId: null, session: null, maxAcu: 10, state: 'failed', failure: 'network',
+      origin: 'fleet', createdAt: new Date().toISOString(), launchedAt: null,
+    } as never] });
+    expect(await runDevinCli(['status'], h.deps)).toBe(0);
+    expect(h.out.join('\n')).toContain('0 ACUs reported usage + adjustment · 10 ACUs held exposure');
+    expect(h.out.join('\n')).toContain('$0 for recorded usage (estimate)');
+    expect(h.out.join('\n')).not.toContain('$22.5');
+    h.out.length = 0;
+    expect(await runDevinCli(['budget'], h.deps)).toBe(0);
+    expect(h.out.join('\n')).toContain('0 ACUs reported usage + adjustment · 10 ACUs held exposure');
+    expect(h.out.join('\n')).toContain('$0 for recorded usage');
   });
 
   it('fleet on/off, enable/disable, and launch from the folder origin', async () => {
@@ -105,5 +120,21 @@ describe('ashlr devin', () => {
   it('unknown verbs are usage errors', async () => {
     const h = harness();
     expect(await runDevinCli(['merge'], h.deps)).toBe(2);
+  });
+
+  it.each([
+    ['--max-concurrent', 'maxConcurrent'], ['--max-per-day', 'maxSessionsPerDay'],
+    ['--fleet-concurrent', 'fleetMaxConcurrent'], ['--fleet-per-day', 'fleetMaxSessionsPerDay'],
+  ] as const)('%s accepts safe counts without a product ceiling and rejects malformed counts before updates', async (flag, field) => {
+    const h = harness();
+    for (const count of [64, 999, 1_000_001, Number.MAX_SAFE_INTEGER]) {
+      expect(await runDevinCli(['budget', flag, String(count)], h.deps)).toBe(0);
+      expect(h.updates.at(-1)).toEqual({ [field]: count });
+    }
+    const before = h.updates.length;
+    for (const invalid of ['-1', '1.5', String(Number.MAX_SAFE_INTEGER + 1), 'NaN', 'Infinity', 'nope']) {
+      expect(await runDevinCli(['budget', flag, invalid], h.deps)).toBe(2);
+    }
+    expect(h.updates).toHaveLength(before);
   });
 });

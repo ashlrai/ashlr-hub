@@ -321,6 +321,24 @@ describe('lane cap reasons are plain sentences at the source', () => {
 });
 
 describe('presence caps', () => {
+  it.each([33, 64, 128, Number.MAX_SAFE_INTEGER])('uses %s measured local slots while absent', (slots) => {
+    const planned = planLanes({ policy: policy(), directives: null, presence: ABSENT, localServingSlots: slots, engineUnavailable: {} });
+    expect(planned.local).toEqual({ lane: 'local', slots, capReason: `The local runtime serves ${slots} slots.` });
+  });
+
+  it.each([null, NaN, Infinity, -1, 33.5, Number.MAX_SAFE_INTEGER + 1])('holds local dispatch with missing or invalid capacity %s', (slots) => {
+    const planned = planLanes({ policy: policy(), directives: null, presence: ABSENT, localServingSlots: slots, engineUnavailable: {} });
+    expect(planned.local).toMatchObject({ slots: 0, capReason: 'The local runtime has no usable serving-slot reading.' });
+  });
+
+  it('still enforces presence, grant exclusion and unavailable engines on a wide runtime', () => {
+    const input = { policy: policy(), directives: null, presence: { present: true, reason: 'An active chat', evidenceAt: NOW_ISO }, localServingSlots: 64, engineUnavailable: {} };
+    expect(planLanes(input).local).toMatchObject({ slots: 2, capReason: expect.stringMatching(/You are active/) });
+    expect(planLanes({ ...input, presence: { present: null, reason: 'Unknown', evidenceAt: null } }).local).toMatchObject({ slots: 2, capReason: expect.stringMatching(/Presence is unknown/) });
+    expect(planLanes({ ...input, policy: policy({ engines: ['codex'] }) }).local.slots).toBe(0);
+    expect(planLanes({ ...input, engineUnavailable: { local: 'Runtime unavailable' } }).local).toMatchObject({ slots: 0, capReason: 'Runtime unavailable' });
+  });
+
   it('holds the local lane to 2 and closes the Claude producer slice while Mason is present', () => {
     const present: OperatorPresence = { present: true, reason: 'A Verse chat turn is running.', evidenceAt: NOW_ISO };
     const planned = planLanes({ policy: policy(), directives: null, presence: present, localServingSlots: 4, engineUnavailable: {} });

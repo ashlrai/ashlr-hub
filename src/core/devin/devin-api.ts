@@ -68,7 +68,7 @@ import { devinBudgetView, devinTaskActive } from './budget.js';
 import { DEVIN_CLI_PR_WINDOW_MS, devinCliPrKey, dismissDevinCliPr, listDevinCliPrs, readDismissedDevinCliPrs, type DevinCliChatPrs } from './cli-prs.js';
 import { devinOverview, launchDevinTask, messageDevinTask, devinEnabled, type DevinServiceDeps } from './service.js';
 import { listDevinTasks, readDevinTask, updateDevinBudget, writeDevinTask } from './store.js';
-import { refreshDevinTasks } from './tracker.js';
+import { devinTaskNeedsObservation, refreshDevinTasks } from './tracker.js';
 import {
   DEVIN_TASK_ID_PATTERN,
   VERSE_DEVIN_BUDGET_PATH,
@@ -95,6 +95,7 @@ const LAUNCH_ORIGINS: readonly DevinLaunchRequest['origin'][] = ['chat', 'operat
 const BUDGET_KEYS = ['acuBudgetTotal', 'acuSpentAdjustment', 'usdPerAcu', 'maxAcuPerSession', 'maxAcuPerDay', 'reserveAcu', 'pauseAtFraction', 'maxConcurrent', 'maxSessionsPerDay',
   'fleetMaxConcurrent', 'fleetMaxSessionsPerDay'] as const;
 const BUDGET_WHOLE: ReadonlySet<string> = new Set(['maxAcuPerSession', 'maxConcurrent', 'maxSessionsPerDay', 'fleetMaxConcurrent', 'fleetMaxSessionsPerDay']);
+const BUDGET_COUNTS: ReadonlySet<string> = new Set(['maxConcurrent', 'maxSessionsPerDay', 'fleetMaxConcurrent', 'fleetMaxSessionsPerDay']);
 
 // ---------------------------------------------------------------------------
 // Input validation (pure, exported for tests)
@@ -130,7 +131,9 @@ export function parseDevinBudgetBody(body: Record<string, unknown>): DevinBudget
     if (value === undefined) continue;
     if (typeof value !== 'number' || !Number.isFinite(value)) throw new CloudInputError(`${key} must be a number.`);
     if (value < 0) throw new CloudInputError(`${key} can't be negative.`);
-    if (value > BUDGET_NUMBER_MAX) throw new CloudInputError(`${key} is too large.`);
+    if (BUDGET_COUNTS.has(key)) {
+      if (!Number.isSafeInteger(value)) throw new CloudInputError(`${key} must be a safe whole number.`);
+    } else if (value > BUDGET_NUMBER_MAX) throw new CloudInputError(`${key} is too large.`);
     if (BUDGET_WHOLE.has(key) && !Number.isInteger(value)) throw new CloudInputError(`${key} must be a whole number.`);
     out[key] = value;
   }
@@ -148,7 +151,7 @@ export function parseDevinMessageBody(body: Record<string, unknown>): { message:
 }
 
 // ---------------------------------------------------------------------------
-// Dismiss (local record only)
+// Dismiss (local visibility only; remote exposure remains reserved)
 // ---------------------------------------------------------------------------
 
 export const DEVIN_DISMISS_REASON = 'Dismissed in Verse.';
@@ -159,6 +162,8 @@ export function dismissDevinTask(id: string, now: Date = new Date()): { ok: true
   if (task.state === 'closed') return { ok: true, task };
   if (task.state === 'merged') return { ok: false, status: 409, error: 'This task was merged; there is nothing to dismiss.' };
   if (task.state === 'queued' || task.state === 'launching') return { ok: false, status: 409, error: 'This task is still launching. Try again in a minute.' };
+  // Keep provider observations and uncertain-create failure evidence intact.
+  // Closing this local record neither terminates Devin nor settles its usage.
   const next: DevinTaskV1 = { ...task, state: 'closed', stateReason: DEVIN_DISMISS_REASON, updatedAt: now.toISOString() };
   writeDevinTask(next);
   return { ok: true, task: next };
@@ -419,9 +424,12 @@ export function startDevinScheduler(env: NodeJS.ProcessEnv = process.env): boole
       enabled = false;
     }
     if (!enabled) return;
-    const tasks = listDevinTasks(200);
+    // The wake decision must not hide an older unsettled session behind a
+    // display-list limit. Actual provider reads retain tracker round-robin caps.
+    const tasks = listDevinTasks(Number.MAX_SAFE_INTEGER);
     const live = tasks.some((task) => devinTaskActive(task));
-    const idleDue = tasks.some((task) => task.state === 'pr-open' || task.state === 'expired') && Date.now() - lastIdleRefreshAt >= DEVIN_IDLE_REFRESH_EVERY_MS;
+    const idleDue = tasks.some((task) => task.state === 'pr-open' || task.state === 'expired' || devinTaskNeedsObservation(task))
+      && Date.now() - lastIdleRefreshAt >= DEVIN_IDLE_REFRESH_EVERY_MS;
     if (!live && !idleDue) return;
     if (idleDue) lastIdleRefreshAt = Date.now();
     void refreshDevinTasksGuarded()

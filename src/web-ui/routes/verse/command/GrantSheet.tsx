@@ -73,16 +73,19 @@ export const ELITE_DIRECT_SHEET_LINE =
   'Elite models (Opus 5.5/5, Fable 5.1/5, Sonnet 5, GPT-6 Astra/Sol/Luna, Grok 4.7/4.6, SWE-2, Qwen 3.8 27B) land directly on green tests — no judge. '
   + 'Other models still need an independent judge; changes to authority code still come to you.';
 
-function stageLine(s: RolloutStage): string {
+function stageLine(s: RolloutStage, grantedClasses: StandingGrantV1['leader']['classes']): string {
   const c = s.criteria;
+  const classes = s.leaderClasses.filter((cls) => grantedClasses.includes(cls));
+  const leader = classes.length ? `Leader classes ${classes.join(' + ')}` : 'Leader advisory only';
   if (s.id === ELITE_DIRECT_STAGE_ID) {
-    return `${s.repos.filter((r) => r.stage === 'merge').length} of ${s.repos.length} repos merge · ${s.maxRisk} risk · ≤ ${volumeLimitLabel(s.maxFiles)} files / ${volumeLimitLabel(s.maxLines)} lines — one rung, no ramp; elite models land on green tests, no judge`;
+    return `${s.repos.filter((r) => r.stage === 'merge').length} of ${s.repos.length} repos merge · ${s.maxRisk} risk · ≤ ${volumeLimitLabel(s.maxFiles)} files / ${volumeLimitLabel(s.maxLines)} lines · ${leader} — one rung, no ramp; elite models land on green tests, no judge`;
   }
   const parts = [
     `${s.repos.length} repo${s.repos.length === 1 ? '' : 's'}`,
     `${s.maxRisk} risk`,
     `≤ ${volumeLimitLabel(s.maxFiles)} files / ${volumeLimitLabel(s.maxLines)} lines`,
     `≤ ${volumeLimitLabel(s.maxMergesPerRepoPerDay)} merges/repo/day`,
+    leader,
   ];
   const exit = [`${c.minMerges} merges`, `${c.minHours} h`, c.minPostMergeGreenPct ? `≥ ${c.minPostMergeGreenPct}% green` : null, `≤ ${c.maxRevertRatePct}% reverts`].filter(Boolean);
   return `${parts.join(' · ')} — advances after ${exit.join(', ')}`;
@@ -91,6 +94,9 @@ function stageLine(s: RolloutStage): string {
 export function DraftScope({ draft }: { draft: AuthorityGrantDraft }) {
   const g = draft.payload;
   const days = grantDays(g);
+  // The grant ceiling alone does not permit Leader actions. A re-approval
+  // preserves its reached rung, which may still allow advisory work only.
+  const startingClasses = g.rollout.stages[0]?.leaderClasses.filter((cls) => g.leader.classes.includes(cls)) ?? [];
   return (
     <div className={styles.scope}>
       <section className={styles.scopeBlock} aria-label="Expiry">
@@ -157,8 +163,11 @@ export function DraftScope({ draft }: { draft: AuthorityGrantDraft }) {
         <MicroLabel>Engines and Leader</MicroLabel>
         <p className={styles.scopeLead}>{g.engines.join(', ') || 'none'}</p>
         <p className={styles.scopeMeta}>
-          Leader classes {g.leader.classes.length ? g.leader.classes.join(' + ') : 'none (proposes only)'} · class-B veto window {g.leader.vetoMinutes} min ·
+          Signed Leader ceiling: {g.leader.classes.length ? g.leader.classes.join(' + ') : 'advisory only'} · class-B veto window {g.leader.vetoMinutes} min ·
           goal conductor {g.conductorGoals ? 'on' : 'off'}
+        </p>
+        <p className={styles.scopeMeta}>
+          {startingClasses.length ? `Starting stage permits Leader classes ${startingClasses.join(' + ')} when autonomy is active.` : 'Leader remains advisory in the starting stage.'}
         </p>
       </section>
 
@@ -175,7 +184,7 @@ export function DraftScope({ draft }: { draft: AuthorityGrantDraft }) {
           {g.rollout.stages.map((s) => (
             <li key={s.id}>
               <span className={styles.ladderId}>{s.id}</span>
-              <span>{stageLine(s)}</span>
+              <span>{stageLine(s, g.leader.classes)}</span>
             </li>
           ))}
         </ol>
@@ -226,6 +235,7 @@ function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose, 
   const canEdit = act !== undefined && served?.editable !== undefined;
   const fixedElite = served?.kind === 'reapprove' && served.eliteDirect === true;
   const scopeDirty = editorRevision > 0 && (acknowledged?.revision !== editorRevision || acknowledged.sourceDigest !== served?.digest);
+  const sourceChanged = editedSourceDigest !== null && editedSourceDigest !== served?.digest;
   const draftMatchesChoice = draft !== null && (draft.eliteDirect === true) === (elite || fixedElite);
 
   function markDirty(): void {
@@ -324,23 +334,27 @@ function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose, 
               <Button variant="ghost" size="sm" aria-expanded={editing} onClick={() => setEditing((e) => !e)}>
                 {editing ? 'Hide the scope editor' : 'Edit scope'}
               </Button>
-              {edited ? <span className={styles.scopeMeta}>Showing your edited draft.</span> : null}
+              {edited && !sourceChanged ? <span className={styles.scopeMeta}>Showing your edited draft.</span> : null}
             </div>
           ) : null}
-          {canEdit && editing && served ? (
-            <GrantScopeEditor
-              key={editorReset}
-              draft={served as EditableGrantDraft}
-              busy={previewing}
-              edited={editedSourceDigest === served.digest || scopeDirty}
-              onDirty={markDirty}
-              onAccountSettings={() => { onClose(); setVerseSection('apps'); }}
-              onResources={() => { onClose(); setVerseResourcesOpen(true); }}
-              onPreview={preview}
-              onReset={resetEditor}
-            />
+          {canEdit && served ? (
+            // Collapsing must not reset controlled choices or explicit edited
+            // field flags. Only Reset or changing the ladder remounts the form.
+            <div hidden={!editing}>
+              <GrantScopeEditor
+                key={editorReset}
+                draft={served as EditableGrantDraft}
+                busy={previewing}
+                edited={editedSourceDigest === served.digest || scopeDirty}
+                onDirty={markDirty}
+                onAccountSettings={() => { onClose(); setVerseSection('apps'); }}
+                onResources={() => { onClose(); setVerseResourcesOpen(true); }}
+                onPreview={preview}
+                onReset={resetEditor}
+              />
+            </div>
           ) : null}
-          {scopeDirty ? <CardNote tone="muted">Preview your choices before approving. Only the reviewed draft below can be signed.</CardNote> : null}
+          {scopeDirty ? <CardNote tone="muted">{sourceChanged ? 'The grant source changed. Your choices are kept; preview them again before approving. The summary below shows the updated source draft.' : 'Preview your choices before approving. Only the reviewed draft below can be signed.'}</CardNote> : null}
           {editError ? <CardNote tone="danger">{editError}</CardNote> : null}
           <GrantDiff lines={draft.diff} />
           <DraftScope draft={draft} />

@@ -133,6 +133,21 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('deriveLocalFleetConcurrency — parallelism derives from measured slots', () => {
+  it.each([33, 64, 128, Number.MAX_SAFE_INTEGER])('preserves %s measured slots without a product ceiling', (slots) => {
+    const derived = deriveLocalFleetConcurrency(capacity({ slots }), null);
+    expect(derived).toMatchObject({ slots, effective: slots, limiter: 'serving-slots' });
+    expect(derived.reason).toContain(`${slots} slot(s)`);
+  });
+
+  it.each([NaN, Infinity, -Infinity, -1, 0, 33.5, Number.MAX_SAFE_INTEGER + 1])('rejects malformed measured slot count %s', (slots) => {
+    expect(deriveLocalFleetConcurrency(capacity({ slots }), null)).toMatchObject({ slots: 0, effective: 1, limiter: 'fail-closed' });
+  });
+
+  it('keeps explicit lower caps and whole-run fence serialization above 32 slots', () => {
+    expect(deriveLocalFleetConcurrency(capacity({ slots: 64 }), 7)).toMatchObject({ slots: 64, effective: 7, limiter: 'config' });
+    expect(deriveLocalFleetConcurrency(capacity({ slots: 64 }), null, { fenceSerialized: true })).toMatchObject({ slots: 64, effective: 1, limiter: 'mutation-fence' });
+  });
+
   it('uses the runtime slot count when nothing is configured', () => {
     // NOT the old default of 2: that number was correct for a runtime which
     // refuses to run two agents at all, and it strands two measured slots here.
@@ -181,6 +196,18 @@ describe('deriveLocalFleetConcurrency — parallelism derives from measured slot
 });
 
 describe('capacityFromRuntimeSnapshot — adapting the runtime lane answer', () => {
+  it.each([33, 64, 128])('carries %s slots from the runtime without clipping the observation', (slots) => {
+    const snapshot = runtimeSnapshot();
+    snapshot.slots.configured = slots;
+    expect(capacityFromRuntimeSnapshot(snapshot).slots).toBe(slots);
+  });
+
+  it.each([NaN, Infinity, 0, -1, 33.5, Number.MAX_SAFE_INTEGER + 1])('reports malformed slot count %s as unknown', (slots) => {
+    const snapshot = runtimeSnapshot();
+    snapshot.slots.configured = slots;
+    expect(capacityFromRuntimeSnapshot(snapshot).slots).toBeNull();
+  });
+
   it('carries the slot count through for a running runtime', () => {
     const observed = capacityFromRuntimeSnapshot(runtimeSnapshot(), Date.parse('2026-09-21T00:02:00Z'));
     expect(observed.state).toBe('up');

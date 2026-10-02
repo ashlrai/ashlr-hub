@@ -2737,6 +2737,7 @@ export interface VerifyVerdict {
 export type EngineId =
   | 'builtin'
   | 'local-coder'
+  | 'llama-server'
   | 'ashlrcode'
   | 'aw'
   | 'claude'

@@ -182,12 +182,13 @@ function takeOption(args: string[], name: string): string | null {
   return value;
 }
 
-function takeNumber(args: string[], name: string, opts: { whole?: boolean } = {}): number | null {
+function takeNumber(args: string[], name: string, opts: { whole?: boolean; safe?: boolean } = {}): number | null {
   const raw = takeOption(args, name);
   if (raw === null) return null;
   const value = Number(raw);
   if (!Number.isFinite(value) || value < 0) throw new UsageError(`${name} must be a number of 0 or more.`);
   if (opts.whole && !Number.isInteger(value)) throw new UsageError(`${name} must be a whole number.`);
+  if (opts.safe && !Number.isSafeInteger(value)) throw new UsageError(`${name} must be a safe whole number.`);
   return value;
 }
 
@@ -287,7 +288,10 @@ async function cmdStatus(deps: DevinCliDeps, args: string[]): Promise<number> {
   if (status.orgId) deps.out(`  Organization: ${status.orgId}${status.principalName ? ` · ${status.principalName}` : ''} · key in the ${status.keyStore === 'keychain' ? 'macOS Keychain' : 'custody helper'}`);
   deps.out(`  ${status.chatLine}`);
   deps.out(`  ${status.fleetLine}`);
-  deps.out(`  ACUs: ${acu(view.acuUsed)} of ${acu(view.acuBudgetTotal)} used (≈ $${view.estimatedUsdUsed}) · ${acu(view.acuToday)} today · ${view.running} running`);
+  deps.out(`  ACUs: ${acu(view.acuUsed)} of ${acu(view.acuBudgetTotal)} accounted for · ${acu(view.acuToday)} today, used or held · ${view.running} running`);
+  if (view.reportedAcuUsed !== undefined && view.unconfirmedAcuExposure !== undefined) {
+    deps.out(`  ${acu(view.reportedAcuUsed)} reported usage + adjustment · ${acu(view.unconfirmedAcuExposure)} held exposure · ≈ $${view.estimatedUsdUsed} for recorded usage (estimate)`);
+  } else deps.out('  Usage and reservations are not separated; recorded cost coverage is unavailable.');
   if (!view.canLaunch.ok) deps.out(`  Launches refused: ${view.canLaunch.reason}`);
   return 0;
 }
@@ -388,10 +392,10 @@ function cmdBudget(deps: DevinCliDeps, args: string[]): number {
   const pauseAt = takeNumber(args, '--pause-at');
   if (pauseAt !== null) update.pauseAtFraction = pauseAt > 1 ? pauseAt / 100 : pauseAt;
   set('usdPerAcu', takeNumber(args, '--usd-per-acu'));
-  set('maxConcurrent', takeNumber(args, '--max-concurrent', { whole: true }));
-  set('maxSessionsPerDay', takeNumber(args, '--max-per-day', { whole: true }));
-  set('fleetMaxConcurrent', takeNumber(args, '--fleet-concurrent', { whole: true }));
-  set('fleetMaxSessionsPerDay', takeNumber(args, '--fleet-per-day', { whole: true }));
+  set('maxConcurrent', takeNumber(args, '--max-concurrent', { whole: true, safe: true }));
+  set('maxSessionsPerDay', takeNumber(args, '--max-per-day', { whole: true, safe: true }));
+  set('fleetMaxConcurrent', takeNumber(args, '--fleet-concurrent', { whole: true, safe: true }));
+  set('fleetMaxSessionsPerDay', takeNumber(args, '--fleet-per-day', { whole: true, safe: true }));
   rejectLeftovers(args);
   const budget = Object.keys(update).length > 0 ? deps.updateBudget(update) : deps.readBudget();
   const view = deps.budgetView(deps.listTasks(Number.MAX_SAFE_INTEGER), budget, deps.now());
@@ -399,11 +403,15 @@ function cmdBudget(deps: DevinCliDeps, args: string[]): number {
     json(deps, view);
     return 0;
   }
-  deps.out(`Devin budget: ${acu(view.acuUsed)} of ${acu(view.acuBudgetTotal)} used · ${acu(view.acuRemaining)} left${view.paused ? ' · PAUSED' : ''}`);
-  deps.out(`  Today: ${acu(view.acuToday)} of ${acu(budget.maxAcuPerDay)} (used + held by running sessions) · ${view.sessionsToday} of ${budget.maxSessionsPerDay} sessions`);
+  deps.out(`Devin budget: ${acu(view.acuUsed)} of ${acu(view.acuBudgetTotal)} accounted for · ${acu(view.acuRemaining)} left before in-flight reservations${view.paused ? ' · PAUSED' : ''}`);
+  deps.out(`  Today: ${acu(view.acuToday)} of ${acu(budget.maxAcuPerDay)} (used + unresolved exposure) · ${view.sessionsToday} of ${budget.maxSessionsPerDay} sessions`);
   deps.out(`  Each session capped at ${acu(budget.maxAcuPerSession)} · ${view.running} of ${budget.maxConcurrent} running · reserve ${acu(budget.reserveAcu)} kept for you · pauses at ${Math.round(budget.pauseAtFraction * 100)}%`);
   deps.out(`  Fleet: ${view.fleetRunning} of ${budget.fleetMaxConcurrent} running · ${view.fleetSessionsToday} of ${budget.fleetMaxSessionsPerDay} today · ${view.canFleetLaunch.ok ? 'fleet launches allowed' : `fleet launches refused: ${view.canFleetLaunch.reason}`}`);
-  deps.out(`  ≈ $${view.estimatedUsdUsed} at $${budget.usdPerAcu}/ACU (estimate). ${view.canLaunch.ok ? 'Launches allowed.' : `Launches refused: ${view.canLaunch.reason}`}`);
+  if (view.reportedAcuUsed !== undefined && view.unconfirmedAcuExposure !== undefined) {
+    deps.out(`  ${acu(view.reportedAcuUsed)} reported usage + adjustment · ${acu(view.unconfirmedAcuExposure)} held exposure`);
+    deps.out(`  ≈ $${view.estimatedUsdUsed} for recorded usage at $${budget.usdPerAcu}/ACU (estimate).`);
+  } else deps.out('  Usage and reservations are not separated; recorded cost coverage is unavailable.');
+  deps.out(`  ${view.canLaunch.ok ? 'Launches allowed.' : `Launches refused: ${view.canLaunch.reason}`}`);
   return 0;
 }
 

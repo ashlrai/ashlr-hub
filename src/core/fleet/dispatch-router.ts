@@ -279,7 +279,8 @@ export function grokDispatchBatchCapacity(cfg: AshlrConfig): number {
 }
 
 /**
- * The slots each lane may use THIS tick. Only ever narrows the defaults,
+ * The slots each lane may use THIS tick. Local width follows measured serving
+ * capacity; other lanes start at their defaults. Standing limits only narrow,
  * except where a class-B Leader action (more than 2 Grok lanes, Codex on) has already
  * passed its veto window — those are decisions the grant allows.
  */
@@ -324,9 +325,16 @@ export function planLanes(input: LanePlanInput): Record<FleetEngine, LanePlan> {
       }
     }
     if (lane === 'local') {
-      if (typeof input.localServingSlots === 'number' && Number.isFinite(input.localServingSlots)) {
-        const serving = Math.max(0, Math.floor(input.localServingSlots));
-        narrow(serving, `The local runtime serves ${countOf(serving, 'slot')}.`);
+      const serving = input.localServingSlots;
+      // A fresh runtime probe supplies the lane width. Starting at the old
+      // four-slot default and only narrowing strands any measured extra
+      // capacity; a missing or malformed reading authorizes no dispatch.
+      if (typeof serving === 'number' && Number.isSafeInteger(serving) && serving >= 0) {
+        slots = serving;
+        capReason = serving === LANE_DEFAULT_SLOTS.local ? null : `The local runtime serves ${countOf(serving, 'slot')}.`;
+      } else {
+        slots = 0;
+        capReason = 'The local runtime has no usable serving-slot reading.';
       }
       if (presentOrUnknown) {
         narrow(PRESENCE_LOCAL_SLOTS, input.presence.present === null

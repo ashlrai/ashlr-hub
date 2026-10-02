@@ -100,11 +100,32 @@ describe('DevinResource', () => {
 
   it('connected: ACUs left of the budget with an estimate note and the usage link', async () => {
     mount();
-    expect(await screen.findByText('38 ACUs of 50 ACUs left')).toBeTruthy();
-    expect(screen.getByRole('img', { name: /Devin ACUs: 12 ACUs used of 50 ACUs, 38 ACUs left/ })).toBeTruthy();
+    expect(await screen.findByText('34 ACUs of 50 ACUs left')).toBeTruthy();
+    expect(screen.getByRole('img', { name: /Devin ACUs: 12 ACUs accounted for of 50 ACUs, 34 ACUs left/ })).toBeTruthy();
+    expect(screen.getByText(/Recorded cost coverage is unavailable/)).toBeTruthy();
     expect(screen.getByText(/1 running · 2 today/)).toBeTruthy();
     expect(screen.getByRole('link', { name: /Real usage on app\.devin\.ai/ }).getAttribute('href')).toBe('https://app.devin.ai/settings/usage');
     expect(screen.getByText('Connected')).toBeTruthy();
+  });
+
+  it('separates reported usage from uncertain exposure and excludes held spend from the cost estimate', async () => {
+    overview = { generatedAt: 'x', status: status(), tasks: [], budget: budget({
+      acuUsed: 10, acuRemaining: 40, acuInFlight: 8, reportedAcuUsed: 2,
+      unconfirmedAcuExposure: 18, estimatedUsdUsed: 4.5,
+    }) };
+    mount();
+    expect(await screen.findByText('30 ACUs of 50 ACUs available')).toBeTruthy();
+    expect(screen.getByRole('img', { name: /2 ACUs reported usage plus adjustment, 18 ACUs held exposure, 30 ACUs available/ })).toBeTruthy();
+    expect(screen.getByText(/2 ACUs reported usage \+ adjustment · 18 ACUs held exposure · about \$4.5 for recorded usage/)).toBeTruthy();
+    expect(screen.queryByText(/Recorded cost coverage is unavailable/)).toBeNull();
+    expect(screen.queryByText(/about \$22.5/)).toBeNull();
+  });
+
+  it('rejects malformed additive usage instead of rendering a false balance', async () => {
+    overview = { generatedAt: 'x', status: status(), tasks: [], budget: budget({ reportedAcuUsed: -1, unconfirmedAcuExposure: 10 }) };
+    mount();
+    expect(await screen.findByText('Unrecognized response — update Ashlr.')).toBeTruthy();
+    expect(screen.queryByText(/ACUs.*available/)).toBeNull();
   });
 
   it('the Devin CLI: says its usage is not reported (not counted) instead of implying it is — even with no API key (3.15)', async () => {
@@ -155,7 +176,7 @@ describe('DevinResource', () => {
   it('no Devin CLI installed (or an older server): no CLI line', async () => {
     overview = { generatedAt: 'x', status: status(), budget: budget(), tasks: [], cli: { state: 'missing', usage: 'not-reported' } };
     mount();
-    await screen.findByText('38 ACUs of 50 ACUs left');
+    await screen.findByText('34 ACUs of 50 ACUs left');
     expect(screen.queryByText(/usage not reported by the CLI/)).toBeNull();
   });
 

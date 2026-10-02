@@ -101,19 +101,57 @@ never asks for the key in the page, and no HTTP route accepts one.
 Check the result with `ashlr devin status`, or the Devin card in the Resources
 drawer (**⌘.**).
 
+### Recovering an uncertain create
+
+When a create loses its response, its full ACU cap remains held. Refresh can
+recover a new task only when its recorded launch organization matches the
+current connection, complete cursor pages contain exactly one task-tag match,
+and a separate session GET confirms that organization and tag. Only literal
+`exit` or `error` with an actual ACU reading settles the hold. Running, paused,
+missing, conflicting or incomplete results retain it; refresh never creates,
+restarts or cancels a session to reconcile it.
+
+Older tasks have no recorded launch organization and remain held. The exported
+`previewDevinCreateRecovery` reader can inspect a match without binding those
+tasks to today's login. Its finite page budget limits GET work; reaching it
+means incomplete evidence, not proof of absence. Provider visibility can be
+limited by permissions, so even a complete no-match result never clears a hold.
+Cloud service-user identity and a personal CLI Max login do not establish a
+shared included-usage pool. Local Dismiss changes only the local task; it is
+not provider termination or billing reconciliation.
+Known-session refresh also respects a recorded launch organization when the
+current connection changes, and rejects explicitly foreign response context.
+Legacy known sessions without that metadata retain the existing account-path
+behavior; this does not qualify their subscription funding.
+
 ### Budget
 
-Devin bills in ACUs. The budget is kept in ACUs, and any dollar figure is a
-labelled **estimate**, because Devin publishes no per-ACU price for self-serve
-plans. The real usage is on app.devin.ai (Settings › Usage), and the Devin card
-links to it. The budget lives in `~/.ashlr/devin/budget.json`, not in config.
+Verse's API launch ledger uses the ACUs in session readings and requested
+session caps. Its configured budget is not a provider-reported credit balance
+or subscription allowance. Devin's [self-serve plans](https://docs.devin.ai/admin/billing/self-serve)
+include subscription quota and prepaid on-demand credits; purchased credits
+roll over and do not expire. A cloud service-user connection does not prove
+that a personal CLI subscription funds its sessions.
+
+Reported usage combines actual session readings with your explicit adjustment.
+Held exposure is a bound on unresolved or possible remaining consumption,
+including locally dismissed sessions, not observed spend. The resource bar
+subtracts both from the configured allowance; unknown readings stay held until
+verified settlement. Refresh continues observing unsettled known sessions after
+local expiry or dismissal while preserving the task's delivery state.
+
+Dollar figures estimate only the recorded usage and adjustment at your
+configured rate (the default is $2.25 per ACU). They are not an invoice or a
+current provider price; missing readings make cost coverage incomplete. Check
+app.devin.ai for actual account usage. The ledger lives in
+`~/.ashlr/devin/budget.json`, not in config.
 
 | Setting | Default | Flag |
 |---|---|---|
 | Total ACUs | 50 | `--acu` |
 | Correction for usage Verse did not see | 0 | `--spent` |
 | ACUs per session, sent to Devin as the hard `max_acu_limit` | 10 | `--per-session` |
-| ACUs per day, used plus held by running sessions | 30 | `--per-day` |
+| ACUs per day, used plus unresolved exposure | 30 | `--per-day` |
 | Reserve kept for you (the fleet never dips into it) | 10 | `--reserve` |
 | Pause launches at this share of the total | 90 % | `--pause-at` |
 | Sessions at once | 2 | `--max-concurrent` |
@@ -121,6 +159,18 @@ links to it. The budget lives in `~/.ashlr/devin/budget.json`, not in config.
 | Fleet sessions at once | 1 | `--fleet-concurrent` |
 | Fleet sessions per day | 3 | `--fleet-per-day` |
 | Dollar estimate per ACU | $2.25 | `--usd-per-acu` |
+
+Session-count preferences accept safe whole numbers without a product ceiling.
+The defaults above stay in effect until you change them. Overall concurrency
+has a minimum of one; daily session limits and both fleet limits accept zero
+to stop new launches. Raising counts preserves the ACU budget, reserve, daily
+spend gate, per-session `max_acu_limit`, and Devin's own account limits.
+
+Concurrency and daily session counts have no fixed product ceiling. They
+accept safe integers: overall concurrency is at least one, while daily and
+fleet counts may be zero to opt out. Defaults and explicit lower settings
+remain unchanged. Count capacity does not override the separate ACU controls
+or the provider's actual availability.
 
 A launch is refused, with the reason, when no budget is set, the budget is
 paused, the free ACUs do not cover one session's cap, or the daily ACU, session

@@ -181,8 +181,8 @@ export function deriveSlotCapacity(props: EndpointReading, slots: EndpointReadin
 
   let configured: number | null = null;
   let source: LlamaSlotCapacity['source'] = 'unknown';
-  if (fromProps !== null && fromProps > 0) {
-    configured = Math.trunc(fromProps);
+  if (fromProps !== null && Number.isSafeInteger(fromProps) && fromProps > 0) {
+    configured = fromProps;
     source = 'props';
   } else if (slotList !== null && slotList.length > 0) {
     configured = slotList.length;

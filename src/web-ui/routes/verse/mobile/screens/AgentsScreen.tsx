@@ -23,7 +23,7 @@ import { AGENT_COLUMNS, boardCounts, buildAgentsBoard, type AgentColumnId } from
 import type { SidebarRow } from '../../chat/sidebar-model.js';
 import { useChatActivity } from '../../chat/use-chat-activity.js';
 import { verseBootstrapQuery } from '../../verse-bootstrap-query.js';
-import { openVerseListChannel } from '../../verse-events.js';
+import { openVerseListChannel } from '../../verse-list-channel.js';
 import { formatRelative, modelLabel, projectName, seatLabel } from '../../verse-model.js';
 import { verseActivityQuery, verseSessionMetaQuery, verseSessionsQuery } from '../../verse-queries.js';
 import { canShowActions, useMobile } from '../mobile-context.js';

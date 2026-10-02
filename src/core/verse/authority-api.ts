@@ -87,6 +87,7 @@ import {
   type AuthorityStatusV1,
   type AutonomySwitch,
   type LedgerEventKind,
+  type LeaderGrantClass,
   type StandingGrantV1,
 } from '../authority/types.js';
 
@@ -772,6 +773,7 @@ export async function buildStandingGrantDraft(
     repos: payload.repos.map((repo) => repo.nameWithOwner),
     engines: editableEngines(payload),
     leaderClasses: ['A', 'B'],
+    startingStageLeaderClasses: { stageId: payload.rollout.stages[0]!.id, classes: ['A', 'B'] as LeaderGrantClass[] },
     maxDays: Math.floor(STANDING_GRANT_CEILINGS.maxTtlMs / 86_400_000),
   };
   if (opts.scope && Object.keys(opts.scope).length > 0) {
@@ -779,6 +781,9 @@ export async function buildStandingGrantDraft(
     if (!edited.ok) throw new AuthorityDraftError('scope-invalid', edited.reason, 400);
     payload = edited.payload;
   }
+  // Repo edits can remove early rungs. Advertise the actual returned start,
+  // rather than letting a later choice target the old stage identity.
+  editable.startingStageLeaderClasses.stageId = payload.rollout.stages[0]!.id;
   const digest = rememberDraft(payload, resolved);
   const summary = describeGrantScope(payload);
   if (devin.note) summary.push(devin.note);

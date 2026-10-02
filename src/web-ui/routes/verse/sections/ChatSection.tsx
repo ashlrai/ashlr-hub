@@ -61,7 +61,6 @@ import type { Sidebar as SidebarComponent, SidebarRowActions } from '../Sidebar.
 import { SkeletonLine } from '../../../components/primitives/Skeleton.js';
 import { useVerseSession } from '../useVerseSession.js';
 import { useVerseUi } from '../useVerseUi.js';
-import { openVerseListChannel } from '../verse-events.js';
 import {
   cancelVerseTurn,
   createVerseSession,
@@ -205,6 +204,18 @@ export function describeChatError(err: unknown): string {
     return err.detail ?? err.message;
   }
   return err instanceof Error ? err.message : 'Something went wrong.';
+}
+
+/** Start metadata after mount; a late module cannot acquire a released owner. */
+export function openDeferredVerseListChannel(
+  load: () => Promise<{ openVerseListChannel: () => () => void }> = () => import('../verse-list-channel.js'),
+): () => void {
+  let alive = true;
+  let release: (() => void) | undefined;
+  void load().then((channel) => {
+    if (alive) release = channel.openVerseListChannel();
+  }, () => undefined); // A failed chunk is retried by the next mount, like other deferred chat modules.
+  return () => { alive = false; release?.(); release = undefined; };
 }
 
 /** The window's width, for the dock's presentation and its 60% cap. */
@@ -355,7 +366,7 @@ export function ChatSection() {
   }, [selectedId, sessionsQuery.data, view.session, setSelectedId]);
 
   // Sidebar digest channel (verse-sessions on /api/events).
-  useEffect(() => openVerseListChannel(), []);
+  useEffect(() => openDeferredVerseListChannel(), []);
 
   // ---- recency + read state -------------------------------------------------
   // Pane requests (a pasted command, a diff to open) belong to the chat they

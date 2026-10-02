@@ -1,6 +1,6 @@
 [package]
 name = "ashlr-desktop"
-version = "3.22.1"
+version = "3.22.2"
 description = "Ashlr Mission Control — desktop wrapper"
 authors = ["Mason Wyatt <mason@evero-consulting.com>"]
 license = "MIT"

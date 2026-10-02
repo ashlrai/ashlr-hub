@@ -32,6 +32,12 @@ function capacity(over: Partial<ServingRuntimeCapacity> = {}): ServingRuntimeCap
 }
 
 describe('local fleet lane cap', () => {
+  it('reports a wide measured runtime while an explicit tick cap still binds', () => {
+    const derived = deriveLocalFleetConcurrency(capacity({ slots: 64 }), null, { laneCap: { limit: 2, reason: 'Mason is present' } });
+    expect(derived).toMatchObject({ slots: 64, effective: 2, limiter: 'lane-cap' });
+    expect(derived.reason).toBe('lane cap 2 is below 64 (serving-slots): Mason is present');
+  });
+
   it('binds below the slot count and says why', () => {
     const derived = deriveLocalFleetConcurrency(capacity(), null, {
       laneCap: { limit: 2, reason: 'Mason is present (live Verse turn)' },

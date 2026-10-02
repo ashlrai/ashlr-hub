@@ -20,6 +20,8 @@ export interface GrantScopeEdit {
   repos?: string[];
   engines?: GrantEngine[];
   leaderClasses?: LeaderGrantClass[];
+  /** Explicit choice for this draft's first stage; omission preserves its permissions. */
+  startingStageLeaderClasses?: { stageId: string; classes: LeaderGrantClass[] };
   maxMode?: BudgetMode;
   seatPolicies?: Record<string, GrantSeatPolicyEdit>;
   /** Integer USD/day for metered APIs, 0..STANDING_GRANT_CEILINGS.maxMeteredUsdPerDay. */
@@ -38,6 +40,8 @@ export interface GrantDraftEditable {
   repos: string[];
   engines: string[];
   leaderClasses: string[];
+  /** Additive capability; older servers cannot edit starting-stage permissions. */
+  startingStageLeaderClasses?: { stageId: string; classes: LeaderGrantClass[] };
   maxDays: number;
   /** New servers support explicitly replacing signed volume limits. */
   volumeLimits?: boolean;
@@ -49,7 +53,7 @@ export interface GrantDraftEditable {
 export type GrantDiffDirection = 'wider' | 'narrower' | 'changed';
 
 export interface GrantDiffLine {
-  field: 'repos' | 'repo-stage' | 'engines' | 'leader' | 'spend-mode' | 'metered' | 'expiry' | 'conductor' | 'ladder' | 'merge-caps' | 'stage-volume' | 'volume-policy' | 'merge-frequency' | 'seat-enabled' | 'seat-roles' | 'seat-reserve' | 'seat-session';
+  field: 'repos' | 'repo-stage' | 'engines' | 'leader' | 'stage-leader' | 'spend-mode' | 'metered' | 'expiry' | 'conductor' | 'ladder' | 'merge-caps' | 'stage-volume' | 'volume-policy' | 'merge-frequency' | 'seat-enabled' | 'seat-roles' | 'seat-reserve' | 'seat-session';
   label: string;
   before: string;
   after: string;

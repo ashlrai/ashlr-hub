@@ -114,6 +114,10 @@ afterEach(() => {
 
 describe('LeaderConversation — rendering', () => {
   it('draws every kind of message with its channel, in one threaded log', async () => {
+    // The fixture reaches back an hour. Pin a local midday so its Today
+    // assertion does not become Yesterday when this suite runs after midnight.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 9, 2, 12));
     stub();
     const log = await mount();
     // Leader prose is Markdown; Mason's words are plain text.
@@ -128,6 +132,23 @@ describe('LeaderConversation — rendering', () => {
     expect(within(log).getByText('Also sent to Telegram')).toBeInTheDocument();
     // Day separators.
     expect(within(log).getByRole('separator', { name: 'Today' })).toBeInTheDocument();
+  });
+
+  it.each([
+    { boundary: 'local midnight', at: new Date(2026, 9, 2, 0, 10) },
+    { boundary: 'local New Year', at: new Date(2027, 0, 1, 0, 10) },
+  ])('separates Yesterday and Today across $boundary', async ({ at }) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(at);
+    stub({ thread: [
+      msg({ id: 'before-midnight', at: new Date(at.getTime() - 50 * 60_000).toISOString(), text: 'Before midnight.' }),
+      msg({ id: 'after-midnight', at: new Date(at.getTime() - 60_000).toISOString(), text: 'After midnight.' }),
+    ] });
+    const log = await mount();
+    await within(log).findByText('After midnight.');
+    expect(within(log).getAllByRole('separator').map(row => row.getAttribute('aria-label'))).toEqual(['Yesterday', 'Today']);
+    expect(within(log).getByText('Before midnight.')).toBeInTheDocument();
+    expect(within(log).getByText('After midnight.')).toBeInTheDocument();
   });
 
   it('draws a memo as a card: bottleneck, the move, and each action with its class, countdown, Approve and Veto', async () => {

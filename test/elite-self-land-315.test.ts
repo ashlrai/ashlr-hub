@@ -251,6 +251,7 @@ describe('the elite-direct grant — what Mason signs', () => {
     expect(stage!.repos.find((r) => r.nameWithOwner === 'ashlrai/ashlr-pulse')?.stage).toBe('propose');
     expect(stage!.engines).toContain('codex');
     expect(stage!.leaderClasses).toEqual([]);
+    expect(describeGrantScope(payload)).toContain('Leader at starting stage elite-direct: advisory only');
     expect(grantHasEliteDirect(payload)).toBe(true);
     const lines = describeGrantScope(payload);
     expect(lines).toContain(ELITE_DIRECT_ONE_LINE);
@@ -275,6 +276,7 @@ describe('the elite-direct grant — what Mason signs', () => {
     // …and a plain re-approval of an elite-direct grant continues it.
     const again = buildReapprovalGrantPayload(next, 0, { ...draftInput, nowMs: NOW + 2000, grantId: 'c'.repeat(32), grantSeq: 11 });
     expect(again.rollout.stages.map((s) => s.id)).toEqual([ELITE_DIRECT_STAGE_ID]);
+    expect(again.rollout.stages[0]!.leaderClasses).toEqual(next.rollout.stages[0]!.leaderClasses);
   });
 });
 

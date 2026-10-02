@@ -14,6 +14,8 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render } from '@testing-library/react';
+import { MockEventSource } from './fixtures.test-support.js';
+import { openVerseListChannel, resetVerseListChannelCapabilities } from './verse-events.js';
 import { markCheckComplete } from '../../data/auth-store.js';
 import { evictAll, getQuerySnapshot, invalidate, runQuery } from '../../data/cache.js';
 import type { VerseBootstrap } from '../../data/api-types.js';
@@ -57,6 +59,8 @@ function json(body: unknown): Response {
 
 beforeEach(() => {
   evictAll();
+  MockEventSource.reset();
+  vi.stubGlobal('EventSource', MockEventSource);
   markCheckComplete(true);
   vi.useFakeTimers();
   vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
@@ -70,6 +74,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  resetVerseListChannelCapabilities();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -213,5 +218,66 @@ describe('useSeatsRefresh', () => {
     const merged = mergeSeatsIntoBootstrap(BOOTSTRAP, LIVE_SEATS as never);
     expect(merged).toEqual({ ...BOOTSTRAP, seats: LIVE_SEATS.seats, localRuntime: LIVE_SEATS.localRuntime, accountTelemetry: LIVE_SEATS.accountTelemetry });
     expect(BOOTSTRAP.seats).toEqual([{ id: 'stale-seat' }]);
+  });
+});
+
+
+describe('published readings after startup', () => {
+  it('updates each late account independently, keeping history and unknown current credits distinct', async () => {
+    let seats = [{ id: 'account-a', health: 'unknown', codexCredits: null }, { id: 'account-b', health: 'unknown', codexCredits: null }];
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => json(String(input).includes('/seats')
+      ? { ...LIVE_SEATS, seats, accountTelemetry: { refreshing: true, pendingAccountIds: seats.filter(row => row.health === 'unknown').map(row => row.id) } }
+      : { ...BOOTSTRAP, seats })));
+    const dispose = openVerseListChannel();
+    try {
+      await act(async () => { render(<><Probe /><Probe /></>); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(SEATS_STARTUP_WINDOW_MS + 1000); });
+      const before = seatsCalls();
+      seats = [{ id: 'account-a', health: 'healthy', codexCredits: null }, seats[1]!];
+      await act(async () => {
+        MockEventSource.instances.at(-1)!.emitNamed('verse-account-readings', { changed: true });
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(seatsCalls()).toBe(before + 1);
+      expect(getQuerySnapshot<VerseBootstrap>(VERSE_BOOTSTRAP_KEY).data!.seats).toEqual(seats);
+      seats = [seats[0]!, { id: 'account-b', health: 'unavailable', codexCredits: null }];
+      await act(async () => {
+        const es = MockEventSource.instances.at(-1)!;
+        es.emitNamed('verse-account-readings', { changed: true });
+        es.emitNamed('verse-account-readings', { changed: true });
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(seatsCalls()).toBe(before + 2);
+      expect(getQuerySnapshot<VerseBootstrap>(VERSE_BOOTSTRAP_KEY).data!.seats).toEqual(seats);
+      const count = pollCalls();
+      await act(async () => { setVisibility('hidden'); });
+      MockEventSource.instances.at(-1)!.emitNamed('verse-account-readings', { changed: true });
+      await act(async () => { await vi.advanceTimersByTimeAsync(SEATS_POLL_MS); });
+      expect(pollCalls()).toBe(count);
+    } finally { dispose(); }
+  });
+
+  it('coalesces a publication burst during an in-flight read into one catch-up read', async () => {
+    await runQuery(VERSE_BOOTSTRAP_KEY, async () => BOOTSTRAP);
+    const resolvers: Array<(response: Response) => void> = [];
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => { resolvers.push(resolve); })));
+    const dispose = openVerseListChannel();
+    try {
+      await act(async () => { render(<Probe />); });
+      await act(async () => {
+        const es = MockEventSource.instances.at(-1)!;
+        for (let i = 0; i < 12; i++) es.emitNamed('verse-account-readings', { changed: true });
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(seatsCalls()).toBe(1);
+      await act(async () => { resolvers[0]!(json(LIVE_SEATS)); });
+      expect(seatsCalls()).toBe(2);
+      await act(async () => { resolvers[1]!(json(LIVE_SEATS)); });
+      expect(seatsCalls()).toBe(2);
+      await act(async () => { markCheckComplete(false); });
+      MockEventSource.instances.at(-1)!.emitNamed('verse-account-readings', { changed: true });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(seatsCalls()).toBe(2);
+    } finally { dispose(); }
   });
 });

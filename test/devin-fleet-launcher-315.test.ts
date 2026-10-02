@@ -146,10 +146,30 @@ describe('the fleet caps count ONLY fleet sessions (Mason\'s own Devin chats cou
     expect(devinBudgetView([], budgetOf({ fleetMaxSessionsPerDay: 0 }), now).canFleetLaunch).toMatchObject({ ok: false, reason: expect.stringMatching(/daily cap is 0/) });
   });
 
-  it('the budget file keeps the new caps (clamped, 0 allowed) and defaults them', () => {
+  it('the budget file preserves operator counts, zero opt-outs and defaults', () => {
     rmSync(devinHome(), { recursive: true, force: true });
-    expect(readDevinBudget()).toMatchObject({ fleetMaxConcurrent: 1, fleetMaxSessionsPerDay: 3 });
-    expect(updateDevinBudget({ fleetMaxConcurrent: 0, fleetMaxSessionsPerDay: 999 })).toMatchObject({ fleetMaxConcurrent: 0, fleetMaxSessionsPerDay: 200 });
+    expect(readDevinBudget()).toMatchObject({ maxConcurrent: 2, maxSessionsPerDay: 10, fleetMaxConcurrent: 1, fleetMaxSessionsPerDay: 3 });
+    expect(updateDevinBudget({ fleetMaxConcurrent: 0, fleetMaxSessionsPerDay: 999 })).toMatchObject({ fleetMaxConcurrent: 0, fleetMaxSessionsPerDay: 999 });
+    expect(updateDevinBudget({ maxConcurrent: 0, maxSessionsPerDay: 0, fleetMaxSessionsPerDay: 0 })).toMatchObject({ maxConcurrent: 1, maxSessionsPerDay: 0, fleetMaxSessionsPerDay: 0 });
+  });
+
+  it.each([64, 999, 1_000_001, Number.MAX_SAFE_INTEGER])('round-trips %s count preferences without allocating session slots', (count) => {
+    const counts = { maxConcurrent: count, maxSessionsPerDay: count, fleetMaxConcurrent: count, fleetMaxSessionsPerDay: count };
+    expect(updateDevinBudget(counts)).toMatchObject(counts);
+    expect(readDevinBudget()).toMatchObject(counts);
+  });
+
+  it.each(['maxConcurrent', 'maxSessionsPerDay', 'fleetMaxConcurrent', 'fleetMaxSessionsPerDay'] as const)('retains the configured %s when its new count is fractional or unsafe', (field) => {
+    updateDevinBudget({ [field]: 64 });
+    for (const invalid of [1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(updateDevinBudget({ [field]: invalid })[field]).toBe(64);
+      expect(readDevinBudget()[field]).toBe(64);
+    }
+  });
+
+  it('raising counts preserves all financial ceilings', () => {
+    expect(updateDevinBudget({ maxConcurrent: 64, maxSessionsPerDay: 999, acuBudgetTotal: 200_000, maxAcuPerSession: 2_000, usdPerAcu: 200 }))
+      .toMatchObject({ maxConcurrent: 64, maxSessionsPerDay: 999, acuBudgetTotal: 100_000, maxAcuPerSession: 1_000, usdPerAcu: 100 });
   });
 });
 

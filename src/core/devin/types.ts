@@ -142,6 +142,8 @@ export interface DevinTaskV1 {
   origin: DevinTaskOrigin;
   requestedBy: 'mason' | 'fleet';
   sessionId: string | null;
+  /** Organization pinned before create; absent on legacy tasks, never inferred from today's login. */
+  launchOrgId?: string;
   sessionUrl: string | null;
   state: DevinTaskState;
   /** Plain-language reason for the current state (never raw ISO / paths / keys). */
@@ -238,6 +240,10 @@ export interface DevinBudgetView {
   acuToday: number;
   /** Headroom still reserved by sessions in flight (their cap minus what they used). */
   acuInFlight: number;
+  /** Provider-reported ACUs plus the explicit operator adjustment; absent on older servers. */
+  reportedAcuUsed?: number;
+  /** Potential additional spend/unknown-consumption bound, not observed spend; absent on older servers. */
+  unconfirmedAcuExposure?: number;
   estimatedUsdUsed: number;
   sessionsToday: number;
   running: number;
