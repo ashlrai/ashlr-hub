@@ -114,6 +114,21 @@ describe('Leader desired outcome planning bridge', () => {
     expect(evidence.acceptance).toEqual([acceptance]);
     expect(f.store.read().state!.scope.desiredOutcome).toContain('user@example.com');
   });
+  it('preserves requirement tails in the actual Leader prompt when redaction expands text', async () => {
+    const f = fixture(); const desiredOutcome = 'Bearer a '.repeat(50) + 'DESIRED_TAIL';
+    const acceptance = 'Token x '.repeat(50) + 'ACCEPTANCE_TAIL';
+    expect(f.coordinator.editScope({ commandId: 'scope-edit', expectedRevision: 1 },
+      { ...f.store.read().state!.scope, desiredOutcome, acceptance: [acceptance] }).ok).toBe(true);
+    const evidence = await gatherLeaderEvidence(f.source, NOW, readLeaderRunState(NOW));
+    const projected = evidence.outcomes!.outcomes[0]!;
+    expect(projected.desiredOutcome).toBe(desiredOutcome.replaceAll('Bearer a', 'Bearer [REDACTED]'));
+    expect(projected.acceptance).toEqual([acceptance.replaceAll('Token x', 'Token [REDACTED]')]);
+    expect(projected.desiredOutcome.length).toBeGreaterThan(desiredOutcome.length);
+    const prompt = buildLeaderPrompt(evidence, { dryRun: false, nowIso: AT });
+    expect(prompt).toContain('DESIRED_TAIL'); expect(prompt).toContain('ACCEPTANCE_TAIL');
+    expect(prompt).toContain('[REDACTED]'); expect(prompt).not.toContain('Bearer a'); expect(prompt).not.toContain('Token x');
+    expect(f.store.read().state!.scope).toMatchObject({ desiredOutcome, acceptance: [acceptance] });
+  });
   it('parses exact aliases and rejects cycles, extra scope fields and raw absolute targets', () => {
     const f = fixture(); expect(parseActionParams('outcome.refine', f.params)).toMatchObject({ ok: true });
     for (const params of [{ ...f.params, desiredOutcome: 'Model replacement' }, { ...f.params, scopeRevision: 0 },

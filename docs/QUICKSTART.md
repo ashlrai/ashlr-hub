@@ -8,26 +8,26 @@ starting a resident fleet and publishing its work are distinct steps.
 
 ### CLI on macOS, Linux or Windows
 
-Install Node.js 22.15+ and Git, then install Verse 3.22.0 from its versioned
+Install Node.js 22.15+ and Git, then install Verse 3.23.0 from its versioned
 GitHub release after its artifacts are published:
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.0/ashlr-hub-3.22.0.tgz
-ashlr --version   # should print 3.22.0
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.23.0/ashlr-hub-3.23.0.tgz
+ashlr --version   # should print 3.23.0
 ashlr verse
 ```
 
 Verse opens at `http://127.0.0.1:7777/verse/` and binds to loopback. The CLI
 prints a read token for the browser and asks for a separate mutation token
 before your first chat or other change. Keep both tokens private. Confirm
-`ashlr --version` reports `3.22.0`; the
-[versioned GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.22.0) is the
+`ashlr --version` reports `3.23.0`; the
+[versioned GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.23.0) is the
 publication target for this candidate’s installers. The unversioned npm package may be an older release.
 
 ### Desktop app on Apple silicon Mac
 
-Download the [v3.22.0 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.0/Ashlr_3.22.0_aarch64_locally-signed.dmg)
-after publication from the [versioned release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.22.0).
+Download the [v3.23.0 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.23.0/Ashlr_3.23.0_aarch64_locally-signed.dmg)
+after publication from the [versioned release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.23.0).
 It includes the CLI and the same console. This DMG is locally signed, not
 Apple Developer ID notarized; macOS may require **Open Anyway** on first launch.
 For a source build and local signing, follow [Releasing locally](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
@@ -37,17 +37,21 @@ There is no Linux or Windows desktop package in this release; use the CLI above.
 
 1. Choose **Work with me**, open **New chat** and choose a project folder. Saving a folder as a project
    does not enroll it for unattended fleet work.
-2. Use a provider CLI you are already signed in to, or start Ollama and choose
-   a tool-capable local model. For separate Claude Code, Codex and Grok accounts,
+2. Use provider CLIs you are already signed in to, or start Ollama with
+   a tool-capable local model. **Automatic** chooses an eligible resource;
+   open **Advanced** if you want to pin an account or model. For separate Claude Code, Codex and Grok accounts,
    follow [seat commissioning](RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity).
    Each vendor signs in through its own CLI; Verse does not take its password.
 3. Ask for a small, checkable change. Review its diff and results in the
    workbench before accepting it. Use **⌘K** to find actions and **⌘J** for
    **Needs you**. The full interface is in the [Verse guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
 
-Choose **Work for me** to delegate a task in its own workspace, review agents,
-or manage the resident fleet. Standing instructions guide the Leader's fleet
-planning. Changing workspaces only navigates; it does not start the fleet or
+Choose **Work for me**, open Fleet and select **New outcome**. Describe the
+result, select enrolled repositories and add observable acceptance criteria.
+The Leader refines the work; expand its tasks to inspect runs, proposals and
+verified merge evidence. Edit, pause or resume the outcome as it evolves.
+See [Automatic work](AUTOMATIC-OUTCOMES.md). Standing instructions also guide
+the Leader's fleet planning. Changing workspaces only navigates; it does not start the fleet or
 change your permission mode. Optional planning, CI and spend settings are under
 **Options** when creating an agent.
 

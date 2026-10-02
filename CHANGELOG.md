@@ -9,7 +9,36 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.22.2] — Unreleased
+## [3.23.0] — 2026-10-02
+
+### Added
+
+- Automatic chat chooses an eligible account and model from the project and
+  task. Advanced keeps explicit overrides; failed routing preserves the draft
+  and local-only projects retain their privacy boundary.
+- Fleet outcomes save a desired result, enrolled repositories and acceptance
+  criteria. The Leader refines dependency-ready tasks through the resident
+  queue. Edit, Pause and Resume retain revisions, runs and selected proposals;
+  Plan verified describes active task evidence rather than arbitrary product success.
+
+### Fixed
+
+- Keep the original local task and correlated tool calls intact when old
+  conversation history no longer fits the actual configured context window.
+- Record outcome claims and run identities atomically. Retry temporary terminal
+  record lock contention without relaunching the producer.
+- Recheck active outcome scope at producer, review and merge contacts, including
+  after awaited setup. Preserve recorded effects when cancellation is in flight.
+- Retain producer durations across retries and proposal capture; preserve
+  Claude historical display readings across mutable CLI configuration updates
+  while keeping financial identity checks unchanged.
+
+### Changed
+
+- Update the Automatic work guide, install instructions and website workflow
+  examples. Include the Automatic, Verse and resident setup guides in npm.
+
+## [3.22.2] — 2026-10-02
 
 ### Fixed
 

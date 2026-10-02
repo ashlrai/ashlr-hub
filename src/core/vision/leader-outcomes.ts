@@ -84,8 +84,10 @@ export function buildLeaderOutcomeEvidence(read: OutcomeInventoryRead): LeaderOu
   return { sourceState: read.sourceState, complete: read.complete, unreadable: read.unreadable, limitExceeded: read.limitExceeded,
     outcomes: read.states.map(state => ({ outcomeId: state.id, scopeRevision: state.scopeRevision, scopeDigest: state.scopeDigest,
       planRevision: state.planRevision, graphDigest: state.graphDigest, paused: state.paused,
-      desiredOutcome: cleanModelText(state.scope.desiredOutcome, state.scope.desiredOutcome.length) ?? '',
-      acceptance: state.scope.acceptance.map(text => cleanModelText(text, text.length) ?? ''),
+      // Privacy replacements can expand text. Preserve the entire scrubbed
+      // saved requirement; the original length is not an output/context cap.
+      desiredOutcome: cleanModelText(state.scope.desiredOutcome, Number.POSITIVE_INFINITY) ?? '',
+      acceptance: state.scope.acceptance.map(text => cleanModelText(text, Number.POSITIVE_INFINITY) ?? ''),
       targets: state.scope.targetRepos.map((repo, index) => ({ alias: `target-${index + 1}`, label: cleanModelText(basename(repo), 200) ?? 'target' })),
       nodes: state.activeNodeIds.map(id => { const node = state.nodes[id]!; return { key: node.basis.definition.key,
         kind: node.basis.definition.kind, title: cleanModelText(node.basis.definition.title, 200) ?? '',

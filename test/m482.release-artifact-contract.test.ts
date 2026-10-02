@@ -862,6 +862,7 @@ describe('release artifact contract v1', () => {
     { name: 'explicit reset-aware scheduling guide', guides: ['docs/RESET-AWARE-SCHEDULING.md'], sibling: 'docs/RESET-AWARE-PRIVATE.md' },
     { name: 'explicit execution feedback guide', guides: ['docs/EXECUTION-FEEDBACK.md'], sibling: 'docs/EXECUTION-FEEDBACK-PRIVATE.md' },
     { name: 'explicit resource evidence guide', guides: ['docs/RESOURCE-EVIDENCE.md'], sibling: 'docs/RESOURCE-EVIDENCE-PRIVATE.md' },
+    { name: 'explicit Automatic and resident setup guides', guides: ['docs/AUTOMATIC-OUTCOMES.md', 'docs/VERSE.md', 'docs/AUTONOMY-SETUP.md'], sibling: 'docs/AUTOMATIC-PRIVATE.md' },
   ])('admits $name from the actual npm file report, while refusing an unapproved sibling', ({ guides, sibling }) => {
     const release = fixture();
     const packagePath = join(release.packageRoot, 'package.json');

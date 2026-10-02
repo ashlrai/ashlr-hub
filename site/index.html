@@ -37,7 +37,7 @@
       "description": "Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "macOS, Linux, Windows",
-      "softwareVersion": "3.22.2",
+      "softwareVersion": "3.23.0",
       "license": "https://github.com/ashlrai/ashlr-hub/blob/master/LICENSE",
       "isAccessibleForFree": true,
       "sameAs": "https://github.com/ashlrai/ashlr-hub",
@@ -403,11 +403,11 @@
   <div class="wrap hero">
     <div class="hero-grid">
       <div class="intro">
-        <p class="eyebrow">Ashlr Verse 3.22 &middot; The coding agent workbench</p>
+        <p class="eyebrow">Ashlr Verse 3.23 &middot; The coding agent workbench</p>
         <h1>Work with me.<br>Work for me.</h1>
         <p class="lede">
           Bring Claude Code, Codex, Grok, local models and Devin into one workbench.
-          Guide an agent in a chat, or delegate work to the fleet. Shared accounts and projects connect both workspaces.
+          Start an Automatic chat, or give the fleet a desired outcome. Shared accounts and projects connect both workspaces.
         </p>
         <p class="lede-tail">Keep your chats, drafts and tools close. Let eligible fleet agents land verified work within the scope you sign once with Touch ID, including the change-volume limits you choose.</p>
         <div class="cta-row">
@@ -416,7 +416,7 @@
         </div>
       </div>
       <div class="journey" role="region" aria-labelledby="journey-heading">
-        <div class="journey-top"><span><span class="journey-light" aria-hidden="true"></span><strong>Verse / work in motion</strong></span><span>3.22</span></div>
+        <div class="journey-top"><span><span class="journey-light" aria-hidden="true"></span><strong>Verse / work in motion</strong></span><span>3.23</span></div>
         <div class="journey-body">
           <p class="journey-kicker">Choose a workflow</p>
           <h2 id="journey-heading">See how the work moves.</h2>
@@ -426,17 +426,17 @@
           </div>
           <div class="journey-panel" id="journey-ask" role="tabpanel" aria-labelledby="journey-tab-ask" tabindex="0">
             <h3>Think, build and steer together.</h3>
-            <p>Choose an account and model, guide it in a chat, inspect reported tools and context, and review the changes beside the conversation.</p>
-            <div class="journey-flow" role="group" aria-label="Inspect stages: Interactive chat to reviewed changes"><button type="button" aria-pressed="true" data-inspect="Choose your account, model and project. Your prompt stays editable until you send it.">Your chat</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="Inspect the tools and context reported for the turn. Steer the conversation while the agent works.">Agent + tools</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="Read the changes, checkpoints and session evidence. You decide the next step.">Your review</button></div>
-            <p class="journey-inspect" aria-live="polite">Choose your account, model and project. Your prompt stays editable until you send it.</p>
+            <p>Choose a project and describe the work. Automatic selects a connected account and model; Advanced lets you choose an explicit override.</p>
+            <div class="journey-flow" role="group" aria-label="Inspect stages: Interactive chat to reviewed changes"><button type="button" aria-pressed="true" data-inspect="Choose a project and describe the work. Automatic selects a resource; Advanced holds account and model overrides. Your draft stays editable.">Your chat</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="Inspect the tools and context reported for the turn. Steer the conversation while the agent works.">Agent + tools</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="Read the changes, checkpoints and session evidence. You decide the next step.">Your review</button></div>
+            <p class="journey-inspect" aria-live="polite">Choose a project and describe the work. Automatic selects a resource; Advanced holds account and model overrides. Your draft stays editable.</p>
             <p class="journey-end">Switch workspaces without losing your drafts or restarting a session.</p>
           </div>
           <div class="journey-panel" id="journey-build" role="tabpanel" aria-labelledby="journey-tab-build" tabindex="0" hidden>
             <h3>Give the fleet an outcome.</h3>
-            <p>Delegate tasks, guide the Leader's planning and see what needs you. An admitted resident fleet works within the repository, account and spending scope you sign.</p>
-            <div class="journey-flow" role="group" aria-label="Inspect stages: Signed scope to verified fleet work"><button type="button" aria-pressed="true" data-inspect="Choose repositories, accounts and standing permissions. Review the exact scope before Touch ID approval.">Your scope</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="An admitted resident fleet plans and dispatches eligible work. Current account readiness and resources still apply.">Fleet + checks</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="Inspect actual work, checks and authority in Fleet. Eligible signed scope can admit merges; this illustration performs none.">Verified work</button></div>
-            <p class="journey-inspect" aria-live="polite">Choose repositories, accounts and standing permissions. Review the exact scope before Touch ID approval.</p>
-            <p class="journey-end">Eligible elite-direct work lands without a separate judge. Stop and revocation remain available.</p>
+            <p>Save a desired result, enrolled repositories and acceptance criteria. The Leader refines the plan; ready tasks use the existing fleet and resource checks.</p>
+            <div class="journey-flow" role="group" aria-label="Inspect stages: Desired outcome to recorded verification"><button type="button" aria-pressed="true" data-inspect="In Fleet, choose New outcome. Describe the desired result, select enrolled repositories and say how you will know it worked. Saving does not start the fleet.">Your outcome</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="The Leader refines tasks within the saved scope. Only dependency-ready work proceeds under current account readiness and signed authority.">Fleet + checks</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="Inspect runs, proposals and verified merges. Plan verified means active tasks have verification or explicit gate evidence; check the desired result against your acceptance criteria.">Work + evidence</button></div>
+            <p class="journey-inspect" aria-live="polite">In Fleet, choose New outcome. Describe the desired result, select enrolled repositories and say how you will know it worked. Saving does not start the fleet.</p>
+            <p class="journey-end">Edit, Pause or Resume the outcome. Pause blocks new requests and asks running work to stop; external cancellation may take time.</p>
           </div>
         </div>
         <p class="journey-foot">Illustration · select a mode, then inspect its stages. No agents are launched.</p>
@@ -1192,9 +1192,9 @@ ashlr wiki ask "where are standing grants verified?"</pre>
         <div class="steps">
           <div class="step"><span class="n"></span><div>
             <h3>Install and open the console</h3>
-            <p>Inspect reported tools and context in each chat, and open source-line evidence from the local module map. Install Verse 3.22.2 with the same CLI command on all three platforms. On an Apple silicon Mac, you can also download the <a href="https://github.com/ashlrai/ashlr-hub/releases/tag/v3.22.2">Verse 3.22.2 desktop DMG</a>. It is locally signed, not Apple Developer ID notarized, so macOS may require Open Anyway on first launch.</p>
-            <p>New in 3.22: fast account-bound usage history, separate credit balances, collapsible projects, and execution timelines connecting verification to GitHub. Expand Resources for dated readings and credit details, or Fleet to inspect an outcome.</p>
-            <pre id="install-command">npm i -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.2/ashlr-hub-3.22.2.tgz
+            <p>Inspect reported tools and context in each chat, and open source-line evidence from the local module map. Install Verse 3.23.0 with the same CLI command on all three platforms. On an Apple silicon Mac, you can also download the <a href="https://github.com/ashlrai/ashlr-hub/releases/tag/v3.23.0">Verse 3.23.0 desktop DMG</a>. It is locally signed, not Apple Developer ID notarized, so macOS may require Open Anyway on first launch.</p>
+            <p>New in 3.23: Automatic chat routing and durable fleet outcomes with editable scope, dependency-ready tasks and recorded verification. Dated resource readings, separate credit balances and execution timelines remain available.</p>
+            <pre id="install-command">npm i -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.23.0/ashlr-hub-3.23.0.tgz
 ashlr verse</pre>
             <button class="copy-command" type="button" data-copy="install-command">Copy commands</button><span class="copy-status" role="status" aria-live="polite"></span>
           </div></div>
@@ -1212,11 +1212,15 @@ ashlr verse</pre>
 ashlr comms setup-telegram</pre>
           </div></div>
           <div class="step"><span class="n"></span><div>
-            <h3>Turn on autonomy</h3>
+            <h3>Set up resident autonomy once</h3>
             <p>macOS only. Setup does what it can and stops for what only you may do: the custody install, Touch ID, two GitHub clicks. Then you start the resident daemon in your own terminal. The default signed ladder begins in shadow; a separately signed elite-direct grant can begin verified merges immediately.</p>
             <pre>ashlr authority setup --dry-run
 ashlr authority setup
 ashlr authority resident start</pre>
+          </div></div>
+          <div class="step"><span class="n"></span><div>
+            <h3>Create an outcome in Fleet</h3>
+            <p>Choose New outcome, enter the desired result, select enrolled repositories and add acceptance criteria. Edit the scope as you learn, or Pause and Resume. Saving an outcome does not activate the resident fleet or widen its signed permissions. <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTOMATIC-OUTCOMES.md">Read the Automatic work guide</a>.</p>
           </div></div>
           <div class="step"><span class="n"></span><div>
             <h3>Optionally, connect Devin cloud</h3>
@@ -1255,7 +1259,7 @@ ashlr devin budget --acu 50</pre>
 
 <footer>
   <div class="wrap">
-    <p>Ashlr Verse 3.22 &middot; verse.ashlr.ai</p>
+    <p>Ashlr Verse 3.23 &middot; verse.ashlr.ai</p>
     <span><a href="/ecosystem">Ecosystem</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md">User guide</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md">Leader</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md">Devin</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/CHANGELOG.md">Changelog</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub">github.com/ashlrai/ashlr-hub</a></span>
   </div>
 </footer>
