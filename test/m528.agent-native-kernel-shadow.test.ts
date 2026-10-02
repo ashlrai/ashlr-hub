@@ -246,6 +246,40 @@ function resignKernel(value: ReturnType<typeof kernel>): ReturnType<typeof kerne
 }
 
 describe('M528 Agent-Native Kernel Shadow V1', () => {
+
+  it.each([33, 64, Number.MAX_SAFE_INTEGER])(
+    'accepts preference %s without inflating trusted capacity or authority', (maxConcurrent) => {
+      const executionIdentity = identity({
+        identities: [{ ...identity().identities[0]!, maxConcurrent }],
+      });
+      const result = kernel({ executionIdentity });
+      expect(result.counts).toMatchObject({ identities: 1, trustedSlots: 2, allocated: 1 });
+      expect(verifyAgentNativeKernelShadowV1(result)).toEqual(result);
+      const unavailable = kernel({ executionIdentity: identity({
+        identities: [{
+          ...executionIdentity.identities[0]!, state: 'unknown', trustedSlots: 0,
+          observedAt: null, reason: 'observation-missing',
+        }],
+      }) });
+      expect(unavailable).toMatchObject({
+        counts: { trustedSlots: 0 }, phase: 'sense', lifecycle: 'degraded',
+        degradedReasons: ['identity-resource-mismatch'],
+      });
+      expect(Object.values(unavailable.authorityBits).every((value) => value === false)).toBe(true);
+    },
+  );
+
+  it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity])(
+    'refuses malformed public preference %s', (maxConcurrent) => {
+      expect(buildAgentNativeKernelShadowV1(input({ executionIdentity: identity({
+        identities: [{ ...identity().identities[0]!, maxConcurrent }],
+      }) }))).toEqual({
+        ok: false, kernel: null,
+        issues: [Number.isFinite(maxConcurrent) ? 'invalid-identity-snapshot' : 'invalid-input'],
+      });
+    },
+  );
+
   it('binds verified identity, resource, evidence, portfolio, spec, and mission snapshots', () => {
     const first = kernel();
     const second = kernel();

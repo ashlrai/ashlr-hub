@@ -393,8 +393,8 @@ function readPrivateStore(
 }
 
 function validConcurrent(value: unknown): value is number {
-  return Number.isSafeInteger(value) && Number(value) >= 1 &&
-    Number(value) <= EXECUTION_IDENTITY_V1_MAX_CONCURRENT;
+  // Plan width is an operator preference; observations still bound trusted slots.
+  return Number.isSafeInteger(value) && Number(value) >= 1;
 }
 
 function validPlan(

@@ -285,7 +285,8 @@ function identityResource(value: unknown): ExecutionIdentityPublicResourceV1 | n
   if (!resource || !exactKeys(resource, IDENTITY_KEYS) || !isDigest(resource['executionIdentityDigest']) ||
     typeof resource['engine'] !== 'string' || !ENGINE_RE.test(resource['engine']) ||
     !['open', 'near', 'exhausted', 'unreachable', 'unknown'].includes(String(resource['state'])) ||
-    !integer(resource['trustedSlots'], 0, 32) || !integer(resource['maxConcurrent'], 0, 32) ||
+    !integer(resource['trustedSlots'], 0, 32) ||
+    !integer(resource['maxConcurrent'], 0, Number.MAX_SAFE_INTEGER) ||
     Number(resource['trustedSlots']) > Number(resource['maxConcurrent']) ||
     (resource['usedPercent'] !== null && (typeof resource['usedPercent'] !== 'number' ||
       !Number.isFinite(resource['usedPercent']) || resource['usedPercent'] < 0 || resource['usedPercent'] > 100)) ||
@@ -741,7 +742,9 @@ function verifyCapabilitySpectrumShadowEnvelopeV1(value: unknown): CapabilitySpe
         'observation-stale', 'observation-future', 'reset-elapsed', 'unavailable-state',
         'zero-capacity', 'invalid-reset',
       ].includes(String(candidate['reason'])) ||
-      !integer(candidate['trustedUnits'], 0, MAX_UNITS) || !integer(candidate['maxUnits'], 0, MAX_UNITS) ||
+      !integer(candidate['trustedUnits'], 0, MAX_UNITS) ||
+      // Model maxUnits carries the plan preference, never trusted allocation capacity.
+      !integer(candidate['maxUnits'], 0, candidate['kind'] === 'model' ? Number.MAX_SAFE_INTEGER : MAX_UNITS) ||
       Number(candidate['trustedUnits']) > Number(candidate['maxUnits']) ||
       (candidate['resetAt'] !== null && !timestamp(candidate['resetAt']))) return null;
     seenResources.add(candidate['resourceDigest']);

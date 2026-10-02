@@ -130,6 +130,109 @@ function codexConfig(): AshlrConfig {
 }
 
 describePosix('Execution Identity V1 — private account isolation', () => {
+
+  it.each([33, 64, Number.MAX_SAFE_INTEGER])(
+    'preserves preference %s while assigning only freshly observed slots', (maxConcurrent) => {
+      const f = fixture();
+      const cfg = config([{
+        ref: ID_A, engine: 'codex', privateRuntimeLocatorRef: LOCATOR_A,
+        plan: { kind: 'subscription', class: 'codex-max', maxConcurrent },
+      }]);
+      const book = new ExecutionIdentityResourceBookV1(cfg, { privateStorePath: f.storePath });
+      const work = [1, 2, 3].map((id) => ({ id: `work-${id}`, engine: 'codex' as const }));
+      const unknown = buildExecutionIdentityShadowStatusV1(cfg, {
+        privateStorePath: f.storePath, resourceBook: book, now: NOW, work,
+      });
+      expect(unknown.sourceState).toBe('healthy');
+      expect(unknown.assignments).toHaveLength(0);
+      expect(unknown.identities[0]).toMatchObject({ maxConcurrent, trustedSlots: 0 });
+      expect(book.recordObservation({
+        identityRef: ID_A, state: 'open', availableSlots: 2, observedAt: OBSERVED_AT,
+      })).toBe(true);
+      // This slice does not widen the V1 observation protocol.
+      expect(book.recordObservation({
+        identityRef: ID_A, state: 'open', availableSlots: 33, observedAt: OBSERVED_AT,
+      })).toBe(false);
+      const observed = buildExecutionIdentityShadowStatusV1(cfg, {
+        privateStorePath: f.storePath, resourceBook: book, now: NOW, work,
+      });
+      expect(observed.identities[0]).toMatchObject({ maxConcurrent, trustedSlots: 2 });
+      expect(observed.assignments).toHaveLength(2);
+      expect(observed.unassigned).toHaveLength(1);
+      expect(observed).toMatchObject({
+        authority: 'shadow-only', executionAuthority: false,
+        proposalAuthority: false, routingMutation: false,
+      });
+    },
+  );
+
+  it('retains a lower explicit preference despite greater observed capacity', () => {
+    const f = fixture();
+    const cfg = config([{
+      ref: ID_A, engine: 'codex', privateRuntimeLocatorRef: LOCATOR_A,
+      plan: { kind: 'subscription', class: 'codex-max', maxConcurrent: 1 },
+    }]);
+    const book = new ExecutionIdentityResourceBookV1(cfg, { privateStorePath: f.storePath });
+    expect(book.recordObservation({
+      identityRef: ID_A, state: 'open', availableSlots: 2, observedAt: OBSERVED_AT,
+    })).toBe(true);
+    const observed = buildExecutionIdentityShadowStatusV1(cfg, {
+      privateStorePath: f.storePath, resourceBook: book, now: NOW,
+      work: [{ id: 'one', engine: 'codex' }, { id: 'two', engine: 'codex' }],
+    });
+    expect(observed.identities[0]).toMatchObject({ maxConcurrent: 1, trustedSlots: 1 });
+    expect(observed.assignments).toHaveLength(1);
+    expect(observed.unassigned).toHaveLength(1);
+  });
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity])(
+    'refuses malformed positive-plan preference %s', (maxConcurrent) => {
+      const f = fixture();
+      const status = buildExecutionIdentityShadowStatusV1(config([{
+        ref: ID_A, engine: 'codex', privateRuntimeLocatorRef: LOCATOR_A,
+        plan: { kind: 'subscription', class: 'codex-max', maxConcurrent },
+      }]), { privateStorePath: f.storePath, now: NOW, work: [{ id: 'held', engine: 'codex' }] });
+      expect(status.sourceState).toBe('degraded');
+      expect(status.assignments).toHaveLength(0);
+    },
+  );
+
+  it('round-trips safe preferences for each positive plan and retains reserved zero', async () => {
+    const f = fixture();
+    vi.resetModules();
+    vi.doMock('node:os', async () => ({
+      ...await vi.importActual<typeof import('node:os')>('node:os'), homedir: () => f.root,
+    }));
+    try {
+      const { loadConfigReadOnly, saveConfig } = await import('../src/core/config.js');
+      const plans: ExecutionIdentityPlanV1[] = [
+        { kind: 'subscription', class: 'codex-max', maxConcurrent: 33 },
+        { kind: 'subscription', class: 'codex-custom', maxConcurrent: 64 },
+        { kind: 'agent-credit', class: 'claude-agent-sdk-credit', maxConcurrent: Number.MAX_SAFE_INTEGER },
+        { kind: 'local', class: 'local-runtime', maxConcurrent: 64 },
+        { kind: 'metered', class: 'api-metered', maxConcurrent: 64 },
+        { kind: 'interactive-reserved', class: 'claude-max', maxConcurrent: 0 },
+      ];
+      const engines: EngineId[] = ['codex', 'codex', 'claude', 'local-coder', 'grok', 'claude'];
+      for (const [index, plan] of plans.entries()) {
+        const engine = engines[index]!;
+        const cfg = config([{ ref: ID_A, engine, privateRuntimeLocatorRef: LOCATOR_A, plan }], [engine]);
+        saveConfig(cfg);
+        expect(loadConfigReadOnly().foundry?.executionIdentityV1?.identities?.[0]?.plan).toEqual(plan);
+      }
+      for (const maxConcurrent of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+        saveConfig(config([{
+          ref: ID_A, engine: 'codex', privateRuntimeLocatorRef: LOCATOR_A,
+          plan: { kind: 'subscription', class: 'codex-max', maxConcurrent },
+        }]));
+        expect(loadConfigReadOnly().foundry?.executionIdentityV1).toEqual({ enabled: true, shadowOnly: true });
+      }
+    } finally {
+      vi.doUnmock('node:os');
+      vi.resetModules();
+    }
+  });
+
   it('resolves two Codex identities to distinct private homes but publishes digests only', () => {
     const f = fixture();
     const cfg = codexConfig();

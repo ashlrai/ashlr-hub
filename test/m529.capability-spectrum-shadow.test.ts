@@ -112,6 +112,63 @@ function resign(value: ReturnType<typeof spectrum>): ReturnType<typeof spectrum>
 }
 
 describe('M529 Capability Spectrum shadow projection', () => {
+
+  it.each([33, 64, Number.MAX_SAFE_INTEGER])(
+    'verifies model preference %s while allocating only observed slots', (maxConcurrent) => {
+      const lanes = [1, 2, 3].map((rank) => lane(digest(`preference-lane-${rank}`), rank, [
+        { kind: 'model', classDigest: MODEL_CLASS, units: 1 },
+      ]));
+      const output = spectrum(input({
+        executionIdentityResources: [{ resource: identity({ maxConcurrent }) }], lanes,
+      }));
+      expect(output.inventory.find((row) => row.kind === 'model'))
+        .toMatchObject({ maxUnits: maxConcurrent, trustedUnits: 2 });
+      expect(output.lanes.filter((row) => row.state === 'ready')).toHaveLength(2);
+      expect(output.lanes.filter((row) => row.state === 'degraded')).toHaveLength(1);
+      expect(verifyCapabilitySpectrumShadowV1(output)).toEqual(output);
+      expect(output).toMatchObject({
+        authority: 'observation-only', executionAuthority: false,
+        routingAuthority: false, reservationAuthority: false, budgetAuthority: false, mutationAuthority: false,
+      });
+      const unknown = spectrum(input({
+        executionIdentityResources: [{ resource: identity({
+          maxConcurrent, trustedSlots: 0, state: 'unknown', observedAt: null, reason: 'observation-missing',
+        }) }], lanes,
+      }));
+      expect(unknown.lanes.filter((row) => row.state === 'ready')).toHaveLength(0);
+      expect(verifyCapabilitySpectrumShadowV1(unknown)).toEqual(unknown);
+    },
+  );
+
+  it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity])(
+    'quarantines malformed preference %s instead of manufacturing capacity', (maxConcurrent) => {
+      const output = spectrum(input({
+        executionIdentityResources: [{ resource: identity({ maxConcurrent }) }],
+      }));
+      expect(output.quarantine.invalidIdentityResources).toBe(1);
+      expect(output.inventory.filter((row) => row.kind === 'model')).toHaveLength(0);
+      expect(output.lanes.filter((row) => row.state === 'ready')).toHaveLength(0);
+      expect(verifyCapabilitySpectrumShadowV1(output)).toEqual(output);
+    },
+  );
+
+  it('keeps local-unit and measured-slot protocols bounded despite a large model preference', () => {
+    const output = spectrum(input({
+      executionIdentityResources: [{ resource: identity({ maxConcurrent: 64 }) }],
+    }));
+    const oversizedLocal = resign({
+      ...output,
+      inventory: output.inventory.map((row) => row.kind === 'compute'
+        ? { ...row, maxUnits: Number.MAX_SAFE_INTEGER } : row),
+    });
+    expect(verifyCapabilitySpectrumShadowV1(oversizedLocal)).toBeNull();
+    const oversizedObservation = spectrum(input({
+      executionIdentityResources: [{ resource: identity({ maxConcurrent: 64, trustedSlots: 33 }) }],
+    }));
+    expect(oversizedObservation.quarantine.invalidIdentityResources).toBe(1);
+    expect(oversizedObservation.lanes.filter((row) => row.state === 'ready')).toHaveLength(0);
+  });
+
   it('is deterministic across input order and spends earliest-reset capacity first', () => {
     const secondIdentity = identity({ executionIdentityDigest: digest('5'), trustedSlots: 1, maxConcurrent: 1 });
     const first = spectrum(input({
