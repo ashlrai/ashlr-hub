@@ -18,6 +18,7 @@ public enum CustodyCommand: Equatable, Sendable {
   case signGrant(path: String?)
   case storeGithubApp
   case storeClaudeToken
+  case reauthorize(account: ReauthorizationAccount)
   case ghToken(repo: String)
   case claudeToken
   case help
@@ -67,8 +68,8 @@ public struct CustodyFailure: Error, Equatable, CustomStringConvertible {
 }
 
 public enum CustodyCLI {
-  // 1.1.0 (3.15): `status` reports `grantEngines`; grants may name `devin`.
-  public static let version = "1.1.0"
+  // 1.2.0: operator-only existing-item Keychain ACL reauthorization.
+  public static let version = "1.2.0"
 
   public static let usageText = """
   usage: ashlr-custody <command>
@@ -81,6 +82,7 @@ public enum CustodyCLI {
     sign-grant <file|->        sign a StandingGrantV1 payload (Touch ID; shows the full scope)
     store-github-app           read {"appId","privateKeyPem"} on stdin into the Keychain
     store-claude-token         read a `claude setup-token` token on stdin into the Keychain
+    reauthorize <account>      refresh ONE existing item's helper trust (github-app|claude-token; human Terminal)
     gh-token --repo <o/name>   mint a 1-hour GitHub App token for ONE repo
     claude-token               print the stored Claude token (restricted judge calls only)
   """
@@ -101,6 +103,11 @@ public enum CustodyCLI {
     case "store-github-app": return try noArgs(.storeGithubApp)
     case "store-claude-token": return try noArgs(.storeClaudeToken)
     case "claude-token": return try noArgs(.claudeToken)
+    case "reauthorize":
+      guard rest.count == 1, let account = ReauthorizationAccount(rawValue: rest[0]) else {
+        throw CustodyFailure.usage("reauthorize takes exactly one account: github-app or claude-token")
+      }
+      return .reauthorize(account: account)
     case "init":
       if rest.isEmpty { return .initKey(rotate: false) }
       if rest == ["--rotate"] { return .initKey(rotate: true) }

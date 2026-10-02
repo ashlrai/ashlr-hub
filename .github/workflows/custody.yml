@@ -1,0 +1,40 @@
+name: Custody helper
+
+on:
+  pull_request:
+    paths:
+      - 'tools/custody/**'
+      - 'scripts/install-custody.sh'
+      - '.github/workflows/custody.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'tools/custody/**'
+      - 'scripts/install-custody.sh'
+      - '.github/workflows/custody.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: custody-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: Custody (macOS, Swift)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test custody contracts without hardware or credentials
+        run: swift test --package-path tools/custody
+      - name: Compile the macOS security adapters
+        run: swift build -c release --package-path tools/custody
+      - name: Check installer syntax
+        run: bash -n scripts/install-custody.sh
+
+# These checks compile the OS adapters and exercise injected contract tests.
+# They never install the helper, authenticate a person, read Keychain secrets,
+# or activate a grant. Real device acceptance remains a separate operator step.
