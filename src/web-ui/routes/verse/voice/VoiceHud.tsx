@@ -25,6 +25,7 @@ import {
   type VoiceSnapshot,
 } from './voice-store.js';
 import type { FixAction } from './voice-bridge.js';
+import { usedPercentText } from '../percent-text.js';
 import { MicIcon, readableVoiceAccelerator } from './VoiceInput.js';
 import { Waveform } from './Waveform.js';
 import styles from './VoiceInput.module.css';
@@ -79,8 +80,9 @@ function modelLine(voice: VoiceSnapshot): { text: string; progress: number | nul
   const name = engine.id === 'whisper' ? 'Whisper' : 'Parakeet';
   switch (engine.model) {
     case 'downloading': {
-      const pct = Math.round((engine.progress ?? 0) * 100);
-      return { text: `Downloading ${name} · ${pct}% of ${formatBytes(engine.totalBytes)} (once)`, progress: engine.progress ?? 0, cancellable: true };
+      // One percent rule: a download at 99.6% is not done, so it must not read "100%".
+      const pct = usedPercentText((engine.progress ?? 0) * 100);
+      return { text: `Downloading ${name} · ${pct} of ${formatBytes(engine.totalBytes)} (once)`, progress: engine.progress ?? 0, cancellable: true };
     }
     case 'verifying':
       return { text: `Verifying ${name}…`, progress: engine.progress, cancellable: false };

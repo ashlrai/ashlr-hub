@@ -16,6 +16,7 @@ import { useSeatsRefresh } from '../../useSeatsRefresh.js';
 import { verseBootstrapQuery } from '../../verse-bootstrap-query.js';
 import type { VerseSeat } from '../../../../data/api-types.js';
 import { SkeletonList } from '../ui.js';
+import { usedPercentText } from '../../percent-text.js';
 import { Meter, Section, ui } from '../ui-parts.js';
 import styles from './HomeScreen.module.css';
 
@@ -29,7 +30,7 @@ export function orderSeats(seats: readonly VerseSeat[]): VerseSeat[] {
   return [...seats].sort((a, b) => rank(a) - rank(b) || a.label.localeCompare(b.label));
 }
 
-function SeatMeter({ seat }: { seat: VerseSeat }) {
+export function SeatMeter({ seat }: { seat: VerseSeat }) {
   const view = seatSubscription(seat);
   if (view.kind === 'local') {
     return <Meter label={seat.label} percent={null} valueText={view.word} note={view.summary} />;
@@ -39,7 +40,9 @@ function SeatMeter({ seat }: { seat: VerseSeat }) {
     ? view.word
     : binding.limitReached
       ? 'limit reached'
-      : binding.usedPercent === null ? 'unknown' : `${Math.round(binding.usedPercent)}% used`;
+      // One percent rule: rounding alone printed a 99.6% window as "100% used"
+      // although limitReached (the real "spent" signal) is false here.
+      : binding.usedPercent === null ? 'unknown' : `${usedPercentText(binding.usedPercent)} used`;
   const noteParts = [binding ? `${binding.label} window` : null, binding?.resetText ? `resets ${binding.resetText}` : null, view.credits].filter(Boolean);
   return (
     <Meter
