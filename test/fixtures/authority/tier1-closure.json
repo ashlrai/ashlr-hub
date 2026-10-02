@@ -224,6 +224,7 @@
     "src/core/devin/cli-probe.ts",
     "src/core/devin/cli-prs.ts",
     "src/core/devin/client.ts",
+    "src/core/devin/create-recovery.ts",
     "src/core/devin/delivery-contract.ts",
     "src/core/devin/devin-api.ts",
     "src/core/devin/fleet-launcher.ts",
