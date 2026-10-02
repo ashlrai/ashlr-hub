@@ -7,7 +7,7 @@
  * token asks for it first, and a surface that cannot act says why.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { evictAll, invalidate } from '../../../data/cache.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { CommandSection } from '../sections/CommandSection.js';
@@ -18,7 +18,7 @@ import { mockWideViewport, type ViewportMock } from '../shell/viewport.test-supp
 import { getVerseUiState, resetVerseUi, setVerseSection } from '../verse-ui-store.js';
 import { stubSurfaceFetch } from './fetch-stub.test-support.js';
 import { GrantScopeEditor } from './GrantScopeEditor.js';
-import { GrantSheet } from './GrantSheet.js';
+import { DraftScope, GrantSheet } from './GrantSheet.js';
 import type { EditableGrantDraft } from './GrantScopeEditor.js';
 import type { SurfaceActions } from './actions.js';
 import { SURFACE_KEYS } from './surface-data.js';
@@ -278,11 +278,12 @@ describe('explicit signed account policies', () => {
 describe('grant approval requires the current preview', () => {
   function setup() {
     setMutationToken(TOKEN);
-    const initial: EditableGrantDraft = { ...grantDraft(), kind: 'new', eliteDirect: false, digest: 'a'.repeat(64), editable: { repos: grantDraft().payload.repos.map((r) => r.nameWithOwner), engines: [...grantDraft().payload.engines], leaderClasses: ['A', 'B'], maxDays: 30, seatPolicies: { 'claude-a': { roles: ['producer', 'judge', 'leader'] } } } };
+    const initial: EditableGrantDraft = { ...grantDraft(), kind: 'new', eliteDirect: false, digest: 'a'.repeat(64), editable: { repos: grantDraft().payload.repos.map((r) => r.nameWithOwner), engines: [...grantDraft().payload.engines], leaderClasses: ['A', 'B'], maxDays: 30, volumeLimits: true, seatPolicies: { 'claude-a': { roles: ['producer', 'judge', 'leader'] } } } };
     let source = initial;
     const pending: ((response: Response) => void)[] = [];
-    const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
       if (init?.method === 'POST') return await new Promise<Response>((resolve) => pending.push(resolve));
+      if (String(input).includes('eliteDirect=1')) return json({ ...source, eliteDirect: true, digest: 'f'.repeat(64) });
       return json(source);
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -354,5 +355,143 @@ describe('grant approval requires the current preview', () => {
     await waitFor(() => expect(approve).toBeDisabled());
     expect(screen.getByLabelText('claude-a: reserve for you (%)')).toHaveValue(25);
     expect(h.approve).not.toHaveBeenCalled();
+  });
+  it('keeps unpreviewed choices and explicit field flags across Hide/Open', async () => {
+    const h = setup();
+    const approve = await screen.findByRole('button', { name: 'Approve with Touch ID' });
+    await waitFor(() => expect(approve).toBeEnabled());
+    fireEvent.change(screen.getByLabelText('claude-a: reserve for you (%)'), { target: { value: '0' } });
+    fireEvent.click(screen.getByRole('checkbox', { name: 'No volume cap: Files per change' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Hide the scope editor' }));
+    expect(screen.queryByRole('button', { name: 'Preview the changes' })).not.toBeInTheDocument();
+    expect(approve).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit scope' }));
+    expect(screen.getByLabelText('claude-a: reserve for you (%)')).toHaveValue(0);
+    expect(screen.getByRole('checkbox', { name: 'No volume cap: Files per change' })).toBeChecked();
+    expect(approve).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the changes' }));
+    await waitFor(() => expect(h.pending).toHaveLength(1));
+    const posted = h.fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')?.[1];
+    expect(JSON.parse(posted!.body as string).scope).toMatchObject({ maxFiles: Number.MAX_SAFE_INTEGER, seatPolicies: { 'claude-a': { reserveFloorPercent: 0 } } });
+    await act(async () => h.pending[0]!(json(h.edited(0, 'b'))));
+  });
+  it('keeps reviewed local engines, uncapped volumes and disabled accounts when reopened and edited', async () => {
+    const h = setup();
+    const approve = await screen.findByRole('button', { name: 'Approve with Touch ID' });
+    await waitFor(() => expect(approve).toBeEnabled());
+    for (const engine of ['Grok (grok-cli)', 'Claude Code (claude-cli)', 'Codex']) fireEvent.click(screen.getByRole('checkbox', { name: engine }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'No volume cap: Files per change' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'No volume cap: Lines per change' }));
+    for (const repo of h.initial.payload.repos) fireEvent.click(screen.getByRole('checkbox', { name: `No volume cap: ${repo.nameWithOwner} merges/day` }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Permit autonomy on claude-a' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the changes' }));
+    await waitFor(() => expect(h.pending).toHaveLength(1));
+    const accepted = h.edited(40, 'b');
+    accepted.payload.engines = ['local'];
+    accepted.payload.merge.maxFiles = Number.MAX_SAFE_INTEGER;
+    accepted.payload.merge.maxLines = Number.MAX_SAFE_INTEGER;
+    accepted.payload.spend.seats['claude-a']!.enabled = false;
+    await act(async () => h.pending[0]!(json(accepted)));
+    await waitFor(() => expect(approve).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Hide the scope editor' }));
+    expect(approve).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit scope' }));
+    expect(screen.getByRole('checkbox', { name: 'Codex' })).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Permit autonomy on claude-a' })).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'No volume cap: Lines per change' })).toBeChecked();
+    fireEvent.change(screen.getByLabelText('Valid for (days, at most 30)'), { target: { value: '7' } });
+    expect(approve).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the changes' }));
+    await waitFor(() => expect(h.pending).toHaveLength(2));
+    const posted = h.fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')[1]![1];
+    expect(JSON.parse(posted!.body as string).scope).toMatchObject({ engines: ['local'], days: 7, maxFiles: Number.MAX_SAFE_INTEGER, maxLines: Number.MAX_SAFE_INTEGER, repoMaxMergesPerDay: Object.fromEntries(h.initial.payload.repos.map((repo) => [repo.nameWithOwner, Number.MAX_SAFE_INTEGER])), seatPolicies: { 'claude-a': { enabled: false } } });
+    await act(async () => h.pending[1]!(json({ ...accepted, digest: 'c'.repeat(64) })));
+    await waitFor(() => expect(approve).toBeEnabled());
+    fireEvent.click(approve);
+    expect(h.approve).toHaveBeenCalledWith(expect.objectContaining({ digest: 'c'.repeat(64) }));
+  });
+  it('retains choices when the source changes while hidden, but requires a fresh preview', async () => {
+    const h = setup();
+    const approve = await screen.findByRole('button', { name: 'Approve with Touch ID' });
+    await waitFor(() => expect(approve).toBeEnabled());
+    fireEvent.change(screen.getByLabelText('claude-a: reserve for you (%)'), { target: { value: '25' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the changes' }));
+    await waitFor(() => expect(h.pending).toHaveLength(1));
+    await act(async () => h.pending[0]!(json(h.edited(25, 'b'))));
+    await waitFor(() => expect(approve).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Hide the scope editor' }));
+    await act(async () => h.refresh({ ...h.initial, digest: 'd'.repeat(64) }));
+    await screen.findByText(/The grant source changed/);
+    expect(approve).toBeDisabled();
+    expect(screen.queryByText('Showing your edited draft.')).not.toBeInTheDocument();
+    fireEvent.click(approve);
+    expect(h.approve).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit scope' }));
+    expect(screen.getByLabelText('claude-a: reserve for you (%)')).toHaveValue(25);
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the changes' }));
+    await waitFor(() => expect(h.pending).toHaveLength(2));
+    await act(async () => h.pending[1]!(json(h.edited(25, 'e'))));
+    await waitFor(() => expect(approve).toBeEnabled());
+    expect(screen.queryByText(/The grant source changed/)).not.toBeInTheDocument();
+  });
+  it('explicit Reset clears retained choices and edited-field flags after Hide/Open', async () => {
+    const h = setup();
+    const approve = await screen.findByRole('button', { name: 'Approve with Touch ID' });
+    await waitFor(() => expect(approve).toBeEnabled());
+    fireEvent.click(screen.getByRole('checkbox', { name: 'No volume cap: Files per change' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Permit autonomy on claude-a' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Hide the scope editor' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit scope' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the default draft' }));
+    expect(screen.getByRole('checkbox', { name: 'No volume cap: Files per change' })).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Permit autonomy on claude-a' })).toBeChecked();
+    expect(approve).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the changes' }));
+    await waitFor(() => expect(h.pending).toHaveLength(1));
+    const posted = h.fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')?.[1];
+    const scope = JSON.parse(posted!.body as string).scope;
+    expect(scope).not.toHaveProperty('maxFiles');
+    expect(scope).not.toHaveProperty('seatPolicies');
+    await act(async () => h.pending[0]!(json(h.edited(40, 'b'))));
+  });
+  it('changing the ladder resets choices retained by the collapsed editor', async () => {
+    const h = setup();
+    const approve = await screen.findByRole('button', { name: 'Approve with Touch ID' });
+    await waitFor(() => expect(approve).toBeEnabled());
+    fireEvent.change(screen.getByLabelText('claude-a: reserve for you (%)'), { target: { value: '0' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the changes' }));
+    await waitFor(() => expect(h.pending).toHaveLength(1));
+    expect(screen.getByRole('checkbox', { name: 'Elite direct' })).toBeDisabled();
+    await act(async () => h.pending[0]!(json(h.edited(0, 'b'))));
+    await waitFor(() => expect(approve).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Hide the scope editor' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Elite direct' }));
+    await waitFor(() => expect(approve).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Edit scope' }));
+    expect(screen.getByLabelText('claude-a: reserve for you (%)')).toHaveValue(40);
+    fireEvent.click(approve);
+    expect(h.approve).toHaveBeenCalledWith(expect.objectContaining({ digest: 'f'.repeat(64), eliteDirect: true }));
+  });
+});
+
+describe('grant review shows starting-stage Leader permission', () => {
+  it('shows advisory work when top-level A/B is unavailable in the elite stage', () => {
+    const d = grantDraft();
+    d.payload.leader.classes = ['A', 'B'];
+    d.payload.rollout.stages = [{ ...d.payload.rollout.stages[0]!, id: 'elite-direct', leaderClasses: [] }];
+    render(<DraftScope draft={d} />);
+    const leader = within(screen.getByRole('region', { name: 'Engines and Leader' }));
+    expect(leader.getByText(/Signed Leader ceiling: A \+ B/)).toBeInTheDocument();
+    expect(leader.getByText('Leader remains advisory in the starting stage.')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Rollout ladder' })).toHaveTextContent('Leader advisory only');
+  });
+  it('shows only the intersection, with autonomy required before actions', () => {
+    const d = grantDraft();
+    d.payload.leader.classes = ['A'];
+    d.payload.rollout.stages[0]!.leaderClasses = ['A', 'B'];
+    render(<DraftScope draft={d} />);
+    expect(screen.getByText('Starting stage permits Leader classes A when autonomy is active.')).toBeInTheDocument();
+    expect(screen.queryByText(/Starting stage permits Leader classes A \+ B/)).not.toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Rollout ladder' })).not.toHaveTextContent('Leader classes A + B');
   });
 });
