@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Ashlr",
-  "version": "3.22.0",
+  "version": "3.22.1",
   "identifier": "ai.ashlr.desktop",
 
   "build": {
@@ -24,7 +24,7 @@
         "resizable": true,
         "fullscreen": false,
         "center": false,
-        "url": "http://127.0.0.1:7777/verse/?v=3.22.0",
+        "url": "http://127.0.0.1:7777/verse/?v=3.22.1",
         "visible": false,
         "create": false,
         "titleBarStyle": "Overlay",

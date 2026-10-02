@@ -8,12 +8,16 @@
  * shown under the same header as a running turn's work. Each of those reads
  * as a fact and is not one.
  */
-import { describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { FleetPanel } from './FleetPanel.js';
 import { LocalOnlyPanel } from './LocalOnlyPanel.js';
 import { LocalRuntimePanel } from './LocalRuntimePanel.js';
+import { GoalsBacklogPanel } from './GoalsBacklogPanel.js';
+import { evictAll, runQuery } from '../../../data/cache.js';
+import type { GoalSummary } from '../../../data/queries.js';
+import type { VerseBacklogSummary } from './control-queries.js';
 import type {
   FleetAgent,
   FleetSnapshot,
@@ -160,6 +164,108 @@ describe('LocalRuntimePanel', () => {
     expect(screen.getByText(/Every local agent turn in flight/)).toBeInTheDocument();
     // Not sent until the confirm is pressed.
     expect(g.request).not.toHaveBeenCalled();
+  });
+});
+
+describe('GoalsBacklogPanel disclosures', () => {
+  beforeEach(() => evictAll());
+  afterEach(() => { evictAll(); vi.unstubAllGlobals(); });
+
+  function goal(id: number, status = 'active'): GoalSummary {
+    return { id: `g${id}`, objective: `Goal ${id}`, status, milestones: [],
+      progress: { fractionDone: 0.5, counts: {}, nextActionableId: null } };
+  }
+
+  async function seed(goals: GoalSummary[], backlog: VerseBacklogSummary = { items: [], absent: false }) {
+    await runQuery('goals', async () => goals);
+    await runQuery('backlog', async () => backlog);
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    return fetcher;
+  }
+
+  it('expands every open goal, counts statuses accurately and preserves source order and records', async () => {
+    const user = userEvent.setup();
+    const goals = [...Array.from({ length: 21 }, (_, i) => goal(i + 1)),
+      goal(22, 'paused'), goal(23, 'paused'), goal(24, 'planning'), goal(25, 'done'), goal(26, 'archived')];
+    const original = JSON.stringify(goals);
+    const fetcher = await seed(goals);
+    render(<GoalsBacklogPanel />);
+    expect(screen.getByText('21 active · 2 paused · 1 planning')).toBeInTheDocument();
+    expect(screen.queryByText('Goal 9')).not.toBeInTheDocument();
+    const expand = screen.getByRole('button', { name: 'Expand all goals (24)' });
+    expect(expand).toHaveAttribute('aria-expanded', 'false');
+    const list = document.getElementById(expand.getAttribute('aria-controls')!)!;
+    expect(list.children).toHaveLength(8);
+    expand.focus();
+    await user.keyboard('{Enter}');
+    const collapse = screen.getByRole('button', { name: 'Collapse goals' });
+    expect(collapse).toHaveFocus();
+    expect(collapse).toHaveAttribute('aria-expanded', 'true');
+    expect(list.children).toHaveLength(24);
+    expect([...list.children].map((row) => row.querySelector('[title]')?.textContent)).toEqual(goals.slice(0, 24).map((g) => g.objective));
+    expect(screen.getAllByText('50% · paused')).toHaveLength(2);
+    expect(screen.getByText('50% · planning')).toBeInTheDocument();
+    expect(screen.queryByText('Goal 25')).not.toBeInTheDocument();
+    expect(screen.queryByText('Goal 26')).not.toBeInTheDocument();
+    await user.keyboard(' ');
+    expect(expand).toHaveAttribute('aria-expanded', 'false');
+    expect(list.children).toHaveLength(8);
+    expect(JSON.stringify(goals)).toBe(original);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('expands and collapses backlog independently, retaining the full queue order', async () => {
+    const user = userEvent.setup();
+    const items = Array.from({ length: 12 }, (_, i) => ({ id: `b${i}`, title: `Task ${i}`, repo: '/demo/hub', score: i }));
+    const fetcher = await seed(Array.from({ length: 10 }, (_, i) => goal(i)), { items, absent: false });
+    render(<GoalsBacklogPanel />);
+    await user.click(screen.getByRole('button', { name: 'Expand all backlog items (12)' }));
+    const collapse = screen.getByRole('button', { name: 'Collapse backlog' });
+    const list = document.getElementById(collapse.getAttribute('aria-controls')!)!;
+    expect(list.children).toHaveLength(12);
+    expect([...list.children].map((row) => row.querySelector('[title]')?.textContent)).toEqual(items.map((item) => item.title));
+    expect(screen.getByRole('button', { name: 'Expand all goals (10)' })).toHaveAttribute('aria-expanded', 'false');
+    await user.click(collapse);
+    expect(list.children).toHaveLength(8);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('keeps expansion across read updates without selecting or rewriting a goal', async () => {
+    const user = userEvent.setup();
+    await seed(Array.from({ length: 9 }, (_, i) => goal(i)));
+    render(<GoalsBacklogPanel />);
+    await user.click(screen.getByRole('button', { name: 'Expand all goals (9)' }));
+    await act(async () => { await runQuery('goals', async () => [...Array.from({ length: 9 }, (_, i) => goal(i)), goal(9, 'paused')]); });
+    expect(screen.getByText('9 active · 1 paused · 0 planning')).toBeInTheDocument();
+    expect(screen.getByText('Goal 9')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Collapse goals' })).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('shows no expansion control for eight rows and retains absent-backlog guidance', async () => {
+    await seed(Array.from({ length: 8 }, (_, i) => goal(i)), { items: [], absent: true });
+    render(<GoalsBacklogPanel />);
+    expect(screen.queryByRole('button', { name: /Expand all|Collapse/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/No backlog has been built yet/)).toBeInTheDocument();
+    expect(screen.queryByText(/The backlog is empty/)).not.toBeInTheDocument();
+  });
+
+  it('does not present failed reads as zero goals or an empty queue', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      throw new Error(input.toString() === '/api/goals' ? 'Goal source unavailable' : 'Backlog source unavailable');
+    }));
+    render(<GoalsBacklogPanel />);
+    expect(await screen.findByText('Goal source unavailable')).toHaveAttribute('role', 'alert');
+    expect(await screen.findByText('Backlog source unavailable')).toHaveAttribute('role', 'alert');
+    expect(screen.queryByText(/0 active|No active goals|The backlog is empty/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Expand all|Collapse/ })).not.toBeInTheDocument();
+  });
+
+  it('does not infer empty goals or backlog while their first reads are pending', () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})));
+    render(<GoalsBacklogPanel />);
+    expect(screen.queryByText(/0 active|No active goals|The backlog is empty|No backlog has been built/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Expand all|Collapse/ })).not.toBeInTheDocument();
   });
 });
 

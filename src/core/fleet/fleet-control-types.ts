@@ -21,7 +21,7 @@ export const VERSE_FLEET_CONTROL_QUEUE_PATH = `${VERSE_FLEET_CONTROL_PATH}/queue
 export const VERSE_FLEET_CONTROL_RUNS_PREFIX = `${VERSE_FLEET_CONTROL_PATH}/runs/`;
 
 /**
- * - `running` — agents are working now.
+ * - `running` — agents are working, or the daemon is preparing an active tick.
  * - `idle`    — the fleet is on and healthy, nothing to do this minute.
  * - `paused`  — dispatch paused (in-flight runs finish; nothing new starts).
  * - `stopped` — Stop is engaged (every run was halted; nothing runs).
@@ -65,6 +65,15 @@ export interface FleetControlAvailability {
 export type FleetDaemonServiceState = 'running' | 'loaded' | 'not-loaded' | 'absent' | 'unknown';
 export type FleetPlistState = 'current' | 'drifted' | 'absent' | 'unknown';
 export type FleetLivenessState = 'alive' | 'stale' | 'stopped' | 'unknown';
+
+/** Observational only: the current daemon generation's open tick, never agent occupancy. */
+export interface FleetControlTickProgress {
+  phase: string;
+  detail: string | null;
+  tickStartedAt: string;
+  phaseStartedAt: string;
+  summary: string;
+}
 
 export interface FleetControlGrantView {
   state: GrantState;
@@ -110,6 +119,8 @@ export interface FleetControlStateV1 {
     plist: FleetPlistState;
     /** One sentence. */
     reason: string;
+    /** Additive: absent on older servers or when no current open tick can be proven. */
+    tickProgress?: FleetControlTickProgress | null;
   };
   kill: boolean;
   paused: boolean;

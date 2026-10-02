@@ -13,6 +13,7 @@ import type {
   FleetControlGrantView,
   FleetControlStateKind,
   FleetControlStateV1,
+  FleetControlTickProgress,
   FleetDaemonServiceState,
   FleetLivenessState,
   FleetNextAction,
@@ -28,7 +29,7 @@ export interface FleetControlInputs {
   kill: boolean;
   paused: boolean;
   pausedAt: string | null;
-  liveness: { state: FleetLivenessState; pid: number | null; lastTickAt: string | null; reason: string };
+  liveness: { state: FleetLivenessState; pid: number | null; lastTickAt: string | null; reason: string; tickProgress?: FleetControlTickProgress | null };
   service: FleetDaemonServiceState;
   plist: FleetPlistState;
   working: number | null;
@@ -125,6 +126,9 @@ export function fleetControlVerdict(inputs: FleetControlInputs): Verdict {
     ? { reason: 'the daemon runs an older plist than your config (budget or interval changed)', action: FLEET_ACTIONS.residentRestart }
     : null;
   if (working !== null && working > 0) return { state: 'running', headline: `${mode} · ${agents}${stage}`, blocker: drift };
+  if (inputs.liveness.state === 'alive' && inputs.liveness.pid !== null && inputs.liveness.tickProgress) {
+    return { state: 'running', headline: `${mode} · preparing work: ${inputs.liveness.tickProgress.phase}${stage}`, blocker: drift };
+  }
   return { state: 'idle', headline: `${mode === 'Running' ? 'Idle' : 'Proposing'} · on, waiting for work${stage}`, blocker: drift };
 }
 
@@ -179,6 +183,8 @@ export function buildFleetControlState(inputs: FleetControlInputs): FleetControl
       service: inputs.service,
       plist: inputs.plist,
       reason: inputs.liveness.reason,
+      ...(inputs.liveness.tickProgress && inputs.liveness.state === 'alive' && inputs.liveness.pid !== null
+        ? { tickProgress: inputs.liveness.tickProgress } : {}),
     },
     kill: inputs.kill,
     paused: inputs.paused,

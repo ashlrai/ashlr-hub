@@ -101,6 +101,7 @@
     "src/cli/daemon.ts",
     "src/cli/open.ts",
     "src/cli/ui.ts",
+    "src/cli/verify-safety-sources.ts",
     "src/cli/verify-safety.ts",
     "src/core/authority/canonical-json.ts",
     "src/core/authority/capability.ts",

@@ -42,6 +42,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
+import { embeddedSafetySourceReader, VERIFY_SAFETY_SOURCE_SYMBOL } from './verify-safety-sources.js';
 
 // The REAL secret-scrub guard — imported (not copied) so CHECK 4 exercises the
 // actual redaction logic. This is a pure, local-only function (no network, no
@@ -82,6 +83,22 @@ function defaultReadCore(relFromCore: string): string {
     return readFileSync(base + selfExt, 'utf8');
   } catch {
     return readFileSync(base + otherExt, 'utf8');
+  }
+}
+
+/** Bun bundles module code, so its virtual filesystem has no raw sibling sources.
+ * The shim supplies the exact compiled texts from this artifact's own build.
+ * Capture and validate once per report; invalid embedded data stays a FAIL.
+ */
+function defaultSourceReader(): CoreSourceReader {
+  if (!Reflect.has(globalThis, VERIFY_SAFETY_SOURCE_SYMBOL)) return defaultReadCore;
+  try {
+    return embeddedSafetySourceReader(
+      Reflect.get(globalThis, VERIFY_SAFETY_SOURCE_SYMBOL),
+      Reflect.get(globalThis, Symbol.for('ashlr.build-identity.v1')),
+    );
+  } catch {
+    return () => { throw new Error('Native safety source snapshot is unavailable or invalid'); };
   }
 }
 
@@ -460,7 +477,7 @@ function checkProviderCloudGate(read: CoreSourceReader): SafetyCheck {
  *   build's own sibling source).
  */
 export function runSafetyChecks(opts?: RunSafetyOptions): SafetyReport {
-  const read = opts?.readSource ?? defaultReadCore;
+  const read = opts?.readSource ?? defaultSourceReader();
   const runners: (() => SafetyCheck)[] = [
     () => checkEnrollmentDefaultEmpty(),
     () => checkKillSwitchPrecedence(read),

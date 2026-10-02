@@ -49,6 +49,41 @@ async function control(): Promise<HTMLElement> {
 }
 
 describe('the header', () => {
+  it('shows preparation and the last completed tick while no agents are working', async () => {
+    const now = Date.now();
+    const preparing = fleetControl('live', now, { working: 0 });
+    preparing.state = 'running';
+    preparing.headline = 'Running · preparing work: selection and dispatch · stage shadow';
+    preparing.daemon.tickProgress = { phase: 'selection and dispatch', detail: null,
+      tickStartedAt: new Date(now - 60_000).toISOString(), phaseStartedAt: new Date(now - 30_000).toISOString(),
+      summary: 'tick in progress: selection and dispatch for 30s' };
+    preparing.daemon.lastTickAt = new Date(now - 2 * 86_400_000).toISOString();
+    stubSurfaceFetch({ kind: 'live', now, routes: { '/api/verse/fleet/control': preparing } });
+    render(<FleetSection />);
+    const region = await control();
+    expect(region).toHaveTextContent('preparing work: selection and dispatch');
+    expect(region).toHaveTextContent('none working');
+    expect(region).toHaveTextContent('tick in progress: selection and dispatch for 30s');
+    expect(region).toHaveTextContent('last completed');
+    expect(region).not.toHaveTextContent('waiting for work');
+    expect(region).not.toHaveTextContent('ticked');
+    expect(within(region).getByRole('button', { name: /^Start/ })).toBeDisabled();
+  });
+
+  it('does not display unconfirmed tick progress from a stale daemon', async () => {
+    const now = Date.now();
+    const stale = fleetControl('live', now, { working: 0 });
+    stale.daemon.liveness = 'stale';
+    stale.daemon.tickProgress = { phase: 'old preparation', detail: null,
+      tickStartedAt: new Date(now - 60_000).toISOString(), phaseStartedAt: new Date(now - 30_000).toISOString(),
+      summary: 'tick in progress: old preparation for 30s' };
+    stubSurfaceFetch({ kind: 'live', now, routes: { '/api/verse/fleet/control': stale } });
+    render(<FleetSection />);
+    const region = await control();
+    expect(region).not.toHaveTextContent('old preparation');
+    expect(region).not.toHaveTextContent('last completed');
+  });
+
   it('says what the fleet is doing, with the grant, spend, daemon and agents', async () => {
     stubSurfaceFetch({ kind: 'live' });
     render(<FleetSection />);

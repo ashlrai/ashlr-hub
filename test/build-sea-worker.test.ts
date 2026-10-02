@@ -1,3 +1,7 @@
+import { mkdtempSync, mkdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import {
   createSeaCompileArgs,
@@ -5,7 +9,50 @@ import {
   createSeaEngineeringWorkerShim,
   createSeaEngineeringReadWorkerShim,
   createSeaFleetHistoryWorkerShim,
+  createSeaShim, collectVerifySafetySources, VERIFY_SAFETY_SOURCE_KEYS,
 } from '../scripts/build-sea.mjs';
+import { embeddedSafetySourceReader, VERIFY_SAFETY_SOURCE_KEYS as runtimeKeys } from '../src/cli/verify-safety-sources.js';
+
+describe('native safety source packaging', () => {
+  it('roundtrips exactly the five build texts and binds them before the CLI boots', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-sea-safety-'));
+    const identity = JSON.stringify({ schemaVersion: 1, revision: 'a'.repeat(40) });
+    const texts = new Map<string, string>();
+    try {
+      expect(VERIFY_SAFETY_SOURCE_KEYS).toEqual(runtimeKeys);
+      for (const key of VERIFY_SAFETY_SOURCE_KEYS) {
+        const text = `// ${key}\nexport const literal = '<script>"\\\\\u2028\u2029';\n`;
+        texts.set(key, text);
+        const file = join(root, key + '.js');
+        mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file, text);
+      }
+      // A nearby unrelated source can never be included in the closed inventory.
+      writeFileSync(join(root, 'unrelated.js'), 'unrelated');
+      const raw = collectVerifySafetySources({ coreRoot: root, buildIdentityJson: identity });
+      const shim = createSeaShim({ pkgVersion: '3.22.0', buildIdentityJson: identity, verifySafetySourcesJson: raw });
+      expect(shim).not.toContain('<script>');
+      const context = { process: { argv: ['node', 'ashlr'], env: {}, execPath: '/owned/ashlr' }, Symbol,
+        booted: false, dirname };
+      const runnable = shim.replace("import { dirname } from 'node:path';", '')
+        .replace("await import('../scripts/scorecard-history-worker.mjs');", "throw new Error('unexpected helper');")
+        .replace("await import('../dist/cli/index.js');", 'booted = true;');
+      runInNewContext(runnable, context);
+      const embedded = runInNewContext("globalThis[Symbol.for('ashlr.verify-safety-sources.v1')]", context);
+      const embeddedIdentity = runInNewContext("globalThis[Symbol.for('ashlr.build-identity.v1')]", context);
+      expect(context.booted).toBe(true);
+      expect(embedded).toBe(raw);
+      expect(embeddedIdentity).toBe(identity);
+      const read = embeddedSafetySourceReader(embedded, embeddedIdentity);
+      for (const [key, text] of texts) expect(read(key)).toBe(text);
+      expect(() => read('unrelated')).toThrow();
+      unlinkSync(join(root, 'daemon', 'loop.js'));
+      expect(() => collectVerifySafetySources({ coreRoot: root, buildIdentityJson: identity })).toThrow();
+      writeFileSync(join(root, 'daemon', 'loop.js'), '');
+      expect(() => collectVerifySafetySources({ coreRoot: root, buildIdentityJson: identity })).toThrow('Empty native safety source');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
 
 describe('Bun sidecar read-worker packaging', () => {
   it('packages the independent journal reader with its trusted identity', () => {
