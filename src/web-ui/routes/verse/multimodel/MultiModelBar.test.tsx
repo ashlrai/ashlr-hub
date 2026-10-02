@@ -3,7 +3,7 @@
  * choice in one line (only after the privacy check answered), the local
  * badge, the override, and the send interceptor's promises — Auto off sends
  * here, staying sends here, and a once-per-send label that CHANGES the seat
- * holds the message and says so instead of sending it somewhere unseen.
+ * continues through the ordinary handoff flow without a second Send.
  */
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -14,7 +14,8 @@ import { evictAll } from '../../../data/cache.js';
 import { CLAUDE_SEAT, LOCAL_SEAT, session } from '../fixtures.test-support.js';
 import { resetVerseStore, seedVerseSession } from '../verse-store.js';
 import { MultiModelBar, resetPendingDraftsForTest, type SendInterceptor } from './MultiModelBar.js';
-import { saveAutoPref, toAdvisorSeats } from './useAutoSeat.js';
+import { saveAutoPref, loadAutoPref, toAdvisorSeats } from './useAutoSeat.js';
+import { DEFAULT_FLOW_API } from './multimodel-flows.js';
 
 const CONTEXT: MultimodelContext = {
   learned: {},
@@ -36,6 +37,22 @@ function stubFetch(context: MultimodelContext | null = CONTEXT) {
     if (url.includes('/api/verse/multimodel/meter')) return new Response('not found', { status: 404 });
     return new Response('not found', { status: 404 });
   }));
+}
+
+/** Exercise the real routeMessage composition with in-memory ordinary routes. */
+function stubFlow(seat = CLAUDE_SEAT) {
+  const created = session({ id: 'vs_auto', seatId: seat.id, engine: seat.engine, model: seat.models[0]!.id, turnCount: 0 });
+  return {
+    create: vi.spyOn(DEFAULT_FLOW_API, 'createSession').mockResolvedValue(created),
+    handoff: vi.spyOn(DEFAULT_FLOW_API, 'createHandoffSession').mockResolvedValue(created),
+    preview: vi.spyOn(DEFAULT_FLOW_API, 'fetchHandoffPreview').mockResolvedValue({
+      sourceSessionId: 'vs_1', sourceTitle: 'Existing chat', text: 'CONTEXT NOTE',
+      stats: { chars: 12, estTokens: 3, turnsCovered: 3, filesTouched: 2, truncated: [] },
+    }),
+    send: vi.spyOn(DEFAULT_FLOW_API, 'sendTurn').mockResolvedValue({}),
+    outcome: vi.spyOn(DEFAULT_FLOW_API, 'outcome').mockResolvedValue(true),
+    open: vi.spyOn(DEFAULT_FLOW_API, 'open').mockImplementation(() => {}),
+  };
 }
 
 function renderBar(text: string, turnCount = 0) {
@@ -89,8 +106,9 @@ describe('MultiModelBar', () => {
 
   const HARD: PromptClassification = { kind: 'plan', task: 'plan', difficulty: 'high', size: 'small', estTokens: 7, label: 'architecture planning', signals: [], decidedBy: 'jev', confidence: 0.93, needsFrontier: 0.9 };
 
-  it('a label that would MOVE the message somewhere not on screen holds it and says where', async () => {
+  it('a changed Auto label sends once on its final seat without pinning or a second Send', async () => {
     stubFetch();
+    const flow = stubFlow();
     seedVerseSession('vs_1', session({ id: 'vs_1', seatId: LOCAL_SEAT.id, engine: 'local', model: 'qwen3-coder', turnCount: 0 }), []);
     let interceptor: SendInterceptor | null = null;
     render(<MultiModelBar sessionId="vs_1" seats={[CLAUDE_SEAT, LOCAL_SEAT]} text="what does this regex match?" running={false}
@@ -99,9 +117,114 @@ describe('MultiModelBar', () => {
     label = HARD;
     let route: string | undefined;
     await act(async () => { route = await interceptor!('what does this regex match?'); });
-    expect(route).toBe('held');
-    expect(await screen.findByRole('status')).toHaveTextContent('Claude Max — architecture planning needs the strongest model; no usage reading. Press Send again to go there, or pick another seat.');
-    expect(screen.getByRole('combobox', { name: 'Send this message to' })).toHaveDisplayValue('Claude Max — no usage reading');
+    expect(route).toBe('handled');
+    expect(flow.create).toHaveBeenCalledTimes(1);
+    expect(flow.create).toHaveBeenCalledWith(expect.objectContaining({ seatId: CLAUDE_SEAT.id, model: 'claude-opus-5' }));
+    expect(flow.preview).not.toHaveBeenCalled();
+    expect(flow.handoff).not.toHaveBeenCalled();
+    expect(flow.send).toHaveBeenCalledExactlyOnceWith('vs_auto', 'what does this regex match?');
+    expect(flow.open).toHaveBeenCalledExactlyOnceWith('vs_auto');
+    expect(flow.outcome).toHaveBeenCalledWith(expect.objectContaining({ signal: 'auto-followed' }));
+    expect(flow.outcome).not.toHaveBeenCalledWith(expect.objectContaining({ signal: 'auto-overridden' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('Sending to Claude Max…');
+    expect(screen.getByRole('combobox', { name: 'Send this message to' })).toHaveValue('auto');
+    expect(loadAutoPref('vs_auto')).toBe('auto');
+    const labels = (fetch as ReturnType<typeof vi.fn>).mock.calls.filter(([url]) => String(url).includes('/multimodel/label'));
+    expect(labels).toHaveLength(1);
+  });
+
+  it('a changed Auto label mid-thread carries context through one handoff and one turn', async () => {
+    stubFetch();
+    const flow = stubFlow();
+    const source = session({ id: 'vs_1', seatId: LOCAL_SEAT.id, engine: 'local', model: 'qwen3-coder',
+      turnCount: 3, projectPath: '/repo', extraRoots: ['/repo', '/lib'] });
+    seedVerseSession('vs_1', source, []);
+    let interceptor: SendInterceptor | null = null;
+    render(<MultiModelBar sessionId="vs_1" seats={[CLAUDE_SEAT, LOCAL_SEAT]} text="what does this regex match?" running={false}
+      registerInterceptor={(fn) => { interceptor = fn; }} onConsumeDraft={vi.fn()} />);
+    await screen.findByText(/^Staying on Qwen3 Coder/);
+    // The final label needs more context than this local model can hold.
+    label = { ...HARD, estTokens: 80_000 };
+    await act(async () => { expect(await interceptor!('what does this regex match?')).toBe('handled'); });
+    expect(flow.create).not.toHaveBeenCalled();
+    expect(flow.preview).toHaveBeenCalledExactlyOnceWith('vs_1');
+    expect(flow.handoff).toHaveBeenCalledExactlyOnceWith({ source, seatId: CLAUDE_SEAT.id, model: 'claude-opus-5' });
+    expect(flow.send).toHaveBeenCalledExactlyOnceWith('vs_auto', 'CONTEXT NOTE\n\n---\n\nThe request to answer now:\n\nwhat does this regex match?');
+    expect(flow.open).toHaveBeenCalledExactlyOnceWith('vs_auto');
+  });
+
+  it('unavailable labelling uses the rules choice in the same send', async () => {
+    stubFetch(); // label endpoint fails; no second send and no provider fallback.
+    const flow = stubFlow(LOCAL_SEAT);
+    const { intercept } = renderBar('what does this regex match?');
+    await screen.findByText(/free and private on this Mac/);
+    await act(async () => { expect(await intercept('what does this regex match?')).toBe('handled'); });
+    expect(flow.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ seatId: LOCAL_SEAT.id, model: 'qwen3-coder' }));
+    expect(flow.send).toHaveBeenCalledExactlyOnceWith('vs_auto', 'what does this regex match?');
+  });
+
+  it('a local Auto reroute preserves Cheap-first on the created chat', async () => {
+    stubFetch();
+    const flow = stubFlow(LOCAL_SEAT);
+    saveAutoPref('vs_1', 'cheap-first');
+    const { intercept } = renderBar('what does this regex match?');
+    await screen.findByText(/local drafts first/);
+    await act(async () => { expect(await intercept('what does this regex match?')).toBe('handled'); });
+    expect(flow.create).toHaveBeenCalledTimes(1);
+    expect(flow.send).toHaveBeenCalledTimes(1);
+    expect(loadAutoPref('vs_auto')).toBe('cheap-first');
+  });
+
+  it('an explicit local pin remains on the current seat when Jev recommends a frontier seat', async () => {
+    stubFetch();
+    const flow = stubFlow();
+    const user = userEvent.setup();
+    seedVerseSession('vs_1', session({ id: 'vs_1', seatId: LOCAL_SEAT.id, engine: 'local', model: 'qwen3-coder' }), []);
+    let interceptor: SendInterceptor | null = null;
+    render(<MultiModelBar sessionId="vs_1" seats={[CLAUDE_SEAT, LOCAL_SEAT]} text="what does this regex match?" running={false}
+      registerInterceptor={(fn) => { interceptor = fn; }} onConsumeDraft={vi.fn()} />);
+    await screen.findByText(/^Staying on Qwen3 Coder/);
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Send this message to' }), LOCAL_SEAT.id);
+    label = HARD;
+    await act(async () => { expect(await interceptor!('what does this regex match?')).toBe('send-here'); });
+    expect(screen.getByRole('combobox', { name: 'Send this message to' })).toHaveValue(LOCAL_SEAT.id);
+    expect(flow.create).not.toHaveBeenCalled();
+    expect(flow.handoff).not.toHaveBeenCalled();
+    expect(flow.send).not.toHaveBeenCalled();
+  });
+
+  it('a local-only chat never reroutes off this Mac when Jev recommends frontier work', async () => {
+    stubFetch({ ...CONTEXT, localOnly: { on: true, reason: 'This repo stays on this Mac.' } });
+    const flow = stubFlow();
+    seedVerseSession('vs_1', session({ id: 'vs_1', seatId: LOCAL_SEAT.id, engine: 'local', model: 'qwen3-coder' }), []);
+    let interceptor: SendInterceptor | null = null;
+    render(<MultiModelBar sessionId="vs_1" seats={[CLAUDE_SEAT, LOCAL_SEAT]} text="what does this regex match?" running={false}
+      registerInterceptor={(fn) => { interceptor = fn; }} onConsumeDraft={vi.fn()} />);
+    await screen.findByText('Local-only repo');
+    label = HARD;
+    await act(async () => { expect(await interceptor!('what does this regex match?')).toBe('send-here'); });
+    expect(flow.create).not.toHaveBeenCalled();
+    expect(flow.handoff).not.toHaveBeenCalled();
+    expect(flow.send).not.toHaveBeenCalled();
+    const remote = screen.getAllByRole('option').find((option) => (option as HTMLOptionElement).value === CLAUDE_SEAT.id);
+    expect(remote).toBeUndefined();
+  });
+
+  it('a failed Auto handoff holds the draft instead of sending on the original seat', async () => {
+    stubFetch();
+    const flow = stubFlow(LOCAL_SEAT);
+    flow.send.mockRejectedValueOnce(new Error('seat-not-ready'));
+    const consume = vi.fn();
+    seedVerseSession('vs_1', session({ id: 'vs_1', turnCount: 0 }), []);
+    let interceptor: SendInterceptor | null = null;
+    render(<MultiModelBar sessionId="vs_1" seats={[CLAUDE_SEAT, LOCAL_SEAT]} text="what does this regex match?" running={false}
+      registerInterceptor={(fn) => { interceptor = fn; }} onConsumeDraft={consume} />);
+    await screen.findByText(/free and private on this Mac/);
+    await act(async () => { expect(await interceptor!('what does this regex match?')).toBe('held'); });
+    expect(flow.send).toHaveBeenCalledTimes(1);
+    expect(flow.open).not.toHaveBeenCalled();
+    expect(consume).not.toHaveBeenCalled();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Your message is still here.');
   });
 
   it('a label that says "stay" is the safe direction: said, then sent here', async () => {

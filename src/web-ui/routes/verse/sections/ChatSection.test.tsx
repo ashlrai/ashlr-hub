@@ -33,6 +33,9 @@ import { setFocusMode } from '../shell/focus-mode.js';
 import { resetLocalSeen } from '../chat/use-chat-activity.js';
 import { CHAT_PANEL_RANGES, CHAT_PANEL_SIZING_KEY, resetChatPanelSizing } from '../chat-panel-sizing.js';
 import { ApiError } from '../../../data/client.js';
+import { classifyPrompt } from '../../../../core/verse/multimodel/classify.js';
+import { loadAutoPref, saveAutoPref } from '../multimodel/useAutoSeat.js';
+import { loadDraft } from '../chat/composer-memory.js';
 import { ChatSection, describeChatError, preloadChatSurface } from './ChatSection.js';
 import { findCommand, formatChord } from '../shell/command-catalog.js';
 
@@ -153,6 +156,9 @@ describe('ChatSection sessions', () => {
 
     await user.click(within(screen.getByRole('navigation', { name: 'Chats' })).getByRole('button', { name: 'New chat' }));
     const dialog = await screen.findByRole('dialog', { name: 'New chat' });
+    if (within(dialog).getByRole('button', { name: 'Advanced' }).getAttribute('aria-expanded') === 'false') {
+      await user.click(within(dialog).getByRole('button', { name: 'Advanced' }));
+    }
     await user.selectOptions(within(dialog).getByLabelText('Project'), '/Users/mason/dev/site');
     await user.selectOptions(within(dialog).getByLabelText('Seat and model'), JSON.stringify(['local:qwen3-coder', 'qwen3-coder']));
     await user.type(within(dialog).getByLabelText(/Title/), 'Refactor nav');
@@ -162,6 +168,7 @@ describe('ChatSection sessions', () => {
     const post = state.calls.find((c) => c.path === '/api/verse/sessions' && c.method === 'POST')!;
     expect(post.body).toEqual({ projectPath: '/Users/mason/dev/site', seatId: 'local:qwen3-coder', model: 'qwen3-coder', title: 'Refactor nav' });
     expect(post.headers['x-ashlr-token']).toBe(TOKEN);
+    await waitFor(() => expect(loadAutoPref(getVerseUiState().activeSessionId)).toBe('off'));
 
     // The new chat is selected: its title is in the workspace header and a per-session stream opened.
     await screen.findByRole('heading', { name: 'Refactor nav' });
@@ -620,6 +627,9 @@ describe('ChatSection — context orchestration wiring', () => {
     await screen.findByRole('button', { name: /Fix the login bug/ });
     await user.click(within(screen.getByRole('navigation', { name: 'Chats' })).getByRole('button', { name: 'New chat' }));
     const dialog = await screen.findByRole('dialog', { name: 'New chat' });
+    if (within(dialog).getByRole('button', { name: 'Advanced' }).getAttribute('aria-expanded') === 'false') {
+      await user.click(within(dialog).getByRole('button', { name: 'Advanced' }));
+    }
     await within(dialog).findByRole('radio', { name: 'Standard', checked: true });
     await user.click(within(dialog).getByRole('radio', { name: 'Expansive' }));
     await user.click(within(dialog).getByRole('button', { name: 'Make Expansive the default for Claude Max' }));
@@ -632,6 +642,7 @@ describe('ChatSection — context orchestration wiring', () => {
     await waitFor(() => expect(posted).toEqual([{ body: { seatId: 'claude-a', contextMode: 'expansive' }, token: TOKEN }]));
     expect(await screen.findByText('New chats on Claude Max now start in Expansive.')).toBeInTheDocument();
 
+    await user.click(within(screen.getByRole('dialog', { name: 'New chat' })).getByRole('button', { name: 'Manual' }));
     await user.click(within(screen.getByRole('dialog', { name: 'New chat' })).getByRole('button', { name: 'Start chat' }));
     await waitFor(() => expect(state.calls.some((c) => c.path === '/api/verse/sessions' && c.method === 'POST')).toBe(true));
     expect(state.calls.find((c) => c.path === '/api/verse/sessions' && c.method === 'POST')!.body)
@@ -1045,4 +1056,183 @@ describe('ChatSection — the workbench (3.16)', () => {
       dispose();
     }
   });
+});
+
+
+describe('Automatic initial session and turn', () => {
+  function automaticFetch(failTurn = false, sessionPrivacy: 'public' | 'private' | 'unavailable' = 'public', changedWorkspace = false, localTarget?: 'private' | 'unverified') {
+    const boot = bootstrapFixture();
+    if (localTarget) boot.seats = boot.seats.filter((seat) => seat.engine === 'local');
+    const base = verseFetch({ bootstrap: boot });
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (changedWorkspace && path === '/api/verse/workspaces') return Response.json({ workspaces: [{
+        id: 'ws_product', name: 'Product', section: false, createdAt: '', updatedAt: '',
+        roots: [{ path: '/Users/mason/dev/hub', name: 'hub', primary: true }, { path: '/Users/mason/dev/site', name: 'site', primary: false }],
+      }] });
+      if (changedWorkspace && path === '/api/verse/sessions' && init?.method === 'POST') {
+        const request = JSON.parse(String(init.body)) as Record<string, unknown>;
+        // Session creation resolves the current workspace registry, which
+        // gained a private extra root after the dialog snapshot was read.
+        const response = await (base.fetch as unknown as typeof globalThis.fetch)(input, {
+          ...init, body: JSON.stringify({ ...request, projectPath: '/Users/mason/dev/hub' }),
+        });
+        const created = await response.json() as ReturnType<typeof sessionFixture>;
+        created.workspaceId = 'ws_product';
+        created.extraRoots = ['/Users/mason/dev/private'];
+        base.state.details[created.id]!.session = created;
+        base.state.sessions = base.state.sessions.map((session) => session.id === created.id ? created : session);
+        return Response.json(created, { status: 201 });
+      }
+      if (path.includes('/api/verse/multimodel/context') && path.includes('sessionId=') && sessionPrivacy === 'unavailable') {
+        return Response.json({ error: 'Session privacy unavailable' }, { status: 503 });
+      }
+      if (path.includes('/api/verse/multimodel/context')) return Response.json({
+        learned: {}, roi: {}, localOnly: { on: path.includes('sessionId=') && sessionPrivacy === 'private', reason: null }, local: localTarget ? [{ seatId: 'local:qwen3-coder', model: 'qwen3-coder', state: 'unknown', contextWindow: 65_536, tokPerSec: null, tokPerSecSource: null, private: localTarget === 'private', supportsTools: null }] : [], sampledAt: '',
+      });
+      if (path === '/api/verse/multimodel/label') return Response.json({
+        classification: classifyPrompt('Review the security of this code'), fallbackReason: null,
+      });
+      if (failTurn && path.endsWith('/turns') && init?.method === 'POST') return Response.json({ error: 'Provider unavailable' }, { status: 503 });
+      return (base.fetch as unknown as typeof globalThis.fetch)(input, init);
+    });
+    return { ...base, fetch };
+  }
+
+  it('starts a generic chat in Automatic and sends exactly one first turn with the held token', async () => {
+    const { fetch, state } = automaticFetch();
+    saveAutoPref(null, 'off');
+    vi.stubGlobal('fetch', fetch);
+    setMutationToken(TOKEN);
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    await user.click(within(screen.getByRole('navigation', { name: 'Chats' })).getByRole('button', { name: 'New chat' }));
+    const dialog = await screen.findByRole('dialog', { name: 'New chat' });
+    expect(within(dialog).queryByLabelText('Seat and model')).not.toBeInTheDocument();
+    await user.type(within(dialog).getByLabelText('What would you like to work on?'), 'Review the security of this code');
+    await user.click(within(dialog).getByRole('button', { name: 'Start chat' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'New chat' })).not.toBeInTheDocument());
+    const creates = state.calls.filter((call) => call.path === '/api/verse/sessions' && call.method === 'POST');
+    const turns = state.calls.filter((call) => call.path.endsWith('/turns') && call.method === 'POST');
+    expect(creates).toHaveLength(1);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.body).toEqual({ text: 'Review the security of this code' });
+    expect(turns[0]!.headers['x-ashlr-token']).toBe(TOKEN);
+    expect(fetch.mock.calls.filter(([url]) => String(url) === '/api/verse/multimodel/label')).toHaveLength(1);
+    const selected = getVerseUiState().activeSessionId!;
+    expect(loadDraft(selected)).toBe('');
+    expect(loadAutoPref(selected)).toBe('auto');
+    expect(fetch.mock.calls.some(([url]) => String(url).includes(`sessionId=${selected}`) && String(url).includes('/api/verse/multimodel/context'))).toBe(true);
+  });
+
+  it('keeps an explicitly chosen manual resource on subsequent turns and sends its first message once', async () => {
+    const { fetch, state } = automaticFetch();
+    vi.stubGlobal('fetch', fetch);
+    setMutationToken(TOKEN);
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    act(() => { requestVerseCommand('new-chat', { seatId: 'local:qwen3-coder', projectPath: '/Users/mason/dev/site' }); });
+    const dialog = await screen.findByRole('dialog', { name: 'New chat' });
+    expect(within(dialog).getByRole('button', { name: 'Manual' })).toHaveAttribute('aria-pressed', 'true');
+    await user.type(within(dialog).getByLabelText('What would you like to work on?'), 'Explain the navigation');
+    await user.click(within(dialog).getByRole('button', { name: 'Start chat' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'New chat' })).not.toBeInTheDocument());
+    const creates = state.calls.filter((call) => call.path === '/api/verse/sessions' && call.method === 'POST');
+    const turns = state.calls.filter((call) => call.path.endsWith('/turns') && call.method === 'POST');
+    expect(creates).toHaveLength(1);
+    expect(creates[0]!.body).toMatchObject({ seatId: 'local:qwen3-coder', model: 'qwen3-coder' });
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.body).toEqual({ text: 'Explain the navigation' });
+    expect(loadAutoPref(getVerseUiState().activeSessionId)).toBe('off');
+    expect(fetch.mock.calls.filter(([url]) => String(url) === '/api/verse/multimodel/label')).toHaveLength(0);
+  });
+
+  it('keeps a failed first message in the created chat composer without creating or retrying a second session', async () => {
+    const { fetch, state } = automaticFetch(true);
+    vi.stubGlobal('fetch', fetch);
+    setMutationToken(TOKEN);
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    await user.click(within(screen.getByRole('navigation', { name: 'Chats' })).getByRole('button', { name: 'New chat' }));
+    const dialog = await screen.findByRole('dialog', { name: 'New chat' });
+    const message = 'Review the security of this code';
+    await user.type(within(dialog).getByLabelText('What would you like to work on?'), message);
+    await user.click(within(dialog).getByRole('button', { name: 'Start chat' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'New chat' })).not.toBeInTheDocument());
+    expect(await screen.findByRole('textbox', { name: 'Message' })).toHaveValue(message);
+    expect(loadDraft(getVerseUiState().activeSessionId)).toBe(message);
+    expect(state.calls.filter((call) => call.path === '/api/verse/sessions' && call.method === 'POST')).toHaveLength(1);
+    expect(fetch.mock.calls.filter(([url, init]) => String(url).endsWith('/turns') && init?.method === 'POST')).toHaveLength(1);
+    expect(screen.getByText(/Chat started; your message is saved to retry/)).toBeInTheDocument();
+  });
+  it.each(['private', 'unavailable'] as const)('holds the first hosted turn when actual session privacy is %s, preserving the created chat and prompt', async (privacy) => {
+    // The pre-create folder snapshot is public. Only the new session's
+    // authoritative roots report the concurrent change (or failed read).
+    const { fetch, state } = automaticFetch(false, privacy);
+    vi.stubGlobal('fetch', fetch);
+    setMutationToken(TOKEN);
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    await user.click(within(screen.getByRole('navigation', { name: 'Chats' })).getByRole('button', { name: 'New chat' }));
+    const dialog = await screen.findByRole('dialog', { name: 'New chat' });
+    const message = 'Review the security of this code';
+    await user.type(within(dialog).getByLabelText('What would you like to work on?'), message);
+    await user.click(within(dialog).getByRole('button', { name: 'Start chat' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'New chat' })).not.toBeInTheDocument());
+    expect(await screen.findByRole('textbox', { name: 'Message' })).toHaveValue(message);
+    expect(loadDraft(getVerseUiState().activeSessionId)).toBe(message);
+    expect(state.calls.filter((call) => call.path === '/api/verse/sessions' && call.method === 'POST')).toHaveLength(1);
+    expect(fetch.mock.calls.filter(([url, init]) => String(url).endsWith('/turns') && init?.method === 'POST')).toHaveLength(0);
+    expect(screen.getByText(/Chat started; your message is saved to retry/)).toBeInTheDocument();
+  });
+
+  it('checks the new session when a saved workspace gains a private root after the dialog snapshot', async () => {
+    const { fetch, state } = automaticFetch(false, 'private', true);
+    vi.stubGlobal('fetch', fetch);
+    setMutationToken(TOKEN);
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    await user.click(within(screen.getByRole('navigation', { name: 'Chats' })).getByRole('button', { name: 'New chat' }));
+    const dialog = await screen.findByRole('dialog', { name: 'New chat' });
+    const option = await within(dialog).findByRole('option', { name: 'Product — 2 folders' });
+    await user.selectOptions(within(dialog).getByLabelText('Project'), option);
+    const message = 'Review the security of this code';
+    await user.type(within(dialog).getByLabelText('What would you like to work on?'), message);
+    await user.click(within(dialog).getByRole('button', { name: 'Start chat' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'New chat' })).not.toBeInTheDocument());
+    const selected = getVerseUiState().activeSessionId!;
+    expect(state.details[selected]!.session.extraRoots).toEqual(['/Users/mason/dev/private']);
+    const creates = fetch.mock.calls.filter(([url, init]) => String(url) === '/api/verse/sessions' && init?.method === 'POST');
+    expect(creates).toHaveLength(1);
+    expect(JSON.parse(String(creates[0]![1]!.body))).toMatchObject({ workspaceId: 'ws_product' });
+    expect(JSON.parse(String(creates[0]![1]!.body))).not.toHaveProperty('projectPath');
+    expect(fetch.mock.calls.some(([url]) => String(url).includes(`sessionId=${selected}`) && String(url).includes('/api/verse/multimodel/context'))).toBe(true);
+    expect(fetch.mock.calls.filter(([url, init]) => String(url).endsWith('/turns') && init?.method === 'POST')).toHaveLength(0);
+    expect(await screen.findByRole('textbox', { name: 'Message' })).toHaveValue(message);
+    expect(loadDraft(selected)).toBe(message);
+  });
+
+  it.each(['private', 'unverified'] as const)('uses the actual local target badge before sending into newly private scope: %s', async (badge) => {
+    const { fetch } = automaticFetch(false, 'private', false, badge);
+    vi.stubGlobal('fetch', fetch);
+    setMutationToken(TOKEN);
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    await user.click(within(screen.getByRole('navigation', { name: 'Chats' })).getByRole('button', { name: 'New chat' }));
+    const dialog = await screen.findByRole('dialog', { name: 'New chat' });
+    const message = 'Review the security of this code';
+    await user.type(within(dialog).getByLabelText('What would you like to work on?'), message);
+    await user.click(within(dialog).getByRole('button', { name: 'Start chat' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'New chat' })).not.toBeInTheDocument());
+    const turns = fetch.mock.calls.filter(([url, init]) => String(url).endsWith('/turns') && init?.method === 'POST');
+    expect(turns).toHaveLength(badge === 'private' ? 1 : 0);
+    expect(loadDraft(getVerseUiState().activeSessionId)).toBe(badge === 'private' ? '' : message);
+  });
+
 });

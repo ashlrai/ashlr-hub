@@ -10,8 +10,8 @@
  *   already polls. "Send to" overrides it for this message. On Enter the
  *   decision layer labels the message once (rules if it cannot), and a message
  *   bound for another seat continues the conversation there with the
- *   zero-spend handoff note. A label that changes the seat is shown first,
- *   never sent silently.
+ *   zero-spend handoff note. Auto follows the final label in the same send,
+ *   while explicit per-message seat choices remain pinned.
  * - CHEAP-FIRST: local models draft; when the draft is weak (escalation.ts)
  *   the conversation escalates to the best frontier seat on its own, with the
  *   draft quoted. Savings show in the meter.
@@ -186,21 +186,15 @@ export function MultiModelBar({ sessionId, seats, text, running, registerInterce
       if (pref === 'cheap-first' && choice.local) pendingDrafts.set(session.id, { text: message, cls, localLabel: choice.label });
       return 'send-here';
     }
-    if (!pinned && choice.seatId !== shownChoice) {
-      // The decision layer read it differently from the line on screen (or
-      // Enter beat the line) and would MOVE it somewhere not shown: show,
-      // never surprise.
-      setPinned(choice.seatId);
-      setNotice({ text: `${final!.why} Press Send again to go there, or pick another seat.`, error: false });
-      return 'held';
-    }
     const overridden = pinned && unpinned?.choice && unpinned.choice.seatId !== pinned ? { seatId: unpinned.choice.seatId } : null;
     if (choice.seatId === session.seatId) {
       if (overridden) void recordOutcome({ seatId: overridden.seatId, kind: cls.kind, signal: 'auto-overridden' });
       if (pref === 'cheap-first' && choice.local) pendingDrafts.set(session.id, { text: message, cls, localLabel: choice.label });
       return 'send-here';
     }
-    setNotice({ text: `Continuing on ${choice.label} with a handoff note…`, error: false });
+    setNotice({ text: session.turnCount > 0
+      ? `Continuing on ${choice.label} with a handoff note…`
+      : `Sending to ${choice.label}…`, error: false });
     try {
       const created = await routeMessage(DEFAULT_FLOW_API, { source: session, target: target(choice), text: message, kind: cls.kind, overridden });
       if (pref === 'cheap-first' && choice.local) pendingDrafts.set(created.id, { text: message, cls, localLabel: choice.label });

@@ -282,7 +282,7 @@ export function Workspace(props: WorkspaceProps) {
           <span className={styles.emptyMark} aria-hidden="true"><VerseMark size={36} /></span>
           <h1 className={styles.emptyTitle}>{hasAnySessions ? 'Pick a chat, or start a new one' : `No chats yet${newChatShortcut ? ` — ${newChatShortcut}` : ''}`}</h1>
           <p className={styles.emptyBody}>
-            Choose a project and model, then ask questions, plan a change, or work through code together.
+            Choose a project and describe the work. Automatic picks a connected resource; you can guide the chat as it progresses.
           </p>
           <button type="button" className={styles.emptyButton} onClick={onNew}>New chat {newChatShortcut ? <kbd>{newChatShortcut}</kbd> : null}</button>
           <WorkbenchKeys />

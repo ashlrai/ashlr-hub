@@ -66,7 +66,7 @@ describe('NewChatDialog', () => {
     const user = userEvent.setup();
     const boot = bootstrap();
     const onCreate = vi.fn();
-    const view = render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={onCreate} />);
+    const view = render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={onCreate} />);
 
     await user.selectOptions(screen.getByLabelText('Project'), 'Other folder…');
     await user.type(screen.getByLabelText('Folder path'), '/Users/mason/dev/elsewhere');
@@ -74,7 +74,7 @@ describe('NewChatDialog', () => {
 
     // A turn finishing in another chat invalidates bootstrap: new array references, same content.
     const again = bootstrap();
-    view.rerender(<NewChatDialog open onClose={() => {}} projects={again.projects} seats={[...V39_SEATS]} onCreate={onCreate} />);
+    view.rerender(<NewChatDialog initialManual open onClose={() => {}} projects={again.projects} seats={[...V39_SEATS]} onCreate={onCreate} />);
 
     expect(screen.getByLabelText('Folder path')).toHaveValue('/Users/mason/dev/elsewhere');
     expect(screen.getByLabelText(/^Title/)).toHaveValue('Long title in progress');
@@ -88,23 +88,23 @@ describe('NewChatDialog', () => {
       model: 'claude-fable-5-1',
       title: 'Long title in progress',
       contextMode: 'standard',
-    });
+    }, undefined, { automatic: false });
   });
 
   it('resets to the pre-fill on each open, not on every render', async () => {
     const user = userEvent.setup();
     const boot = bootstrap();
-    const view = render(<NewChatDialog open={false} onClose={() => {}} projects={boot.projects} seats={boot.seats} onCreate={() => {}} initialProjectPath="/Users/mason/dev/site" />);
-    view.rerender(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={boot.seats} onCreate={() => {}} initialProjectPath="/Users/mason/dev/site" />);
+    const view = render(<NewChatDialog initialManual open={false} onClose={() => {}} projects={boot.projects} seats={boot.seats} onCreate={() => {}} initialProjectPath="/Users/mason/dev/site" />);
+    view.rerender(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={boot.seats} onCreate={() => {}} initialProjectPath="/Users/mason/dev/site" />);
     expect(screen.getByLabelText('Project')).toHaveValue('/Users/mason/dev/site');
     await user.type(screen.getByLabelText(/^Title/), 'draft');
-    view.rerender(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={boot.seats} onCreate={() => {}} initialProjectPath="/Users/mason/dev/hub" />);
+    view.rerender(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={boot.seats} onCreate={() => {}} initialProjectPath="/Users/mason/dev/hub" />);
     // Pre-fill changes while open do not clobber the form …
     expect(screen.getByLabelText(/^Title/)).toHaveValue('draft');
     expect(screen.getByLabelText('Project')).toHaveValue('/Users/mason/dev/site');
     // … but the next open applies them.
-    view.rerender(<NewChatDialog open={false} onClose={() => {}} projects={boot.projects} seats={boot.seats} onCreate={() => {}} initialProjectPath="/Users/mason/dev/hub" />);
-    view.rerender(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={boot.seats} onCreate={() => {}} initialProjectPath="/Users/mason/dev/hub" />);
+    view.rerender(<NewChatDialog initialManual open={false} onClose={() => {}} projects={boot.projects} seats={boot.seats} onCreate={() => {}} initialProjectPath="/Users/mason/dev/hub" />);
+    view.rerender(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={boot.seats} onCreate={() => {}} initialProjectPath="/Users/mason/dev/hub" />);
     expect(screen.getByLabelText(/^Title/)).toHaveValue('');
     expect(screen.getByLabelText('Project')).toHaveValue('/Users/mason/dev/hub');
   });
@@ -118,7 +118,7 @@ describe('NewChatDialog — capacity at the point of choice', () => {
   const boot = bootstrap();
 
   it('shows the chosen seat\u2019s plan, binding meter and verbatim reset', () => {
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={[CLAUDE_TIGHT_SEAT]} onCreate={() => {}} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={[CLAUDE_TIGHT_SEAT]} onCreate={() => {}} />);
     // 3.10: the dialog mounts THE shared capacity strip (usage/CapacityStrip), for the chosen seat only.
     const strip = screen.getByRole('region', { name: 'Claude Max capacity' });
     expect(within(strip).getByText('max')).toBeInTheDocument();
@@ -128,13 +128,13 @@ describe('NewChatDialog — capacity at the point of choice', () => {
   });
 
   it('names the credits that outlive a spent window', () => {
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={[CODEX_CREDITS_SEAT]} onCreate={() => {}} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={[CODEX_CREDITS_SEAT]} onCreate={() => {}} />);
     expect(screen.getByText('limit reached')).toBeInTheDocument();
     expect(screen.getByText('2048.4196250000 credits available')).toBeInTheDocument();
   });
 
   it('draws no meter for a seat nothing was read from', () => {
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={[UNREAD_SEAT]} onCreate={() => {}} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={[UNREAD_SEAT]} onCreate={() => {}} />);
     // Absence drawn as absence: never a 0% bar.
     expect(screen.queryByRole('img', { name: /% used/ })).not.toBeInTheDocument();
     expect(screen.queryByText('0%')).not.toBeInTheDocument();
@@ -150,7 +150,7 @@ describe('NewChatDialog — context mode', () => {
   const boot = bootstrap();
 
   it('shows the chosen model’s budget and its provenance', async () => {
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
     const context = screen.getByRole('group', { name: 'Context' });
     expect(within(context).getByText('1M window · compacts ≈367k')).toBeInTheDocument();
     expect(within(context).getByText(`Window ${WINDOW_SOURCE_TEXT['cli-catalog']}.`)).toBeInTheDocument();
@@ -162,12 +162,12 @@ describe('NewChatDialog — context mode', () => {
     queries.fetchPreferences.mockResolvedValue(prefs({ 'claude-a': { contextMode: 'expansive' } }));
     const user = userEvent.setup();
     const onCreate = vi.fn();
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={onCreate} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={onCreate} />);
     expect(await screen.findByRole('radio', { name: 'Expansive', checked: true })).toBeInTheDocument();
     // The picker row for the chosen model shows the budget it will actually get.
     expect(screen.getByRole('option', { name: /Fable 5\.1 · 1M ctx · compacts ≈967k \(expansive\)/ })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Start chat' }));
-    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ seatId: 'claude-a', model: 'claude-fable-5-1', contextMode: 'expansive' }));
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ seatId: 'claude-a', model: 'claude-fable-5-1', contextMode: 'expansive' }), undefined, { automatic: false });
   });
 
   it('lets the operator switch mode, explains the cost, and saves it as the seat default through the guard', async () => {
@@ -178,7 +178,7 @@ describe('NewChatDialog — context mode', () => {
       reasons.push(reason);
       return action();
     };
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={onCreate} runMutation={runMutation} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={onCreate} runMutation={runMutation} />);
     await screen.findByRole('radio', { name: 'Standard', checked: true });
     // Nothing to save while the mode on screen IS the saved default.
     expect(screen.queryByRole('button', { name: /the default for/ })).not.toBeInTheDocument();
@@ -195,7 +195,7 @@ describe('NewChatDialog — context mode', () => {
     expect(screen.queryByRole('button', { name: /the default for/ })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Start chat' }));
-    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ contextMode: 'expansive' }));
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ contextMode: 'expansive' }), undefined, { automatic: false });
   });
 
   it('writes nothing when the token prompt is dismissed', async () => {
@@ -205,7 +205,7 @@ describe('NewChatDialog — context mode', () => {
       asked += 1;
       return null;
     };
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} runMutation={runMutation} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} runMutation={runMutation} />);
     await screen.findByRole('radio', { name: 'Standard', checked: true });
     await user.click(screen.getByRole('radio', { name: 'Expansive' }));
     await user.click(screen.getByRole('button', { name: 'Make Expansive the default for Claude Max' }));
@@ -226,7 +226,7 @@ describe('NewChatDialog — context mode', () => {
       new ApiError('POST /api/verse/preferences failed (HTTP 400).', 400, '/api/verse/preferences', 'claude-a has no expansive budget for that model.'),
     );
     const user = userEvent.setup();
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} runMutation={parked} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} runMutation={parked} />);
     await screen.findByRole('radio', { name: 'Standard', checked: true });
     await user.click(screen.getByRole('radio', { name: 'Expansive' }));
     await user.click(screen.getByRole('button', { name: 'Make Expansive the default for Claude Max' }));
@@ -245,7 +245,7 @@ describe('NewChatDialog — context mode', () => {
   it('says to unlock when no mutation token is held', async () => {
     queries.updatePreferences.mockRejectedValue(new VerseMutationLockedError());
     const user = userEvent.setup();
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
     await screen.findByRole('radio', { name: 'Standard', checked: true });
     await user.click(screen.getByRole('radio', { name: 'Expansive' }));
     await user.click(screen.getByRole('button', { name: 'Make Expansive the default for Claude Max' }));
@@ -255,7 +255,7 @@ describe('NewChatDialog — context mode', () => {
   it('offers no mode for a model with one budget, and sends none', async () => {
     const user = userEvent.setup();
     const onCreate = vi.fn();
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={onCreate} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={onCreate} />);
     await user.selectOptions(screen.getByLabelText('Seat and model'), encodeSeatChoice({ seatId: 'grok-a', model: 'grok-4.7-build-fast' }));
     expect(screen.queryByRole('radiogroup', { name: 'Context mode' })).not.toBeInTheDocument();
     expect(screen.getByText(/One budget: this CLI compacts at its own fixed point/)).toBeInTheDocument();
@@ -267,16 +267,16 @@ describe('NewChatDialog — context mode', () => {
     queries.fetchPreferences.mockResolvedValue(prefs({ 'claude-a': { contextMode: 'expansive' } }));
     const user = userEvent.setup();
     const onCreate = vi.fn();
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={onCreate} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={onCreate} />);
     await screen.findByRole('radio', { name: 'Expansive', checked: true });
     await user.selectOptions(screen.getByLabelText('Seat and model'), encodeSeatChoice({ seatId: 'claude-a', model: 'claude-haiku-4-5-20251001' }));
     await user.click(screen.getByRole('button', { name: 'Start chat' }));
-    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ model: 'claude-haiku-4-5-20251001', contextMode: 'standard' }));
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ model: 'claude-haiku-4-5-20251001', contextMode: 'standard' }), undefined, { automatic: false });
   });
 
   it('falls back to Standard, and says so, when saved defaults cannot be read', async () => {
     queries.fetchPreferences.mockRejectedValue(new ApiError('GET /api/verse/preferences failed (HTTP 404).', 404, '/api/verse/preferences'));
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
     expect(await screen.findByText(/Saved defaults could not be read/)).toBeInTheDocument();
     expect(screen.getByRole('radio', { name: 'Standard', checked: true })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /the default for/ })).not.toBeInTheDocument();
@@ -287,7 +287,7 @@ describe('NewChatDialog — models the pinned CLI cannot run', () => {
   const boot = bootstrap();
 
   it('refuses the model with its reason, and resolves an aliased pre-fill to the catalog row', async () => {
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}}
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}}
       initialSeat={{ seatId: 'claude-a', model: 'claude-opus-5.5' }} />);
     expect(screen.getByLabelText('Seat and model')).toHaveValue(encodeSeatChoice({ seatId: 'claude-a', model: 'claude-opus-5-5' }));
     expect(screen.getByText(`Opus 5.5 cannot run on this seat: ${OPUS_55_REASON}. Pick another model.`)).toBeInTheDocument();
@@ -295,7 +295,7 @@ describe('NewChatDialog — models the pinned CLI cannot run', () => {
   });
 
   it('shows the seat’s pinned CLI and its own notes in visible text', () => {
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
     const facts = screen.getByRole('list', { name: 'Claude Max facts' });
     expect(within(facts).getByText('Runs Claude Code 2.1.257.')).toBeInTheDocument();
     expect(within(facts).getByText(CLAUDE_SKEW_NOTE)).toBeInTheDocument();
@@ -308,7 +308,7 @@ describe('NewChatDialog — context fit', () => {
   it('sizes the chosen folder and gives every model a verdict, explaining the chosen one', async () => {
     queries.fetchContextFit.mockResolvedValue(fitOf(300_000));
     const user = userEvent.setup();
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
     expect(await screen.findByText('Tight fit')).toBeInTheDocument();
     expect(queries.fetchContextFit).toHaveBeenCalledWith({ projectPath: '/Users/mason/dev/hub' });
     expect(screen.getByText(/~300k tokens of tracked code fits under the ≈367k compaction point/)).toBeInTheDocument();
@@ -331,7 +331,7 @@ describe('NewChatDialog — context fit', () => {
   it('re-judges the fit against the Expansive budget once the chat is set to it', async () => {
     queries.fetchContextFit.mockResolvedValue(fitOf(300_000));
     const user = userEvent.setup();
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
     expect(await screen.findByText('Tight fit')).toBeInTheDocument();
     expect(screen.getByText(/Expansive \(≈967k\) would hold it with room to spare/)).toBeInTheDocument();
     await user.click(screen.getByRole('radio', { name: 'Expansive' }));
@@ -342,7 +342,7 @@ describe('NewChatDialog — context fit', () => {
 
   it('marks a truncated scan as a floor', async () => {
     queries.fetchContextFit.mockResolvedValue(fitOf(100_000, true));
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
     expect(await screen.findByText(/All at least ~100k tokens of tracked code fits/)).toBeInTheDocument();
   });
 
@@ -355,14 +355,14 @@ describe('NewChatDialog — context fit', () => {
       updatedAt: '2026-09-20T00:00:00.000Z',
     } as VerseWorkspace;
     const user = userEvent.setup();
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} workspaces={[workspace]} onCreate={() => {}} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} workspaces={[workspace]} onCreate={() => {}} />);
     await user.selectOptions(screen.getByLabelText('Project'), 'platform — 2 folders');
     await waitFor(() => expect(queries.fetchContextFit).toHaveBeenCalledWith({ workspaceId: 'ws_1' }));
   });
 
   it('sizes a typed path once, after it settles, never each prefix', async () => {
     const user = userEvent.setup();
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
     await user.selectOptions(screen.getByLabelText('Project'), 'Other folder…');
     await user.type(screen.getByLabelText('Folder path'), '/Users/mason/dev/elsewhere');
     await waitFor(() => expect(queries.fetchContextFit).toHaveBeenCalledWith({ projectPath: '/Users/mason/dev/elsewhere' }));
@@ -375,7 +375,7 @@ describe('NewChatDialog — context fit', () => {
 
   it('says so when the folders could not be sized, and claims no fit', async () => {
     queries.fetchContextFit.mockRejectedValue(new ApiError('GET failed (HTTP 400).', 400, '/api/verse/context-fit', 'projectPath is not a directory'));
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
     expect(await screen.findByText('Could not size the chosen folders: projectPath is not a directory')).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: /code fits/ })).not.toBeInTheDocument();
   });
@@ -416,7 +416,7 @@ describe('NewChatDialog — isolate in a worktree', () => {
 
   async function openOnFolder(onCreate: (req: VerseCreateSessionRequest) => void, runMutation?: RunMutation) {
     const user = userEvent.setup();
-    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={onCreate}
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={onCreate}
       {...(runMutation ? { runMutation } : {})} />);
     await user.selectOptions(screen.getByLabelText('Project'), 'Other folder…');
     await user.type(screen.getByLabelText('Folder path'), '/Users/mason/dev/hub');
@@ -428,7 +428,7 @@ describe('NewChatDialog — isolate in a worktree', () => {
     const user = await openOnFolder(onCreate);
     expect(screen.getByRole('checkbox', { name: 'Isolate in a worktree' })).not.toBeChecked();
     await user.click(screen.getByRole('button', { name: 'Start chat' }));
-    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ projectPath: '/Users/mason/dev/hub' }));
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ projectPath: '/Users/mason/dev/hub' }), undefined, { automatic: false });
     expect(gitQueries.createGitWorktree).not.toHaveBeenCalled();
   });
 
@@ -453,7 +453,7 @@ describe('NewChatDialog — isolate in a worktree', () => {
     await waitFor(() => expect(onCreate).toHaveBeenCalled());
     expect(gitQueries.createGitWorktree).toHaveBeenCalledWith('/Users/mason/dev/hub', 'fix-login');
     expect(reasons).toEqual([expect.stringContaining('fix-login')]);
-    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ projectPath: '/Users/mason/.ashlr-worktrees/hub/fix-login', seatId: 'claude-a' }));
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ projectPath: '/Users/mason/.ashlr-worktrees/hub/fix-login', seatId: 'claude-a' }), undefined, { automatic: false });
   });
 
   it('a refusal is shown in the server\'s words and no chat is created', async () => {

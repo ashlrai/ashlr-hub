@@ -38,6 +38,7 @@ import { useToast } from '../../../components/primitives/Toast.js';
 import { clearReadSession } from '../../../data/auth-store.js';
 import { ApiError, DispatchDisabledError } from '../../../data/client.js';
 import { useMutationHold, useQuery, useRefresh } from '../../../data/hooks.js';
+import type { NewChatRoutingOptions } from '../NewChatDialog.js';
 import type { DeleteChatDialog as DeleteChatDialogComponent } from '../chat/DeleteChatDialog.js';
 import { insertIntoComposer } from '../chat/composer-bridge.js';
 import { forgetComposerMemory } from '../chat/composer-memory.js';
@@ -63,7 +64,6 @@ import { useVerseSession } from '../useVerseSession.js';
 import { useVerseUi } from '../useVerseUi.js';
 import {
   cancelVerseTurn,
-  createVerseSession,
   deleteVerseSession,
   renameVerseSession,
   sendVerseTurn,
@@ -78,7 +78,6 @@ import { forgetVerseSession, setVerseSession, setVerseSessionStatus } from '../v
 import {
   clearVerseCommand,
   lastVerseSeat,
-  rememberVerseSeat,
   setVerseActiveSession,
   setVerseSection,
   setVerseSidebarCollapsed,
@@ -315,7 +314,7 @@ export function ChatSection() {
 
   const [selectedId, setSelectedIdState] = useState<string | null>(loadSelected);
   const [query, setQuery] = useState('');
-  const [newChat, setNewChat] = useState<{ open: boolean; projectPath?: string | null; seat?: SeatChoice | null }>({ open: false });
+  const [newChat, setNewChat] = useState<{ open: boolean; projectPath?: string | null; seat?: SeatChoice | null; manual?: boolean }>({ open: false });
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
@@ -428,20 +427,22 @@ export function ChatSection() {
       ? { seatId: current.seatId, model: current.model }
       : null;
     const seat = prefill.seat ?? fromCurrent ?? lastVerseSeat(projectPath);
-    setNewChat({ open: true, projectPath, seat });
+    setNewChat({ open: true, projectPath, seat, manual: prefill.seat != null });
   }, [view.session]);
 
-  const create = useCallback(async (req: VerseCreateSessionRequest) => {
+  const create = useCallback(async (req: VerseCreateSessionRequest, firstMessage?: string, routing?: NewChatRoutingOptions) => {
     await withToken('Starting a chat spawns an agent process for this project.', async () => {
       setCreating(true);
       setCreateError(null);
       try {
-        const session = await createVerseSession(req);
-        rememberVerseSeat(session.projectPath, { seatId: session.seatId, model: session.model });
-        setVerseSession(session.id, session);
+        const { startChat } = await import('../chat/start-chat.js');
+        const { session, firstTurn } = await startChat(req, firstMessage, routing);
+        if (!firstTurn.ok) {
+          toast.show(`Chat started; your message is saved to retry. ${describeChatError(firstTurn.error)}`, 'danger');
+        }
         setNewChat({ open: false });
         setSelectedId(session.id);
-        toast.show(`Started “${session.title}”`, 'success');
+        if (firstTurn.ok) toast.show(`Started “${session.title}”`, 'success');
       } catch (err) {
         setCreateError(describeChatError(err));
       } finally {
@@ -847,8 +848,8 @@ export function ChatSection() {
       {newChat.open ? (
         <Suspense fallback={null}>
           <NewChatDialog open onClose={() => setNewChat({ open: false })} projects={projects} seats={seats} workspaces={workspaces}
-            initialProjectPath={newChat.projectPath ?? null} initialSeat={newChat.seat ?? null} busy={creating} error={createError} onCreate={create}
-            // The dialog's one write of its own (a seat's default context mode)
+            initialProjectPath={newChat.projectPath ?? null} initialSeat={newChat.seat ?? null} initialManual={newChat.manual ?? false} busy={creating} error={createError} onCreate={create}
+            // The dialog's guarded operations (adviser, worktree, saved default)
             // goes through the same token guard as every other chat mutation.
             runMutation={withToken} />
         </Suspense>
