@@ -6,5 +6,5 @@ export interface ResourceLastKnownUsage {
   expiresAt: string;
   windows: ResourceConnectionQuotaWindow[];
   source: 'native-account-checked-history';
-  identitySource: 'native-account-checked' | 'native-account-checked-local-epoch';
+  identitySource: 'native-account-checked' | 'native-account-checked-local-epoch' | 'native-account-checked-display-identity';
 }

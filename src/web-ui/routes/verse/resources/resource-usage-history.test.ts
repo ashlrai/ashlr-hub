@@ -23,6 +23,16 @@ describe('Historical startup usage display', () => {
     expect(display.detail.join(' ')).toContain('Historical reading'); expect(display.summary).toContain('current usage unconfirmed');
     expect(withHistory.historicalUsage?.observedAt).toBe('2026-09-30T12:00:00.000Z');
   });
+  it('roundtrips display-only Claude identity history without promoting current usage or credits', () => {
+    const recorded = history({ identitySource: 'native-account-checked-display-identity' });
+    const s = { ...seat(), lastKnownUsage: JSON.parse(JSON.stringify(recorded)) };
+    expect(resourceUsageHistory(s, NOW)).toEqual(recorded);
+    const row = buildCapacityRows([s], { now: NOW })[0]!;
+    expect(row.windows).toEqual([]); expect(row.credits).toBeNull();
+    expect(barRows([row], { now: NOW, healthRead: false })[0]?.value).toBe('28% last');
+    expect(barRows([row], { now: NOW, healthRead: false })[0]?.level).toBe('unknown');
+    expect(row.historicalUsage?.identitySource).toBe('native-account-checked-display-identity');
+  });
   it('lets live measurements replace history immediately, and never shows cached signed-out usage', () => {
     const w = seatWindow({ id: 'seven_day', usedPercent: 22 });
     const s = seat(); s.capacity = capacity({ windows: [w], binding: w });

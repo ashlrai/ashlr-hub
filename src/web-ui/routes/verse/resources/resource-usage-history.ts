@@ -8,7 +8,7 @@ function instant(value: unknown): value is string {
 export function resourceUsageHistory(seat: VerseSeat, now: number): ResourceLastKnownUsage | null {
   const history = seat.lastKnownUsage;
   if (!history || history.source !== 'native-account-checked-history' ||
-    !['native-account-checked', 'native-account-checked-local-epoch'].includes(history.identitySource) ||
+    !['native-account-checked', 'native-account-checked-local-epoch', 'native-account-checked-display-identity'].includes(history.identitySource) ||
     !instant(history.observedAt) || !instant(history.expiresAt) || Date.parse(history.observedAt) > now ||
     Date.parse(history.expiresAt) <= Date.parse(history.observedAt) ||
     Date.parse(history.expiresAt) - Date.parse(history.observedAt) > 60_000 || !Array.isArray(history.windows) ||
