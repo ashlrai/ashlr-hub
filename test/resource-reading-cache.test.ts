@@ -3,7 +3,7 @@ import { chmodSync, linkSync, mkdtempSync, readFileSync, realpathSync, rmSync, s
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createResourceReadingCache, readResourceHistoricalIdentityWitnesses, RESOURCE_READING_CACHE_FILENAME, RESOURCE_READING_CACHE_MAX_BYTES, type ResourceReadingCache } from '../src/core/resources/reading-cache.js';
+import { createResourceReadingCache, normalizeResourceLastKnownUsage, readResourceHistoricalIdentityWitnesses, RESOURCE_READING_CACHE_FILENAME, RESOURCE_READING_CACHE_MAX_BYTES, type ResourceReadingCache } from '../src/core/resources/reading-cache.js';
 import { buildVerseAccountsSnapshot, deriveVerseAccountRecord, type VerseAccountCollector } from '../src/core/verse/accounts.js';
 import { buildSeatTelemetry } from '../src/core/verse/seats.js';
 import { resourceAccountProfileDigest, validResourceAccountIdentityWitness, sameResourceAccountIdentity,
@@ -59,6 +59,66 @@ describe('display-only historical reading storage', () => {
     vi.mocked(Date.now).mockReturnValue(Date.parse(EXPIRES) + 1);
     expect(next.lastKnown(a)?.expiresAt).toBe(EXPIRES); expect(next.lastKnown(a)?.windows[0]?.usedPercent).toBe(0);
     expect(next.witness(a)?.source).toBe('native-account-checked-local-epoch');
+  });
+  it('keeps paired Claude history through settings epochs without minting a financial witness', async () => {
+    const a = account('claude-a', 'claude'); const before = { ...local(a), accountDigest: HINT };
+    let current = { ...before, epochDigest: 'c'.repeat(64) };
+    const first = cache([a], () => current); first.remember(a, reading(a), HINT, before); await first.flush();
+    const saved = JSON.parse(readFileSync(join(root, RESOURCE_READING_CACHE_FILENAME), 'utf8')).readings[0];
+    expect(saved.epochDigest).toBeNull(); expect(saved.displayIdentityDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(first.identityWitnessesSnapshot()[0]?.localEpoch).toBeNull();
+    current = { ...current, epochDigest: 'd'.repeat(64) };
+    vi.mocked(Date.now).mockReturnValue(Date.parse(EXPIRES) + 1);
+    const restarted = cache([a], () => current);
+    expect(restarted.lastKnown(a)).toEqual({ observedAt: NOW, expiresAt: EXPIRES, windows: reading(a).windows,
+      source: 'native-account-checked-history', identitySource: 'native-account-checked-display-identity' });
+    expect(normalizeResourceLastKnownUsage(JSON.parse(JSON.stringify(restarted.lastKnown(a))))).toEqual(restarted.lastKnown(a));
+    expect(validResourceAccountIdentityWitness({ provider: a.provider, accountId: a.id, accountDigest: HINT,
+      profileDigest: resourceAccountProfileDigest(a), generation: 1, observedAt: new Date(Date.now()).toISOString(),
+      expiresAt: new Date(Date.now() + 30_000).toISOString(), source: 'native-account-checked-display-identity' })).toBe(false);
+    expect(restarted.witness(a)).toBeNull(); expect(restarted.identityWitnessesSnapshot()).toEqual([]);
+    expect(readResourceHistoricalIdentityWitnesses({ root, accountsRoot: root, accounts: [a], readEpoch: () => current })).toEqual([]);
+    current = { ...current, accountDigest: 'e'.repeat(64) }; expect(restarted.lastKnown(a)).toBeNull();
+  });
+  it.each(['absent-before', 'mismatched-before', 'missing-after', 'wrong-after'] as const)(
+    'cannot bootstrap Claude display continuity from %s identity', async kind => {
+      const a = account('claude-a', 'claude'); const before = { ...local(a), accountDigest: HINT };
+      const after = kind === 'missing-after' ? null : { ...before, epochDigest: 'c'.repeat(64),
+        ...(kind === 'wrong-after' ? { accountDigest: 'd'.repeat(64) } : {}) };
+      const first = cache([a], () => after);
+      first.remember(a, reading(a), HINT, kind === 'absent-before' ? null : kind === 'mismatched-before' ?
+        { ...before, accountDigest: 'e'.repeat(64) } : before); await first.flush();
+      expect(cache([a], () => after).lastKnown(a)).toBeNull();
+    });
+  it.each(['wrong-digest', 'wrong-provider', 'null-digest'] as const)('refuses a %s display-cache extension without rewriting it', async kind => {
+    const a = account('claude-a', 'claude'); const current = { ...local(a), accountDigest: HINT };
+    const first = cache([a], () => current); first.remember(a, reading(a), HINT, current); await first.flush();
+    const file = join(root, RESOURCE_READING_CACHE_FILENAME); const value = JSON.parse(readFileSync(file, 'utf8'));
+    if (kind === 'wrong-provider') value.readings[0].provider = 'codex';
+    else value.readings[0].displayIdentityDigest = kind === 'wrong-digest' ? 'd'.repeat(64) : null;
+    const bytes = JSON.stringify(value); writeFileSync(file, bytes, { mode: 0o600 });
+    const next = cache([a], () => current); expect(next.lastKnown(a)).toBeNull();
+    next.remember(a, reading(a), HINT, current); await next.flush(); expect(readFileSync(file, 'utf8')).toBe(bytes);
+  });
+  it('does not retroactively bind a legacy null epoch until a new paired native capture', async () => {
+    const a = account('claude-a', 'claude'); const current = { ...local(a), accountDigest: HINT };
+    const old = cache([a], () => null); old.remember(a, reading(a), HINT, null); await old.flush();
+    const next = cache([a], () => current); expect(next.lastKnown(a)).toBeNull();
+    next.remember(a, reading(a), HINT, current); await next.flush();
+    expect(cache([a], () => ({ ...current, epochDigest: 'c'.repeat(64) })).lastKnown(a)?.observedAt).toBe(NOW);
+  });
+  it.each(['settings', 'account'] as const)('rechecks a deferred Claude %s change before commit', async kind => {
+    const a = account('claude-a', 'claude'); let current = { ...local(a), accountDigest: HINT };
+    let release!: () => void; let entered!: () => void;
+    io.gate = new Promise(resolve => { release = resolve; }); const ready = new Promise<void>(resolve => { entered = resolve; }); io.entered = entered;
+    const first = cache([a], () => current); first.remember(a, reading(a), HINT, current); await ready;
+    current = { ...current, epochDigest: 'c'.repeat(64), ...(kind === 'account' ? { accountDigest: 'd'.repeat(64) } : {}) };
+    release(); await first.flush();
+    const next = cache([a], () => current);
+    if (kind === 'settings') {
+      expect(next.lastKnown(a)?.observedAt).toBe(NOW); expect(next.witness(a)).toBeNull();
+      expect(JSON.parse(readFileSync(join(root, RESOURCE_READING_CACHE_FILENAME), 'utf8')).readings[0].epochDigest).toBeNull();
+    } else { expect(next.lastKnown(a)).toBeNull(); expect(first.identityWitnessesSnapshot()).toEqual([]); }
   });
   it('uses one requested projection clock for restart identity while preserving original quota timestamps', async () => {
     const a = account(); const first = cache(); first.remember(a, reading(a), HINT, local(a)); await first.flush();

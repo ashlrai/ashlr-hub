@@ -1,10 +1,12 @@
 /** Local fixture metadata only. No CLI, keychain, credential read or provider request. */
-import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readResourceAccountLocalEpoch, resourceAccountProfileDigest, recheckResourceAccountIdentitySnapshot } from '../src/core/resources/account-identity-witness.js';
+import { createResourceReadingCache } from '../src/core/resources/reading-cache.js';
+import type { ResourceAccountConnection } from '../src/core/resources/connection-types.js';
 import type { ResourceConnectionConfig } from '../src/core/resources/connection-monitor.js';
 
 const resolver = vi.hoisted(() => vi.fn());
@@ -20,6 +22,34 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); rmSync(root, { recursive: true, force: true }); });
 
 describe('same-profile last-checked local identity epoch', () => {
+  it('survives a real Claude settings replacement only for history, not financial evidence', async () => {
+    const a = account('claude'); const file = join(state, '.claude.json');
+    const value = { oauthAccount: { emailAddress: 'demo@example.invalid', organizationUuid: 'demo-org' }, settings: 1 };
+    writeFileSync(file, JSON.stringify(value), { mode: 0o600 });
+    const before = readResourceAccountLocalEpoch(root, a)!; const now = Date.now();
+    const row: ResourceAccountConnection = { id: a.id, label: a.label, provider: a.provider, state: 'observed',
+      authentication: 'signed-in', health: 'reachable', planType: 'max', observedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + 60_000).toISOString(), windows: [{ id: 'weekly', usedPercent: 7, resetsAt: null }],
+      reason: 'probe-observed', onDemandEnabled: false, executionSupported: true };
+    const replace = (v: unknown) => { const temp = join(state, 'settings.tmp'); writeFileSync(temp, JSON.stringify(v), { mode: 0o600 }); renameSync(temp, file); };
+    replace({ ...value, settings: 2 });
+    expect(readResourceAccountLocalEpoch(root, a)?.epochDigest).not.toBe(before.epochDigest);
+    const first = createResourceReadingCache({ root, accountsRoot: root, accounts: [a], assertOwnership: () => {} });
+    first.remember(a, row, before.accountDigest!, before); await first.flush();
+    const snapshot = first.identityWitnessesSnapshot()[0]!;
+    expect(snapshot.localEpoch).toBeNull(); expect(recheckResourceAccountIdentitySnapshot(root, a, snapshot)).toBeNull();
+    replace({ ...value, settings: 3 });
+    const next = createResourceReadingCache({ root, accountsRoot: root, accounts: [a], assertOwnership: () => {} });
+    expect(next.lastKnown(a)?.observedAt).toBe(row.observedAt); expect(next.lastKnown(a)?.windows).toEqual(row.windows);
+    expect(next.witness(a)).toBeNull();
+    chmodSync(file, 0o644); expect(next.lastKnown(a)).toBeNull(); chmodSync(file, 0o600);
+    replace({ ...value, settings: 'x'.repeat(2 * 1024 * 1024) }); expect(next.lastKnown(a)).toBeNull();
+    replace(value); const linked = join(state, 'linked'); linkSync(file, linked); expect(next.lastKnown(a)).toBeNull(); rmSync(linked);
+    const symlinkTarget = join(state, 'symlink-target'); renameSync(file, symlinkTarget); symlinkSync(symlinkTarget, file);
+    expect(next.lastKnown(a)).toBeNull(); rmSync(file); renameSync(symlinkTarget, file);
+    replace({ oauthAccount: { ...value.oauthAccount, organizationUuid: 'other-org' } }); expect(next.lastKnown(a)).toBeNull();
+    replace({ oauthAccount: {} }); expect(next.lastKnown(a)).toBeNull();
+  });
   it.each(['codex', 'grok'] as const)('pins %s private auth file metadata without parsing credential contents', provider => {
     const file = join(state, 'auth.json'); writeFileSync(file, 'not parsed credential content', { mode: 0o600 });
     const a = account(provider); const first = readResourceAccountLocalEpoch(root, a);

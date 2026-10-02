@@ -2,7 +2,7 @@
 import { randomInt, randomUUID } from 'node:crypto';
 import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
-import { canonical, inspectPrivateDirectory } from '../universe/artifacts.js';
+import { canonical, digest, inspectPrivateDirectory } from '../universe/artifacts.js';
 import { writePrivateFileAtomicallyAsync } from '../util/private-file-write.js';
 import { validResetProvenance } from '../routing/reset-pressure.js';
 import { readResourceJson } from './pool-runtime.js';
@@ -17,7 +17,7 @@ export const RESOURCE_READING_CACHE_MAX_BYTES = 2 * 1024 * 1024;
 type Account = ResourceConnectionConfig['accounts'][number];
 interface CachedReading {
   accountId: string; provider: Account['provider']; accountDigest: string; profileDigest: string;
-  epochDigest: string | null; observedAt: string; expiresAt: string; windows: ResourceConnectionQuotaWindow[];
+  epochDigest: string | null; displayIdentityDigest?: string; observedAt: string; expiresAt: string; windows: ResourceConnectionQuotaWindow[];
 }
 export interface ResourceReadingCache {
   captureEpoch(account: Account): ResourceAccountLocalEpoch | null;
@@ -65,15 +65,27 @@ function windows(value: unknown): ResourceConnectionQuotaWindow[] {
   }
   return structuredClone(value) as ResourceConnectionQuotaWindow[];
 }
+/** This digest qualifies historical quota display only. It never replaces the
+ * stricter file epoch used by native/financial identity witnesses. */
+function claudeDisplayIdentityDigest(profileDigest: string, accountDigest: string): string {
+  return digest(canonical(['claude-historical-display-identity-v1', profileDigest, accountDigest]));
+}
+function displayIdentityMatches(row: CachedReading, current: ResourceAccountLocalEpoch | null): boolean {
+  return row.provider === 'claude' && row.displayIdentityDigest !== undefined && current !== null &&
+    current.profileDigest === row.profileDigest && current.accountDigest === row.accountDigest &&
+    claudeDisplayIdentityDigest(current.profileDigest, current.accountDigest) === row.displayIdentityDigest;
+}
 function checked(value: unknown): CachedReading[] {
   if (!record(value) || !exact(value, ['schemaVersion', 'scope', 'readings']) || value.schemaVersion !== 1 ||
     value.scope !== 'historical-display-only' || !dense(value.readings, Math.floor(RESOURCE_READING_CACHE_MAX_BYTES / 2))) throw new Error();
   const ids = new Set<string>();
   return value.readings.map(v => {
-    if (!record(v) || !exact(v, ['accountId', 'provider', 'accountDigest', 'profileDigest', 'epochDigest', 'observedAt', 'expiresAt', 'windows']) ||
+    if (!record(v) || !exact(v, ['accountId', 'provider', 'accountDigest', 'profileDigest', 'epochDigest', 'observedAt', 'expiresAt', 'windows'], ['displayIdentityDigest']) ||
       typeof v.accountId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(v.accountId) || ids.has(v.accountId) ||
       typeof v.provider !== 'string' || !['codex', 'claude', 'grok'].includes(v.provider) || !hash(v.accountDigest) || !hash(v.profileDigest) ||
-      !(v.epochDigest === null || hash(v.epochDigest)) || !resourceIdentityInstant(v.observedAt) || !resourceIdentityInstant(v.expiresAt) ||
+      !(v.epochDigest === null || hash(v.epochDigest)) ||
+      Object.hasOwn(v, 'displayIdentityDigest') && (v.provider !== 'claude' || !hash(v.displayIdentityDigest) ||
+        v.displayIdentityDigest !== claudeDisplayIdentityDigest(v.profileDigest as string, v.accountDigest as string)) || !resourceIdentityInstant(v.observedAt) || !resourceIdentityInstant(v.expiresAt) ||
       Date.parse(v.observedAt) > Date.now() || Date.parse(v.expiresAt) <= Date.parse(v.observedAt) || Date.parse(v.expiresAt) - Date.parse(v.observedAt) > 60_000) throw new Error();
     ids.add(v.accountId);
     return { ...v, windows: windows(v.windows) } as unknown as CachedReading;
@@ -87,7 +99,7 @@ export function normalizeResourceLastKnownUsage(value: unknown): ResourceLastKno
       !resourceIdentityInstant(value.observedAt) || !resourceIdentityInstant(value.expiresAt) ||
       Date.parse(value.observedAt) > Date.now() || Date.parse(value.expiresAt) <= Date.parse(value.observedAt) ||
       Date.parse(value.expiresAt) - Date.parse(value.observedAt) > 60_000 || value.source !== 'native-account-checked-history' ||
-      typeof value.identitySource !== 'string' || !['native-account-checked', 'native-account-checked-local-epoch'].includes(value.identitySource)) return null;
+      typeof value.identitySource !== 'string' || !['native-account-checked', 'native-account-checked-local-epoch', 'native-account-checked-display-identity'].includes(value.identitySource)) return null;
     return { observedAt: value.observedAt, expiresAt: value.expiresAt, windows: windows(value.windows),
       source: 'native-account-checked-history', identitySource: value.identitySource as ResourceLastKnownUsage['identitySource'] };
   } catch { return null; }
@@ -164,10 +176,17 @@ export function createResourceReadingCache(options: { root: string; accountsRoot
             checkTarget();
             for (const row of captured) {
               const a = roster.get(row.accountId)!;
-              if (row.epochDigest !== null) {
+              if (row.epochDigest !== null || row.displayIdentityDigest !== undefined) {
                 const current = epoch(a);
-                if (!current || current.epochDigest !== row.epochDigest || current.accountDigest !== undefined && current.accountDigest !== row.accountDigest) {
+                if (row.displayIdentityDigest !== undefined && !displayIdentityMatches(row, current) ||
+                  row.displayIdentityDigest === undefined && (!current || current.epochDigest !== row.epochDigest ||
+                    current.accountDigest !== undefined && current.accountDigest !== row.accountDigest)) {
                   rows.delete(row.accountId); native.delete(row.accountId); invalidated.add(row.accountId); identityRevision++; revision++; throw new Error();
+                }
+                if (row.epochDigest !== null && current?.epochDigest !== row.epochDigest) {
+                  // Settings may change without changing Claude's checked account.
+                  // Keep history but discard strict native proof, then serialize again.
+                  row.epochDigest = null; identityRevision++; revision++; throw new Error();
                 }
               }
             }
@@ -206,7 +225,11 @@ export function createResourceReadingCache(options: { root: string; accountsRoot
         const previous = rows.get(a.id);
         const preserve = row.windows.length === 0 && previous?.accountDigest === hint && previous.profileDigest === resourceAccountProfileDigest(a);
         const record: CachedReading = { accountId: a.id, provider: a.provider, accountDigest: hint, profileDigest: resourceAccountProfileDigest(a),
-          epochDigest: stable, observedAt: row.observedAt, expiresAt: row.expiresAt, windows: windows(row.windows) };
+          epochDigest: stable, observedAt: row.observedAt, expiresAt: row.expiresAt, windows: windows(row.windows),
+          ...(a.provider === 'claude' && before?.profileDigest === resourceAccountProfileDigest(a) &&
+            before.accountDigest === hint && after?.accountDigest === hint ? {
+              displayIdentityDigest: claudeDisplayIdentityDigest(resourceAccountProfileDigest(a), hint),
+            } : {}) };
         if (preserve) { record.observedAt = previous.observedAt; record.expiresAt = previous.expiresAt; record.windows = previous.windows; }
         rows.set(a.id, record);
         native.set(a.id, { provider: a.provider, accountId: a.id, accountDigest: hint, profileDigest: record.profileDigest, generation,
@@ -237,9 +260,12 @@ export function createResourceReadingCache(options: { root: string; accountsRoot
     identitySnapshotRevision: () => identityRevision,
     lastKnown(a) {
       const current = witness(a); const row = rows.get(a.id);
-      if (!current || !row || Date.parse(row.observedAt) > Date.now()) return null;
+      if (!row || Date.parse(row.observedAt) > Date.now() || !belongs(a) ||
+        row.profileDigest !== resourceAccountProfileDigest(a)) return null;
+      // Never expose this fallback through witness() or financial snapshots.
+      if (!current && !displayIdentityMatches(row, epoch(a))) return null;
       return { observedAt: row.observedAt, expiresAt: row.expiresAt, windows: structuredClone(row.windows),
-        source: 'native-account-checked-history', identitySource: current.source };
+        source: 'native-account-checked-history', identitySource: current?.source ?? 'native-account-checked-display-identity' };
     },
     async flush() { while (pending) await pending; },
   };
