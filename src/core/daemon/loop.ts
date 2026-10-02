@@ -6112,16 +6112,14 @@ export async function tick(
     fleetMonitor.setConcurrency(fleetConcurrency);
     const allowance = localFleetDispatchAllowed(localFleet);
     if (!allowance.allowed) fleetDispatchBlocked = allowance.reason;
-    // A RUNTIME THAT CANNOT SERVE MUST BLOCK, not be dispatched into. Failing
-    // closed to concurrency 1 and then dispatching anyway burns one work item
-    // per tick into a failure against a dead socket, every backoff period,
-    // indefinitely — and the loop's park only reacts after the item is spent.
+    // A RUNTIME WITH NO USABLE CAPACITY MUST BLOCK, not be dispatched into.
+    // The display's fail-closed concurrency of 1 is not admission evidence:
+    // even an up runtime with no valid slot count must hold its work.
     // Items routed elsewhere (builtin) are unaffected: the gate in
     // `superviseFleetTurn` is scoped to turns that actually use the runtime.
-    if (fleetDispatchBlocked === null && fleetConcurrency.limiter === 'fail-closed' &&
-        capacity.state !== 'up') {
+    if (fleetDispatchBlocked === null && fleetConcurrency.limiter === 'fail-closed') {
       fleetDispatchBlocked = capacity.detail ||
-        `serving runtime ${capacity.state} — not dispatching into it`;
+        `serving runtime ${capacity.state} has no usable capacity — not dispatching into it`;
     }
     if (fleetConcurrency.limiter === 'fail-closed' || fleetDispatchBlocked) {
       audit({

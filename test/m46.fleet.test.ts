@@ -604,7 +604,7 @@ describe('fleet quota ledger', () => {
     expect(readdirSync(join(tmpHome, '.ashlr', 'fleet')).some((name) => name.endsWith('.tmp'))).toBe(false);
   });
 
-  it.each(['grok-cli', 'devin-cli'] as const)('admits native %s with absent limits without creating quota storage', (backend) => {
+  it.each(['grok-cli', 'devin-cli', 'llama-server'] as const)('admits registered %s with absent limits without creating quota storage', (backend) => {
     const cfg = withFoundry({ allowedBackends: [backend] });
     expect(reserveFleetQuotaUse(backend, cfg, 'native-unlimited')).toEqual({
       kind: 'unlimited', launchAuthorized: true,
@@ -613,7 +613,7 @@ describe('fleet quota ledger', () => {
     expect(existsSync(join(tmpHome, '.ashlr', 'fleet'))).toBe(false);
   });
 
-  it.each(['grok-cli', 'devin-cli'] as const)('enforces durable native %s reservations and exact ledger readback', (backend) => {
+  it.each(['grok-cli', 'devin-cli', 'llama-server'] as const)('enforces durable registered %s reservations and exact ledger readback', (backend) => {
     const cfg = withFoundry({
       allowedBackends: [backend],
       limits: { [backend]: { window: '1h', max: 2 } },

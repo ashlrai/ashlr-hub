@@ -9,6 +9,29 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.22.2] — 2026-10-01
+
+### Fixed
+
+- Keep grant scope choices when collapsing and reopening the editor. Preserve
+  account permissions and uncapped volume choices; require a fresh reviewed
+  preview after source changes before Touch ID approval.
+- Show the signed Leader ceiling separately from each stage's actual allowed
+  actions, including an explicit advisory-only starting stage.
+- Admit the registered parallel local engine through the fleet quota ledger.
+  Hold local work when a reachable runtime reports no valid serving capacity;
+  do not treat the display fallback as permission to dispatch.
+
+### Changed
+
+- Derive local lane width from reported serving slots instead of fixed
+  four-slot and 32-slot ceilings. Preserve explicit operator quotas, presence
+  limits and shared execution controls; allocate workers from available work.
+- Custody helper 1.2.0 can reauthorize one existing GitHub App or Claude token
+  after an ad-hoc helper update, without exporting or replacing the credential.
+  It requires a separate operator installation and human Keychain approval;
+  publishing the Hub does not activate the fleet.
+
 ## [3.22.1] — 2026-10-01
 
 ### Fixed

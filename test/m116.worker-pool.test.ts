@@ -151,6 +151,7 @@ vi.mock('../src/core/run/learned-router.js', () => ({
 import { tick, runDaemon } from '../src/core/daemon/loop.js';
 import { enroll, unenroll, setKill } from '../src/core/sandbox/policy.js';
 import { createProposal } from '../src/core/inbox/store.js';
+import { registerServingCapacityProbe, resetServingCapacityCache } from '../src/core/daemon/local-fleet.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -264,6 +265,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  registerServingCapacityProbe(null);
+  resetServingCapacityCache();
   try { unenroll(tmpRepo); } catch { /* ignore */ }
   try { setKill(false); } catch { /* ignore */ }
 
@@ -286,6 +289,38 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('M116 — default config (batch mode)', () => {
+  it.each([null, NaN, 33.5, Number.MAX_SAFE_INTEGER + 1])('holds local work when an up runtime reports unusable capacity %s', async (slots) => {
+    enroll(tmpRepo);
+    backlogItems = [makeItem('unknown-local-capacity', tmpRepo)];
+    routeResult = { backend: 'llama-server', tier: 'local', reason: 'test runtime' };
+    const cfg = makeCfg({ perTickItems: 1 });
+    cfg.foundry = { localOnly: true, allowedBackends: ['llama-server'] };
+    mockLoadConfig.mockReturnValue(cfg);
+    registerServingCapacityProbe(async ({ nowMs }) => ({ runtime: 'llama-server', endpoint: 'unit-test', state: 'up', slots, busySlots: 0, model: 'unit-test', managed: true, startedAt: null, observedAt: new Date(nowMs).toISOString(), detail: 'No usable test capacity' }));
+    resetServingCapacityCache();
+    const result = await tick(cfg, { dryRun: false });
+    expect(result.itemsConsidered).toBe(1);
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(result.dispatches?.[0]).toMatchObject({ dispatched: false, assignedBy: 'local-fleet-limit', reason: 'No usable test capacity' });
+  });
+
+  it.each([1, 4, 64])('admits a fresh %s-slot runtime without allocating absent work', async (slots) => {
+    enroll(tmpRepo);
+    backlogItems = [makeItem('known-local-capacity', tmpRepo)];
+    routeResult = { backend: 'llama-server', tier: 'local', reason: 'test runtime' };
+    const cfg = makeCfg({ perTickItems: 1 });
+    cfg.foundry = { localOnly: true, allowedBackends: ['llama-server'] };
+    mockLoadConfig.mockReturnValue(cfg);
+    registerServingCapacityProbe(async ({ nowMs }) => ({ runtime: 'llama-server', endpoint: 'unit-test', state: 'up', slots, busySlots: 0, model: 'unit-test', managed: true, startedAt: null, observedAt: new Date(nowMs).toISOString(), detail: 'Usable test capacity' }));
+    resetServingCapacityCache();
+    const result = await tick(cfg, { dryRun: false });
+    expect(result.itemsConsidered).toBe(1);
+    expect(result.dispatches?.[0]).toMatchObject({ dispatched: true, backend: 'llama-server' });
+    expect(mockRunGoal).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
   it('runs requested batch concurrency above eight while bounding workers by actual inventory', async () => {
     enroll(tmpRepo);
     backlogItems = Array.from({ length: 17 }, (_, i) => makeItem(`wide-${i}`, tmpRepo));

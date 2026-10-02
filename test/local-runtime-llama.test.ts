@@ -483,6 +483,21 @@ describe('health interpretation', () => {
 });
 
 describe('slot capacity', () => {
+  it.each([33, 64, 128, Number.MAX_SAFE_INTEGER])('preserves %s valid serving slots', (slots) => {
+    expect(deriveSlotCapacity(reading({ body: { total_slots: slots } }), reading({ body: null })))
+      .toMatchObject({ configured: slots, source: 'props' });
+  });
+
+  it.each([NaN, Infinity, -1, 0, 33.5, Number.MAX_SAFE_INTEGER + 1])('never rounds or trusts invalid reported count %s', (slots) => {
+    expect(deriveSlotCapacity(reading({ body: { total_slots: slots } }), reading({ body: null })))
+      .toMatchObject({ configured: null, source: 'unknown' });
+  });
+
+  it('uses the actual slot array when the props count is malformed', () => {
+    expect(deriveSlotCapacity(reading({ body: { total_slots: 33.5 } }), reading({ body: [{ state: 0 }, { state: 1 }] })))
+      .toEqual({ configured: 2, busy: 1, idle: 1, source: 'slots' });
+  });
+
   it('prefers what the server says it built', () => {
     const capacity = deriveSlotCapacity(
       reading({ body: { total_slots: 4 } }),

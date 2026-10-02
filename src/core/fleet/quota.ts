@@ -64,8 +64,10 @@ const MAX_BATCH_RESERVATIONS = 64;
 const RESERVATION_DOMAIN = 'ashlr:fleet-quota-reservation:v1';
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const O_NOFOLLOW = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+// Include the registered parallel local engine; its serving capacity is checked
+// separately, while configured quotas retain this same durable admission gate.
 const ENGINE_IDS = new Set<EngineId>([
-  'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
+  'builtin', 'local-coder', 'llama-server', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
   'kimi', 'nim', 'opencode', 'meta-muse', 'grok', 'grok-cli', 'devin-cli',
 ]);
 const MAX_AUTHORITY_EVENTS = MAX_EVENTS * ENGINE_IDS.size;

@@ -16,15 +16,15 @@
 
 ## Install
 
-Install Verse 3.22.1 from its versioned GitHub release:
+Install Verse 3.22.2 from its versioned GitHub release:
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.1/ashlr-hub-3.22.1.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.2/ashlr-hub-3.22.2.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
 ashlr verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 On an Apple silicon Mac, download the
-[v3.22.1 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.1/Ashlr_3.22.1_aarch64_locally-signed.dmg).
+[v3.22.2 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.2/Ashlr_3.22.2_aarch64_locally-signed.dmg).
 It is locally signed, not Apple notarized; macOS may require **Open Anyway** on
 first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
@@ -183,7 +183,7 @@ separate Node.js install to run.
 
 ### Install
 
-The [v3.22.1 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.22.1)
+The [v3.22.2 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.22.2)
 includes an arm64 DMG. It is locally signed, not Apple Developer ID notarized,
 so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
@@ -271,7 +271,7 @@ The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.1/ashlr-hub-3.22.1.tgz
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.2/ashlr-hub-3.22.2.tgz
 ashlr --version
 ashlr verse                 # start the server and open http://127.0.0.1:7777/verse/
 ```
