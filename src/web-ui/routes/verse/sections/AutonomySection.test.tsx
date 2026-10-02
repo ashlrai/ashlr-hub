@@ -113,7 +113,15 @@ describe('AutonomySection', () => {
   });
 
   it('commits a valid cap on blur and confirms it applied live', async () => {
-    const { posted } = stubFetch();
+    const refreshedCaps = { ...CAPS, parallel: 65 };
+    const routes: Routes = {
+      caps: CAPS,
+      posts: () => {
+        routes.caps = refreshedCaps;
+        return new Response(JSON.stringify({ ok: true, applied: ['parallel'], live: true, caps: refreshedCaps }), { status: 200 });
+      },
+    };
+    const { posted, fetchMock } = stubFetch(routes);
     setMutationToken(TOKEN);
     render(<AutonomySection />);
 
@@ -123,6 +131,9 @@ describe('AutonomySection', () => {
 
     await waitFor(() => expect(posted).toContainEqual({ url: '/api/verse/caps', body: { parallel: 65 } }));
     expect(await screen.findByText('applied live')).toBeInTheDocument();
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url, init]) =>
+      String(url).startsWith('/api/verse/caps') && init?.method !== 'POST').length).toBeGreaterThanOrEqual(2));
+    expect(screen.getByLabelText('Parallel swarms')).toHaveValue(65);
   });
 
   it('shows actual journal admission beside a larger requested item preference', async () => {
