@@ -567,6 +567,9 @@ describe('M454 pinned upstream routing challenge', () => {
       'CHANGELOG.md',
       'docs/README.md',
       'docs/QUICKSTART.md',
+      'docs/AUTOMATIC-OUTCOMES.md',
+      'docs/VERSE.md',
+      'docs/AUTONOMY-SETUP.md',
       'docs/DEMO.md',
       'docs/ARCHITECTURE.md',
       'docs/MISSION-OS.md',
@@ -610,6 +613,9 @@ describe('M454 pinned upstream routing challenge', () => {
       const archive = packed[0];
       const packedPaths = archive?.files.map((entry) => entry.path) ?? [];
       expect(packedPaths.length).toBeGreaterThan(0);
+      expect(packedPaths).toContain('docs/AUTOMATIC-OUTCOMES.md');
+      expect(packedPaths).toContain('docs/VERSE.md');
+      expect(packedPaths).toContain('docs/AUTONOMY-SETUP.md');
       expect(packedPaths).toContain('docs/RUNTIME_ACTIVATION_AUTHORITY.md');
       expect(packedPaths).toContain('docs/REMOTE-PHONE.md');
       expect(packedPaths).toContain('docs/contracts/CONTRACT-M521.md');
