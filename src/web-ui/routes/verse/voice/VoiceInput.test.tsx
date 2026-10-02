@@ -195,6 +195,13 @@ describe('VoiceInput — desktop (native engine)', () => {
     expect(sent.at(-1)).toEqual({ op: 'fix', action: 'cancel-download' });
   });
 
+  it('a download at 99.6% reads "99%", never a finished-looking "100%"', () => {
+    installBridge();
+    render(<><Box /><VoiceHud /></>);
+    nativeEvent({ event: 'voice://state', state: state({ engine: { id: 'parakeet', label: 'local Parakeet', model: 'downloading', progress: 0.996, totalBytes: 670_000_000, error: null } }) });
+    expect(screen.getByText('Downloading Parakeet · 99% of 670 MB (once)')).toBeInTheDocument();
+  });
+
   it('Escape cancels a live dictation from the page', () => {
     const sent = installBridge();
     render(<><Box /><VoiceHud /></>);

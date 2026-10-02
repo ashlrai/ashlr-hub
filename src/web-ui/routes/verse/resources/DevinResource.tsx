@@ -26,6 +26,7 @@ import { describeContextError, useTokenGate } from '../context/use-token-gate.js
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { acuLevel, devinHeadline, devinModelsLines, devinReadinessRow, devinUsageEvidence, DEVIN_USAGE_LINK, formatAcu, safeDevinHref, waitingTasks } from '../devin/devin-model.js';
 import { DEVIN_POLL_MS, devinQuery, messageDevinTask } from '../devin/devin-queries.js';
+import { usedPercentText } from '../percent-text.js';
 import { ReadinessLines } from './ReadinessLines.js';
 import { ResourceFacts } from './ResourceFacts.js';
 import type { ResourceFactsView } from './resources-model.js';
@@ -163,7 +164,8 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
             >
               <span className={styles.meterFill} data-kind="left" style={{ width: `${Math.round(leftPercent)}%` }} />
             </span>
-            <span className={styles.meterValue} aria-hidden="true">{Math.round(leftPercent)}% left</span>
+            {/* One percent rule, as CloudCredits: 0.4% left is "<1% left", never "0% left" (exhausted). */}
+            <span className={styles.meterValue} aria-hidden="true">{usedPercentText(leftPercent)} left</span>
           </div>
           <p className={styles.subtle}>
             {budget.running} running · {budget.sessionsToday} today · {formatAcu(budget.acuToday)} today, used or held

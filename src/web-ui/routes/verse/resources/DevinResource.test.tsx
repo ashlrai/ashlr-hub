@@ -98,6 +98,13 @@ describe('DevinResource', () => {
     expect(li.querySelector('input[type="password"]')).toBeNull();
   });
 
+  it('the "% left" readout follows the one percent rule: 0.36% left is "<1% left", never "0% left"', async () => {
+    overview = { generatedAt: 'x', tasks: [], status: status(), budget: budget({ acuBudgetTotal: 1000, acuRemaining: 3.6, acuInFlight: 0 }) };
+    mount();
+    expect(await screen.findByText('<1% left')).toBeTruthy();
+    expect(screen.queryByText('0% left')).toBeNull();
+  });
+
   it('connected: ACUs left of the budget with an estimate note and the usage link', async () => {
     mount();
     expect(await screen.findByText('34 ACUs of 50 ACUs left')).toBeTruthy();
