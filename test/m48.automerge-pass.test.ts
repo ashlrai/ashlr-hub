@@ -77,6 +77,7 @@ const mockReplayRealizedMergeFanout = vi.fn();
 const mockSetStatus = vi.fn();
 const mockUpdateProposalField = vi.fn();
 vi.mock('../src/core/inbox/store.js', () => ({
+  loadProposal: (id: string) => pendingProposals.find((p) => p.id === id) ?? null,
   listProposalsDetailed: (...args: unknown[]) => mockListProposalsDetailed(...args),
   replayRealizedMergeFanout: (...args: unknown[]) => mockReplayRealizedMergeFanout(...args),
   setStatus: (...args: unknown[]) => mockSetStatus(...args),
@@ -132,7 +133,7 @@ vi.mock('../src/core/run/provider-client.js', () => ({
 // Lazy imports — after mocks + HOME isolation
 // ---------------------------------------------------------------------------
 
-import { runAutoMergePass } from '../src/core/fleet/automerge-pass.js';
+import { runAutoMergePass, runAuthorizedFrontierJudge } from '../src/core/fleet/automerge-pass.js';
 import { readAgentActions } from '../src/core/fleet/agent-action-ledger.js';
 import { enroll, setKill } from '../src/core/sandbox/policy.js';
 import {
@@ -1697,5 +1698,53 @@ describe('M48 runAutoMergePass — KILL-SWITCH halts the pass', () => {
     expect(out.attempted).toBe(0);
     expect(out.merged).toBe(0);
     expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('outcome proposals require standing host progression', () => {
+  it('never spends a judge or enters legacy automatic merge for an outcome proposal', async () => {
+    pendingProposals = [makeProposal('outcome-legacy', {
+      engineTier: 'frontier', workItemId: 'goal:outcome-' + 'a'.repeat(64) + ':milestone-' + 'b'.repeat(64),
+      workItemGenerationId: 'outcome:v1:current',
+    })];
+    const out = await runAutoMergePass(managerGateCfg());
+    expect(mockJudgeProposal).not.toHaveBeenCalled();
+    expect(mockAutoMergeProposal).not.toHaveBeenCalled();
+    expect(out.skipped).toEqual(expect.arrayContaining([expect.objectContaining({ check: 'outcome-standing' })]));
+    expect(pendingProposals[0]?.status).toBe('pending');
+  });
+});
+
+
+describe('authorized outcome frontier judge admission', () => {
+  it('refuses a held outcome before the first judge request', async () => {
+    const admissionModule = await import('../src/core/daemon/outcome-proposal-admission.js');
+    const admission = vi.spyOn(admissionModule, 'outcomeProposalStillCurrent').mockReturnValue(false);
+    try {
+      const result = await runAuthorizedFrontierJudge(makeProposal('held-judge', { engineTier: 'frontier' }), managerGateCfg(), { model: 'claude-opus-4-8', complete: vi.fn() });
+      expect(result.requested).toBe(false);
+      expect(mockJudgeProposal).not.toHaveBeenCalled();
+      expect(mockRecordDecision).not.toHaveBeenCalled();
+    } finally { admission.mockRestore(); }
+  });
+
+  it('passes a live predicate to nested judge calls and withholds authority after pause during response', async () => {
+    const admissionModule = await import('../src/core/daemon/outcome-proposal-admission.js');
+    let current = true;
+    const admission = vi.spyOn(admissionModule, 'outcomeProposalStillCurrent').mockImplementation(() => current);
+    try {
+      mockJudgeProposal.mockImplementationOnce(async (_p, _cfg, _client, opts) => {
+        expect(opts.selectedOutcomeAdmission()).toBe(true);
+        await Promise.resolve();
+        current = false;
+        expect(opts.selectedOutcomeAdmission()).toBe(false);
+        return { considered: true, verdict: 'ship', wouldMerge: true, rationale: 'contacted response' };
+      });
+      const result = await runAuthorizedFrontierJudge(makeProposal('paused-judge', { engineTier: 'frontier' }), managerGateCfg(), { model: 'claude-opus-4-8', complete: vi.fn() });
+      expect(result).toMatchObject({ requested: true, authorityLive: false, decisionPersisted: false });
+      expect(mockJudgeProposal).toHaveBeenCalledTimes(1);
+      expect(mockRecordDecision).not.toHaveBeenCalled();
+    } finally { admission.mockRestore(); }
   });
 });

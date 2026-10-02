@@ -1,0 +1,165 @@
+/** The existing Leader plans durable outcomes; this port never launches agents or selects resources. */
+import { lstatSync, opendirSync, realpathSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import type { EffectivePolicy } from '../authority/types.js';
+import { repoIdentityOfPath } from '../fleet/repo-identity.js';
+import { OutcomeCoordinator } from '../goals/outcome-coordinator.js';
+import { goalProjectMatchesRepo } from '../goals/project-match.js';
+import { outcomeDirectory } from '../goals/outcome-runtime.js';
+import { OutcomeStore } from '../goals/outcome-store.js';
+import { outcomeDigest, outcomeIdentity, type OutcomeState } from '../goals/outcome-types.js';
+import { readEnrollmentRegistry } from '../sandbox/policy.js';
+import { inspectPrivateDirectory } from '../universe/artifacts.js';
+import { cleanModelText } from './leader-memo.js';
+import type { MissionGraphNodeInput } from './mission-graph.js';
+import type { LeaderOutcomePlanIdentity, LeaderOutcomeRefinement } from './leader-types.js';
+
+export interface OutcomeInventoryRead {
+  sourceState: 'healthy' | 'missing' | 'degraded';
+  complete: boolean;
+  states: OutcomeState[];
+  unreadable: number;
+  limitExceeded: boolean;
+}
+/** Filesystem admission bound shared in scale with the immutable record store, not an outcome/agent quota. */
+const MAX_OUTCOME_DIRECTORY_ENTRIES = 100_000;
+export function readOutcomeInventory(rootPath?: string): OutcomeInventoryRead {
+  const states: OutcomeState[] = [];
+  let unreadable = 0;
+  let limitExceeded = false;
+  try {
+    // Default-path failures are qualified discovery failures too. Evaluating
+    // this outside the try would stop unrelated legacy backlog discovery.
+    rootPath ??= dirname(outcomeDirectory('inventory'));
+    // Inspect the owned parent when present; a missing parent must still have a real ancestor.
+    try { inspectPrivateDirectory(dirname(rootPath)); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      let ancestor = dirname(rootPath);
+      for (;;) {
+        try { lstatSync(ancestor); if (realpathSync.native(ancestor) !== ancestor) throw new Error('Unsafe outcome ancestor'); break; }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || dirname(ancestor) === ancestor) throw error; ancestor = dirname(ancestor); }
+      }
+    }
+    let identity;
+    try { identity = lstatSync(rootPath); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { sourceState: 'missing', complete: true, states, unreadable, limitExceeded };
+      }
+      throw error;
+    }
+    inspectPrivateDirectory(rootPath);
+    const handle = opendirSync(rootPath);
+    let count = 0;
+    try {
+      for (;;) {
+        const entry = handle.readSync();
+        if (!entry) break;
+        if (++count > MAX_OUTCOME_DIRECTORY_ENTRIES) { limitExceeded = true; break; }
+        if (!entry.isDirectory() || !outcomeIdentity(entry.name)) { unreadable += 1; continue; }
+        const read = new OutcomeStore(join(rootPath, entry.name)).read();
+        if (read.sourceState !== 'healthy' || read.state.id !== entry.name) { unreadable += 1; continue; }
+        states.push(read.state);
+      }
+    } finally { handle.closeSync(); }
+    const after = lstatSync(rootPath);
+    if (after.dev !== identity.dev || after.ino !== identity.ino || after.mtimeMs !== identity.mtimeMs || after.ctimeMs !== identity.ctimeMs || after.isSymbolicLink()) throw new Error('Outcome inventory changed while reading');
+    states.sort((a, b) => a.id.localeCompare(b.id));
+    const complete = unreadable === 0 && !limitExceeded;
+    return { sourceState: complete ? 'healthy' : 'degraded', complete, states, unreadable, limitExceeded };
+  } catch { return { sourceState: 'degraded', complete: false, states, unreadable: unreadable + 1, limitExceeded }; }
+}
+export interface LeaderOutcomeEvidence {
+  sourceState: OutcomeInventoryRead['sourceState'];
+  complete: boolean;
+  unreadable: number;
+  limitExceeded: boolean;
+  outcomes: Array<{ outcomeId: string; scopeRevision: number; scopeDigest: string; planRevision: number;
+    graphDigest: string | null; paused: boolean; desiredOutcome: string; acceptance: string[];
+    targets: Array<{ alias: string; label: string }>; nodes: Array<{ key: string; kind: string; title: string;
+      state: string; attemptId: string | null; terminalRunId: string | null; dependsOn: string[]; acceptance: string[] }> }>;
+}
+export function buildLeaderOutcomeEvidence(read: OutcomeInventoryRead): LeaderOutcomeEvidence {
+  return { sourceState: read.sourceState, complete: read.complete, unreadable: read.unreadable, limitExceeded: read.limitExceeded,
+    outcomes: read.states.map(state => ({ outcomeId: state.id, scopeRevision: state.scopeRevision, scopeDigest: state.scopeDigest,
+      planRevision: state.planRevision, graphDigest: state.graphDigest, paused: state.paused,
+      desiredOutcome: cleanModelText(state.scope.desiredOutcome, state.scope.desiredOutcome.length) ?? '',
+      acceptance: state.scope.acceptance.map(text => cleanModelText(text, text.length) ?? ''),
+      targets: state.scope.targetRepos.map((repo, index) => ({ alias: `target-${index + 1}`, label: cleanModelText(basename(repo), 200) ?? 'target' })),
+      nodes: state.activeNodeIds.map(id => { const node = state.nodes[id]!; return { key: node.basis.definition.key,
+        kind: node.basis.definition.kind, title: cleanModelText(node.basis.definition.title, 200) ?? '',
+        state: node.completion ? 'complete' : node.humanApproval ? 'approved' : node.attempts.at(-1)?.state ?? 'pending',
+        attemptId: node.attempts.at(-1)?.id ?? null, terminalRunId: node.attempts.at(-1)?.terminalRunId ?? null,
+        dependsOn: node.basis.definition.dependsOn, acceptance: node.basis.definition.acceptance.map(text => cleanModelText(text, 500) ?? '') }; }) })) };
+}
+export type LeaderOutcomeApplyResult = { ok: true; applied: LeaderOutcomePlanIdentity } | { ok: false; reason: string };
+export interface LeaderOutcomesPort {
+  evidence(): LeaderOutcomeEvidence;
+  refine(actionId: string, params: LeaderOutcomeRefinement, createdAt: string): LeaderOutcomeApplyResult;
+  pausePlan(actionId: string, applied: LeaderOutcomePlanIdentity): { ran: boolean; detail: string };
+}
+export interface LeaderOutcomesDeps {
+  now(): number;
+  standingPolicy(): EffectivePolicy | null;
+  enrollment(): { state: 'ready'; repos: string[] } | { state: 'degraded' };
+  identityOfPath(repo: string): string | null;
+  directory(outcomeId: string): string;
+  inventory(): OutcomeInventoryRead;
+}
+export function createLeaderOutcomesPort(deps: LeaderOutcomesDeps): LeaderOutcomesPort {
+  const ranks = { low: 0, medium: 1, high: 2 };
+  const authorized = (state: OutcomeState, nodes: readonly MissionGraphNodeInput[] = []): boolean => {
+    try {
+      const policy = deps.standingPolicy(); const inventory = deps.enrollment();
+      return policy?.switch === 'autonomous' && policy.leader.classes.includes('A') && inventory.state === 'ready' &&
+        state.scope.targetRepos.every(repo => realpathSync.native(repo) === repo && inventory.repos.some(executionRepo =>
+          realpathSync.native(executionRepo) === executionRepo && goalProjectMatchesRepo(repo, executionRepo)) &&
+          policy.repos.some(granted => granted.nameWithOwner === deps.identityOfPath(repo))) &&
+        nodes.every(node => node.kind === 'human-gate' || policy.repos.some(granted =>
+          granted.nameWithOwner === deps.identityOfPath(node.targetRepo!) && ranks[node.riskClass] <= ranks[granted.maxRisk]));
+    } catch { return false; }
+  };
+  return {
+    evidence: () => buildLeaderOutcomeEvidence(deps.inventory()),
+    refine(actionId, params, createdAt) {
+      const coordinator = new OutcomeCoordinator(new OutcomeStore(deps.directory(params.outcomeId)));
+      const read = coordinator.store.read();
+      if (read.sourceState !== 'healthy') return { ok: false, reason: 'Outcome source is unavailable.' };
+      const state = read.state;
+      if (state.paused || state.scopeRevision !== params.scopeRevision || state.scopeDigest !== params.scopeDigest || !authorized(state)) {
+        return { ok: false, reason: 'Outcome scope changed, is paused, or is outside current enrollment/authority.' };
+      }
+      if (params.nodes.some(node => node.kind !== 'work')) return { ok: false, reason: 'Automatic planning cannot invent human gates; an authenticated operator gate port is required.' };
+      const nodes = params.nodes.map(node => {
+        const index = typeof node.targetRepo === 'string' && /^target-[1-9][0-9]*$/.test(node.targetRepo) ? Number(node.targetRepo.slice(7)) - 1 : -1;
+        return { ...node, targetRepo: node.kind === 'human-gate' ? null : state.scope.targetRepos[index] ?? '/unapproved-target' };
+      });
+      if (!authorized(state, nodes) || nodes.some(node => node.kind === 'work' && !state.scope.targetRepos.includes(node.targetRepo!))) {
+        return { ok: false, reason: 'Plan target or risk exceeds the current approved scope.' };
+      }
+      const result = coordinator.refinePlan({ commandId: `leader-refine-${outcomeDigest(actionId)}`, expectedRevision: state.revision },
+        { missionKey: state.id, title: params.title, objective: state.scope.desiredOutcome, createdAt, nodes },
+        { sourceState: 'healthy', complete: true, repos: state.scope.targetRepos }, () => authorized(state, nodes));
+      if (!result.ok || !result.state.graphDigest) return { ok: false, reason: result.ok ? 'Plan was not created.' : `Outcome plan held: ${result.reason}.` };
+      return { ok: true, applied: { outcomeId: state.id, scopeRevision: state.scopeRevision, scopeDigest: state.scopeDigest,
+        planRevision: result.state.planRevision, graphDigest: result.state.graphDigest } };
+    },
+    pausePlan(actionId, applied) {
+      const coordinator = new OutcomeCoordinator(new OutcomeStore(deps.directory(applied.outcomeId)));
+      const read = coordinator.store.read();
+      if (read.sourceState !== 'healthy') return { ran: false, detail: 'Outcome source is unavailable; no state was changed.' };
+      const state = read.state;
+      if (state.scopeRevision !== applied.scopeRevision || state.scopeDigest !== applied.scopeDigest ||
+          state.planRevision !== applied.planRevision || state.graphDigest !== applied.graphDigest || state.paused) {
+        return { ran: false, detail: 'The outcome was changed or paused since this action; left as is.' };
+      }
+      const result = coordinator.setPaused({ commandId: `leader-pause-${outcomeDigest(actionId)}`, expectedRevision: state.revision }, true);
+      return { ran: result.ok, detail: result.ok ? 'The applied plan was paused; immutable plan and attempt history remain. Prior state was not restored.' : `The plan could not be paused: ${result.reason}.` };
+    },
+  };
+}
+export async function loadDefaultLeaderOutcomesPort(policy: () => EffectivePolicy | null): Promise<LeaderOutcomesPort> {
+  return createLeaderOutcomesPort({ now: () => Date.now(), standingPolicy: policy, enrollment: readEnrollmentRegistry,
+    identityOfPath: repoIdentityOfPath, directory: outcomeDirectory, inventory: readOutcomeInventory });
+}

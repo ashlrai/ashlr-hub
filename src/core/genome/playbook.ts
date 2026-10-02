@@ -1,3 +1,4 @@
+import { selectedOutcomeAdmissionCurrent } from '../run/outcome-admission.js';
 /**
  * playbook.ts — Genome playbook synthesis (M16).
  *
@@ -118,8 +119,10 @@ function buildSynthesisPrompt(goal: string, entries: RecallHit[]): string {
 async function tryLocalSynthesis(
   prompt: string,
   cfg: AshlrConfig,
+  selectedOutcomeAdmission?: () => boolean,
 ): Promise<string | null> {
   try {
+    if (!selectedOutcomeAdmissionCurrent(selectedOutcomeAdmission)) return null;
     const ollamaBase = (cfg.models?.ollama ?? 'http://localhost:11434').replace(/\/+$/, '');
     const chatUrl = `${ollamaBase}/api/chat`;
 
@@ -170,6 +173,7 @@ async function tryLocalSynthesis(
     const chatTimer = setTimeout(() => chatController.abort(), SYNTHESIS_TIMEOUT_MS);
 
     try {
+      if (!selectedOutcomeAdmissionCurrent(selectedOutcomeAdmission)) return null;
       const res = await fetch(chatUrl, {
         method: 'POST',
         signal: chatController.signal,
@@ -212,8 +216,10 @@ async function tryLocalSynthesis(
 async function tryLmStudioSynthesis(
   prompt: string,
   cfg: AshlrConfig,
+  selectedOutcomeAdmission?: () => boolean,
 ): Promise<string | null> {
   try {
+    if (!selectedOutcomeAdmissionCurrent(selectedOutcomeAdmission)) return null;
     const lmBase = (cfg.models?.lmstudio ?? 'http://localhost:1234').replace(/\/+$/, '');
     const modelsUrl = `${lmBase}/v1/models`;
     const chatUrl = `${lmBase}/v1/chat/completions`;
@@ -261,6 +267,7 @@ async function tryLmStudioSynthesis(
     const chatTimer = setTimeout(() => chatController.abort(), SYNTHESIS_TIMEOUT_MS);
 
     try {
+      if (!selectedOutcomeAdmissionCurrent(selectedOutcomeAdmission)) return null;
       const res = await fetch(chatUrl, {
         method: 'POST',
         signal: chatController.signal,
@@ -310,7 +317,7 @@ async function tryLmStudioSynthesis(
 export async function buildPlaybook(
   goal: string,
   cfg: AshlrConfig,
-  opts?: { limit?: number },
+  opts?: { limit?: number; selectedOutcomeAdmission?: () => boolean },
 ): Promise<Playbook> {
   // Step 1: recall similar past entries
   let entries: RecallHit[] = [];
@@ -337,10 +344,10 @@ export async function buildPlaybook(
   // Step 3: attempt local synthesis (Ollama first, then LM Studio)
   let synthesis: string | null = null;
 
-  synthesis = await tryLocalSynthesis(prompt, cfg);
+  synthesis = await tryLocalSynthesis(prompt, cfg, opts?.selectedOutcomeAdmission);
 
   if (!synthesis) {
-    synthesis = await tryLmStudioSynthesis(prompt, cfg);
+    synthesis = await tryLmStudioSynthesis(prompt, cfg, opts?.selectedOutcomeAdmission);
   }
 
   // Step 4: fall back to concatenated-recall synthesis if model unavailable/failed

@@ -1,3 +1,4 @@
+import { assertSelectedOutcomeAdmission, selectedOutcomeAdmissionCurrent } from './outcome-admission.js';
 /**
  * best-of-n.ts — M142: best-of-N candidate generation with critic selection.
  *
@@ -832,6 +833,8 @@ async function runBestOfNInternal(
   cfg: AshlrConfig,
   opts?: {
     n?: number;
+    /** Host-provided full authorized task prompt; text grants no authority. */
+    goal?: string;
     workItemId?: string;
     workItemGenerationId?: string;
     workSource?: WorkSource;
@@ -865,6 +868,8 @@ async function runBestOfNInternal(
     seatId?: string;
     /** Internal same-seat pre-spawn fence, forwarded only to its routed Grok candidate. */
     selectedGrokAdmission?: () => boolean;
+    /** Caller-owned outcome revision shared by all ordinary candidates and critics. */
+    selectedOutcomeAdmission?: () => boolean;
     /**
      * V3.11: the active harness's per-lane effort / sampling (a standing
      * dispatch's RunOptions.harness). Every non-shadow candidate gets it and
@@ -900,7 +905,7 @@ async function runBestOfNInternal(
   },
 ): Promise<BestOfNResult | { winner: undefined; candidates: CandidateResult[]; critique: BestOfNResult['critique'] }> {
   const n = readN(cfg, opts?.n);
-  const goal = goalFor(item);
+  const goal = opts?.goal ?? goalFor(item);
   const candidateOutputPersistenceEnabled =
     cfg.foundry?.runOutputPersistence?.enabled === true;
 
@@ -1185,7 +1190,7 @@ async function runBestOfNInternal(
         ? { shadow: true, shadowParticipated: false }
         : {}),
     };
-    if (opts?.signal?.aborted) {
+    if ((opts?.signal?.aborted || !selectedOutcomeAdmissionCurrent(opts?.selectedOutcomeAdmission))) {
       return {
         ...base,
         ...(shadowConfig.kind === 'on' ? { shadowIdentityStatus: 'refused' as const } : {}),
@@ -1249,7 +1254,7 @@ async function runBestOfNInternal(
       };
     }
     const providerStillAuthorized = (): boolean => {
-      if (opts?.signal?.aborted) return false;
+      if ((opts?.signal?.aborted || !selectedOutcomeAdmissionCurrent(opts?.selectedOutcomeAdmission))) return false;
       if (!opts?.providerDispatchStillAuthorized) return true;
       try {
         return opts.providerDispatchStillAuthorized() === true;
@@ -1483,6 +1488,7 @@ async function runBestOfNInternal(
           existingWorktree: sb,
           runId,
           ...seatFor(cEngine as EngineId),
+          ...(opts?.selectedOutcomeAdmission && shadowConfig.kind !== 'on' ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
           // A shadow observes the compiled defaults (its transport is immutable).
           ...(opts?.harness && shadowConfig.kind !== 'on' ? { harness: opts.harness } : {}),
           ...(observedCandidateStreamClaim
@@ -1521,7 +1527,7 @@ async function runBestOfNInternal(
               : {}),
           };
         }
-        if (opts?.signal?.aborted) {
+        if ((opts?.signal?.aborted || !selectedOutcomeAdmissionCurrent(opts?.selectedOutcomeAdmission))) {
           const generationError = candidateErrorFromState(result.state, false, generationOutcome);
           return {
             ...base,
@@ -1630,6 +1636,7 @@ async function runBestOfNInternal(
         sourceRepo,
         ...(effectiveCandidateBudget ? { budget: effectiveCandidateBudget } : {}),
         propose: true,
+        ...(opts?.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
         runId,
         ...seatFor(cEngine as EngineId),
         ...(opts?.harness ? { harness: opts.harness } : {}),
@@ -1647,7 +1654,7 @@ async function runBestOfNInternal(
       if (candidateOutputPersistenceEnabled) await finishCandidateObservation(result.state);
       const proposalOutcome = result.proposalOutcome ?? result.state.proposalOutcome;
       observeExecutedCandidate(result.state, proposalOutcome);
-      if (opts?.signal?.aborted) {
+      if ((opts?.signal?.aborted || !selectedOutcomeAdmissionCurrent(opts?.selectedOutcomeAdmission))) {
         const diff = typeof result.state.result === 'string' ? result.state.result : '';
         const hasMaterial = !!result.proposalId;
         const candidateError = candidateErrorFromState(result.state, hasMaterial, proposalOutcome);
@@ -1852,7 +1859,7 @@ async function runBestOfNInternal(
       generateCandidate,
     );
 
-    if (opts?.signal?.aborted) {
+    if ((opts?.signal?.aborted || !selectedOutcomeAdmissionCurrent(opts?.selectedOutcomeAdmission))) {
       scored = rawCandidates;
       return cancelledSelection(scored);
     }
@@ -1926,7 +1933,7 @@ async function runBestOfNInternal(
       rawCandidates,
       MAX_BEST_OF_N_CONCURRENCY,
       async (c): Promise<InternalCandidateResult> => {
-        if (opts?.signal?.aborted) return c;
+        if ((opts?.signal?.aborted || !selectedOutcomeAdmissionCurrent(opts?.selectedOutcomeAdmission))) return c;
         if (!candidateHasProposalMaterial(c)) return c;
 
         let verdict: ManagerVerdict | undefined;
@@ -1952,8 +1959,14 @@ async function runBestOfNInternal(
             judgeSource = 'skipped';
           }
           try {
-            const rawVerdict = await judgeProposal(proposal, cfg, client, {
+            const complete: FrontierJudgeClient['complete'] = client.complete;
+            const guardedJudge = opts?.selectedOutcomeAdmission ? { ...client, complete: (system: string, user: string, signal?: AbortSignal) => {
+              assertSelectedOutcomeAdmission(opts.selectedOutcomeAdmission);
+              return complete(system, user, signal, opts.selectedOutcomeAdmission);
+            } } : client;
+            const rawVerdict = await judgeProposal(proposal, cfg, guardedJudge, {
               recordTrace: false,
+              ...(opts?.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
               ...(opts?.signal ? { signal: opts.signal } : {}),
             });
             if (rawVerdict.judgeFailure) {
@@ -1971,7 +1984,7 @@ async function runBestOfNInternal(
             // Judge failure — candidate stays with score 0, verdict undefined.
           }
         }
-        if (opts?.signal?.aborted) return { ...c, verdict, score, judgeSource };
+        if ((opts?.signal?.aborted || !selectedOutcomeAdmissionCurrent(opts?.selectedOutcomeAdmission))) return { ...c, verdict, score, judgeSource };
 
         // Deterministic quick verification. Infrastructure errors remain neutral.
         if (c.proposalDraft || c.proposalId) {
@@ -1993,7 +2006,7 @@ async function runBestOfNInternal(
             // test runner unavailable — don't penalise
           }
         }
-        if (opts?.signal?.aborted) return { ...c, verdict, score, judgeSource, testsPassed };
+        if ((opts?.signal?.aborted || !selectedOutcomeAdmissionCurrent(opts?.selectedOutcomeAdmission))) return { ...c, verdict, score, judgeSource, testsPassed };
 
         // M183: taste scoring (flag-gated; only when tasteCritic enabled)
         let taste: TasteScore | undefined;
@@ -2003,13 +2016,13 @@ async function runBestOfNInternal(
               proposal,
               { repo: sourceRepo },
               cfg,
-              opts?.signal ? { signal: opts.signal } : undefined,
+              { ...(opts?.signal ? { signal: opts.signal } : {}), ...(opts?.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}) },
             );
           } catch {
             // taste score failure is non-fatal — candidate is still eligible
           }
         }
-        if (opts?.signal?.aborted) return { ...c, verdict, score, judgeSource, testsPassed, taste };
+        if ((opts?.signal?.aborted || !selectedOutcomeAdmissionCurrent(opts?.selectedOutcomeAdmission))) return { ...c, verdict, score, judgeSource, testsPassed, taste };
 
         return {
           ...c,
@@ -2026,7 +2039,7 @@ async function runBestOfNInternal(
       },
     );
 
-    if (opts?.signal?.aborted) {
+    if ((opts?.signal?.aborted || !selectedOutcomeAdmissionCurrent(opts?.selectedOutcomeAdmission))) {
       return cancelledSelection(scored);
     }
 
@@ -2070,7 +2083,7 @@ async function runBestOfNInternal(
 
     let winner: InternalCandidateResult | undefined;
     for (const c of eligible) {
-      if (opts?.signal?.aborted) break;
+      if ((opts?.signal?.aborted || !selectedOutcomeAdmissionCurrent(opts?.selectedOutcomeAdmission))) break;
 
       if (c.proposalId) {
         const persisted = exactDurablePendingProposal(
@@ -2166,7 +2179,7 @@ async function runBestOfNInternal(
         break;
       }
 
-      if (opts?.signal?.aborted) break;
+      if ((opts?.signal?.aborted || !selectedOutcomeAdmissionCurrent(opts?.selectedOutcomeAdmission))) break;
 
       const captureOutcome = filed.proposalId
         ? finalCaptureFailureOutcome(outcome, filed.proposalId)
@@ -2192,7 +2205,7 @@ async function runBestOfNInternal(
       ) break;
     }
 
-    if (opts?.signal?.aborted && !winner) {
+    if ((opts?.signal?.aborted || !selectedOutcomeAdmissionCurrent(opts?.selectedOutcomeAdmission)) && !winner) {
       return cancelledSelection(scored);
     }
 

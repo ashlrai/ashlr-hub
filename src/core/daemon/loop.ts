@@ -78,6 +78,15 @@ import {
   releaseOutwardMutationFence,
 } from '../sandbox/mutation-fence.js';
 import { audit as persistAudit } from '../sandbox/audit.js';
+import { readEnrollmentRegistry } from '../sandbox/policy.js';
+import { currentStandingPolicy } from '../authority/effective-config.js';
+import { repoIdentityOfPath } from '../fleet/repo-identity.js';
+import { outcomeDigest } from '../goals/outcome-types.js';
+import { goalProjectMatchesRepo } from '../goals/project-match.js';
+import { readOutcomeWorkItemContext, materializeOutcomeIntents, outcomeDirectory } from '../goals/outcome-runtime.js';
+import { OutcomeStore } from '../goals/outcome-store.js';
+import { readOutcomeInventory } from '../vision/leader-outcomes.js';
+import { OutcomeDispatch, isOutcomeWorkItem, reconcileOutcomeCompletions } from './outcome-dispatch.js';
 import { buildBacklog, loadBacklog } from '../portfolio/backlog.js';
 import { loadQueuedAutonomyItems } from '../portfolio/queued-autonomy.js';
 import {
@@ -4776,6 +4785,26 @@ export async function tick(
   const refreshBacklogForTick = async (): Promise<WorkItem[]> => {
     if (stopRequested()) return [];
     try {
+      if (!opts.dryRun) {
+        const inventory = readOutcomeInventory();
+        // Unknown/partial discovery cannot authorize creation or completion.
+        if (inventory.complete && inventory.sourceState === 'healthy') {
+          for (const outcome of inventory.states) {
+            const authorized = (): boolean => {
+              const registry = readEnrollmentRegistry();
+              const policy = standingTick ? currentStandingPolicy() : null;
+              return !stopRequested() && (!standingTick || policy !== null) &&
+                registry.state === 'ready' && outcome.scope.targetRepos.every(target =>
+                  registry.repos.some(repo => goalProjectMatchesRepo(target, repo) &&
+                    (!standingTick || policy?.repos.some(granted =>
+                      granted.nameWithOwner.toLowerCase() === repoIdentityOfPath(repo)?.toLowerCase()))));
+            };
+            if (!authorized()) continue;
+            reconcileOutcomeCompletions({ store: new OutcomeStore(outcomeDirectory(outcome.id)) });
+            materializeOutcomeIntents(outcome.id, { stillAuthorized: authorized, cfg: routingCfg });
+          }
+        }
+      }
       const backlog = await buildBacklog({ repos: enrolled });
       backlogSnapshotAt = backlog.generatedAt;
       backlogSnapshotId = backlog.snapshotId;
@@ -6499,17 +6528,51 @@ export async function tick(
     // "another machine took this claim" — so a wedged agent and a lost claim
     // stay distinguishable in the tick trace and the audit trail.
     const fleetWatchdogController = new AbortController();
+    const outcomeAbortController = new AbortController();
     const dispatchSignal = AbortSignal.any(
       opts.signal
-        ? [opts.signal, leaseController.signal, fleetWatchdogController.signal]
-        : [leaseController.signal, fleetWatchdogController.signal],
+        ? [opts.signal, leaseController.signal, fleetWatchdogController.signal, outcomeAbortController.signal]
+        : [leaseController.signal, fleetWatchdogController.signal, outcomeAbortController.signal],
     );
+    const outcomeCandidate = isOutcomeWorkItem(item);
+    const outcomeContext = outcomeCandidate ? readOutcomeWorkItemContext(item) : null;
+    const outcomePolicy = outcomeCandidate && standingTick ? currentStandingPolicy() : null;
+    const outcomePolicyDigest = outcomePolicy ? outcomeDigest({ ...outcomePolicy, computedAt: null }) : null;
+    const outcomeDispatch = outcomeContext ? new OutcomeDispatch(outcomeContext, item, attemptId, {
+      stillAuthorized: () => {
+        const policy = standingTick ? currentStandingPolicy() : null;
+        return stillOwnsTick() && !stopRequested() && !dispatchSignal.aborted &&
+          coordinator.fence([item.id], machineId).includes(item.id) &&
+          isRejectedCaptureRecoveryAuthorized(item) && (!standingTick || policy !== null &&
+            outcomePolicyDigest === outcomeDigest({ ...policy, computedAt: null }));
+      },
+      executionRepoAllowed: (target, executionRepo) => {
+        const registry = readEnrollmentRegistry();
+        return registry.state === 'ready' && registry.repos.includes(executionRepo) &&
+          goalProjectMatchesRepo(target, executionRepo) && (!standingTick ||
+            outcomePolicy?.repos.some(granted => granted.nameWithOwner.toLowerCase() ===
+              repoIdentityOfPath(executionRepo)?.toLowerCase()) === true);
+      },
+    }) : null;
+    let outcomeWatch: ReturnType<typeof setInterval> | undefined;
     const beginQueueExecution = (): void => {
       if (dispatchSignal.aborted || !coordinator.beginExecution(item.id, machineId)) {
         if (!leaseController.signal.aborted) {
           leaseController.abort(new Error(`shared queue claim authority lost for ${item.id}`));
         }
         throw new QueueClaimAuthorityError(item.id);
+      }
+      if (outcomeCandidate && (!outcomeDispatch || !outcomeDispatch.begin())) {
+        throw new Error('outcome claim is missing, retired, replayed or no longer authorized');
+      }
+      if (outcomeDispatch && !outcomeWatch) {
+        // Existing CLI children already in flight use the same abort signal.
+        // Every new contact also checks synchronously; this watcher catches
+        // pause/edit while a child is waiting on a long external response.
+        outcomeWatch = setInterval(() => {
+          if (!outcomeDispatch.stillAuthorized()) outcomeAbortController.abort(new Error('outcome paused, changed or authority withdrawn'));
+        }, 1000);
+        outcomeWatch.unref();
       }
     };
     const runItem = async (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null): Promise<ItemOutcome> => {
@@ -6522,6 +6585,12 @@ export async function tick(
         return fleetWatchdogOutcome(item, attemptId, localFleet.taskTimeoutMs);
       }
       if (leaseController.signal.aborted) return queueLeaseLostOutcome(item, attemptId);
+      if (outcomeCandidate && !readOutcomeWorkItemContext(item)) {
+        return { item, spentUsd: 0, dispatched: false, dispatch: dispatchTrace(item, {
+          assignedBy: 'preflight', reason: 'outcome unavailable, paused or retired', dispatched: false,
+          runId: attemptId, trajectoryId: `run:${attemptId}`, skipReason: 'outcome-unavailable',
+        }) };
+      }
       if (!isRejectedCaptureRecoveryAuthorized(item)) {
         return {
           item,
@@ -7107,7 +7176,8 @@ export async function tick(
       }
       // V3.10 (B-U9): a standing tick's producers run with the active harness —
       // its producer prompt overlay rides on the goal (baseline: none).
-      const harnessGoal = standingTick ? withHarnessProducerPrompt(buildItemGoal(item), hooks) : buildItemGoal(item);
+      const itemGoal = outcomeDispatch ? outcomeDispatch.prompt() : buildItemGoal(item);
+      const harnessGoal = standingTick ? withHarnessProducerPrompt(itemGoal, hooks) : itemGoal;
       // 3.15: the playbook the item names (`!macro`) or auto-matches, recorded
       // against this runId for retros (playbooks/lanes.ts). None ⇒ byte-identical.
       const baseGoal = withFleetPlaybook(harnessGoal, item, attemptId);
@@ -7124,7 +7194,7 @@ export async function tick(
       const dispatchCfg = dispatchConfigForItem(item, routingCfg);
       const itemBudget = { maxTokens: zeroDollarProducer(backend, routingCfg, selectedModel)
         ? dcfg.perItemMaxTokens ?? DEFAULT_MAX_TOKENS : perItemMaxTokens, maxSteps: 100, allowCloud: false };
-      const workItemGenerationId = generatedRepairGenerationId(item) ?? undefined;
+      const workItemGenerationId = outcomeDispatch?.generationId ?? generatedRepairGenerationId(item) ?? undefined;
       const delegationScope = scopeFromWorkItem(item, {
         runId: attemptId,
         budget: itemBudget,
@@ -7175,6 +7245,7 @@ export async function tick(
               runId: attemptId, workItemId: item.id, workItemGenerationId,
               workSource: item.source, delegationScope,
               signal: dispatchSignal,
+              ...(outcomeDispatch ? { selectedOutcomeAdmission: () => outcomeDispatch.stillAuthorized() } : {}),
             },
             sink,
           );
@@ -7467,6 +7538,7 @@ export async function tick(
             beginQueueExecution();
             return runBestOfN(item, routingCfg, {
               n: bestOfN, engine: backend, model: selectedModel,
+              ...(outcomeDispatch ? { goal } : {}),
               ...(standingSeatId ? { seatId: standingSeatId } : {}),
               ...(selectedGrokAdmission ? { selectedGrokAdmission } : {}),
               ...(dispatchHarness ? { harness: dispatchHarness } : {}),
@@ -7477,10 +7549,13 @@ export async function tick(
               delegationScope, attemptId, shadowSkillCards, shadowSkillSelectedAt,
               signal: dispatchSignal,
               reserveQuotaUses: (requests) => reserveFleetQuotaUses(requests, routingCfg),
+              ...(outcomeDispatch ? { selectedOutcomeAdmission: () => outcomeDispatch.stillAuthorized() } : {}),
               providerDispatchStillAuthorized: () =>
-                stillOwnsTick() && !stopRequested() && !dispatchSignal.aborted,
-              beforeCandidateProviderDispatch: () => {
+                stillOwnsTick() && !stopRequested() && !dispatchSignal.aborted &&
+                (!outcomeDispatch || outcomeDispatch.stillAuthorized()),
+              beforeCandidateProviderDispatch: (_candidateBackend, candidateRunId) => {
                 if (!stillOwnsTick() || stopRequested() || dispatchSignal.aborted) return false;
+                if (outcomeDispatch && !outcomeDispatch.registerProviderRun(candidateRunId)) return false;
                 if (!bonLaunchMarked) {
                   if (!markGeneratedRepairExecutionLaunched(item)) return false;
                   bonLaunchMarked = true;
@@ -7619,6 +7694,7 @@ export async function tick(
               ...(selectedModel ? { model: selectedModel } : {}),
               ...(standingSeatId ? { seatId: standingSeatId } : {}),
               ...(selectedGrokAdmission ? { selectedGrokAdmission } : {}),
+              ...(outcomeDispatch ? { selectedOutcomeAdmission: () => outcomeDispatch.stillAuthorized() } : {}),
               ...(dispatchHarness ? { harness: dispatchHarness } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,
               signal: dispatchSignal,
@@ -7931,7 +8007,24 @@ export async function tick(
           { backend: assignedBackend ?? routePlan.backend, model: assignedModel ?? routePlan.model },
           attemptId,
           fleetWatchdogController,
-          () => runItem(assignedBackend, assignedReason, assignedModel),
+          async () => {
+            try {
+              const result = await runItem(assignedBackend, assignedReason, assignedModel);
+              if (outcomeDispatch && !await outcomeDispatch.finishWithRetry(result.dispatch?.production, dispatchSignal.aborted)) {
+                console.warn('[ashlr] outcome terminal history could not be joined for', item.id);
+              }
+              return result;
+            } catch (error) {
+              // A failed execution remains a failure even when scope was edited.
+              // This does not assert zero spend or infer a successful proposal.
+              if (outcomeDispatch && !await outcomeDispatch.finishWithRetry(undefined, dispatchSignal.aborted)) {
+                console.warn('[ashlr] outcome terminal history could not be joined for', item.id);
+              }
+              throw error;
+            } finally {
+              if (outcomeWatch) clearInterval(outcomeWatch);
+            }
+          },
         ),
     });
   });  // end tasks.map

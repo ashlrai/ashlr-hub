@@ -1,3 +1,4 @@
+import { selectedOutcomeAdmissionCurrent } from '../run/outcome-admission.js';
 /**
  * core/swarm/runner.ts — M12 swarm runner, M17 verified + unattended-safe.
  *
@@ -140,6 +141,10 @@ let _gateLoadFailed = false;
 // build, import cycle, partial dist) — NOT an absent module — so it must
 // never be a silent catch.
 // ---------------------------------------------------------------------------
+function outcomeCancelled(opts: SwarmOptions): boolean {
+  return opts.signal?.aborted === true || !selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission);
+}
+
 function runnerLog(level: 'warn' | 'error', msg: string, extra?: Record<string, unknown>): void {
   const line = extra
     ? `[ashlr] swarm/runner:${level} ${msg} ${JSON.stringify(extra)}`
@@ -564,9 +569,9 @@ async function executeTask(
   // remain terminal; owner-cancelled tasks are reset to pending on resume.
   if (taskRun.status !== 'pending') return 'continue';
 
-  if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) {
+  if (outcomeCancelled(opts) || (enforceKillState && killSwitchOn())) {
     taskRun.status = 'cancelled';
-    taskRun.error = opts.signal?.aborted
+    taskRun.error = outcomeCancelled(opts)
       ? 'Cancelled by the swarm owner.'
       : 'Cancelled because the autonomy kill switch is ON.';
     persist(run);
@@ -711,6 +716,7 @@ async function executeTask(
 
   try {
     const taskResult = await runGoal(safeGoal, cfg, {
+      ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
       budget: taskBudget,
       parallel: 1,
       tools: true,
@@ -743,7 +749,7 @@ async function executeTask(
 
     taskRun.status = taskResult.status === 'done'
       ? 'done'
-      : opts.signal?.aborted || taskResult.terminationReason === 'cancelled'
+      : outcomeCancelled(opts) || taskResult.terminationReason === 'cancelled'
         ? 'cancelled'
         : 'failed';
     taskRun.result = taskResult.result;
@@ -755,7 +761,7 @@ async function executeTask(
     }
   } catch (err) {
     if (isGoalConductorQuotaRefusal(err)) throw err;
-    if (opts.signal?.aborted) {
+    if (outcomeCancelled(opts)) {
       taskRun.status = 'cancelled';
       taskRun.error = 'Cancelled by the swarm owner.';
     } else {
@@ -862,7 +868,7 @@ async function executePhase(
     );
 
     for (let i = 0; i < pending.length; i += parallelCap) {
-      if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) return false;
+      if (outcomeCancelled(opts) || (enforceKillState && killSwitchOn())) return false;
       // Abort entire phase if budget is already blown.
       if (overBudget(run.usage, run.budget)) {
         emitLog(sink, `phase ${phase}: aborting — swarm budget exceeded`);
@@ -878,7 +884,7 @@ async function executePhase(
       const reserved = { tokens: 0, steps: 0 };
       const launches: Promise<'continue' | 'escalate'>[] = [];
       for (let b = 0; b < batch.length; b++) {
-        if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) break;
+        if (outcomeCancelled(opts) || (enforceKillState && killSwitchOn())) break;
         const t = batch[b]!;
         const remainingInBatch = batch.length - b;
         // Snapshot the per-task slice this task will be authorized so we can
@@ -910,7 +916,7 @@ async function executePhase(
         );
       }
       const results = await Promise.all(launches);
-      if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) return false;
+      if (outcomeCancelled(opts) || (enforceKillState && killSwitchOn())) return false;
 
       // If any task in the batch triggered an escalation gate, stop the phase.
       if (results.includes('escalate')) {
@@ -931,7 +937,7 @@ async function executePhase(
   } else {
     // All other phases: sequential execution respecting deps.
     for (const taskSpec of phaseTasks) {
-      if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) return false;
+      if (outcomeCancelled(opts) || (enforceKillState && killSwitchOn())) return false;
       if (overBudget(run.usage, run.budget)) {
         emitLog(sink, `phase ${phase}: aborting — swarm budget exceeded`);
         return false;
@@ -1184,6 +1190,7 @@ function captureSandboxAndCleanup(
   persistOutcome = true,
   cleanupAuthority: BorrowedSandboxCleanupAuthority | null = null,
   enforceKillState = false,
+  selectedOutcomeAdmission?: () => boolean,
 ): RunProposalOutcome {
   // Capture diff (read-only; never mutates source tree).
   let diff: SandboxDiff | null = null;
@@ -1261,7 +1268,9 @@ function captureSandboxAndCleanup(
     // The proposal-only gate line below is canonical (the H4 safety grep checks
     // for it), so the empty-skip is a NESTED guard, not inlined into the condition.
     if (propose && _createProposal !== null) {
-      if (enforceKillState && killSwitchOn()) {
+      if (!selectedOutcomeAdmissionCurrent(selectedOutcomeAdmission)) {
+        outcome = { kind: 'proposal-capture-error', reason: 'selected outcome retired before proposal capture', ...diffCounts };
+      } else if (enforceKillState && killSwitchOn()) {
         emitLog(sink, `[M24] swarm ${run.id} paused before proposal capture`);
         outcome = {
           kind: 'proposal-capture-error',
@@ -1556,7 +1565,7 @@ async function runSwarmInternal(
 
   const resumeSnapshot = opts.resumeId ? loadSwarm(opts.resumeId) : null;
 
-  if (opts.signal?.aborted) {
+  if (outcomeCancelled(opts)) {
     if (resumeSnapshot !== null) {
       emitLog(sink, `Resume of swarm ${resumeSnapshot.id} cancelled before execution.`);
       return resumeSnapshot;
@@ -1954,6 +1963,7 @@ async function runSwarmInternal(
       !opts.dryRun,
       cleanupAuthority,
       enforceKillState,
+      ...(opts.selectedOutcomeAdmission ? [opts.selectedOutcomeAdmission] : []),
     );
   };
 
@@ -2054,6 +2064,7 @@ async function runSwarmInternal(
         opts.signal,
         opts.providerQuota,
         opts.providerQuota ? run.budget.maxTokens : undefined,
+        ...(opts.selectedOutcomeAdmission ? [opts.selectedOutcomeAdmission] : []),
       );
       if (plan.usage !== undefined) {
         run.usage = addUsage(run.usage, plan.usage);
@@ -2066,9 +2077,9 @@ async function runSwarmInternal(
           run.tasks.push({ id: t.id, phase: t.phase, status: 'pending' });
         }
       }
-      if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) {
+      if (outcomeCancelled(opts) || (enforceKillState && killSwitchOn())) {
         run.status = 'aborted';
-        run.result = opts.signal?.aborted
+        run.result = outcomeCancelled(opts)
           ? 'Swarm cancelled during planning.'
           : 'Swarm paused by the autonomy kill switch during planning.';
         maybePersist(run);
@@ -2079,9 +2090,9 @@ async function runSwarmInternal(
       maybePersist(run);
       emitLog(sink, `Plan ready: ${plan.tasks.length} task(s) across phases`);
     } catch (err) {
-      if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) {
+      if (outcomeCancelled(opts) || (enforceKillState && killSwitchOn())) {
         run.status = 'aborted';
-        run.result = opts.signal?.aborted
+        run.result = outcomeCancelled(opts)
           ? 'Swarm cancelled during planning.'
           : 'Swarm paused by the autonomy kill switch during planning.';
         maybePersist(run);
@@ -2103,9 +2114,9 @@ async function runSwarmInternal(
     }
   }
 
-  if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) {
+  if (outcomeCancelled(opts) || (enforceKillState && killSwitchOn())) {
     run.status = 'aborted';
-    run.result = opts.signal?.aborted
+    run.result = outcomeCancelled(opts)
       ? 'Swarm cancelled after planning.'
       : 'Swarm paused by the autonomy kill switch after planning.';
     maybePersist(run);
@@ -2151,9 +2162,9 @@ async function runSwarmInternal(
 
   try {
     for (const phase of PHASE_ORDER) {
-      if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) {
+      if (outcomeCancelled(opts) || (enforceKillState && killSwitchOn())) {
         run.status = 'aborted';
-        run.result = opts.signal?.aborted
+        run.result = outcomeCancelled(opts)
           ? `Swarm cancelled before phase ${phase}.`
           : `Swarm paused by the autonomy kill switch before phase ${phase}.`;
         persist(run);
@@ -2189,9 +2200,9 @@ async function runSwarmInternal(
         enforceKillState,
       );
 
-      if (opts.signal?.aborted || (enforceKillState && killSwitchOn())) {
+      if (outcomeCancelled(opts) || (enforceKillState && killSwitchOn())) {
         run.status = 'aborted';
-        run.result = opts.signal?.aborted
+        run.result = outcomeCancelled(opts)
           ? `Swarm cancelled during phase ${phase}.`
           : `Swarm paused by the autonomy kill switch during phase ${phase}.`;
         persist(run);
@@ -2329,6 +2340,12 @@ export async function runSwarm(
     return refused;
   };
 
+  // This process owns the callback; a detached CLI worker cannot inherit it.
+  // Ordinary background runs retain their existing durable handoff protocol.
+  if (opts.background && !opts.resumeId && opts.selectedOutcomeAdmission) {
+    return refuseAuthority(opts.runId ?? makeId(), 'selected outcome admission requires a foreground owner');
+  }
+
   if (opts.providerQuota) {
     const signedBudget = opts.budget;
     const invalidSignedShape =
@@ -2396,7 +2413,7 @@ export async function runSwarm(
     }
   };
 
-  if (process.env['ASHLR_IN_SWARM'] || opts.signal?.aborted === true) return execute();
+  if (process.env['ASHLR_IN_SWARM'] || outcomeCancelled(opts) === true) return execute();
   if (opts.resumeId && opts.runId) opts = { ...opts, runId: undefined };
 
   let id: string;

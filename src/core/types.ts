@@ -2194,6 +2194,8 @@ export interface RunOptions {
   seatId?: string;
   /** Internal synchronous same-seat authority fence; never serialized or passed to a model. */
   selectedGrokAdmission?: () => boolean;
+  /** Internal caller-owned outcome revision fence; never persisted or sent to a model. */
+  selectedOutcomeAdmission?: () => boolean;
   /** Partial budget overrides (merged over defaults). */
   budget?: Partial<RunBudget>;
   /** Max independent tasks to execute in parallel. */
@@ -2287,6 +2289,8 @@ export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   /** Message text content. */
   content: string;
+  /** Assistant tool calls retained together with their correlated results. */
+  toolCalls?: { id: string; name: string; arguments: unknown }[];
   /** Tool-call id this message responds to (for role 'tool'). */
   toolCallId?: string;
   /** Tool/function name (for role 'tool'). */
@@ -2333,6 +2337,8 @@ export interface ProviderClient {
   supportsTools: boolean;
   /** Explicit opt-in required before a governed caller may contact this client. */
   authority?: ProviderClientAuthority;
+  /** Optional metadata-only discovery for the exact endpoint/model; unknown is undefined. */
+  getContextWindowTokens?(signal?: AbortSignal): Promise<number | undefined>;
   /** Send a chat exchange (optionally with tool specs) and get a result. */
   chat(
     messages: ChatMessage[],
@@ -3120,6 +3126,8 @@ export interface SwarmRun {
 
 /** Options accepted by `runSwarm` / the `ashlr swarm` CLI. */
 export interface SwarmOptions {
+  /** Nonserializable caller outcome revision, shared by planner and every child. */
+  selectedOutcomeAdmission?: () => boolean;
   /** Optional owner cancellation shared by planning and every task run. */
   signal?: AbortSignal;
   /** Partial budget overrides (merged over defaults) — the HARD total ceiling. */
@@ -5432,6 +5440,17 @@ export interface GoalMissionBindingV1 {
   nodeKey: string;
 }
 
+/** Immutable provenance for a Goal materialized by the durable outcome coordinator.
+ * A binding identifies scope and node basis; it never grants provider/merge authority. */
+export interface GoalOutcomeBindingV1 {
+  schemaVersion: 1;
+  outcomeId: string;
+  nodeId: string;
+  nodeBasisDigest: string;
+  scopeRevision: number;
+  scopeDigest: string;
+}
+
 /**
  * M28: a single MILESTONE within a Goal. Each milestone is an ordered unit of
  * work that authors/links a versioned SpecArtifact and is advanced by a single
@@ -5489,6 +5508,7 @@ export interface Goal {
   owner?: string;
   /** Exact graph/node contract that created this goal; absent on legacy goals. */
   mission?: GoalMissionBindingV1;
+  outcome?: GoalOutcomeBindingV1;
   /** The high-level objective text the goal was created from. */
   objective: string;
   /**

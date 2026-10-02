@@ -435,3 +435,43 @@ describe('M522 — cost-bounded judging', () => {
     expect(result.critique.judge?.status).toBe('skipped');
   });
 });
+
+
+describe('best-of-N selected outcome admission', () => {
+  it('passes the caller fence to all three ordinary candidates without changing their run identities', async () => {
+    const sandboxMock = makeSandboxMock(); mockSandboxedEngine(sandboxMock);
+    vi.doMock('../src/core/fleet/manager.js', () => makeManagerMock());
+    const admission = () => true;
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?outcome-candidates=' + randomUUID());
+    const result = await runBestOfN(makeItem(), makeConfig({ bestOfN: 3 }), { selectedOutcomeAdmission: admission });
+    expect(sandboxMock).toHaveBeenCalledTimes(3); expect(result.candidates).toHaveLength(3);
+    for (const [index, call] of sandboxMock.mock.calls.entries()) {
+      expect(call[3].selectedOutcomeAdmission).toBe(admission);
+      expect(call[3].runId).toBe(result.candidates[index]!.runId);
+    }
+  });
+  it('a pause during awaited judge setup refuses the critic before contact and selects no winner', async () => {
+    const sandboxMock = makeSandboxMock({ diffs: ['diff A', 'diff B'] }); mockSandboxedEngine(sandboxMock);
+    let current = true; const contact = vi.fn(async () => '{}');
+    const judgeProposal = vi.fn(async (_proposal: unknown, _cfg: unknown, client: { complete: (system: string, user: string) => Promise<string> }) => {
+      await Promise.resolve(); current = false;
+      await client.complete('system', 'diff');
+      throw new Error('unreachable');
+    });
+    vi.doMock('../src/core/fleet/manager.js', () => ({ judgeProposal, resolveFrontierJudgeClient: () => ({ model: 'fixture-judge', complete: contact }) }));
+    const { runBestOfN } = await import('../src/core/run/best-of-n.js?outcome-critic=' + randomUUID());
+    const result = await runBestOfN(makeItem(), makeConfig({ bestOfN: 2, bestOfNJudge: true }), { selectedOutcomeAdmission: () => current });
+    expect(judgeProposal).toHaveBeenCalled(); expect(contact).not.toHaveBeenCalled(); expect(result.winner).toBeUndefined();
+  });
+});
+
+
+it('uses the complete host task prompt for every candidate without granting prompt text authority', async () => {
+  const sandboxMock = makeSandboxMock(); mockSandboxedEngine(sandboxMock);
+  vi.doMock('../src/core/fleet/manager.js', () => makeManagerMock());
+  const fullGoal = 'Approved outcome\n' + 'Detailed requirement. '.repeat(600) + '\nFINAL ACCEPTANCE CRITERION';
+  const { runBestOfN } = await import('../src/core/run/best-of-n.js?full-goal=' + randomUUID());
+  const result = await runBestOfN(makeItem(), makeConfig({ bestOfN: 3 }), { goal: fullGoal, selectedOutcomeAdmission: () => true });
+  expect(result.candidates).toHaveLength(3); expect(fullGoal.length).toBeGreaterThan(4000);
+  for (const call of sandboxMock.mock.calls) expect(call[1]).toBe(fullGoal);
+});

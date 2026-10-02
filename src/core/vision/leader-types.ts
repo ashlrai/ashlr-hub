@@ -28,6 +28,7 @@
  */
 import type { BudgetMode, BudgetPolicy } from '../routing/types.js';
 import type { GoalStatus } from '../types.js';
+import type { MissionGraphNodeInput } from './mission-graph.js';
 import type { FleetTaskInput, RepoHold } from '../fleet/fleet-types.js';
 import type { HarnessHypothesis, HarnessRoutingWeights } from '../learn/harness-types.js';
 
@@ -88,6 +89,7 @@ export type LeaderActionKind =
   | 'goal.reorder'
   | 'goal.archive'
   | 'goal.create'
+  | 'outcome.refine'
   | 'work.dispatch'
   | 'standard.add'
   | 'router.tune'
@@ -113,6 +115,7 @@ export const LEADER_ACTION_KINDS: readonly LeaderActionKind[] = [
   'goal.reorder',
   'goal.archive',
   'goal.create',
+  'outcome.refine',
   'work.dispatch',
   'standard.add',
   'router.tune',
@@ -179,6 +182,22 @@ export interface LeaderGoalProposal {
   acceptanceEvidence: string[];
 }
 
+/** Model transport uses target-1 etc.; the host binds aliases to the immutable saved scope. */
+export interface LeaderOutcomeRefinement {
+  outcomeId: string;
+  scopeRevision: number;
+  scopeDigest: string;
+  title: string;
+  nodes: MissionGraphNodeInput[];
+}
+export interface LeaderOutcomePlanIdentity {
+  outcomeId: string;
+  scopeRevision: number;
+  scopeDigest: string;
+  planRevision: number;
+  graphDigest: string;
+}
+
 export interface LeaderStandard {
   id: string;
   rule: string;
@@ -198,6 +217,7 @@ export interface LeaderActionParamsMap {
   'goal.reorder': { goalIds: string[] };
   'goal.archive': { goalId: string };
   'goal.create': { goal: LeaderGoalProposal };
+  'outcome.refine': LeaderOutcomeRefinement;
   'work.dispatch': { task: FleetTaskInput };
   'standard.add': { rule: string; appliesTo: string; evidence: string | null };
   'router.tune': { tuning: Partial<HarnessRoutingWeights> };
@@ -269,6 +289,8 @@ export type LeaderInverse =
   | { op: 'restore-goals'; before: { goalId: string; record: string | null; recordSha256?: string; priorStatus?: GoalStatus }[] }
   /** goal.create */
   | { op: 'archive-goal'; goalId: string }
+  /** A veto pauses only this exact applied plan, retaining immutable history (not exact rollback). */
+  | ({ op: 'pause-outcome-plan' } & LeaderOutcomePlanIdentity)
   /** work.dispatch (only while the task is still queued / parked) */
   | { op: 'cancel-task'; taskId: string }
   /** standard.add */
@@ -381,7 +403,7 @@ export type LeaderRunOutcome = 'ok' | 'no-seat' | 'skipped-unchanged' | 'failed'
  * waiting for tomorrow's slot. `checkin` (3.14): the cheap working-hours
  * check-in (LeaderRunMode 'checkin').
  */
-export type LeaderTrigger = 'schedule' | 'merges' | 'revert' | 'seat-reset' | 'insight' | 'manual' | 'retry' | 'checkin';
+export type LeaderTrigger = 'schedule' | 'merges' | 'revert' | 'seat-reset' | 'insight' | 'manual' | 'retry' | 'checkin' | 'outcome-plan-needed';
 
 /**
  * 3.14: `full` is the daily memo (and trigger / manual runs); `checkin` is the

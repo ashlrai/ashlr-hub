@@ -25,6 +25,8 @@
  * owner lane, head-SHA races and judge-family refusals are tested without
  * GitHub, models or a real ledger.
  */
+import { outcomeProposalStillCurrent } from '../daemon/outcome-proposal-admission.js';
+import { assertSelectedOutcomeAdmission } from '../run/outcome-admission.js';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 
@@ -447,7 +449,7 @@ async function defaultClaimIntegrity(proposal: Proposal, cfg: AshlrConfig, polic
     // heuristic judges the claim, the diff supplies the fact.
     const useModel = policy.spend.meteredUsdPerDay > 0;
     const claim = useModel
-      ? (await claims.classifyCompletionClaim(proposal.summary, cfg)).claim
+      ? (await claims.classifyCompletionClaim(proposal.summary, cfg, { selectedOutcomeAdmission: () => outcomeProposalStillCurrent(proposal) })).claim
       : claims.classifyCompletionClaimHeuristic(proposal.summary);
     const integrity = claims.turnIntegrity(claim, claims.changedFileCountFromDiff(proposal.diff));
     return { integrity, claim, classifier: useModel ? 'model' : 'heuristic', describe: claims.describeTurnIntegrity(integrity) };
@@ -467,6 +469,7 @@ async function defaultRedTeam(proposal: Proposal, cfg: AshlrConfig, lanes: reado
     const { redTeamProposal } = await import('./red-team.js');
     const rt = await redTeamProposal(proposal, cfg, {
       judge: { producerModel: proposal.engineModel, requireIndependent: true, allowedJudgeEngines: lanes },
+      selectedOutcomeAdmission: () => outcomeProposalStillCurrent(proposal),
     }) as { verdict?: unknown; detail?: unknown; frontier?: unknown };
     const frontier = rt?.frontier === 'answered' || rt?.frontier === 'failed' ? rt.frontier : 'none';
     if (rt?.verdict !== 'broken' && rt?.verdict !== 'survived') {
@@ -911,7 +914,27 @@ function cleanupReason(proposal: Proposal, cfg: AshlrConfig, nowMs: number): str
   return null;
 }
 
+/** Bind every host contact, including token acquisition and the post-await
+ * transport call, to fresh protected outcome state. The original context is
+ * shared by repo lanes, so this binding must be per proposal, never mutable. */
+function withOutcomeProposalContext(ctx: PassContext, proposal: Proposal): PassContext {
+  const admission = (): boolean => outcomeProposalStillCurrent(proposal);
+  const host = ctx.deps.host;
+  return { ...ctx, deps: { ...ctx.deps, host: {
+    ...host,
+    token: async (repo) => { assertSelectedOutcomeAdmission(admission); return host.token(repo); },
+    transport: async (call) => { assertSelectedOutcomeAdmission(admission); return host.transport(call); },
+    policy: () => admission() ? host.policy() : null,
+    killActive: () => !admission() || host.killActive(),
+  } } };
+}
+
 async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<void> {
+  if (!outcomeProposalStillCurrent(proposal)) {
+    skip(ctx, proposal.id, 'outcome-current', 'Outcome is paused, retired or unavailable; proposal stays pending.');
+    return;
+  }
+  ctx = withOutcomeProposalContext(ctx, proposal);
   const { deps, policy } = ctx;
   const key = proposalStateKey(proposal.id);
   if (!key) return;
@@ -1121,7 +1144,9 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
       skip(ctx, proposal.id, 'standing-G4', reason);
       return;
     }
+    if (!outcomeProposalStillCurrent(proposal)) return;
     const g4 = evaluateG4(await deps.claimIntegrity(proposal, ctx.cfg, livePolicy));
+    if (!outcomeProposalStillCurrent(proposal)) return;
     if (!recordGate(ctx, state, 'G4', g4, null)) {
       persist(ctx, state);
       return;
@@ -1129,7 +1154,9 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
     if (g4.verdict !== 'pass') return rejectProposal(ctx, state, proposal, 'G4', g4);
 
     // ── G5 — blast radius ────────────────────────────────────────────────
+    if (!outcomeProposalStillCurrent(proposal)) return;
     const g5Checks = await deps.blastChecks(proposal, ctx.cfg);
+    if (!outcomeProposalStillCurrent(proposal)) return;
     if ((ctx.cfg.foundry as Record<string, unknown> | undefined)?.['redTeam'] === true) {
       if (ctx.meteredUsdExhausted && !eliteSelfLand
         && validRedTeamMemo((state as StandingMergeState).redTeam, hashDiff(diff))?.frontier !== 'answered') {
@@ -1144,6 +1171,7 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
         ? []
         : (seat ?? deps.judgeSeatLanes({ producerFamily, policy: livePolicy, waitSinceMs, nowMs })).lanes));
     }
+    if (!outcomeProposalStillCurrent(proposal)) return;
     const g5 = evaluateG5(g5Checks);
     if (!recordGate(ctx, state, 'G5', g5, null)) {
       persist(ctx, state);
@@ -1171,8 +1199,10 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
       } else if (lanes.length > 0 && ctx.budget.judge > 0) {
         ctx.budget.judge--;
         state.judgeCalledAt = iso(deps.host.nowMs());
+        if (!outcomeProposalStillCurrent(proposal)) return;
         const judged = await deps.runJudge(proposal, ctx.cfg, lanes);
         if (judged.called) ctx.out.judged++;
+        if (!outcomeProposalStillCurrent(proposal)) return;
         g6 = evaluateG6({
           proposalId: proposal.id,
           producerModel: proposal.engineModel,
@@ -1254,6 +1284,7 @@ async function runRedTeam(
   }
   // Reserve one judge call for this pass only when a model may actually run.
   if (lanes.length > 0) ctx.budget.judge--;
+  assertSelectedOutcomeAdmission(() => outcomeProposalStillCurrent(proposal));
   const outcome = await ctx.deps.redTeam(proposal, ctx.cfg, lanes);
   if (lanes.length > 0 && outcome.frontier !== 'none') {
     memoState.redTeam = { diffHash, check: outcome.check, frontier: outcome.frontier, at: iso(nowMs) };
@@ -1581,7 +1612,7 @@ function backoff(ctx: PassContext, state: FleetMergeStateV1): void {
 }
 
 async function progressFleetPr(key: string, ctx: PassContext): Promise<void> {
-  const { deps } = ctx;
+  let { deps } = ctx;
   const lock = lockFleetMergeState(key, 0);
   if (!lock) return;
   let scratch: FleetGitScratch | null = null;
@@ -1615,6 +1646,12 @@ async function progressFleetPr(key: string, ctx: PassContext): Promise<void> {
     }
     if (state.outcome !== null || state.pr.state !== 'open') return;
     if (!proposal) return;
+    if (!outcomeProposalStillCurrent(proposal)) {
+      note(ctx, `${state.repo}: outcome is paused, retired or unavailable; PR progression is held`);
+      return;
+    }
+    ctx = withOutcomeProposalContext(ctx, proposal);
+    deps = ctx.deps;
     if (proposal.status !== 'pending') {
       // Rejected — or handled outside the fleet (approved / applied / handed
       // off by hand): either way this PR must never land a second copy.

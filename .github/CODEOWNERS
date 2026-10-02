@@ -129,6 +129,7 @@
 /src/core/daemon/activation-permit.ts @masonwyatt23
 /src/core/daemon/tick-hooks.ts @masonwyatt23
 /src/core/daemon/loop.ts @masonwyatt23
+/src/core/daemon/outcome-*.ts @masonwyatt23
 /src/core/daemon/post-merge-halt.ts @masonwyatt23
 /src/core/daemon/liveness.ts @masonwyatt23
 /src/core/daemon/service.ts @masonwyatt23
@@ -158,6 +159,9 @@
 /src/core/vision/leader.ts @masonwyatt23
 /src/core/vision/leader-seat.ts @masonwyatt23
 /src/core/goals/preferences.ts @masonwyatt23
+/src/core/goals/outcome-*.ts @masonwyatt23
+/src/core/vision/leader-outcomes.ts @masonwyatt23
+/src/core/verse/outcomes-*.ts @masonwyatt23
 /src/core/vision/leader-preferences.ts @masonwyatt23
 /src/core/sandbox/** @masonwyatt23
 /src/core/policy/** @masonwyatt23
@@ -317,6 +321,7 @@
 /test/leader-lessons-315.test.ts @masonwyatt23
 /test/leader-local-transport-314.test.ts @masonwyatt23
 /test/leader-memo-310b.test.ts @masonwyatt23
+/test/leader-outcomes.test.ts @masonwyatt23
 /test/leader-preferences.test.ts @masonwyatt23
 /test/leader-reliability-314.test.ts @masonwyatt23
 /test/leader-run-310b.test.ts @masonwyatt23
@@ -670,6 +675,12 @@
 /test/mirror-sibling-deps-314.test.ts @masonwyatt23
 /test/mirrors-310b.test.ts @masonwyatt23
 /test/orchestrator-bash-standing-310b.test.ts @masonwyatt23
+/test/outcome-core.test.ts @masonwyatt23
+/test/outcome-daemon-loop.test.ts @masonwyatt23
+/test/outcome-dispatch.test.ts @masonwyatt23
+/test/outcome-proposal-admission.test.ts @masonwyatt23
+/test/outcome-runtime.test.ts @masonwyatt23
+/test/outcomes-api.test.ts @masonwyatt23
 /test/overnight-api-310b.test.ts @masonwyatt23
 /test/playbooks-315.test.ts @masonwyatt23
 /test/post-merge-credit-import-cycle.test.ts @masonwyatt23

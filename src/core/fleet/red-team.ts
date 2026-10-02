@@ -30,6 +30,7 @@
  *   if (r.broke) { ...block... }
  */
 
+import { assertSelectedOutcomeAdmission } from '../run/outcome-admission.js';
 import type { AshlrConfig, Proposal } from '../types.js';
 import type { FrontierJudgeResolutionOptions } from './manager.js';
 import { scrubSecrets } from '../util/scrub.js';
@@ -75,6 +76,7 @@ export interface RedTeamResult {
 
 /** Options — mostly knobs for bounding + testing. */
 export interface RedTeamOptions {
+  selectedOutcomeAdmission?: () => boolean;
   /** Max chars of diff sent to the frontier (default 4000). */
   maxDiffChars?: number;
   /** Hard cap on returned attacks (default 12). */
@@ -364,11 +366,12 @@ export async function redTeamProposal(
   let frontierAttacks: RedTeamAttack[] = [];
   let frontier: 'none' | 'answered' | 'failed' = 'none';
   try {
-    let client: { complete: (system: string, user: string) => Promise<string> } | null = null;
+    let client: { complete: (system: string, user: string, signal?: AbortSignal, admission?: () => boolean) => Promise<string> } | null = null;
     // An explicitly empty lane list is the router saying "no seat may be
     // spent": never even resolve a client (resolution alone may probe CLIs).
     const noLaneAdmitted = opts?.judge?.allowedJudgeEngines !== undefined && opts.judge.allowedJudgeEngines.length === 0;
     if (!noLaneAdmitted) {
+      assertSelectedOutcomeAdmission(opts?.selectedOutcomeAdmission);
       try {
         const { resolveFrontierJudgeClient } = await import('./manager.js');
         client = resolveFrontierJudgeClient(cfg, opts?.judge ?? {});
@@ -380,14 +383,18 @@ export async function redTeamProposal(
     if (client) {
       const userPrompt = buildUserPrompt(proposal, maxDiffChars);
       try {
-        const raw = await client.complete(RED_TEAM_SYSTEM_PROMPT, userPrompt);
+        assertSelectedOutcomeAdmission(opts?.selectedOutcomeAdmission);
+        const raw = opts?.selectedOutcomeAdmission
+          ? await client.complete(RED_TEAM_SYSTEM_PROMPT, userPrompt, undefined, opts.selectedOutcomeAdmission)
+          : await client.complete(RED_TEAM_SYSTEM_PROMPT, userPrompt);
         frontierAttacks = parseFrontierAttacks(raw, maxAttacks);
         // JEV TYPED EXTRACTION for a reply that is not JSON at all (the
         // parser above returns [] and the reply would read as "survived").
         // Escalate-only (src/core/decide/verdict.ts): it can ADD one finding
         // at the severity the reply reports, never remove or soften one.
         if (frontierAttacks.length === 0 && !frontierReplyParses(raw)) {
-          const severity = await extractRedTeamSeverity(raw, { cfg }).catch(() => null);
+          assertSelectedOutcomeAdmission(opts?.selectedOutcomeAdmission);
+          const severity = await extractRedTeamSeverity(raw, { cfg, ...(opts?.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}) }).catch(() => null);
           if (severity && severity.path === 'jev' && severity.value !== 'none') {
             frontierAttacks = [{
               vector: 'frontier:unstructured-report',

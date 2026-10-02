@@ -13,6 +13,10 @@
  * REAL-IO (git through the fake): belongs in the real-io lane (U3 report).
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+const heldOutcomeProposals = vi.hoisted(() => new Set<string>());
+vi.mock('../src/core/daemon/outcome-proposal-admission.js', () => ({
+  outcomeProposalStillCurrent: (p: { id: string }) => !heldOutcomeProposals.has(p.id),
+}));
 
 // Real git work: generous until this file joins REAL_IO_TEST_FILES (see header).
 vi.setConfig({ testTimeout: 30_000 });
@@ -20,7 +24,7 @@ vi.setConfig({ testTimeout: 30_000 });
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
 import { closeGitScratch, openGitScratch, parseFleetTrailers, type FleetGitScratch, type HostMergeDeps } from '../src/core/fleet/host-merge.js';
 import { allowedJudgeLanes } from '../src/core/fleet/merge-gates.js';
-import { proposalHasFleetPr } from '../src/core/fleet/fleet-merge-state.js';
+import { proposalHasFleetPr, proposalStateKey, readFleetMergeState } from '../src/core/fleet/fleet-merge-state.js';
 import { runStandingMergePass, type StandingPassDeps } from '../src/core/fleet/standing-merge-pass.js';
 import type { AutoMergePassResult } from '../src/core/fleet/automerge-pass.js';
 import type { EffectivePolicy } from '../src/core/authority/types.js';
@@ -36,6 +40,7 @@ let fakes: FakeGithub[] = [];
 let counter = 0;
 
 afterEach(() => {
+  heldOutcomeProposals.clear();
   for (const fake of fakes) fake.dispose();
   fakes = [];
 });
@@ -957,5 +962,147 @@ describe('standing merge pass — repo lanes run in parallel (3.15)', () => {
   it('two repos verify at the same time by default; repoLanes: 1 restores one at a time', async () => {
     expect(await concurrency(undefined)).toBe(2);
     expect(await concurrency(1)).toBe(1);
+  });
+});
+
+
+describe('standing outcome progression fences', () => {
+  it('holds an already paused pending proposal before verification, judge or host contact', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    heldOutcomeProposals.add(p.id);
+    const verify = vi.fn(w.deps.verifyAndPersist!);
+    w.deps.verifyAndPersist = verify;
+    await pass(w);
+    expect(verify).not.toHaveBeenCalled();
+    expect(w.judgeCalls).toEqual([]);
+    expect(w.fake.calls).toEqual([]);
+    expect(p.status).toBe('pending');
+  });
+
+  it('scope retirement during verification prevents classifier and judge contacts', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    const verify = w.deps.verifyAndPersist!;
+    w.deps.verifyAndPersist = async (...args) => {
+      const result = await verify(...args);
+      heldOutcomeProposals.add(p.id);
+      return result;
+    };
+    const classify = vi.fn(w.deps.claimIntegrity!);
+    w.deps.claimIntegrity = classify;
+    await pass(w);
+    expect(classify).not.toHaveBeenCalled();
+    expect(w.judgeCalls).toEqual([]);
+    expect(w.fake.calls).toEqual([]);
+    expect(p.status).toBe('pending');
+  });
+
+  it('pause during the judge prevents publication and PR creation', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    const judge = w.deps.runJudge!;
+    w.deps.runJudge = async (...args) => {
+      const result = await judge(...args);
+      heldOutcomeProposals.add(p.id);
+      return result;
+    };
+    await pass(w);
+    expect(w.judgeCalls).toHaveLength(1);
+    expect(w.fake.calls).toEqual([]);
+    expect(w.fake.pulls.size).toBe(0);
+    expect(p.status).toBe('pending');
+  });
+
+  it('rechecks after token acquisition before the first GitHub request', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    w.deps.host = { ...w.deps.host!, token: async () => {
+      await Promise.resolve();
+      heldOutcomeProposals.add(p.id);
+      return { token: 'ghs_test_installation_token', expiresAt: null };
+    } };
+    await pass(w);
+    expect(w.fake.calls).toEqual([]);
+    expect(w.fake.pulls.size).toBe(0);
+    expect(p.status).toBe('pending');
+  });
+
+  it('holds an existing open PR before fresh reads when the outcome is paused', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    await pass(w);
+    const pr = prOf(w);
+    w.fake.greenRequired(w.fake.headOfPull(pr.number)!);
+    w.clock.now += 10 * 60_000;
+    w.fake.calls.length = 0;
+    heldOutcomeProposals.add(p.id);
+    await pass(w);
+    expect(w.fake.calls).toEqual([]);
+    expect(pr.state).toBe('open');
+    expect(p.status).toBe('pending');
+  });
+
+  it('pause after final merge recheck blocks consume and the merge request', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    await pass(w);
+    const pr = prOf(w);
+    w.fake.greenRequired(w.fake.headOfPull(pr.number)!);
+    w.clock.now += 10 * 60_000;
+    w.deps.host = { ...w.deps.host!, beforeConsume: async () => {
+      await Promise.resolve();
+      heldOutcomeProposals.add(p.id);
+    } };
+    await pass(w);
+    expect(w.fake.mergeCalls()).toEqual([]);
+    expect(pr.state).toBe('open');
+    expect(p.status).toBe('pending');
+  });
+
+  it('pause during the final merge token await blocks the PUT after consume', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    await pass(w);
+    const pr = prOf(w);
+    w.fake.greenRequired(w.fake.headOfPull(pr.number)!);
+    w.clock.now += 10 * 60_000;
+    let pausedAtFinalToken = false;
+    w.deps.host = { ...w.deps.host!, token: async () => {
+      const state = readFleetMergeState(proposalStateKey(p.id)!);
+      if (state.state === 'ok' && state.record.merge?.phase === 'consumed') {
+        await Promise.resolve();
+        pausedAtFinalToken = true;
+        heldOutcomeProposals.add(p.id);
+      }
+      return { token: 'ghs_test_installation_token', expiresAt: null };
+    } };
+    const { out } = await pass(w);
+    expect(pausedAtFinalToken).toBe(true);
+    expect(w.fake.mergeCalls()).toEqual([]);
+    expect(out.merged).toBe(0);
+    expect(pr.state).toBe('open');
+    expect(p.status).toBe('pending');
+    expect(w.ledger.of('merge:landed')).toEqual([]);
+  });
+
+  it('records a real contacted merge result even when pause happens while it resolves', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    await pass(w);
+    const pr = prOf(w);
+    w.fake.greenRequired(w.fake.headOfPull(pr.number)!);
+    w.clock.now += 10 * 60_000;
+    const transport = w.deps.host!.transport;
+    w.deps.host = { ...w.deps.host!, transport: async (call) => {
+      const response = await transport(call);
+      if (call.method === 'PUT' && call.path.endsWith('/merge')) heldOutcomeProposals.add(p.id);
+      return response;
+    } };
+    const { out } = await pass(w);
+    expect(w.fake.mergeCalls()).toHaveLength(1);
+    expect(out.merged).toBe(1);
+    expect(p.status).toBe('applied');
+    expect(w.ledger.of('merge:landed')).toHaveLength(1);
   });
 });

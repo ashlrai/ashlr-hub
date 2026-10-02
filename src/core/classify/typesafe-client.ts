@@ -1,3 +1,4 @@
+import { selectedOutcomeAdmissionCurrent } from '../run/outcome-admission.js';
 /**
  * classify/typesafe-client.ts — typed client for the TypeSafe AI ("Jev")
  * System One decision model.
@@ -155,6 +156,8 @@ export interface TypeSafeUsage {
 export type TypeSafeUnavailableReason =
   /** No credential resolvable (phantom vault empty and env unset). */
   | 'no-key'
+  /** Caller-owned outcome retired before provider contact. */
+  | 'admission-refused'
   /** Turned off by env, or the caller passed an empty question set. */
   | 'disabled'
   /** Deadline hit, or the caller's signal aborted. */
@@ -201,6 +204,8 @@ export interface TypeSafeRequest {
 }
 
 export interface TypeSafeCallOptions {
+  /** In-process caller fence; never persisted or sent to Jev. */
+  readonly selectedOutcomeAdmission?: () => boolean;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
   /** Override for tests and self-hosted deployments. */
@@ -498,6 +503,9 @@ export async function askTypeSafe(
   try {
     let response: Response;
     try {
+      if (!selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission)) {
+        return { ok: false, reason: 'admission-refused', detail: 'selected outcome retired before dispatch', durationMs: elapsed() };
+      }
       response = await fetch(endpoint, {
         method: 'POST',
         headers: {
