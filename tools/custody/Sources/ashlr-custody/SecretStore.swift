@@ -36,7 +36,7 @@ enum SecretStore {
 
   static func failure(_ status: OSStatus, _ action: String) -> CustodyFailure {
     if status == errSecInteractionNotAllowed || status == errSecAuthFailed {
-      return CustodyFailure("keystore", "the Keychain would not release the item without a prompt — a different build of the helper stored it; run the matching store-… command again", exit: .keystore)
+      return CustodyFailure("keystore", "the Keychain would not release the item without a prompt — run the installed helper's reauthorize github-app or reauthorize claude-token yourself for the affected existing item", exit: .keystore)
     }
     return CustodyFailure("keystore", "Keychain \(action) failed (OSStatus \(status))", exit: .keystore)
   }

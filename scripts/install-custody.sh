@@ -9,8 +9,9 @@
 # Optional: ASHLR_CUSTODY_SIGN_IDENTITY="Developer ID Application: …" signs
 # with your identity instead of ad hoc. With an identity the Keychain items'
 # access lists survive rebuilds; with ad-hoc signing each new build must
-# re-run `store-github-app` / `store-claude-token` (the Keychain asks, or the
-# helper fails closed — it never prompts from a non-interactive call).
+# run `reauthorize github-app` or `reauthorize claude-token` yourself for
+# each affected EXISTING item. This refreshes helper trust without exporting
+# or replacing credentials. Unattended readers still never prompt.
 #
 # WHY root-owned: confined agents already cannot exec or read it (the
 # autonomous sandbox profile denies both), and a root-owned binary in a
@@ -64,7 +65,9 @@ if [ "$mode" = dry-run ]; then
   echo "  2. codesign a staged copy: --options runtime --identifier $IDENTIFIER --sign ${ASHLR_CUSTODY_SIGN_IDENTITY:--}"
   echo "  3. install -o root -g wheel -m 0755 → $DEST (atomic rename)"
   echo "  4. verify owner/mode/signature, print its sha256"
-  echo "  then YOU run: $DEST status && $DEST init   (Touch ID)"
+  echo "  then YOU run: $DEST status; init only if no signing key exists (Touch ID)"
+  echo "  existing item after a rebuild: $DEST reauthorize github-app   (human Terminal)"
+  echo "  separately if needed: $DEST reauthorize claude-token"
   if [ -e "$DEST" ]; then echo "  currently installed: $(stat -f '%Su:%Sg %Lp' "$DEST") $(shasum -a 256 "$DEST" | cut -d' ' -f1)"; else echo "  currently installed: none"; fi
   exit 0
 fi
@@ -124,4 +127,7 @@ echo "    $(codesign -dv "$DEST" 2>&1 | grep -E '^(Identifier|TeamIdentifier|Run
 echo
 echo "Next (you, not an agent):"
 echo "  $DEST status"
-echo "  $DEST init        # Touch ID; prints {keyId, publicKeyPem} for trust-roots.ts"
+echo "  $DEST init        # ONLY if status says keyInitialized:false; Touch ID"
+echo "  # If a key already exists, keep it. For affected existing credentials after a rebuild:"
+echo "  $DEST reauthorize github-app    # human Terminal; OS Keychain approval; no secret export"
+echo "  $DEST reauthorize claude-token  # separate explicit existing item, only if needed"

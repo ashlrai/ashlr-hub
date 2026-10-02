@@ -363,8 +363,23 @@ installed plist has drifted from config.
    path (token refresh, the auth write-back, the leader socket) and a Claude
    judge call with a real token. Verify both in the Phase 1 shadow.
 5. **Ad-hoc signing ties the Keychain access list to one exact build.** Every
-   helper reinstall means storing the App key and the Claude token again.
-   Setting `ASHLR_CUSTODY_SIGN_IDENTITY` to a Developer ID avoids this.
+   changed helper build can require renewed trust for an existing credential.
+   Helper 1.2.0 provides `/usr/local/libexec/ashlr-custody reauthorize github-app`
+   and, separately if needed, `reauthorize claude-token`. Run one yourself in
+   your login Terminal, without sudo or an agent. Touch ID/login-password
+   presence is followed by the OS's own Keychain access-change authorization.
+   The command requires the root-owned, signed installed helper and exactly
+   one existing legacy item. It changes only a supported single-helper
+   decryption ACL, preserving the credential, label, other attributes and
+   access rules. Success requires an access-metadata readback matching the
+   prepared change. If the OS accepts the update but verification fails,
+   the command reports that uncertainty without retrying or rolling back.
+   Missing/duplicate items, broad or unsupported ACLs and
+   changes during authentication are refused; it never creates a replacement
+   item or signing key. A successful ACL update does not prove provider
+   access: retry the normal setup check afterward. Unattended readers still
+   disable Keychain prompts. A stable Developer ID signing identity can avoid
+   build-specific trust changes; no identity or ACL is changed automatically.
 6. **Sandbox denials are invisible to non-root log readers.** Violation
    detection is best effort: tripwire kills plus an output scan. The denial
    itself still holds.

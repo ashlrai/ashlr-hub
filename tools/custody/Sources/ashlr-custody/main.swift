@@ -135,6 +135,9 @@ enum Runner {
       line.bool("ok", true)
       IO.out(line.text)
 
+    case let .reauthorize(account):
+      try ExistingSecretReauthorization.run(account)
+
     case let .ghToken(repo):
       SecretStore.disableInteraction()
       guard let stored = try SecretStore.read(.githubApp) else {
