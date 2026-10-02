@@ -38,6 +38,7 @@
  * No new runtime deps; node builtins only; never throws out of public API.
  */
 
+import { countForInventory, resolveDaemonCountPreferences } from './count-preferences.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, readdirSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -3316,8 +3317,8 @@ function recordTickStartAgentAction(fields: {
   ts: string;
   dryRun: boolean;
   dailyBudgetUsd: number;
-  perTickItems: number;
-  parallel: number;
+  perTickItems: number | null;
+  parallel: number | null;
   mode?: string;
   drain?: DaemonDrainMode;
   machineId?: string;
@@ -3332,7 +3333,7 @@ function recordTickStartAgentAction(fields: {
     action: 'daemon:tick-start',
     summary:
       `start: budget $${fields.dailyBudgetUsd.toFixed(2)}, ` +
-      `perTick ${fields.perTickItems}, parallel ${fields.parallel}`,
+      `perTick ${fields.perTickItems ?? 'adaptive'}, parallel ${fields.parallel ?? 'adaptive'}`,
     reason: fields.dryRun ? 'dry-run' : 'live',
     tags: [
       'tick-start',
@@ -3341,8 +3342,8 @@ function recordTickStartAgentAction(fields: {
       ...(fields.drain ? [drainTag(fields.drain)] : []),
     ],
     counts: {
-      perTickItems: fields.perTickItems,
-      parallel: fields.parallel,
+      ...(fields.perTickItems !== null ? { perTickItems: fields.perTickItems } : {}),
+      ...(fields.parallel !== null ? { parallel: fields.parallel } : {}),
       ...(fields.drain ? { drainRequested: 1 } : {}),
     },
   });
@@ -3589,17 +3590,9 @@ function proposalProductionSummary(
  * Merge the hard-coded defaults with any partial overrides in cfg.daemon.
  * cfg.daemon grants NO authority — it only tunes caps.
  */
-function resolveCfg(cfg: AshlrConfig): DaemonConfig {
+function resolveCfg(cfg: AshlrConfig): DaemonConfig & ReturnType<typeof resolveDaemonCountPreferences> {
   const o = cfg.daemon ?? {};
-  const capacity = (value: number | undefined, fallback: number): number =>
-    typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : fallback;
-  // M116: tiered concurrency caps — defaults chosen for M5 Max (18 cores, 137GB RAM):
-  // local=2 (GPU/RAM bound), cloud=6 (I/O bound), total=8. Configurable upward.
-  const concLocal = capacity(o.concurrency?.local, 2);
-  const concCloud = capacity(o.concurrency?.cloud, 6);
-  const concTotal = capacity(o.concurrency?.total, 8);
-  // maxConcurrent: explicit override > concurrency.total > 8
-  const maxConcurrent = capacity(o.maxConcurrent, concTotal);
+  const counts = resolveDaemonCountPreferences(o);
   return {
     // ZERO IS A CHOICE, NOT AN ABSENCE. The Verse control plane offers 0 as
     // "stop the loop" (VERSE-CONTRACT-V2: "a budget of 0 means 'stopped', say
@@ -3615,15 +3608,15 @@ function resolveCfg(cfg: AshlrConfig): DaemonConfig {
         : DEFAULTS.dailyBudgetUsd,
     perItemMaxTokens: Number.isSafeInteger(o.perItemMaxTokens) && (o.perItemMaxTokens ?? 0) > 0
       ? o.perItemMaxTokens : DEFAULT_MAX_TOKENS,
-    perTickItems: capacity(o.perTickItems, DEFAULTS.perTickItems),
-    parallel: capacity(o.parallel, DEFAULTS.parallel),
+    perTickItems: counts.perTickItems,
+    parallel: counts.parallel,
     intervalMs: typeof o.intervalMs === 'number' && o.intervalMs > 0
       ? o.intervalMs
       : DEFAULTS.intervalMs,
     // M116: new fields — undefined/absent ⇒ undefined in returned config (backward-compat)
     mode: o.mode === 'continuous' ? 'continuous' : o.mode === 'batch' ? 'batch' : undefined,
-    maxConcurrent,
-    concurrency: { local: concLocal, cloud: concCloud, total: concTotal },
+    maxConcurrent: counts.maxConcurrent,
+    concurrency: counts.concurrency,
     idleBackoffMs: typeof o.idleBackoffMs === 'number' && o.idleBackoffMs > 0
       ? o.idleBackoffMs : 5_000,
   };
@@ -3696,8 +3689,8 @@ export function poolTierForBackend(
  */
 export function resolveLocalPoolCap(
   fleetConcurrency: { effective: number } | null,
-  baseLocalCap: number,
-): number {
+  baseLocalCap: number | null,
+): number | null {
   return fleetConcurrency === null ? baseLocalCap : fleetConcurrency.effective;
 }
 
@@ -3711,9 +3704,9 @@ export function resolveLocalPoolCap(
  *   if (pool.canStart(tier)) { pool.start(tier); try { await task(); } finally { pool.finish(tier); } }
  */
 class TieredPool {
-  private readonly _localCap: number;
-  private readonly _cloudCap: number;
-  private readonly _totalCap: number;
+  private readonly _localCap: number | null;
+  private readonly _cloudCap: number | null;
+  private readonly _totalCap: number | null;
   private _localInFlight = 0;
   private _cloudInFlight = 0;
   // V3.10 (U5): per-LANE caps from a standing tick's beforeTick (local 4 / 2
@@ -3724,10 +3717,10 @@ class TieredPool {
   private readonly _laneCaps: ReadonlyMap<string, number>;
   private readonly _laneInFlight = new Map<string, number>();
 
-  constructor(opts: { local: number; cloud: number; total: number; laneCaps?: Readonly<Partial<Record<string, number>>> }) {
-    this._localCap = Math.max(1, opts.local);
-    this._cloudCap = Math.max(1, opts.cloud);
-    this._totalCap = Math.max(1, opts.total);
+  constructor(opts: { local: number | null; cloud: number | null; total: number | null; laneCaps?: Readonly<Partial<Record<string, number>>> }) {
+    this._localCap = opts.local === null ? null : Math.max(1, opts.local);
+    this._cloudCap = opts.cloud === null ? null : Math.max(1, opts.cloud);
+    this._totalCap = opts.total === null ? null : Math.max(1, opts.total);
     const lanes = new Map<string, number>();
     for (const [lane, cap] of Object.entries(opts.laneCaps ?? {})) {
       if (typeof cap === 'number' && Number.isFinite(cap)) lanes.set(lane, Math.max(1, Math.floor(cap)));
@@ -3740,13 +3733,13 @@ class TieredPool {
   get cloudInFlight(): number { return this._cloudInFlight; }
 
   canStart(tier: 'local' | 'cloud', lane: string | null = null): boolean {
-    if (this.totalInFlight >= this._totalCap) return false;
+    if (this._totalCap !== null && this.totalInFlight >= this._totalCap) return false;
     if (lane !== null) {
       const cap = this._laneCaps.get(lane);
       if (cap !== undefined && (this._laneInFlight.get(lane) ?? 0) >= cap) return false;
     }
-    if (tier === 'local') return this._localInFlight < this._localCap;
-    return this._cloudInFlight < this._cloudCap;
+    if (tier === 'local') return this._localCap === null || this._localInFlight < this._localCap;
+    return this._cloudCap === null || this._cloudInFlight < this._cloudCap;
   }
 
   start(tier: 'local' | 'cloud', lane: string | null = null): void {
@@ -3769,7 +3762,7 @@ class TieredPool {
  */
 async function bounded<T>(
   tasks: Array<() => Promise<T>>,
-  limit: number,
+  limit: number | null,
 ): Promise<PromiseSettledResult<T>[]> {
   const results: PromiseSettledResult<T>[] = new Array(tasks.length);
   let nextIdx = 0;
@@ -3787,7 +3780,7 @@ async function bounded<T>(
     }
   }
 
-  const slots = Math.max(1, Math.min(limit, tasks.length));
+  const slots = countForInventory(limit, tasks.length);
   await Promise.all(Array.from({ length: slots }, () => worker()));
   return results;
 }
@@ -5551,11 +5544,16 @@ export async function tick(
     : drainMode
       ? backlogItems.filter((item) => isDrainCandidate(item, drainMode))
       : backlogItems;
+  const explicitItemCeiling = typeof liveCfg.daemon?.perTickItems === 'number' &&
+    Number.isSafeInteger(liveCfg.daemon.perTickItems) && liveCfg.daemon.perTickItems > 0;
   const configuredSelectCount = zeroDollarOnlyTick
-    ? Math.min(selectionItems.length, Math.max(1, Math.floor(dcfg.perTickItems),
-      productionVelocity.fillQueueToSlots ? (availableSlotsForSelection ?? 0) : 0))
+    ? Math.min(selectionItems.length, explicitItemCeiling
+      ? countForInventory(dcfg.perTickItems, selectionItems.length)
+      : Math.max(1, countForInventory(dcfg.perTickItems, selectionItems.length),
+        productionVelocity.fillQueueToSlots ? (availableSlotsForSelection ?? 0) : 0))
     : daemonQueueSelectionLimit({
     perTickItems: dcfg.perTickItems,
+    explicitItemCeiling,
     remainingBudgetUsd: remainingBudget,
     backlogItems: selectionItems.length,
     fillQueueToSlots: productionVelocity.fillQueueToSlots,
@@ -6113,6 +6111,9 @@ export async function tick(
   // DERIVED, every tick, from what the runtime says it has — and fails closed
   // to 1 when the runtime is down or will not say.
   // -------------------------------------------------------------------------
+  const batchParallelCeiling = dcfg.mode !== 'continuous' &&
+    typeof liveCfg.daemon?.parallel === 'number' && Number.isSafeInteger(liveCfg.daemon.parallel) && liveCfg.daemon.parallel > 0
+    ? liveCfg.daemon.parallel : null;
   const fleetMonitor = localFleetMonitor();
   const localFleet: LocalFleetSettings = readLocalFleetSettings(routingCfg);
   fleetMonitor.setSettings(localFleet);
@@ -6130,7 +6131,9 @@ export async function tick(
       capacity,
       // null (not 2) when the operator configured nothing, so the runtime's own
       // slot count — not a stale default — becomes the parallelism.
-      typeof liveCfg.daemon?.concurrency?.local === 'number' ? liveCfg.daemon.concurrency.local : null,
+      batchParallelCeiling === null
+        ? typeof liveCfg.daemon?.concurrency?.local === 'number' ? liveCfg.daemon.concurrency.local : null
+        : Math.min(batchParallelCeiling, typeof liveCfg.daemon?.concurrency?.local === 'number' && liveCfg.daemon.concurrency.local > 0 ? liveCfg.daemon.concurrency.local : batchParallelCeiling),
       {
         fenceSerialized: FENCE_SERIALIZED_ENGINES.has(localFleet.engine),
         ...(typeof localLaneCap === 'number'
@@ -6179,7 +6182,7 @@ export async function tick(
   const explicitConcurrency =
     liveCfg.daemon?.concurrency !== undefined || liveCfg.daemon?.maxConcurrent !== undefined;
   const tieredCaps = isContinuousMode || explicitConcurrency;
-  const baseLocalCap = tieredCaps ? dcfg.concurrency?.local ?? 2 : dcfg.parallel;
+  const baseLocalCap = tieredCaps ? dcfg.concurrency.local : dcfg.parallel;
   // USE THE DERIVED ANSWER. `deriveLocalFleetConcurrency` has already folded in
   // the operator's explicit cap (limiter 'config' when it is below the slot
   // count) — that is its entire job. Intersecting it with `baseLocalCap` put
@@ -6196,12 +6199,13 @@ export async function tick(
     // daemon with `parallel: 2` and no concurrency block now takes the tiered
     // pool — it is the only one that can carry the slot ceiling — so the tiers
     // the fleet does not govern keep the batch caps they had before.
-    cloud: tieredCaps ? dcfg.concurrency?.cloud ?? 6 : dcfg.parallel,
+    cloud: tieredCaps ? dcfg.concurrency.cloud : dcfg.parallel,
     // The total must leave room for the local cap, or the slot ceiling the
     // fleet just derived would be unreachable.
-    total: tieredCaps
-      ? dcfg.maxConcurrent ?? dcfg.concurrency?.total ?? 8
-      : Math.max(dcfg.parallel, localCap),
+    total: batchParallelCeiling !== null
+      ? Math.min(batchParallelCeiling, tieredCaps ? dcfg.maxConcurrent ?? batchParallelCeiling : batchParallelCeiling)
+      : tieredCaps ? dcfg.maxConcurrent
+        : dcfg.parallel === null || localCap === null ? null : Math.max(dcfg.parallel, localCap),
   });
 
   // Determine each item's pool tier BEFORE building the task array so the
@@ -8066,13 +8070,19 @@ export async function tick(
       backends: [{ backend: 'builtin' as const, availability: 'open' as const, usedPct: null, cap: null, capUnit: null, capWindow: null, resetsAt: null, costPerMTokenOut: 0, p50LatencyMs: null, snapshotAt: new Date().toISOString(), reason: 'snapshot-failed', backoffUntilMs: null }],
     })));
 
-    const maxSlotsPerBackend: number =
-      typeof (routingCfg.foundry?.fabric as Record<string, unknown> | undefined)?.['maxSlotsPerBackend'] === 'number'
-        ? Math.max(1, (routingCfg.foundry!.fabric as Record<string, unknown>)['maxSlotsPerBackend'] as number)
-        : 3;
+    const adaptivePool = dcfg.parallel === null || dcfg.concurrency?.local === null ||
+      dcfg.concurrency?.cloud === null || dcfg.maxConcurrent === null;
+    const rawVelocity = liveCfg.foundry?.productionVelocity;
+    const explicitFabricSlots = typeof rawVelocity === 'object' && rawVelocity !== null &&
+      typeof rawVelocity.maxSlotsPerBackend === 'number'
+      ? rawVelocity.maxSlotsPerBackend : liveCfg.foundry?.fabric?.maxSlotsPerBackend;
+    const maxSlotsPerBackend = typeof explicitFabricSlots === 'number' && Number.isSafeInteger(explicitFabricSlots) && explicitFabricSlots > 0
+      ? explicitFabricSlots
+      // Do not mistake a materialized profile default3 for a manual preference.
+      : adaptivePool ? workedSet.length : 3;
 
     // THE FLEET CEILING MUST FOLLOW THE PATH THE TICK ACTUALLY TAKES. This
-    // branch never touches `tierPool`, so `fleetConcurrency.effective` had no
+    // branch previously bypassed `tierPool`, so `fleetConcurrency.effective` had no
     // effect here at all while `/api/verse/fleet` and LocalRuntimePanel kept
     // printing it as the fleet's concurrency with limiter 'serving-slots' — a
     // limiter that was simply not in force. The measured slot count is handed
@@ -8084,8 +8094,8 @@ export async function tick(
       slotsByBackend?: Readonly<Partial<Record<EngineId, number>>>;
     } = { maxSlotsPerBackend };
     if (localFleet.enabled && fleetConcurrency !== null) {
-      concurrentCfg.slotsByBackend = { [localFleet.engine]: fleetConcurrency.effective };
       const concurrentEffective = Math.min(fleetConcurrency.effective, maxSlotsPerBackend);
+      concurrentCfg.slotsByBackend = { [localFleet.engine]: concurrentEffective };
       if (concurrentEffective !== fleetConcurrency.effective) {
         // `foundry.fabric.maxSlotsPerBackend` is lower than the runtime's
         // slots, so IT is the limiter, not the slot count. Say that rather
@@ -8197,7 +8207,14 @@ export async function tick(
 	        } satisfies ItemOutcome;
 	      },
       killSwitchOn,
-      concurrentCfg,
+      {
+        ...concurrentCfg,
+        admission: {
+          canStart: backend => tierPool.canStart(poolTierForBackend(backend, engineTierOf(backend, routingCfg), routingCfg), laneCapsActive ? fleetLaneOf(backend, routingCfg) : null),
+          start: backend => tierPool.start(poolTierForBackend(backend, engineTierOf(backend, routingCfg), routingCfg), laneCapsActive ? fleetLaneOf(backend, routingCfg) : null),
+          finish: backend => tierPool.finish(poolTierForBackend(backend, engineTierOf(backend, routingCfg), routingCfg), laneCapsActive ? fleetLaneOf(backend, routingCfg) : null),
+        },
+      },
     );
 
     // Convert DispatchResult[] → PromiseSettledResult<ItemOutcome>[] for downstream.

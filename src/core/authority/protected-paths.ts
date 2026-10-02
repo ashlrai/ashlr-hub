@@ -83,6 +83,8 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/daemon/activation-permit.ts',
   'src/core/daemon/tick-hooks.ts',
   'src/core/daemon/loop.ts',
+  // Resolves operator count preferences used by both tick admission and routing.
+  'src/core/daemon/count-preferences.ts',
   'src/core/daemon/outcome-*.ts',
   'src/core/daemon/post-merge-halt.ts',
   'src/core/daemon/liveness.ts',

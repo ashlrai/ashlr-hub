@@ -74,6 +74,15 @@ Each plan uses the existing mission graph transport, and plans can evolve over
 time. Actual serving slots, provider quotas, account policy, workspace isolation,
 and the operator's current authority still determine what can execute.
 
+Fleet count preferences can be **Automatic**, with no operator count ceiling,
+or an explicit number. In Budget and limits, **Use Automatic counts** applies
+Automatic to items per tick, batch parallelism, continuous concurrency, and the
+local, cloud and total tiers. Existing numeric preferences stay in effect until
+you change them. Automatic derives worker counts from available work and actual
+resource admission; remaining work continues through the durable queue. Money,
+subscription reserves, purchased-credit policy and signed authority retain
+their separate settings.
+
 Long desired results remain intact in the saved scope and producer prompt.
 The graph uses a host-bound scope reference when its existing objective field
 cannot hold the text. This preserves the desired result without replacing it
@@ -85,6 +94,7 @@ From a trusted source checkout:
 
 ```sh
 npx vitest run test/outcome-core.test.ts test/outcome-runtime.test.ts test/outcome-dispatch.test.ts test/outcome-daemon-loop.test.ts test/leader-outcomes.test.ts test/outcomes-api.test.ts
+npx vitest run test/m116.worker-pool.test.ts test/m255.concurrent-dispatch.test.ts test/m344.production-velocity.test.ts test/verse-caps.test.ts test/verse-control-api.test.ts
 npm run gate
 ```
 

@@ -20,6 +20,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   criteria. The Leader refines dependency-ready tasks through the resident
   queue. Edit, Pause and Resume retain revisions, runs and selected proposals;
   Plan verified describes active task evidence rather than arbitrary product success.
+- Automatic fleet count preferences remove operator count ceilings without
+  inventing a large worker count. Manual numbers remain available; actual work,
+  serving capacity, account admission and durable journal capacity determine
+  dispatch, with financial and signed-authority settings kept separate.
 
 ### Fixed
 

@@ -239,7 +239,7 @@ describe('/api/verse/caps', () => {
     const caps = res.json as VerseCaps;
     expect(Object.keys(caps).sort()).toEqual([
       'concurrency', 'dailyBudgetUsd', 'defaulted', 'foundryLimits', 'goalFocusActiveThreshold', 'goalFocusMode', 'goalPreferences', 'intervalMs', 'journalItemCapacity', 'leaderPreferences',
-      'maxConcurrent', 'mode', 'parallel', 'perTickItems', 'subscriptionMaxPercent',
+      'maxConcurrent', 'mode', 'parallel', 'perTickItems', 'subscriptionMaxPercent', 'supportsUncappedCounts', 'uncappedCountKeys',
     ]);
     expect(caps.dailyBudgetUsd).toBe(1);
     expect(caps.subscriptionMaxPercent).toBe(90);
@@ -284,6 +284,31 @@ describe('/api/verse/caps', () => {
     expect(saved.daemon).toMatchObject(body);
     expect(saved.authority).toBeUndefined();
     expect(saved.foundry?.subscriptionMaxPercent).toBeUndefined();
+  });
+
+  it('saves Automatic count choices through the authenticated route without changing money or authority', async () => {
+    const { port, read, mutate } = await boot();
+    const body = { perTickItems: null, parallel: null, maxConcurrent: null,
+      concurrency: { local: null, cloud: null, total: null } };
+    const before = (await request(port, 'GET', '/api/verse/caps', read)).json as VerseCaps;
+    expect(before.uncappedCountKeys).toEqual([]);
+    expect((await request(port, 'POST', '/api/verse/caps', { 'content-type': 'application/json' }, JSON.stringify(body))).status).toBe(401);
+    const posted = await request(port, 'POST', '/api/verse/caps', mutate, JSON.stringify(body));
+    expect(posted.status).toBe(200);
+    expect((posted.json as VerseCapsUpdateResult).live).toBe(true);
+    const after = (await request(port, 'GET', '/api/verse/caps', read)).json as VerseCaps;
+    expect(after).toMatchObject({ ...body, supportsUncappedCounts: true,
+      uncappedCountKeys: ['concurrency.cloud', 'concurrency.local', 'concurrency.total', 'maxConcurrent', 'parallel', 'perTickItems'] });
+    expect(after.dailyBudgetUsd).toBe(before.dailyBudgetUsd);
+    expect(after.subscriptionMaxPercent).toBe(before.subscriptionMaxPercent);
+    const saved = JSON.parse(fs.readFileSync(path.join(tmpHome, '.ashlr', 'config.json'), 'utf8'));
+    expect(saved.daemon).toMatchObject(body); expect(saved.authority).toBeUndefined();
+    for (const key of ['dailyBudgetUsd', 'intervalMs', 'subscriptionMaxPercent']) {
+      expect((await request(port, 'POST', '/api/verse/caps', mutate, JSON.stringify({ [key]: null }))).status).toBe(400);
+    }
+    expect((await request(port, 'POST', '/api/verse/caps', mutate, JSON.stringify({ parallel: 0 }))).status).toBe(400);
+    expect((await request(port, 'POST', '/api/verse/caps', mutate, JSON.stringify({ parallel: 17 }))).status).toBe(200);
+    expect(((await request(port, 'GET', '/api/verse/caps', read)).json as VerseCaps).uncappedCountKeys).not.toContain('parallel');
   });
 
   it('rejects unknown keys and out-of-range values without writing anything', async () => {
@@ -717,9 +742,13 @@ describe('strict goal-preference live config boundary', () => {
     expect((caps.json as VerseCaps).goalPreferences?.sourceState).toBe('unavailable');
     expect((caps.json as VerseCaps).leaderPreferences?.sourceState).toBe('unavailable');
     expect((caps.json as VerseCaps).goalFocusMode).toBeUndefined();
+    expect((caps.json as VerseCaps).supportsUncappedCounts).toBe(false);
+    expect((caps.json as VerseCaps).uncappedCountKeys).toEqual([]);
     const aggregate = await request(port, 'GET', '/api/verse/control', read);
     expect((aggregate.json as VerseControlSnapshot).caps.goalPreferences?.sourceState).toBe('unavailable');
-    for (const body of [{ goalPreferences: { maxOpenGoals: null } }, { goalFocusMode: false }, { leaderPreferences: { maxTotalRunsPerDay: null } }]) {
+    for (const body of [{ goalPreferences: { maxOpenGoals: null } }, { goalFocusMode: false }, { leaderPreferences: { maxTotalRunsPerDay: null } },
+      { perTickItems: null }, { parallel: null }, { maxConcurrent: null }, { concurrency: { local: null } },
+      { concurrency: { cloud: null } }, { concurrency: { total: null } }, { parallel: 17 }]) {
       const result = await request(port, 'POST', '/api/verse/caps', mutate, JSON.stringify(body));
       expect(result.status).toBeGreaterThanOrEqual(400);
       expect(result.body).not.toContain(corrupt);

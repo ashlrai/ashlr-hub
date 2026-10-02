@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CAP_FIELDS, capFieldByKey, capPatch, readCap, validateCap, validateFoundryMax, type CapKey } from './caps-spec.js';
+import { CAP_FIELDS, automaticCountsPatch, isUncappedCount, capFieldByKey, capPatch, readCap, validateCap, validateFoundryMax, type CapKey } from './caps-spec.js';
 import { VERSE_CAPS_BOUNDS } from './control-types.js';
 import type { VerseCaps } from './control-types.js';
 
@@ -142,5 +142,24 @@ describe('the client table agrees with the server bounds', () => {
       expect(validateCap(field, String(field.min)).ok, `${field.key} at min`).toBe(true);
       expect(validateCap(field, String(field.max)).ok, `${field.key} at max`).toBe(true);
     }
+  });
+});
+
+
+describe('Automatic count transport', () => {
+  it('does not reinterpret older-server null or missing readings as Automatic', () => {
+    const old = { ...CAPS, maxConcurrent: null };
+    expect(isUncappedCount(old, 'maxConcurrent')).toBe(false);
+    expect(isUncappedCount({ ...old, supportsUncappedCounts: true }, 'maxConcurrent')).toBe(false);
+    expect(isUncappedCount({ ...old, supportsUncappedCounts: true, uncappedCountKeys: ['maxConcurrent'] }, 'maxConcurrent')).toBe(true);
+    expect(isUncappedCount({ ...CAPS, supportsUncappedCounts: true, uncappedCountKeys: ['maxConcurrent'] }, 'maxConcurrent')).toBe(false);
+    expect(isUncappedCount({ ...old, supportsUncappedCounts: false, uncappedCountKeys: ['maxConcurrent'] }, 'maxConcurrent')).toBe(false);
+  });
+  it('builds the six-count-only patch and forbids null financial or interval fields', () => {
+    expect(automaticCountsPatch()).toEqual({ perTickItems: null, parallel: null, maxConcurrent: null,
+      concurrency: { local: null, cloud: null, total: null } });
+    expect(capPatch('parallel', null)).toEqual({ parallel: null });
+    expect(capPatch('concurrency.cloud', null)).toEqual({ concurrency: { cloud: null } });
+    for (const key of ['dailyBudgetUsd', 'intervalMs', 'subscriptionMaxPercent'] as CapKey[]) expect(() => capPatch(key, null)).toThrow(/only for count/);
   });
 });

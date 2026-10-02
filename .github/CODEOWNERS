@@ -129,6 +129,7 @@
 /src/core/daemon/activation-permit.ts @masonwyatt23
 /src/core/daemon/tick-hooks.ts @masonwyatt23
 /src/core/daemon/loop.ts @masonwyatt23
+/src/core/daemon/count-preferences.ts @masonwyatt23
 /src/core/daemon/outcome-*.ts @masonwyatt23
 /src/core/daemon/post-merge-halt.ts @masonwyatt23
 /src/core/daemon/liveness.ts @masonwyatt23
@@ -506,6 +507,7 @@
 /test/m335.model-stats.test.ts @masonwyatt23
 /test/m336.swe-bench-gate.test.ts @masonwyatt23
 /test/m337.sandbox-cancellation.test.ts @masonwyatt23
+/test/m344.production-velocity.test.ts @masonwyatt23
 /test/m349.secret-safety-invariants.test.ts @masonwyatt23
 /test/m354.trajectory-records.test.ts @masonwyatt23
 /test/m355.skill-records.test.ts @masonwyatt23

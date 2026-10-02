@@ -4571,10 +4571,10 @@ export interface DaemonConfig {
   dailyBudgetUsd: number;
   /** Positive safe integer token allowance for proven zero-dollar producers; defaults to the normal run allowance. */
   perItemMaxTokens?: number;
-  /** Max number of backlog items processed per tick (per-tick item cap). */
-  perTickItems: number;
-  /** Bounded concurrency: max sandboxed swarms run simultaneously in a tick. */
-  parallel: number;
+  /** Per-tick item preference; null uses eligible inventory within actual admission. Absent defaults to 3. */
+  perTickItems: number | null;
+  /** Batch concurrency preference; null has no operator ceiling. Absent defaults to 2. */
+  parallel: number | null;
   /** Interval between ticks in `daemon start` loop mode (ms). */
   intervalMs: number;
   /**
@@ -4586,28 +4586,15 @@ export interface DaemonConfig {
    *                when the backlog is empty. Bound by budget + kill-switch + pool caps.
    */
   mode?: 'batch' | 'continuous';
-  /**
-   * M116: absolute ceiling on in-flight dispatches for continuous mode (ignored
-   * in batch mode, which uses `parallel`). Defaults to concurrency.total when
-   * set, or 8 otherwise. Raise to saturate a powerful machine.
-   */
-  maxConcurrent?: number;
-  /**
-   * M116: per-tier concurrency budgets for the tiered worker pool. All fields
-   * optional; absent tiers fall back to sensible defaults. Effective in BOTH
-   * batch and continuous modes — in batch mode these cap `parallel` per tier.
-   *
-   * 'local' tier  — engines whose EngineTier is 'local' (on-device models).
-   *                 GPU/RAM bound; keep low (default 2).
-   * 'cloud' tier  — engines whose EngineTier is 'frontier' or 'mid' (subscription
-   *                 cloud agents). I/O bound; can run many concurrently (default 6).
-   * 'total'       — hard cap across all tiers (default 8, raised from the old
-   *                 hard-coded 8). maxConcurrent takes precedence over this.
-   */
+  /** Continuous count preference. Explicit null overrides total with no operator
+   * ceiling; absent inherits concurrency.total (default 8). Actual admission remains. */
+  maxConcurrent?: number | null;
+  /** Per-tier preferences: absence retains local2/cloud6/total8, null removes
+   * only the operator ceiling. maxConcurrent, including null, overrides total. */
   concurrency?: {
-    local?: number;
-    cloud?: number;
-    total?: number;
+    local?: number | null;
+    cloud?: number | null;
+    total?: number | null;
   };
   /**
    * M116: how long (ms) the continuous loop backs off when the backlog is empty

@@ -101,6 +101,18 @@ describe('effective config snapshot', () => {
     expect(snapshot.warnings.join('\n')).toMatch(/cfg\.foundry is missing/);
   });
 
+  it('projects explicit null capacity honestly, numeric parallel above8, and zero Stop', () => {
+    const daemon = { dailyBudgetUsd: 0, perTickItems: null, parallel: null, maxConcurrent: null,
+      concurrency: { local: null, cloud: null, total: 1 } };
+    const snapshot = buildEffectiveConfigSnapshot(makeCfg({ daemon }), { rawConfig: { daemon } });
+    expect(snapshot.daemon.dailyBudgetUsd.value).toBe(0);
+    expect(snapshot.daemon.perTickItems).toMatchObject({ value: null, source: 'configured' });
+    expect(snapshot.daemon.parallel.value).toBeNull();
+    expect(snapshot.daemon.maxConcurrent.value).toBeNull();
+    expect(snapshot.daemon.concurrency.total.value).toBe(1);
+    expect(buildEffectiveConfigSnapshot(makeCfg({ daemon: { parallel: 17 } })).daemon.parallel.value).toBe(17);
+  });
+
   it('marks configured operator settings and never serializes secret values', () => {
     const cfg = makeCfg({
       daemon: {

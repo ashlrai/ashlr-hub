@@ -5,6 +5,7 @@
  * selection sized to resource slots, and explicit local/NIM/Kimi caps.
  */
 
+import { resolveDaemonCountPreferences, countForInventory } from '../src/core/daemon/count-preferences.js';
 import { describe, expect, it } from 'vitest';
 import type { AshlrConfig, EngineId, Proposal } from '../src/core/types.js';
 import type { BackendAvailability, BackendResourceState, ResourceSnapshot } from '../src/core/fabric/resource-monitor.js';
@@ -115,6 +116,29 @@ describe('production velocity profile', () => {
     expect(effective.foundry?.kimi?.maxConcurrent).toBe(2);
   });
 
+  it('does not materialize a default fabric3 ceiling for adaptive counts, but keeps explicit resource choices', () => {
+    const configuration = cfg({ daemon: { perTickItems: null, parallel: null }, foundry: { productionVelocity: true } });
+    expect(applyProductionVelocityProfile(configuration).foundry?.fabric?.maxSlotsPerBackend).toBeUndefined();
+    configuration.foundry!.fabric = { maxSlotsPerBackend: 5 };
+    expect(applyProductionVelocityProfile(configuration).foundry?.fabric?.maxSlotsPerBackend).toBe(5);
+    configuration.foundry!.productionVelocity = { enabled: true, maxSlotsPerBackend: 7 };
+    expect(applyProductionVelocityProfile(configuration).foundry?.fabric?.maxSlotsPerBackend).toBe(7);
+  });
+
+  it('selects finite inventory for null items while keeping money and empty-backlog bounds', () => {
+    const input = { perTickItems: null, remainingBudgetUsd: 50, backlogItems: 17, fillQueueToSlots: false };
+    expect(daemonQueueSelectionLimit(input)).toBe(17);
+    expect(daemonQueueSelectionLimit({ ...input, backlogItems: 0 })).toBe(0);
+    expect(daemonQueueSelectionLimit({ ...input, remainingBudgetUsd: 0.02, minPerItemUsd: 0.01 })).toBe(2);
+  });
+
+  it('honors an explicit numeric item ceiling over fill-to-slots without changing legacy filling', () => {
+    const input = { perTickItems: 2, remainingBudgetUsd: 50, backlogItems: 17, fillQueueToSlots: true, availableSlots: 9 };
+    expect(daemonQueueSelectionLimit({ ...input, explicitItemCeiling: true })).toBe(2);
+    expect(daemonQueueSelectionLimit(input)).toBe(9);
+    expect(daemonQueueSelectionLimit({ ...input, perTickItems: null })).toBe(17);
+  });
+
   it('fills daemon queue selection to available resource slots when enabled', () => {
     expect(daemonQueueSelectionLimit({
       perTickItems: 3,
@@ -217,5 +241,21 @@ describe('production velocity profile', () => {
       .toEqual(['prop-fresh']);
     expect(blockingPendingProposalsForBacklog([stale], cfg(), { now }).map((p) => p.id))
       .toEqual(['prop-stale']);
+  });
+});
+
+
+describe('daemon nullable count preferences', () => {
+  it('preserves legacy defaults and explicit null maximum precedence', () => {
+    expect(resolveDaemonCountPreferences()).toEqual({ perTickItems: 3, parallel: 2, maxConcurrent: 8, concurrency: { local: 2, cloud: 6, total: 8 } });
+    expect(resolveDaemonCountPreferences({ maxConcurrent: null, concurrency: { total: 1 } }).maxConcurrent).toBeNull();
+    expect(resolveDaemonCountPreferences({ concurrency: { total: null } }).maxConcurrent).toBeNull();
+    expect(resolveDaemonCountPreferences({ maxConcurrent: 4, concurrency: { total: null } }).maxConcurrent).toBe(4);
+    expect(countForInventory(null, 0)).toBe(0);
+    expect(countForInventory(null, 17)).toBe(17);
+    expect(countForInventory(Number.MAX_SAFE_INTEGER, 2)).toBe(2);
+  });
+  it.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('does not interpret invalid count %s as unlimited', (value) => {
+    expect(resolveDaemonCountPreferences({ perTickItems: value, parallel: value, maxConcurrent: value, concurrency: { local: value, cloud: value, total: value } })).toEqual(resolveDaemonCountPreferences());
   });
 });
