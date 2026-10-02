@@ -611,6 +611,124 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     });
   });
 
+  it.each([
+    { engine: 'local-coder' as const, capturedDuration: undefined, expected: 176_374 },
+    { engine: 'claude' as const, capturedDuration: undefined, expected: 176_374 },
+    { engine: 'local-coder' as const, capturedDuration: -1, expected: 176_374 },
+    { engine: 'local-coder' as const, capturedDuration: Number.NaN, expected: 176_374 },
+    { engine: 'local-coder' as const, capturedDuration: 200_000, expected: 200_000 },
+    { engine: 'claude' as const, capturedDuration: 200_000, expected: 200_000 },
+  ])('$engine preserves retry timing through capture ($capturedDuration)', async ({ engine, capturedDuration, expected }) => {
+    // Reproduce the production seam: a long first producer needs repair, then
+    // a short failed producer captures an empty sandbox with a fresh summary.
+    const first = {
+      ...makeRunState({ status: 'done', usage: { tokensIn: 10, tokensOut: 5, steps: 1, estCostUsd: 0.1 } }),
+      engine,
+      createdAt: '2026-10-02T07:03:24.000Z',
+      updatedAt: '2026-10-02T07:06:19.400Z',
+    };
+    const second = {
+      ...makeRunState({ status: 'failed', result: 'Budget exceeded before any result was produced.',
+        usage: { tokensIn: 20, tokensOut: 7, steps: 1, estCostUsd: 0.2 } }),
+      id: first.id,
+      engine,
+      createdAt: '2026-10-02T07:06:19.400Z',
+      updatedAt: '2026-10-02T07:06:20.374Z',
+    };
+    const emptyOutcome = { kind: 'empty-diff' as const, reason: 'no material diff', files: 0, insertions: 0, deletions: 0 };
+    engineMockFn.mockResolvedValueOnce({ state: first }).mockResolvedValueOnce({ state: second });
+    detectVCMockFn.mockReturnValue([{ kind: 'test', cmd: ['npm', 'test'] }]);
+    runVCMockFn.mockReturnValue({ ok: false, command: 'npm test', exitCode: 1, output: 'repair required', timedOut: false });
+    captureMockFn.mockResolvedValueOnce({
+      state: {
+        ...makeRunState({ status: 'failed' }), id: first.id, proposalOutcome: emptyOutcome,
+        runEventSummary: {
+          runId: first.id, status: 'failed', outcome: 'empty-diff', proposalCreated: false,
+          ...(capturedDuration !== undefined ? { durationMs: capturedDuration } : {}),
+        },
+      },
+      proposalOutcome: emptyOutcome,
+    });
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('repair quality metrics', sandboxCfg(), {
+      engine, sandboxEngine: true, budget: { maxTokens: 1_000_000, maxSteps: 100 }, tools: false,
+      titrrMaxAttempts: 2,
+    } as Parameters<typeof runGoal>[2] & { titrrMaxAttempts: number });
+    expect(engineMockFn).toHaveBeenCalledTimes(2);
+    expect(captureMockFn).toHaveBeenCalledTimes(1);
+    expect(captureMockFn.mock.calls[0]?.[3]).toMatchObject({ durationMs: 176_374 });
+    expect(state.status).toBe('failed');
+    expect(state.createdAt).toBe(first.createdAt);
+    expect(state.runEventSummary?.durationMs).toBe(expected);
+    expect(state.usage).toMatchObject({ tokensIn: 30, tokensOut: 12, steps: 2 });
+    expect(state.usage.estCostUsd).toBeCloseTo(0.3);
+    expect(terminalActionMockFn).toHaveBeenCalledTimes(1);
+    expect(terminalActionMockFn.mock.calls[0]?.[0]).toMatchObject({
+      startedAt: first.createdAt, durationMs: expected, status: 'failed', usage: state.usage,
+    });
+    const { loadRun } = await import('../src/core/run/orchestrator.js');
+    expect(loadRun(state.id)).toMatchObject({
+      createdAt: first.createdAt, status: 'failed', usage: state.usage,
+      runEventSummary: { durationMs: expected },
+    });
+  });
+
+  it.each([undefined, -1, Number.NaN, Number.POSITIVE_INFINITY])('unknown first-attempt duration stays unknown after retry and capture (%s)', async (durationMs) => {
+    const first = {
+      ...makeRunState({ status: 'done' }), engine: 'local-coder' as const,
+      createdAt: durationMs === undefined ? 'invalid' : '2026-10-02T07:03:24.000Z',
+      updatedAt: durationMs === undefined ? 'invalid' : '2026-10-02T07:06:19.400Z',
+      ...(durationMs !== undefined ? { runEventSummary: { durationMs } } : {}),
+    };
+    const second = {
+      ...makeRunState({ status: 'failed' }), id: first.id, engine: 'local-coder' as const,
+      createdAt: '2026-10-02T07:06:19.400Z', updatedAt: '2026-10-02T07:06:20.374Z',
+    };
+    engineMockFn.mockResolvedValueOnce({ state: first }).mockResolvedValueOnce({ state: second });
+    detectVCMockFn.mockReturnValue([{ kind: 'test', cmd: ['npm', 'test'] }]);
+    runVCMockFn.mockReturnValue({ ok: false, command: 'npm test', exitCode: 1, output: 'repair required', timedOut: false });
+    const emptyOutcome = { kind: 'empty-diff' as const, reason: 'no material diff' };
+    captureMockFn.mockResolvedValueOnce({
+      state: { ...makeRunState({ status: 'failed' }), id: first.id,
+        runEventSummary: { runId: first.id, status: 'failed', outcome: 'empty-diff' } },
+      proposalOutcome: emptyOutcome,
+    });
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('repair quality metrics', sandboxCfg(), {
+      engine: 'local-coder', sandboxEngine: true, budget: { maxTokens: 1_000_000, maxSteps: 100 }, tools: false,
+      titrrMaxAttempts: 2,
+    } as Parameters<typeof runGoal>[2] & { titrrMaxAttempts: number });
+    expect(state.createdAt).toBe(durationMs === undefined ? second.createdAt : first.createdAt);
+    expect(state.runEventSummary?.durationMs).toBeUndefined();
+    expect(captureMockFn.mock.calls[0]?.[3].durationMs).toBeUndefined();
+    expect(terminalActionMockFn.mock.calls[0]?.[0].durationMs).toBeUndefined();
+    const { loadRun } = await import('../src/core/run/orchestrator.js');
+    expect(loadRun(state.id)?.runEventSummary?.durationMs).toBeUndefined();
+  });
+
+  it('a measured zero producer duration remains zero through capture', async () => {
+    const producer = {
+      ...makeRunState({ status: 'failed' }), engine: 'local-coder' as const,
+      createdAt: '2026-10-02T07:06:19.400Z', updatedAt: '2026-10-02T07:06:20.374Z',
+      runEventSummary: { durationMs: 0 },
+    };
+    engineMockFn.mockResolvedValueOnce({ state: producer });
+    const emptyOutcome = { kind: 'empty-diff' as const, reason: 'no material diff' };
+    captureMockFn.mockResolvedValueOnce({
+      state: { ...makeRunState({ status: 'failed' }), id: producer.id,
+        runEventSummary: { runId: producer.id, status: 'failed', outcome: 'empty-diff' } },
+      proposalOutcome: emptyOutcome,
+    });
+    const runGoal = await loadRunGoal();
+    const state = await runGoal('repair quality metrics', sandboxCfg(), {
+      engine: 'local-coder', sandboxEngine: true, tools: false,
+    });
+    expect(state.runEventSummary?.durationMs).toBe(0);
+    expect(terminalActionMockFn.mock.calls[0]?.[0].durationMs).toBe(0);
+    const { loadRun } = await import('../src/core/run/orchestrator.js');
+    expect(loadRun(state.id)?.runEventSummary?.durationMs).toBe(0);
+  });
+
   it('api-model step-cap output remains partial when TITRR owns capture', async () => {
     const partialDisabledOutcome = {
       kind: 'proposal-disabled' as const,

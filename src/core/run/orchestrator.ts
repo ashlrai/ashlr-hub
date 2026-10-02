@@ -666,8 +666,12 @@ export function listRuns(options: ListRunsDetailedOptions = {}): RunState[] {
 
 function runDurationMs(state: RunState): number | undefined {
   const summarized = state.runEventSummary?.durationMs;
-  if (typeof summarized === 'number' && Number.isFinite(summarized) && summarized >= 0) {
-    return summarized;
+  if (state.runEventSummary && Object.hasOwn(state.runEventSummary, 'durationMs')) {
+    // An explicitly unknown/invalid summary must not become a timestamp-derived
+    // duration (or zero) after one TITRR attempt failed to report its timing.
+    return typeof summarized === 'number' && Number.isFinite(summarized) && summarized >= 0
+      ? summarized
+      : undefined;
   }
   const start = Date.parse(state.createdAt);
   const end = Date.parse(state.updatedAt);
@@ -852,6 +856,15 @@ function hasAuthoritativeErrorExit(state: RunState): boolean {
 function withCapturedProposalMetadata(producerState: RunState, capturedState: RunState): RunState {
   const captureAborted = capturedState.status === 'aborted' && !hasAuthoritativeErrorExit(producerState);
   const captureFailed = capturedState.proposalOutcome?.kind === 'proposal-capture-error';
+  const capturedDuration = capturedState.runEventSummary?.durationMs;
+  // Capture records its outcome in a fresh state. Most capture paths do not
+  // supply duration, so retain the cumulative producer time instead of falling
+  // back to the last attempt's timestamps. This remains producer time, excluding
+  // sandbox admission, verification and cleanup; it is not whole-run elapsed.
+  const durationMs = typeof capturedDuration === 'number' &&
+    Number.isFinite(capturedDuration) && capturedDuration >= 0
+    ? capturedDuration
+    : runDurationMs(producerState);
   const merged = {
     ...producerState,
     ...(captureAborted || captureFailed
@@ -867,6 +880,7 @@ function withCapturedProposalMetadata(producerState: RunState, capturedState: Ru
       ? {
           runEventSummary: {
             ...capturedState.runEventSummary,
+            durationMs,
             ...(captureAborted ? { status: 'aborted' as const } : {}),
           },
         }
@@ -1101,10 +1115,12 @@ function withCumulativeUsage(
   usage: RunUsage,
   budget: RunBudget,
   actionCounts: RunActionCounts,
-  durationMs: number,
+  durationMs: number | undefined,
+  createdAt?: string,
 ): RunState {
   return {
     ...state,
+    ...(createdAt !== undefined ? { createdAt } : {}),
     budget,
     usage,
     runEventSummary: {
@@ -2520,7 +2536,8 @@ async function runGoalInternal(
             const titrrBudget = resolveTitrrBudget(opts.budget, opts.allowCloud);
             let titrrUsage = newUsage();
             let titrrActionCounts: RunActionCounts = {};
-            let titrrDurationMs = 0;
+            let titrrDurationMs: number | undefined = 0;
+            let titrrCreatedAt: string | undefined;
             const proposalRequired =
               delegationScope?.resultContract?.requireProposal === true ||
               delegationScope?.resultContract?.requireDiff === true;
@@ -2570,7 +2587,13 @@ async function runGoalInternal(
                   titrrActionCounts,
                   rawApiR.state.runEventSummary?.actionCounts,
                 );
-                titrrDurationMs += runDurationMs(rawApiR.state) ?? 0;
+                const attemptDurationMs = runDurationMs(rawApiR.state);
+                titrrDurationMs = titrrDurationMs !== undefined && attemptDurationMs !== undefined
+                  ? titrrDurationMs + attemptDurationMs
+                  : undefined;
+                if (titrrCreatedAt === undefined && Number.isFinite(Date.parse(rawApiR.state.createdAt))) {
+                  titrrCreatedAt = rawApiR.state.createdAt;
+                }
                 const apiR = {
                   ...rawApiR,
                   state: withCumulativeUsage(
@@ -2579,6 +2602,7 @@ async function runGoalInternal(
                     titrrBudget,
                     titrrActionCounts,
                     titrrDurationMs,
+                    titrrCreatedAt,
                   ),
                 };
                 lastApiR = apiR;
@@ -2903,7 +2927,8 @@ async function runGoalInternal(
           const titrrBudget = resolveTitrrBudget(opts.budget, opts.allowCloud);
           let titrrUsage = newUsage();
           let titrrActionCounts: RunActionCounts = {};
-          let titrrDurationMs = 0;
+          let titrrDurationMs: number | undefined = 0;
+          let titrrCreatedAt: string | undefined;
           const proposalRequired =
             delegationScope?.resultContract?.requireProposal === true ||
             delegationScope?.resultContract?.requireDiff === true;
@@ -2981,7 +3006,13 @@ async function runGoalInternal(
                 titrrActionCounts,
                 rawR.state.runEventSummary?.actionCounts,
               );
-              titrrDurationMs += runDurationMs(rawR.state) ?? 0;
+              const attemptDurationMs = runDurationMs(rawR.state);
+              titrrDurationMs = titrrDurationMs !== undefined && attemptDurationMs !== undefined
+                ? titrrDurationMs + attemptDurationMs
+                : undefined;
+              if (titrrCreatedAt === undefined && Number.isFinite(Date.parse(rawR.state.createdAt))) {
+                titrrCreatedAt = rawR.state.createdAt;
+              }
               const r = {
                 ...rawR,
                 state: withSandboxRetention(
@@ -2991,6 +3022,7 @@ async function runGoalInternal(
                     titrrBudget,
                     titrrActionCounts,
                     titrrDurationMs,
+                    titrrCreatedAt,
                   ),
                   retention,
                 ),
