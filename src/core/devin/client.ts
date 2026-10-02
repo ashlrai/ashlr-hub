@@ -75,6 +75,8 @@ export interface DevinSelf {
 /** SessionResponse, reduced to what Verse uses. https://docs.devin.ai/api-reference/v3/sessions/get-organizations-session */
 export interface DevinSession {
   sessionId: string;
+  /** Provider-reported account context; short create responses may omit it. */
+  orgId?: string;
   url: string;
   status: DevinSessionStatus;
   statusDetail: string | null;
@@ -174,6 +176,8 @@ export function parseDevinSession(raw: unknown): DevinSession | null {
   if (typeof sessionId !== 'string' || !DEVIN_SESSION_ID_PATTERN.test(sessionId)) return null;
   if (!isHttpsUrl(url)) return null;
   if (typeof status !== 'string' || !SESSION_STATUSES.includes(status as DevinSessionStatus)) return null;
+  const orgId = raw['org_id'];
+  if (orgId !== undefined && (typeof orgId !== 'string' || !DEVIN_ORG_ID_PATTERN.test(orgId))) return null;
 
   const detail = raw['status_detail'];
   if (detail !== undefined && detail !== null && typeof detail !== 'string') return null;
@@ -201,6 +205,7 @@ export function parseDevinSession(raw: unknown): DevinSession | null {
   const structured = raw['structured_output'];
   return {
     sessionId,
+    ...(typeof orgId === 'string' ? { orgId } : {}),
     url,
     status: status as DevinSessionStatus,
     statusDetail: typeof detail === 'string' ? detail.slice(0, 60) : null,
@@ -213,7 +218,15 @@ export function parseDevinSession(raw: unknown): DevinSession | null {
 }
 
 /** PaginatedResponse[SessionResponse] — https://docs.devin.ai/api-reference/concepts/pagination. Unparseable items are dropped. */
-export function parseDevinSessionPage(raw: unknown): { items: DevinSession[]; endCursor: string | null; hasNextPage: boolean } | null {
+export interface DevinSessionPage {
+  items: DevinSession[];
+  endCursor: string | null;
+  hasNextPage: boolean;
+  /** False when tolerant parsing discarded evidence or pagination was incomplete. */
+  complete?: boolean;
+}
+
+export function parseDevinSessionPage(raw: unknown): DevinSessionPage | null {
   if (!isRecord(raw) || !Array.isArray(raw['items'])) return null;
   const items: DevinSession[] = [];
   for (const item of raw['items']) {
@@ -224,6 +237,11 @@ export function parseDevinSessionPage(raw: unknown): { items: DevinSession[]; en
     items,
     endCursor: typeof raw['end_cursor'] === 'string' ? raw['end_cursor'] : null,
     hasNextPage: raw['has_next_page'] === true,
+    complete: items.length === raw['items'].length
+      && raw['items'].every((item) => isRecord(item) && Array.isArray(item['tags'])
+        && item['tags'].length <= 50 && item['tags'].every((tag: unknown) => typeof tag === 'string'))
+      && typeof raw['has_next_page'] === 'boolean'
+      && (raw['has_next_page'] === false || (typeof raw['end_cursor'] === 'string' && raw['end_cursor'].length > 0)),
   };
 }
 
@@ -431,12 +449,12 @@ export class DevinClient {
     const org = checkOrg(orgId);
     if (!DEVIN_SESSION_ID_PATTERN.test(sessionId)) throw new DevinApiError('invalid-request', 'That is not a Devin session id.');
     const parsed = parseDevinSession(await this.request('GET', `/organizations/${encodeURIComponent(org)}/sessions/${encodeURIComponent(sessionId)}`, undefined, 'read'));
-    if (!parsed || parsed.sessionId !== sessionId) throw new DevinApiError('unparsed', STATUS_SENTENCES.unparsed);
+    if (!parsed || parsed.sessionId !== sessionId || (parsed.orgId !== undefined && parsed.orgId !== org)) throw new DevinApiError('unparsed', STATUS_SENTENCES.unparsed);
     return parsed;
   }
 
   /** GET /v3/organizations/{org_id}/sessions?first=&after= — https://docs.devin.ai/api-reference/v3/sessions/organizations-sessions */
-  async listSessions(orgId: string, opts: { first?: number; after?: string } = {}): Promise<{ items: DevinSession[]; endCursor: string | null; hasNextPage: boolean }> {
+  async listSessions(orgId: string, opts: { first?: number; after?: string } = {}): Promise<DevinSessionPage> {
     const org = checkOrg(orgId);
     const first = Math.min(200, Math.max(1, Math.floor(opts.first ?? 25)));
     const query = new URLSearchParams({ first: String(first) });
@@ -486,7 +504,12 @@ export class DevinClient {
     const org = checkOrg(orgId);
     const id = checkSessionId(sessionId);
     const raw = await this.request('DELETE', `/organizations/${encodeURIComponent(org)}/sessions/${encodeURIComponent(id)}`, undefined, 'create');
-    return parseDevinSession(raw);
+    const parsed = parseDevinSession(raw);
+    if (parsed && (parsed.sessionId !== id || (parsed.orgId !== undefined && parsed.orgId !== org))) {
+      throw new DevinApiError('unparsed', STATUS_SENTENCES.unparsed);
+    }
+    // Empty/nonterminal responses are not evidence that provider spend stopped.
+    return parsed;
   }
 }
 

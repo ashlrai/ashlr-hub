@@ -1052,6 +1052,8 @@ export interface VerseAccountCollector {
   touch(): void;
   /** Live per-account connection snapshot, or null when this server is read-only. */
   connections(): ResourceConnectionsSnapshot | null;
+  /** Pure owned-generation/publication identity; no snapshot enrichment or IO. */
+  readingRevision?(): string | null;
   /** Live Codex observations (NOT merged with the baseline — the caller merges). */
   observations(): ResourceObservation[];
   /** Current account/transport vetoes, including failures after a prior sample. */
@@ -1679,6 +1681,10 @@ export async function startVerseAccountCollector(
       if (mode !== 'owned') return;
       if (collectionDegraded()) { requestRecovery(); return; }
       if (state === 'suspended') resume();
+    },
+    readingRevision: () => {
+      if (closed || mode !== 'owned' || state !== 'running' || !monitor?.readingRevision || monitor.isStopped?.()) return null;
+      return `${generation}:${monitor.readingRevision()}`;
     },
     connections: () => {
       if (monitor) {

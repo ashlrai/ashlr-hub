@@ -98,7 +98,7 @@ import { readUniverseOverview } from '../universe/index.js';
 import { readUniverseGraph } from '../universe/graph-reader.js';
 import type { ProposalsReadResult } from '../inbox/store.js';
 import { handleRunEventsSse, RUN_EVENTS_PATH_RE } from './run-stream.js';
-import { handleVerseApi, isVerseApiPath, verseSessionsDigest, verseSessionsSnapshot } from '../verse/verse-api.js';
+import { handleVerseApi, isVerseApiPath, verseSessionsDigest, verseSessionsSnapshot, verseAccountReadingsDigest } from '../verse/verse-api.js';
 // V2 autonomy control plane (mounted BEFORE handleVerseApi — see handleApi).
 import { handleVerseControlApi, isVerseControlPath } from '../verse/control-api.js';
 // GitHub, reachable from Verse (docs/VERSE-WORKSPACES.md §2) — also BEFORE handleVerseApi.
@@ -200,7 +200,7 @@ let sseHistoryProjection: SseHistoryProjection | null = null;
  * No `topics` parameter means every group (the historical behaviour).
  */
 export const SSE_TOPICS = [
-  'verse-sessions', 'runs', 'swarms', 'inbox', 'daemon', 'fleet-activity', 'snapshot',
+  'verse-sessions', 'verse-account-readings', 'runs', 'swarms', 'inbox', 'daemon', 'fleet-activity', 'snapshot',
 ] as const;
 export type SseTopic = typeof SSE_TOPICS[number];
 
@@ -1030,6 +1030,20 @@ function handleSseEvents(
     } catch { /* verse slice is best-effort */ }
   }
 
+  let lastAccountReadingsDigest: string | null = null;
+  function pushAccountReadingsIfChanged(): void {
+    if (cleaned || backpressured || !topics.has('verse-account-readings')) return;
+    try {
+      const digest = verseAccountReadingsDigest(cfg);
+      if (digest === null) { lastAccountReadingsDigest = null; return; }
+      if (digest !== lastAccountReadingsDigest) {
+        lastAccountReadingsDigest = digest;
+        // Invalidation only: no account identifiers, balances, timestamps or digest.
+        sendNamed('verse-account-readings', { changed: true });
+      }
+    } catch { /* unavailable publications never imply a completed reading */ }
+  }
+
   // Emit one full update (runs, swarms, inbox, daemon slices) for the
   // subscribed topics.
   async function emitUpdate(): Promise<void> {
@@ -1112,6 +1126,7 @@ function handleSseEvents(
 
   // Send an initial snapshot immediately.
   pushVerseSessionsIfChanged();
+  pushAccountReadingsIfChanged();
   try {
     void emitUpdate().catch(() => { /* A failed read must not reject outside the stream. */ });
   } catch {
@@ -1123,6 +1138,7 @@ function handleSseEvents(
   verseSessionPushers.add(pushVerseSessionsIfChanged);
   const intervalId = setInterval(() => {
     pushVerseSessionsIfChanged();
+    pushAccountReadingsIfChanged();
     try {
       void emitUpdate().catch(() => { /* Retry a failed read on the next bounded tick. */ });
     } catch {

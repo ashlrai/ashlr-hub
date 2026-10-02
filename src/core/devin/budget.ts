@@ -27,14 +27,25 @@ const plural = (n: number, one: string, many: string): string => (n === 1 ? one 
 const acu = (n: number): string => `${round2(n)} ACU${round2(n) === 1 ? '' : 's'}`;
 
 const ACTIVE_SESSION_STATUSES = new Set(['new', 'claimed', 'running', 'resuming']);
+const TERMINAL_SESSION_STATUSES = new Set(['exit', 'error']);
+
+/** A local delivery state never proves that the remote session stopped. */
+function hasUnsettledExposure(task: DevinTaskV1): boolean {
+  if (task.session && TERMINAL_SESSION_STATUSES.has(task.session.status)) return false;
+  if (task.sessionId !== null) return true;
+  return task.failure === 'network' || task.failure === 'unparsed'
+    || ['queued', 'launching', 'running', 'blocked'].includes(task.state);
+}
 
 /** The session may still spend: the task is in flight, or Devin says it is running. */
 export function devinTaskActive(task: DevinTaskV1): boolean {
+  if (task.session && TERMINAL_SESSION_STATUSES.has(task.session.status)) return false;
+  if (task.session && ACTIVE_SESSION_STATUSES.has(task.session.status)) return true;
   if (task.state === 'queued' || task.state === 'launching' || task.state === 'running' || task.state === 'blocked') {
     // A blocked session that Devin suspended no longer spends until resumed.
     return !(task.state === 'blocked' && task.session?.status === 'suspended');
   }
-  return task.session !== null && ACTIVE_SESSION_STATUSES.has(task.session.status) && !['merged', 'closed', 'failed', 'expired'].includes(task.state);
+  return false;
 }
 
 /** ACUs the task has used, fail-closed for a session whose usage was never read. */
@@ -43,22 +54,26 @@ export function devinTaskAcuUsed(task: DevinTaskV1): number {
   if (typeof known === 'number' && Number.isFinite(known) && known >= 0) return known;
   if (task.sessionId === null) {
     // A create whose outcome was unknown may have started a session we never
-    // heard back from: its full cap counts until the operator dismisses it.
-    return task.state === 'failed' && (task.failure === 'network' || task.failure === 'unparsed') ? task.maxAcu : 0;
+    // heard back from. Its full cap remains a conservative reservation even
+    // after local dismissal; this is not an observed provider spend reading.
+    return task.failure === 'network' || task.failure === 'unparsed' ? task.maxAcu : 0;
   }
   return devinTaskActive(task) ? 0 : task.maxAcu;
 }
 
-/** Headroom an active session still holds: its cap minus what it has used. */
+/** Unsettled remote exposure, including suspended and locally dismissed sessions. */
 export function devinTaskAcuHeadroom(task: DevinTaskV1): number {
-  if (!devinTaskActive(task)) return 0;
-  const known = task.session?.acusConsumed;
-  return Math.max(0, task.maxAcu - (typeof known === 'number' && Number.isFinite(known) ? known : 0));
+  if (!hasUnsettledExposure(task)) return 0;
+  // Unknown terminal/ID-less usage is already conservatively booked at its
+  // cap by devinTaskAcuUsed. Never count that same reservation twice.
+  return Math.max(0, task.maxAcu - devinTaskAcuUsed(task));
 }
 
 export function devinBudgetView(tasks: readonly DevinTaskV1[], budget: DevinBudgetV1, now: Date): DevinBudgetView {
   const today = localDayKey(now);
   let used = budget.acuSpentAdjustment;
+  let reported = budget.acuSpentAdjustment;
+  let unconfirmed = 0;
   let inFlight = 0;
   let usedToday = 0;
   let sessionsToday = 0;
@@ -68,7 +83,13 @@ export function devinBudgetView(tasks: readonly DevinTaskV1[], budget: DevinBudg
   for (const task of tasks) {
     const taskUsed = devinTaskAcuUsed(task);
     const headroom = devinTaskAcuHeadroom(task);
+    const known = task.session?.acusConsumed;
+    const reportedTask = typeof known === 'number' && Number.isFinite(known) && known >= 0 ? known : 0;
     used += taskUsed;
+    reported += reportedTask;
+    // Existing admission totals book unknown usage at its cap. Expose that
+    // bound separately from readings, together with possible remaining spend.
+    unconfirmed += Math.max(0, taskUsed - reportedTask) + headroom;
     inFlight += headroom;
     const active = devinTaskActive(task);
     // Only sessions the FLEET launched count against the fleet's own caps;
@@ -76,11 +97,20 @@ export function devinBudgetView(tasks: readonly DevinTaskV1[], budget: DevinBudg
     const fleet = task.origin === 'fleet';
     if (active) running += 1;
     if (active && fleet) fleetRunning += 1;
-    const spentSession = task.sessionId !== null || active;
+    const spentSession = task.sessionId !== null || active
+      || (task.failure === 'network' || task.failure === 'unparsed');
     const at = Date.parse(task.launchedAt ?? task.createdAt);
-    if (spentSession && Number.isFinite(at) && localDayKey(new Date(at)) === today) {
+    const launchedToday = spentSession && Number.isFinite(at) && localDayKey(new Date(at)) === today;
+    if (launchedToday) {
       sessionsToday += 1;
       if (fleet) fleetSessionsToday += 1;
+      usedToday += taskUsed;
+    }
+    // An unresolved create from yesterday can still spend today. Include its
+    // conservative cap in today's admission bound without claiming a new
+    // session or actual usage reading today (or double-counting today's hold).
+    if (!launchedToday && hasUnsettledExposure(task)
+      && !(typeof known === 'number' && Number.isFinite(known) && known >= 0)) {
       usedToday += taskUsed;
     }
   }
@@ -127,7 +157,9 @@ export function devinBudgetView(tasks: readonly DevinTaskV1[], budget: DevinBudg
     acuRemaining,
     acuToday,
     acuInFlight,
-    estimatedUsdUsed: round2(acuUsed * budget.usdPerAcu),
+    reportedAcuUsed: round2(reported),
+    unconfirmedAcuExposure: round2(unconfirmed),
+    estimatedUsdUsed: round2(reported * budget.usdPerAcu),
     sessionsToday,
     running,
     paused,
@@ -135,7 +167,7 @@ export function devinBudgetView(tasks: readonly DevinTaskV1[], budget: DevinBudg
     fleetSessionsToday,
     canLaunch,
     canFleetLaunch,
-    estimateNote: `ACUs come from Devin's own session readings; dollars are an estimate at $${round2(budget.usdPerAcu)} per ACU. Check real usage on app.devin.ai.`,
+    estimateNote: `Reported usage includes Devin session readings plus your usage adjustment; dollars estimate that reported portion at $${round2(budget.usdPerAcu)} per ACU, not a total invoice. Held exposure is possible remaining spend or unknown consumption bounded by the session cap, not an observed usage reading. Check real usage on app.devin.ai.`,
     usageUrl: DEVIN_USAGE_URL,
     budget,
   };

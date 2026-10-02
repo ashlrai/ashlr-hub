@@ -13,6 +13,7 @@ import { markCheckComplete } from '../../data/auth-store.js';
 import { MockEventSource } from './fixtures.test-support.js';
 import {
   openVerseListChannel,
+  onVerseAccountReadingsChanged,
   parseVerseEventFrame,
   resetVerseListChannelCapabilities,
   verseListEventsUrl,
@@ -45,8 +46,8 @@ afterEach(() => {
 });
 
 describe('verseListEventsUrl', () => {
-  it('asks for the verse-sessions group only, with the client proof last', () => {
-    expect(verseListEventsUrl()).toMatch(/^\/api\/events\?topics=verse-sessions&client=[a-f0-9]{64}$/);
+  it('asks for the two metadata groups, with the client proof last', () => {
+    expect(verseListEventsUrl()).toMatch(/^\/api\/events\?topics=verse-sessions,verse-account-readings&client=[a-f0-9]{64}$/);
   });
   it('without topics is the historical request', () => {
     expect(verseListEventsUrl(false)).toMatch(/^\/api\/events\?client=[a-f0-9]{64}$/);
@@ -63,7 +64,7 @@ describe('openVerseListChannel', () => {
     const invalidate = vi.spyOn(queries, 'invalidateVerseLists').mockImplementation(() => undefined);
     const dispose = openVerseListChannel();
     const es = lastList();
-    expect(es.url).toContain('topics=verse-sessions&');
+    expect(es.url).toContain('topics=verse-sessions,verse-account-readings&');
     expect(es.withCredentials).toBe(true);
     es.emitOpen();
     es.emitNamed('verse-sessions', { sessions: [] });
@@ -101,7 +102,7 @@ describe('openVerseListChannel', () => {
     expect(listSources()).toHaveLength(2);
     vi.advanceTimersByTime(1000);
     expect(listSources()).toHaveLength(3);
-    expect(lastList().url).toContain('topics=verse-sessions&');
+    expect(lastList().url).toContain('topics=verse-sessions,verse-account-readings&');
     dispose();
   });
 
@@ -114,7 +115,7 @@ describe('openVerseListChannel', () => {
     expect(listSources()).toHaveLength(1);
     vi.advanceTimersByTime(1000);
     expect(listSources()).toHaveLength(2);
-    expect(lastList().url).toContain('topics=verse-sessions&');
+    expect(lastList().url).toContain('topics=verse-sessions,verse-account-readings&');
     dispose();
   });
 
@@ -144,5 +145,76 @@ describe('parseVerseEventFrame — V3.10 frames', () => {
     expect(parseVerseEventFrame(JSON.stringify({ seq: 3, at, type: 'status', turnId: null, kind: 'panic', message: 'x' }))).toBeNull();
     expect(parseVerseEventFrame(JSON.stringify({ seq: 1, at, type: 'history-truncated', turnId: null, droppedBefore: null }))).toBeNull();
     expect(parseVerseEventFrame('not json')).toBeNull();
+  });
+});
+
+
+describe('account publication notifications', () => {
+  it('notifies subscribers only for the fixed invalidation, without refreshing unrelated lists', () => {
+    const listener = vi.fn();
+    const unsubscribe = onVerseAccountReadingsChanged(listener);
+    const dispose = openVerseListChannel();
+    const invalidate = vi.spyOn(queries, 'invalidateVerseLists').mockImplementation(() => undefined);
+    try {
+      const es = lastList(); es.emitOpen();
+      es.emitNamed('verse-account-readings', { changed: true });
+      expect(listener).toHaveBeenCalledOnce();
+      expect(invalidate).not.toHaveBeenCalled();
+      es.emitNamed('verse-account-readings', { changed: true, accountId: 'untrusted' });
+      es.emitNamed('verse-account-readings', { changed: false });
+      markCheckComplete(false);
+      es.emitNamed('verse-account-readings', { changed: true });
+      expect(listener).toHaveBeenCalledOnce();
+    } finally { dispose(); unsubscribe(); }
+  });
+});
+
+
+describe('shared lightweight channel', () => {
+  it('shares the resource subscriber and sidebar until the last owner closes', () => {
+    const releaseSidebar = openVerseListChannel();
+    const notify = vi.fn();
+    const unsubscribe = onVerseAccountReadingsChanged(notify);
+    expect(listSources()).toHaveLength(1);
+    const es = lastList(); es.emitOpen();
+    releaseSidebar();
+    expect(es.closed).toBe(false);
+    es.emitNamed('verse-account-readings', { changed: true });
+    expect(notify).toHaveBeenCalledOnce();
+    unsubscribe();
+    expect(es.closed).toBe(true);
+  });
+});
+
+
+describe('shared channel identity lifetime', () => {
+  it('closes on sign-out despite active owners and reconnects once after authentication', async () => {
+    vi.useFakeTimers();
+    const firstOwner = openVerseListChannel();
+    const listener = vi.fn();
+    const secondOwner = onVerseAccountReadingsChanged(listener);
+    const old = lastList(); old.emitOpen();
+    const invalidate = vi.spyOn(queries, 'invalidateVerseLists').mockImplementation(() => undefined);
+    markCheckComplete(false);
+    expect(old.closed).toBe(true);
+    old.emitNamed('verse-account-readings', { changed: true });
+    old.emitNamed('verse-sessions', { sessions: [] });
+    expect(listener).not.toHaveBeenCalled();
+    expect(invalidate).not.toHaveBeenCalled();
+    markCheckComplete(true);
+    expect(listSources()).toHaveLength(2);
+    const fresh = lastList(); fresh.emitOpen();
+    old.onerror?.(); old.emitOpen();
+    old.emitNamed('verse-sessions', { sessions: [] });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(listSources().filter(es => !es.closed)).toEqual([fresh]);
+    expect(fresh.closed).toBe(false);
+    fresh.emitNamed('verse-account-readings', { changed: true });
+    expect(listener).toHaveBeenCalledOnce();
+    firstOwner(); firstOwner();
+    expect(fresh.closed).toBe(false);
+    secondOwner(); secondOwner();
+    expect(fresh.closed).toBe(true);
   });
 });

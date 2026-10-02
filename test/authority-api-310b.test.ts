@@ -301,6 +301,29 @@ describe('actions', () => {
     expect((again!.body['diff'] as { label: string; direction: string }[]).find((line) => line.label === 'Leader classes')).toMatchObject({ direction: 'wider' });
   });
 
+  it('requires an explicit fresh starting-stage choice and signs that exact reapproval digest', async () => {
+    state.roots.push(TEST_ROOT);
+    const plain = await call('GET', '/api/verse/authority/draft?eliteDirect=1');
+    const initial = plain!.body['payload'] as StandingGrantV1;
+    expect(initial.rollout.stages[0]!.leaderClasses).toEqual([]);
+    expect(plain!.body['editable']).toMatchObject({ startingStageLeaderClasses: { stageId: 'elite-direct', classes: ['A', 'B'] } });
+    expect((await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: plain!.body['digest'] }))?.status).toBe(200);
+    const unchanged = await call('POST', '/api/verse/authority/draft', { kind: 'reapprove', scope: { leaderClasses: ['A', 'B'], days: 7 } });
+    expect((unchanged!.body['payload'] as StandingGrantV1).rollout.stages[0]!.leaderClasses).toEqual([]);
+    const wrong = await call('POST', '/api/verse/authority/draft', { kind: 'reapprove', scope: { startingStageLeaderClasses: { stageId: 'shadow', classes: ['A'] } } });
+    expect(wrong?.body).toMatchObject({ code: 'scope-invalid' });
+    const changed = await call('POST', '/api/verse/authority/draft', { kind: 'reapprove', scope: { startingStageLeaderClasses: { stageId: 'elite-direct', classes: ['A', 'B'] } } });
+    expect(changed?.status).toBe(200);
+    expect((changed!.body['diff'] as { field: string; direction: string }[]).find((line) => line.field === 'stage-leader')).toMatchObject({ direction: 'wider' });
+    const expected = changed!.body['payload'] as StandingGrantV1;
+    expect(expected.rollout.stages[0]!.leaderClasses).toEqual(['A', 'B']);
+    expect(changed!.body['digest']).not.toBe(unchanged!.body['digest']);
+    expect((await call('POST', '/api/verse/authority', { action: 're-approve', draftDigest: changed!.body['digest'] }))?.status).toBe(200);
+    const continued = await call('GET', '/api/verse/authority/draft?kind=reapprove');
+    expect((continued!.body['payload'] as StandingGrantV1).rollout.stages).toEqual(expected.rollout.stages);
+    expect(state.signCalls).toBe(2);
+  });
+
   it('elite-direct (3.15): the draft is one signed rung, and once granted it is the live stage', async () => {
     state.roots.push(TEST_ROOT);
     expect((await call('GET', '/api/verse/authority/draft?eliteDirect=2'))?.status).toBe(400);

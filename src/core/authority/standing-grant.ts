@@ -919,7 +919,8 @@ export function describeGrantScope(grant: StandingGrantV1): string[] {
     `Grant #${grant.grantSeq} (${grant.grantId.slice(0, 8)}), key ${grant.keyId}, valid ${grant.issuedAt} → ${grant.expiresAt}`,
     `Engines: ${grant.engines.join(', ')} · budget up to ${grant.spend.maxMode} · metered spend $${grant.spend.meteredUsdPerDay}/day`,
     `Merge caps: ${volumeLimitLabel(grant.merge.maxFiles)} files / ${volumeLimitLabel(grant.merge.maxLines)} lines · ashlr-hub: ${grant.merge.selfRepo}`,
-    `Leader: class ${grant.leader.classes.length > 0 ? grant.leader.classes.join('+') : 'none'} · veto window ${grant.leader.vetoMinutes} min · conductors ${grant.conductorGoals ? 'live' : 'dry-run'}`,
+    `Leader permission ceiling: ${grant.leader.classes.length > 0 ? grant.leader.classes.join('+') : 'none'} · veto window ${grant.leader.vetoMinutes} min · conductors ${grant.conductorGoals ? 'live' : 'dry-run'}`,
+    `Leader at starting stage ${grant.rollout.stages[0]!.id}: ${grant.rollout.stages[0]!.leaderClasses.length ? grant.rollout.stages[0]!.leaderClasses.join('+') : 'advisory only'}`,
     `Volume policy: ${grant.merge.volumePolicy === 'operator-signed' ? 'operator-signed limits apply to all producer models and enforcement modes; risk and verification remain binding' : 'legacy local 4 files / 150 lines and local-enforcement 4 merges/day remain'}`,
     ...(grantHasEliteDirect(grant) ? [ELITE_DIRECT_ONE_LINE] : []),
   ];
@@ -935,6 +936,7 @@ export function describeGrantScope(grant: StandingGrantV1): string[] {
     lines.push(`  seat ${seatId}: ${seat.enabled ? 'on' : 'off'}, keep ${seat.reserveFloorPercent}% for Mason${seat.maxSessionWindowPercent !== undefined ? `, idle while 5 h > ${seat.maxSessionWindowPercent}%` : ''}, ${seat.roles.join('/')}`);
   }
   grant.rollout.stages.forEach((stage, i) => {
+    lines.push(`  stage ${i + 1} ${stage.id} Leader: ${stage.leaderClasses.length ? stage.leaderClasses.join('+') : 'advisory only'}`);
     const merging = stage.repos.filter((r) => r.stage === 'merge').map((r) => r.nameWithOwner.split('/')[1]);
     if (stage.id === ELITE_DIRECT_STAGE_ID) {
       lines.push(`  stage ${i + 1} ${stage.id}: ${stage.repos.length} repos (${merging.length > 0 ? `merging ${merging.join(', ')}` : 'propose only'}), ${stage.maxRisk} risk ${volumeLimitLabel(stage.maxFiles)}/${volumeLimitLabel(stage.maxLines)} — elite models land on green tests, no judge; no ramp`);

@@ -120,6 +120,17 @@ describe('/api/verse/devin', () => {
     expect(res.body).toMatchObject({ acuBudgetTotal: 80, budget: { pauseAtFraction: 0.5 } });
   });
 
+  it('HTTP budget counts round-trip beyond the old ceilings and reject unsafe counts before persistence', async () => {
+    const counts = { maxConcurrent: 64, maxSessionsPerDay: 999, fleetMaxConcurrent: 1_000_001, fleetMaxSessionsPerDay: Number.MAX_SAFE_INTEGER };
+    expect(await post('/api/verse/devin/budget', counts)).toMatchObject({ status: 200, body: { budget: counts } });
+    for (const field of Object.keys(counts)) {
+      expect((await post('/api/verse/devin/budget', { [field]: Number.MAX_SAFE_INTEGER + 1 })).status).toBe(400);
+      expect((await post('/api/verse/devin/budget', { [field]: 1.5 })).status).toBe(400);
+    }
+    expect(await post('/api/verse/devin/budget', { maxAcuPerSession: 2_000 })).toMatchObject({ status: 200, body: { budget: { ...counts, maxAcuPerSession: 1_000 } } });
+    expect((await post('/api/verse/devin/budget', { acuBudgetTotal: 1_000_001 })).status).toBe(400);
+  });
+
   it('task routes validate ids; there is no route that takes a key', async () => {
     expect((await post('/api/verse/devin/tasks/../../x/dismiss', {})).status).toBe(404);
     expect((await post('/api/verse/devin/tasks/ct_20260925T1200_abc123/dismiss', {})).status).toBe(400);

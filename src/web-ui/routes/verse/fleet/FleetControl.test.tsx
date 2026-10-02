@@ -280,7 +280,7 @@ describe('the grant editor', () => {
     const region = await control();
     await user.click(within(region).getByRole('button', { name: /Edit scope/ }));
     const sheet = await screen.findByRole('dialog', { name: 'Approve a standing grant' });
-    await waitFor(() => expect(within(sheet).getByRole('group', { name: /Leader may act/ })).toBeInTheDocument());
+    await waitFor(() => expect(within(sheet).getByRole('group', { name: /Leader permission ceiling/ })).toBeInTheDocument());
     await user.click(within(sheet).getByRole('checkbox', { name: /Class B/ }));
     await user.click(within(sheet).getByRole('button', { name: 'Preview the changes' }));
     await waitFor(() => expect(posted.find((p) => p.url === '/api/verse/authority/draft')?.body).toMatchObject({ kind: 'new', scope: { leaderClasses: ['A'] } }));

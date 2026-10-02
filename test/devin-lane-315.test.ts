@@ -228,7 +228,7 @@ describe('launch', () => {
     expect(body['tags']).toEqual(['ashlr-verse', `ashlr-task-${t.id}`]);
     expect(String(body['prompt'])).toContain(`Create branch \`ashlr-devin/${t.id}\` from \`main\``);
     expect(String(body['prompt'])).toContain('Never merge anything');
-    expect(readDevinTask(t.id)).toMatchObject({ state: 'running', sessionId: t.sessionId });
+    expect(readDevinTask(t.id)).toMatchObject({ state: 'running', sessionId: t.sessionId, launchOrgId: FAKE_ORG });
     // 3.15: no playbook ⇒ no ref, no block.
     expect(t).not.toHaveProperty('playbookRef');
     expect(String(body['prompt'])).not.toContain('## Playbook:');
@@ -305,6 +305,18 @@ describe('launch', () => {
 
 describe('ACU budget', () => {
   const now = new Date();
+  it('large operator counts permit real work while explicit lower counts and financial gates still apply', () => {
+    const running = Array.from({ length: 11 }, () => task({ origin: 'fleet', createdAt: now.toISOString(), launchedAt: now.toISOString(), maxAcu: 1, session: { status: 'running', statusDetail: null, acusConsumed: 0, prUrls: [], readAt: now.toISOString() } }));
+    const roomy = budget({ acuBudgetTotal: 100, maxAcuPerDay: 100, maxAcuPerSession: 1, reserveAcu: 0, maxConcurrent: 64, maxSessionsPerDay: 999, fleetMaxConcurrent: 64, fleetMaxSessionsPerDay: 999 });
+    expect(devinBudgetView(running, roomy, now).canFleetLaunch.ok).toBe(true);
+    expect(devinBudgetView(running, { ...roomy, maxConcurrent: 11 }, now).canLaunch.reason).toMatch(/already running/);
+    expect(devinBudgetView(running, { ...roomy, fleetMaxConcurrent: 11 }, now).canFleetLaunch.reason).toMatch(/already running/);
+    expect(devinBudgetView(running, { ...roomy, maxSessionsPerDay: 11 }, now).canLaunch.reason).toMatch(/used today/);
+    expect(devinBudgetView(running, { ...roomy, fleetMaxSessionsPerDay: 11 }, now).canFleetLaunch.reason).toMatch(/used today/);
+    expect(devinBudgetView(running, { ...roomy, maxAcuPerDay: 11 }, now).canLaunch.reason).toMatch(/daily cap/);
+    expect(devinBudgetView(running, { ...roomy, acuBudgetTotal: 11 }, now).canLaunch.reason).toMatch(/free after running sessions/);
+    expect(devinBudgetView(running, { ...roomy, reserveAcu: 100 }, now).canFleetLaunch.reason).toMatch(/kept for you/);
+  });
   it('counts real ACUs, holds in-flight headroom, and pauses at the threshold', () => {
     const running = task({ session: { status: 'running', statusDetail: 'working', acusConsumed: 3, prUrls: [], readAt: now.toISOString() }, maxAcu: 10 });
     const done = task({ state: 'merged', session: { status: 'exit', statusDetail: null, acusConsumed: 6, prUrls: [], readAt: now.toISOString() } });
@@ -404,6 +416,14 @@ describe('messages', () => {
 });
 
 describe('HTTP module (pure parts)', () => {
+  it.each(['maxConcurrent', 'maxSessionsPerDay', 'fleetMaxConcurrent', 'fleetMaxSessionsPerDay'] as const)('accepts safe operator %s counts and rejects malformed values', (field) => {
+    expect(parseDevinBudgetBody({ [field]: Number.MAX_SAFE_INTEGER })).toEqual({ [field]: Number.MAX_SAFE_INTEGER });
+    expect(parseDevinBudgetBody({ [field]: 1_000_001 })).toEqual({ [field]: 1_000_001 });
+    for (const invalid of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY, '64']) {
+      expect(() => parseDevinBudgetBody({ [field]: invalid })).toThrow(CloudInputError);
+    }
+    expect(() => parseDevinBudgetBody({ acuBudgetTotal: 1_000_001 })).toThrow(/too large/);
+  });
   it('strict bodies: unknown keys and a `fleet` origin are refused; there is no key field anywhere', () => {
     expect(() => parseDevinLaunchBody({ repo: REPO, prompt: 'x', apiKey: FAKE_KEY })).toThrow(CloudInputError);
     expect(() => parseDevinLaunchBody({ repo: REPO, prompt: 'x', origin: 'fleet' })).toThrow(/Origin/);

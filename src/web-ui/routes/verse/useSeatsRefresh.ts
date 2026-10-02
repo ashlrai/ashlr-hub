@@ -45,6 +45,8 @@
  *  - A shared, bounded startup burst picks up independent initial checks;
  *    reliable completion returns to the 30s cadence. Older servers receive
  *    only the bounded burst, never an infinite wait for missing quota.
+ *  - Current servers also send metadata-only publication notifications over
+ *    the existing shared stream: late accounts trigger one cheap seats read.
  *  - Nothing is requested while the document is hidden, and a read is issued
  *    the moment it becomes visible again. A backgrounded app polls zero times
  *    and is nonetheless correct the instant it is looked at.
@@ -57,6 +59,7 @@ import { getQuerySnapshot, refetchQuery, runQuery } from '../../data/cache.js';
 import { apiGet } from '../../data/client.js';
 import { oneShotFetcher } from './health/health-queries.js';
 import { VERSE_BOOTSTRAP_KEY, verseBootstrapQuery } from './verse-queries.js';
+import { onVerseAccountReadingsChanged } from './verse-events.js';
 
 /** Steady-state cached reads follow the collector's cadence. */
 export const SEATS_POLL_MS = 30_000;
@@ -105,20 +108,38 @@ function startSharedRefresh(): () => void {
   let generation = 0;
   let startedAt = Date.now();
   let alive = true;
+  let reading = false;
+  let publicationPending = false;
+  let notificationQueued = false;
   let phase = getAuthSnapshot().phase;
   const visible = () => alive && phase !== 'unauthenticated' && document.visibilityState !== 'hidden';
   const cancelTimer = () => { window.clearTimeout(timer); timer = undefined; };
   const tick = () => {
-    if (!visible()) return;
+    if (!visible() || reading) return;
+    reading = true;
+    publicationPending = false;
     const ownGeneration = generation;
     void pollSeats().finally(() => {
-      if (!visible() || ownGeneration !== generation) return;
+      reading = false;
+      if (!visible()) return;
+      if (publicationPending || ownGeneration !== generation) { tick(); return; }
       const telemetry = getQuerySnapshot<VerseBootstrap>(VERSE_BOOTSTRAP_KEY).data?.accountTelemetry;
       const pending = telemetry == null || !Array.isArray(telemetry.pendingAccountIds) || telemetry.pendingAccountIds.length > 0;
       const delay = pending && Date.now() - startedAt < SEATS_STARTUP_WINDOW_MS ? SEATS_STARTUP_POLL_MS : SEATS_POLL_MS;
       timer = window.setTimeout(tick, delay);
     });
   };
+  const unsubscribeReadings = onVerseAccountReadingsChanged(() => {
+    if (!visible()) return;
+    publicationPending = true;
+    cancelTimer();
+    if (notificationQueued) return;
+    notificationQueued = true;
+    queueMicrotask(() => {
+      notificationQueued = false;
+      if (visible() && publicationPending) tick();
+    });
+  });
   const restart = () => {
     cancelTimer();
     generation += 1;
@@ -142,6 +163,7 @@ function startSharedRefresh(): () => void {
     generation += 1;
     cancelTimer();
     unsubscribeAuth();
+    unsubscribeReadings();
     document.removeEventListener('visibilitychange', onVisibility);
   };
 }

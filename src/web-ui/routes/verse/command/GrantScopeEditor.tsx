@@ -133,6 +133,8 @@ export function GrantScopeEditor({ draft, busy, onPreview, onReset, edited, onAc
   const [repos, setRepos] = useState<string[]>(() => g.repos.map((r) => r.nameWithOwner));
   const [engines, setEngines] = useState<string[]>(() => [...g.engines]);
   const [classes, setClasses] = useState<string[]>(() => [...g.leader.classes]);
+  const [startingLeader, setStartingLeader] = useState(() => ({ stageId: g.rollout.stages[0]!.id, classes: [...g.rollout.stages[0]!.leaderClasses] }));
+  const [startingLeaderEdited, setStartingLeaderEdited] = useState(false);
   const [mode, setMode] = useState<BudgetMode>(g.spend.maxMode);
   const [metered, setMetered] = useState<string>(String(g.spend.meteredUsdPerDay));
   const [days, setDays] = useState<string>(String(daysOf(draft)));
@@ -159,13 +161,18 @@ export function GrantScopeEditor({ draft, busy, onPreview, onReset, edited, onAc
     return seat.roles.length > 0 && seat.reserve !== '' && Number.isInteger(Number(seat.reserve)) && Number(seat.reserve) >= 0 && Number(seat.reserve) <= 100
       && (!seat.ceiling || (seat.session !== '' && Number.isInteger(Number(seat.session)) && Number(seat.session) >= 1 && Number(seat.session) <= 100));
   });
-  const valid = seatValid && volumeValid && repos.length > 0 && engines.length > 0 && Number.isInteger(meteredN) && meteredN >= 0 && Number.isInteger(daysN) && daysN >= 1 && daysN <= base.maxDays;
+  const startingCapability = base.startingStageLeaderClasses;
+  const startingStage = g.rollout.stages[0]!;
+  const startingLeaderCurrent = !startingLeaderEdited || (startingLeader.stageId === startingStage.id && startingCapability?.stageId === startingLeader.stageId);
+  const startingClasses = (startingLeaderEdited ? startingLeader.classes : startingStage.leaderClasses).filter((c) => classes.includes(c));
+  const valid = startingLeaderCurrent && seatValid && volumeValid && repos.length > 0 && engines.length > 0 && Number.isInteger(meteredN) && meteredN >= 0 && Number.isInteger(daysN) && daysN >= 1 && daysN <= base.maxDays;
 
   function preview(): void {
     onPreview({
       repos,
       engines: engines as GrantEngine[],
       leaderClasses: classes as LeaderGrantClass[],
+      ...(startingCapability && startingLeaderEdited ? { startingStageLeaderClasses: { stageId: startingLeader.stageId, classes: startingClasses } } : {}),
       maxMode: mode,
       meteredUsdPerDay: meteredN,
       days: daysN,
@@ -207,14 +214,31 @@ export function GrantScopeEditor({ draft, busy, onPreview, onReset, edited, onAc
         ))}
       </fieldset>
       <fieldset className={styles.scopeFieldset}>
-        <legend><MicroLabel>Leader may act</MicroLabel></legend>
+        <legend><MicroLabel>Leader permission ceiling</MicroLabel></legend>
         {base.leaderClasses.map((c) => (
           <label key={c} className={styles.scopeCheck}>
-            <input type="checkbox" checked={classes.includes(c)} onChange={(e) => setClasses(toggle(classes, c, e.target.checked))} />
+            <input type="checkbox" checked={classes.includes(c)} onChange={(e) => {
+              setClasses(toggle(classes, c, e.target.checked));
+              if (!e.target.checked && startingLeaderEdited) setStartingLeader((current) => ({ ...current, classes: current.classes.filter((cls) => cls !== c) }));
+            }} />
             <span>Class {c}{c === 'A' ? ' — reversible housekeeping' : ' — larger changes, with a veto window'}</span>
           </label>
         ))}
+        <p className={styles.scopeMeta}>The starting stage chooses which of these permissions the Leader can use immediately.</p>
       </fieldset>
+      {startingCapability ? <fieldset className={styles.scopeFieldset}>
+        <legend><MicroLabel>Leader permissions when this grant starts</MicroLabel></legend>
+        <p className={styles.scopeMeta}>Starting stage: {startingStage.id}. Choose immediate permissions explicitly; other stages keep their existing permissions. Preview shows the change before Touch ID.</p>
+        {startingCapability.classes.map((c) => <label key={c} className={styles.scopeCheck}>
+          <input type="checkbox" aria-label={`Starting stage class ${c}`} checked={startingClasses.includes(c)} disabled={!startingLeaderCurrent || !classes.includes(c)} onChange={(e) => {
+            setStartingLeader({ stageId: startingStage.id, classes: toggle(startingClasses, c, e.target.checked) });
+            setStartingLeaderEdited(true);
+          }} />
+          <span>Class {c}{c === 'A' ? ' — reversible housekeeping' : ' — larger changes, with a veto window'}</span>
+        </label>)}
+        {!startingClasses.length ? <p className={styles.scopeMeta}>The Leader stays advisory at this stage.</p> : null}
+        {!startingLeaderCurrent ? <p role="alert" className={styles.scopeMeta}>The starting stage changed. Reset to the current draft before choosing its Leader permissions.</p> : null}
+      </fieldset> : null}
       {base.volumeLimits ? <fieldset className={styles.scopeFieldset}>
         <legend><MicroLabel>Signed volume limits</MicroLabel></legend>
         <label className={styles.scopeCheck}>

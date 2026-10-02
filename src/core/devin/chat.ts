@@ -184,6 +184,9 @@ export async function sendDevinChatMessage(taskId: string, text: string, deps: D
   }
   const connected = await connectedClient(deps);
   if ('error' in connected) return { ok: false, ended: false, error: connected.error, failure: connected.failure };
+  if (task.launchOrgId !== undefined && task.launchOrgId !== connected.orgId) {
+    return { ok: false, ended: false, error: 'This Devin session belongs to a different organization. Restore its original connection before replying.', failure: 'invalid-request' };
+  }
   try {
     await connected.client.sendMessage(connected.orgId, task.sessionId, message);
     recordDevinApiOutcome(null);
@@ -211,7 +214,8 @@ export type DevinChatTerminateResult = { ok: true; task: DevinTaskV1 } | { ok: f
 
 /**
  * Stop a Devin chat for good: DELETE the session ("a terminated session
- * cannot be resumed") and close the task, so it stops holding budget headroom.
+ * cannot be resumed") and close the local task. Local close alone is not
+ * provider termination evidence; uncertain usage remains held by the budget.
  */
 export async function terminateDevinChat(taskId: string, deps: DevinServiceDeps = {}): Promise<DevinChatTerminateResult> {
   if (!DEVIN_TASK_ID_PATTERN.test(taskId)) return { ok: false, status: 404, error: 'No Devin session is bound to this chat yet.' };
@@ -220,6 +224,9 @@ export async function terminateDevinChat(taskId: string, deps: DevinServiceDeps 
   if (!task.sessionId) return { ok: false, status: 409, error: 'This chat’s Devin session never started.' };
   const connected = await connectedClient(deps);
   if ('error' in connected) return { ok: false, status: 409, error: connected.error };
+  if (task.launchOrgId !== undefined && task.launchOrgId !== connected.orgId) {
+    return { ok: false, status: 409, error: 'This Devin session belongs to a different organization. Restore its original connection before stopping it.' };
+  }
   let session: DevinSession | null = null;
   try {
     session = await connected.client.terminateSession(connected.orgId, task.sessionId);

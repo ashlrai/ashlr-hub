@@ -217,6 +217,48 @@ describe('explicit signed volume editor choices', () => {
 });
 
 
+describe('explicit starting-stage Leader choices', () => {
+  function draft(): EditableGrantDraft {
+    const d = grantDraft();
+    return { ...d, editable: { repos: d.payload.repos.map((r) => r.nameWithOwner), engines: [...d.payload.engines], leaderClasses: ['A', 'B'], maxDays: 30, startingStageLeaderClasses: { stageId: d.payload.rollout.stages[0]!.id, classes: ['A', 'B'] } } };
+  }
+  it('omits untouched starting permissions and hides the control for older servers', () => {
+    const d = draft(); const preview = vi.fn();
+    const { rerender } = render(<GrantScopeEditor draft={d} busy={false} edited={false} onPreview={preview} onReset={() => undefined} />);
+    expect(screen.getByRole('checkbox', { name: 'Starting stage class A' })).not.toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the changes' }));
+    expect(preview.mock.calls[0]![0]).not.toHaveProperty('startingStageLeaderClasses');
+    delete d.editable!.startingStageLeaderClasses;
+    rerender(<GrantScopeEditor draft={d} busy={false} edited={false} onPreview={preview} onReset={() => undefined} />);
+    expect(screen.queryByRole('checkbox', { name: 'Starting stage class A' })).not.toBeInTheDocument();
+  });
+  it('sends only an explicit stage-bound selection and requires the global ceiling', () => {
+    const d = draft(); const preview = vi.fn();
+    render(<GrantScopeEditor draft={d} busy={false} edited={false} onPreview={preview} onReset={() => undefined} />);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Starting stage class A' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the changes' }));
+    expect(preview).toHaveBeenLastCalledWith(expect.objectContaining({ startingStageLeaderClasses: { stageId: d.payload.rollout.stages[0]!.id, classes: ['A'] } }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Class A — reversible housekeeping' }));
+    expect(screen.getByRole('checkbox', { name: 'Starting stage class A' })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Starting stage class A' })).not.toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the changes' }));
+    expect(preview).toHaveBeenLastCalledWith(expect.objectContaining({ startingStageLeaderClasses: { stageId: d.payload.rollout.stages[0]!.id, classes: [] } }));
+  });
+  it('holds an explicit choice when the starting-stage identity changes', () => {
+    const d = draft(); const preview = vi.fn();
+    const { rerender } = render(<GrantScopeEditor draft={d} busy={false} edited={false} onPreview={preview} onReset={() => undefined} />);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Starting stage class A' }));
+    const next = structuredClone(d);
+    next.payload.rollout.stages[0]!.id = 'elite-direct';
+    next.editable!.startingStageLeaderClasses!.stageId = 'elite-direct';
+    rerender(<GrantScopeEditor draft={next} busy={false} edited={false} onPreview={preview} onReset={() => undefined} />);
+    expect(screen.getByRole('alert')).toHaveTextContent('The starting stage changed');
+    expect(screen.getByRole('button', { name: 'Preview the changes' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the changes' }));
+    expect(preview).not.toHaveBeenCalled();
+  });
+});
+
 describe('explicit signed account policies', () => {
   const draft = () => {
     const d = grantDraft();
@@ -278,7 +320,7 @@ describe('explicit signed account policies', () => {
 describe('grant approval requires the current preview', () => {
   function setup() {
     setMutationToken(TOKEN);
-    const initial: EditableGrantDraft = { ...grantDraft(), kind: 'new', eliteDirect: false, digest: 'a'.repeat(64), editable: { repos: grantDraft().payload.repos.map((r) => r.nameWithOwner), engines: [...grantDraft().payload.engines], leaderClasses: ['A', 'B'], maxDays: 30, volumeLimits: true, seatPolicies: { 'claude-a': { roles: ['producer', 'judge', 'leader'] } } } };
+    const initial: EditableGrantDraft = { ...grantDraft(), kind: 'new', eliteDirect: false, digest: 'a'.repeat(64), editable: { repos: grantDraft().payload.repos.map((r) => r.nameWithOwner), engines: [...grantDraft().payload.engines], leaderClasses: ['A', 'B'], maxDays: 30, volumeLimits: true, startingStageLeaderClasses: { stageId: grantDraft().payload.rollout.stages[0]!.id, classes: ['A', 'B'] }, seatPolicies: { 'claude-a': { roles: ['producer', 'judge', 'leader'] } } } };
     let source = initial;
     const pending: ((response: Response) => void)[] = [];
     const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -374,6 +416,37 @@ describe('grant approval requires the current preview', () => {
     const posted = h.fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')?.[1];
     expect(JSON.parse(posted!.body as string).scope).toMatchObject({ maxFiles: Number.MAX_SAFE_INTEGER, seatPolicies: { 'claude-a': { reserveFloorPercent: 0 } } });
     await act(async () => h.pending[0]!(json(h.edited(0, 'b'))));
+  });
+  it('keeps stage choices across Hide/Open, requires a fresh preview and clears the opt-in on Reset', async () => {
+    const h = setup();
+    const approve = await screen.findByRole('button', { name: 'Approve with Touch ID' });
+    await waitFor(() => expect(approve).toBeEnabled());
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Starting stage class A' }));
+    expect(approve).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Hide the scope editor' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit scope' }));
+    expect(screen.getByRole('checkbox', { name: 'Starting stage class A' })).toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the changes' }));
+    await waitFor(() => expect(h.pending).toHaveLength(1));
+    const posted = h.fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')?.[1];
+    expect(JSON.parse(posted!.body as string).scope.startingStageLeaderClasses).toEqual({ stageId: h.initial.payload.rollout.stages[0]!.id, classes: ['A'] });
+    const reviewed = h.edited(40, 'b');
+    reviewed.payload.rollout.stages[0]!.leaderClasses = ['A'];
+    reviewed.diff = [{ field: 'stage-leader', label: 'Starting Leader permissions', before: 'none', after: 'A', direction: 'wider' }];
+    await act(async () => h.pending[0]!(json(reviewed)));
+    await waitFor(() => expect(approve).toBeEnabled());
+    await act(async () => h.refresh({ ...h.initial, digest: 'd'.repeat(64) }));
+    await waitFor(() => expect(approve).toBeDisabled());
+    expect(screen.getByRole('checkbox', { name: 'Starting stage class A' })).toBeChecked();
+    fireEvent.click(approve); expect(h.approve).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the default draft' }));
+    expect(screen.getByRole('checkbox', { name: 'Starting stage class A' })).not.toBeChecked();
+    expect(approve).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the changes' }));
+    await waitFor(() => expect(h.pending).toHaveLength(2));
+    const posts = h.fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST');
+    expect(JSON.parse(posts[1]![1]!.body as string).scope).not.toHaveProperty('startingStageLeaderClasses');
+    await act(async () => h.pending[1]!(json({ ...h.initial, digest: 'e'.repeat(64) })));
   });
   it('keeps reviewed local engines, uncapped volumes and disabled accounts when reopened and edited', async () => {
     const h = setup();

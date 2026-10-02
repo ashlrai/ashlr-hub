@@ -32,6 +32,7 @@ import {
 } from '../cloud/tracker.js';
 import type { CloudTaskReport } from '../cloud/types.js';
 import type { DevinClient, DevinSession } from './client.js';
+import { hasAmbiguousDevinCreate, previewDevinCreateRecovery } from './create-recovery.js';
 import { devinReportFromStructuredOutput, parseDevinReport } from './delivery-contract.js';
 import { connectedClient, recordDevinApiOutcome, snapshotOf, type DevinServiceDeps } from './service.js';
 import { listDevinTasks, readDevinTask, writeDevinTask } from './store.js';
@@ -39,7 +40,7 @@ import { DEVIN_TASK_EXPIRY_MS, type DevinTaskState, type DevinTaskV1 } from './t
 
 export interface DevinTrackerDeps extends DevinServiceDeps {
   /** A ready client (tests); default: the stored key + org. */
-  client?: { client: Pick<DevinClient, 'getSession'>; orgId: string } | null;
+  client?: { client: Pick<DevinClient, 'getSession'> & Partial<Pick<DevinClient, 'listSessions'>>; orgId: string } | null;
 }
 
 const HOUR = 60 * 60 * 1000;
@@ -68,6 +69,19 @@ const SUSPEND_REASONS: Readonly<Record<string, string>> = {
 const watched = (task: DevinTaskV1, nowMs: number): boolean =>
   task.state === 'running' || task.state === 'blocked' || task.state === 'pr-open'
   || (task.state === 'expired' && task.pr === null && nowMs - Date.parse(task.createdAt) < DEVIN_EXPIRED_WATCH_MS);
+
+/** Local dismissal/age/delivery does not establish that remote billing stopped. */
+function unsettledRemoteUsage(task: DevinTaskV1): boolean {
+  if (task.sessionId === null) return false;
+  const observation = task.session;
+  return observation === null || !['exit', 'error'].includes(observation.status)
+    || typeof observation.acusConsumed !== 'number' || !Number.isFinite(observation.acusConsumed) || observation.acusConsumed < 0;
+}
+
+/** Shared scheduler/tracker eligibility, independent of local visibility and delivery age. */
+export function devinTaskNeedsObservation(task: DevinTaskV1): boolean {
+  return unsettledRemoteUsage(task) || (hasAmbiguousDevinCreate(task) && task.launchOrgId !== undefined);
+}
 
 /** Writes `next` only when the task on disk is still the one this refresh read. */
 function commit(before: DevinTaskV1, next: DevinTaskV1): boolean {
@@ -123,7 +137,7 @@ function strayPrHint(task: DevinTaskV1, session: DevinSession | null): string | 
 
 let lastCheckedTaskId: string | null = null;
 function watchedForRefresh(tasks: readonly DevinTaskV1[], nowMs: number): DevinTaskV1[] {
-  const list = tasks.filter((task) => watched(task, nowMs));
+  const list = tasks.filter((task) => watched(task, nowMs) || devinTaskNeedsObservation(task));
   if (list.length <= MAX_CHECKS_PER_REFRESH) {
     lastCheckedTaskId = list.at(-1)?.id ?? null;
     return list;
@@ -165,7 +179,7 @@ export async function refreshDevinTasks(deps: DevinTrackerDeps = {}): Promise<{ 
   if (due.length === 0) return { checked, updated };
 
   // One client for the sweep; without one the GitHub half still runs.
-  let api: { client: Pick<DevinClient, 'getSession'>; orgId: string } | null = null;
+  let api: DevinTrackerDeps['client'] = null;
   if (deps.client !== undefined) api = deps.client;
   else {
     try {
@@ -178,7 +192,38 @@ export async function refreshDevinTasks(deps: DevinTrackerDeps = {}): Promise<{ 
 
   for (const task of due) {
     checked += 1;
-    if (task.supersededBy) {
+    if (hasAmbiguousDevinCreate(task)) {
+      // Legacy holds are preview-only: today's saved login cannot prove which
+      // organization accepted an older create, so do not poll all its history.
+      if (task.launchOrgId === undefined) continue;
+      if (!api?.client.listSessions) continue;
+      const preview = await previewDevinCreateRecovery(task, {
+        orgId: api.orgId,
+        client: { listSessions: api.client.listSessions.bind(api.client), getSession: api.client.getSession.bind(api.client) },
+      });
+      if (preview.kind !== 'match' || !preview.launchAccountBound) continue;
+      const session = preview.session;
+      // A still-running/paused session is not proof of settled spend. Keep the
+      // full create hold until a literal terminal status AND actual ACUs exist.
+      if (!['exit', 'error'].includes(session.status)
+        || typeof session.acusConsumed !== 'number' || !Number.isFinite(session.acusConsumed) || session.acusConsumed < 0) continue;
+      const mapped = stateFromSession(task, session);
+      if (!mapped) continue;
+      try {
+        const next: DevinTaskV1 = { ...task, sessionId: session.sessionId,
+          sessionUrl: session.url, session: snapshotOf(session, clock()) };
+        // Dismiss changes visibility, not billing evidence. Settle its usage
+        // without reopening it or replacing the operator's dismissal reason.
+        if (task.state !== 'closed') {
+          next.state = mapped.state;
+          next.stateReason = mapped.reason;
+          next.failure = mapped.failure;
+        }
+        if (commit(task, next)) updated += 1;
+      } catch { /* preserve the original hold when storage changed or failed */ }
+      continue;
+    }
+    if (task.supersededBy && watched(task, nowMs)) {
       const next = await readSupersedingState(task, gh);
       if (next && (next.state !== task.state || next.reason !== task.stateReason)) {
         try {
@@ -190,14 +235,28 @@ export async function refreshDevinTasks(deps: DevinTrackerDeps = {}): Promise<{ 
 
     // ── Devin: status + ACUs ─────────────────────────────────────────────
     let session: DevinSession | null = null;
-    if (api && task.sessionId) {
+    if (api && task.sessionId && (task.launchOrgId === undefined || task.launchOrgId === api.orgId)) {
       try {
         session = await api.client.getSession(api.orgId, task.sessionId);
+        // Preserve legacy responses that omit org_id, but never let an explicit
+        // foreign response replace this task's provider observation/ACU usage.
+        if (session.orgId !== undefined && session.orgId !== api.orgId) session = null;
         recordDevinApiOutcome(null);
       } catch (error) {
         recordDevinApiOutcome(error);
         session = null;
       }
+    }
+
+    if (!watched(task, nowMs) && unsettledRemoteUsage(task)) {
+      // Settlement-only observation: do not reopen a dismissed task, change
+      // delivery admission, or turn a merged task into an expired task.
+      if (session) {
+        try {
+          if (commit(task, { ...task, session: snapshotOf(session, clock()) })) updated += 1;
+        } catch { /* keep the prior evidence/exposure until a later sweep */ }
+      }
+      continue;
     }
 
     // ── GitHub: the delivery ─────────────────────────────────────────────

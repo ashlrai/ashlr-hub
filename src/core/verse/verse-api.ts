@@ -89,6 +89,7 @@
  * its directory and prompt block go into the private launch record only.
  */
 
+import { createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -770,6 +771,19 @@ async function liveSeats(cfg: AshlrConfig): Promise<VerseSeatDiscovery> {
 // ---------------------------------------------------------------------------
 // Sessions digest for the /api/events poll
 // ---------------------------------------------------------------------------
+
+/** Same-root owned memory publications only. Never invokes an enriched snapshot,
+ * native probe, identity file read, or discovery. The digest is not sent on wire. */
+export function verseAccountReadingsDigest(cfg: AshlrConfig): string | null {
+  try {
+    const collector = getVerseAccountCollector();
+    const root = resolveAccountsRoot(cfg);
+    if (!collector || collector.accountsRoot !== root) return null;
+    const revision = collector.readingRevision?.();
+    if (typeof revision !== 'string' || !/^\d+:\d+$/.test(revision)) return null;
+    return createHash('sha256').update(JSON.stringify([root, revision])).digest('hex');
+  } catch { return null; }
+}
 
 /**
  * A cheap, deterministic digest of the session list — the /api/events poll

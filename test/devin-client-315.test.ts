@@ -66,6 +66,19 @@ describe('parsers (docs.devin.ai v3 schemas)', () => {
   it('maps HTTP status to failure codes (docs overview#error-handling)', () => {
     expect([401, 403, 404, 422, 429, 500, 503].map(failureForStatus)).toEqual(['auth', 'forbidden', 'invalid-request', 'invalid-request', 'rate-limited', 'server', 'server']);
   });
+
+  it('preserves provider organization context and reports lossy pages as incomplete recovery evidence', () => {
+    const wire = { session_id: 'devin-a', url: 'https://app.devin.ai/sessions/devin-a', status: 'exit', org_id: FAKE_ORG, tags: [] };
+    expect(parseDevinSession(wire)?.orgId).toBe(FAKE_ORG);
+    expect(parseDevinSession({ ...wire, org_id: '../other' })).toBeNull();
+    const page = (items: unknown[], patch = {}) => parseDevinSessionPage({ items, has_next_page: false, end_cursor: null, ...patch });
+    expect(page([wire])?.complete).toBe(true);
+    expect(page([wire, { nope: true }])?.complete).toBe(false);
+    expect(page([{ ...wire, tags: ['tag', 7] }])?.complete).toBe(false);
+    expect(page([{ ...wire, tags: Array.from({ length: 51 }, () => 'tag') }])?.complete).toBe(false);
+    expect(page([wire], { has_next_page: true, end_cursor: null })?.complete).toBe(false);
+    expect(page([wire], { has_next_page: undefined })?.complete).toBe(false);
+  });
 });
 
 describe('requests', () => {
@@ -109,6 +122,24 @@ describe('requests', () => {
     const s = await c.createSession(FAKE_ORG, { prompt: 'x' });
     await c.sendMessage(FAKE_ORG, s.sessionId, 'Also add tests');
     expect(f.requests.at(-1)).toMatchObject({ method: 'POST', path: `/v3/organizations/${FAKE_ORG}/sessions/${s.sessionId}/messages`, body: { message: 'Also add tests' } });
+  });
+
+  it.each(['getSession', 'terminateSession'] as const)('rejects foreign session identity/account returned by %s without retry', async (method) => {
+    for (const patch of [{ session_id: 'devin-other' }, { org_id: 'org-foreign' }]) {
+      const f = fakeDevin();
+      f.forced.push({ status: 200, body: { session_id: 'devin-wanted', org_id: FAKE_ORG,
+        url: 'https://app.devin.ai/sessions/devin-wanted', status: 'exit', acus_consumed: 3, ...patch } });
+      await expect(client(f)[method](FAKE_ORG, 'devin-wanted')).rejects.toMatchObject({ code: 'unparsed' });
+      expect(f.requests).toHaveLength(1);
+    }
+  });
+  it('does not manufacture terminal proof from an empty or still-running DELETE acknowledgement', async () => {
+    const f = fakeDevin();
+    f.forced.push({ status: 204 }, { status: 200, body: { session_id: 'devin-wanted', org_id: FAKE_ORG,
+      url: 'https://app.devin.ai/sessions/devin-wanted', status: 'running', acus_consumed: 3 } });
+    const c = client(f);
+    expect(await c.terminateSession(FAKE_ORG, 'devin-wanted')).toBeNull();
+    expect(await c.terminateSession(FAKE_ORG, 'devin-wanted')).toMatchObject({ status: 'running' });
   });
 });
 

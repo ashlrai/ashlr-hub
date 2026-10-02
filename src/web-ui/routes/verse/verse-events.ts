@@ -9,8 +9,8 @@
  *     session-stream.ts (V3.10); the replay-from-zero opener that used to sit
  *     here had no callers left and was removed.
  *   - openVerseListChannel: one EventSource against /api/events for the
- *     `verse-sessions` list digest, which just invalidates the sidebar's
- *     cache keys. It subscribes with `?topics=verse-sessions` (V3.10) so the
+ *     session-list and account-reading digests, which invalidate the corresponding
+ *     cached projections. It subscribes only to these metadata topics so the
  *     server skips the dashboard snapshot and the other groups this console
  *     would only discard.
  *
@@ -19,7 +19,7 @@
  * send the proof as a header (see read-session.ts readSessionClientProof).
  */
 import type { VerseEvent, VerseEventType } from '../../data/api-types.js';
-import { getAuthSnapshot, getReadClientProof } from '../../data/auth-store.js';
+import { getAuthSnapshot, getReadClientProof, subscribeAuth } from '../../data/auth-store.js';
 import { isRemoteMobileMode } from '../../data/remote-mode.js';
 import { invalidateVerseLists } from './verse-queries.js';
 
@@ -140,11 +140,18 @@ export function parseVerseEventFrame(raw: string): VerseEvent | null {
   }
 }
 
-/** The only /api/events group the Verse console listens to. */
-export const VERSE_LIST_TOPICS = 'verse-sessions';
+/** Lightweight metadata groups; the paired gateway retains its existing session topic. */
+export const VERSE_LIST_TOPICS = 'verse-sessions,verse-account-readings';
+const accountReadingListeners = new Set<() => void>();
+/** Reuse the existing list stream; subscribers share one connection with the sidebar. */
+export function onVerseAccountReadingsChanged(listener: () => void): () => void {
+  accountReadingListeners.add(listener);
+  const release = openVerseListChannel();
+  return () => { accountReadingListeners.delete(listener); release(); };
+}
 
 /**
- * The sidebar channel's URL. `topics` narrows the server to the one group
+ * The sidebar channel's URL. `topics` narrows the server to the metadata groups
  * this console listens to; `client` stays last, as in eventsUrl(). Without
  * `topics` the server sends every group — the historical request, which is
  * also what the refusal fallback below falls back to.
@@ -152,7 +159,7 @@ export const VERSE_LIST_TOPICS = 'verse-sessions';
 export function verseListEventsUrl(withTopics = true): string {
   // The gateway accepts only the scoped topic and adds the Hub client proof
   // on its private hop. A phone must never construct or send that proof.
-  if (isRemoteMobileMode()) return `/api/events?topics=${VERSE_LIST_TOPICS}`;
+  if (isRemoteMobileMode()) return '/api/events?topics=verse-sessions';
   const topics = withTopics ? `topics=${VERSE_LIST_TOPICS}&` : '';
   return `/api/events?${topics}client=${encodeURIComponent(getReadClientProof())}`;
 }
@@ -174,10 +181,25 @@ export function resetVerseListChannelCapabilities(): void {
 }
 
 /**
- * Sidebar digest channel: listens only for `verse-sessions` on /api/events
- * and refreshes the session list + bootstrap when it fires.
+ * Shared lightweight channel: session changes refresh the list; account
+ * publications notify the visible seat scheduler without rebuilding bootstrap.
  */
+let listReaders = 0;
+let closeSharedListChannel: (() => void) | null = null;
+/** Sidebar and resources share one authenticated stream, including reconnects. */
 export function openVerseListChannel(): () => void {
+  listReaders += 1;
+  if (listReaders === 1) closeSharedListChannel = startVerseListChannel();
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    listReaders -= 1;
+    if (listReaders === 0) { closeSharedListChannel?.(); closeSharedListChannel = null; }
+  };
+}
+
+function startVerseListChannel(): () => void {
   let source: EventSource | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let attempt = 0;
@@ -186,13 +208,14 @@ export function openVerseListChannel(): () => void {
   let probing = false;
 
   const connect = () => {
-    if (disposed || typeof EventSource === 'undefined') return;
+    if (disposed || source || typeof EventSource === 'undefined') return;
     if (getAuthSnapshot().phase !== 'authenticated') return;
     const withTopics = isRemoteMobileMode() || (!topicsRefused && !probing);
     const es = new EventSource(verseListEventsUrl(withTopics), { withCredentials: true });
     let opened = false;
     source = es;
     es.onopen = () => {
+      if (disposed || source !== es || getAuthSnapshot().phase !== 'authenticated') return;
       opened = true;
       attempt = 0;
       if (probing) {
@@ -200,8 +223,20 @@ export function openVerseListChannel(): () => void {
         probing = false;
       }
     };
-    es.addEventListener('verse-sessions', () => invalidateVerseLists());
+    es.addEventListener('verse-sessions', () => {
+      if (!disposed && source === es && getAuthSnapshot().phase === 'authenticated') invalidateVerseLists();
+    });
+    es.addEventListener('verse-account-readings', (event) => {
+      if (disposed || source !== es || getAuthSnapshot().phase !== 'authenticated') return;
+      try {
+        const value: unknown = JSON.parse((event as MessageEvent<string>).data);
+        if (!value || typeof value !== 'object' || Object.keys(value).length !== 1 ||
+          !('changed' in value) || value.changed !== true) return;
+        for (const listener of accountReadingListeners) listener();
+      } catch { /* malformed invalidations are not account readings */ }
+    });
     es.onerror = () => {
+      if (disposed || source !== es) return;
       es.close();
       if (source === es) source = null;
       if (disposed || getAuthSnapshot().phase !== 'authenticated') return;
@@ -223,10 +258,19 @@ export function openVerseListChannel(): () => void {
     };
   };
 
+  const unsubscribeAuth = subscribeAuth(() => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    source?.close();
+    source = null;
+    attempt = 0;
+    if (getAuthSnapshot().phase === 'authenticated') connect();
+  });
   connect();
 
   return () => {
     disposed = true;
+    unsubscribeAuth();
     if (timer) clearTimeout(timer);
     timer = null;
     source?.close();

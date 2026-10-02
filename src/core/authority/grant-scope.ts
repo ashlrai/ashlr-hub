@@ -17,7 +17,8 @@
  *   - engines: a subset of the draft's engines plus the four fleet lanes —
  *     never `devin` unless the draft already named it (the helper may not
  *     sign it; authority-api decides that);
- *   - leader classes: a subset of A, B;
+ *   - leader classes: a subset of A, B; an explicit stage-ID-bound choice
+ *     may replace the first rung's classes within that global ceiling;
  *   - spend: mode and metered dollars inside the ceilings;
  *   - days: 1..30;
  *   - volume: positive safe-integer size and nonnegative per-repo daily limits,
@@ -37,7 +38,7 @@ import type { GrantDiffLine, GrantScopeEdit, GrantSeatPolicyEdit } from './grant
 export type { GrantDiffDirection, GrantDiffLine, GrantScopeEdit } from './grant-scope-types.js';
 
 export const GRANT_SCOPE_EDIT_KEYS: readonly (keyof GrantScopeEdit)[] = Object.freeze([
-  'repos', 'engines', 'leaderClasses', 'maxMode', 'meteredUsdPerDay', 'days', 'conductorGoals', 'maxFiles', 'maxLines', 'repoMaxMergesPerDay', 'seatPolicies',
+  'repos', 'engines', 'leaderClasses', 'startingStageLeaderClasses', 'maxMode', 'meteredUsdPerDay', 'days', 'conductorGoals', 'maxFiles', 'maxLines', 'repoMaxMergesPerDay', 'seatPolicies',
 ]);
 
 const LEADER_CLASSES: readonly LeaderGrantClass[] = ['A', 'B'];
@@ -79,6 +80,17 @@ export function parseGrantScopeEdit(value: unknown): { ok: true; edit: GrantScop
     if (typeof list === 'string') return { ok: false, reason: list };
     if (list.some((c) => !(LEADER_CLASSES as readonly string[]).includes(c))) return { ok: false, reason: 'leaderClasses may name only A and B' };
     edit.leaderClasses = list as LeaderGrantClass[];
+  }
+  if (raw['startingStageLeaderClasses'] !== undefined) {
+    const value = raw['startingStageLeaderClasses'];
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, reason: 'startingStageLeaderClasses must name a stage and classes' };
+    const stage = value as Record<string, unknown>;
+    if (Object.keys(stage).some((key) => key !== 'stageId' && key !== 'classes') ||
+      typeof stage['stageId'] !== 'string' || !STANDING_GRANT_PATTERNS.stageId.test(stage['stageId'])) return { ok: false, reason: 'startingStageLeaderClasses must name a valid stage' };
+    const classes = stringList(stage['classes'], 'startingStageLeaderClasses.classes', 2);
+    if (typeof classes === 'string') return { ok: false, reason: classes };
+    if (classes.some((c) => !(LEADER_CLASSES as readonly string[]).includes(c))) return { ok: false, reason: 'starting stage classes may name only A and B' };
+    edit.startingStageLeaderClasses = { stageId: stage['stageId'], classes: classes as LeaderGrantClass[] };
   }
   if (raw['maxMode'] !== undefined) {
     if (typeof raw['maxMode'] !== 'string' || !(BUDGET_MODES as readonly string[]).includes(raw['maxMode'])) return { ok: false, reason: 'maxMode must be all-in, balanced or reserve' };
@@ -211,6 +223,16 @@ export function applyGrantScopeEdit(draft: StandingGrantV1, requestedEdit: Grant
     next.rollout.stages = next.rollout.stages.map((stage) => ({ ...stage, leaderClasses: stage.leaderClasses.filter((c) => next.leader.classes.includes(c)) }));
   }
 
+  if (edit.startingStageLeaderClasses !== undefined) {
+    const choice = edit.startingStageLeaderClasses;
+    const first = next.rollout.stages[0];
+    // Repo narrowing can drop the first rung. Never silently apply a retained
+    // choice to a different starting stage, or widen the global ceiling.
+    if (!first || choice.stageId !== draft.rollout.stages[0]?.id || choice.stageId !== first.id) return { ok: false, reason: 'the starting stage changed — review a fresh draft before choosing Leader permissions' };
+    if (choice.classes.some((c) => !next.leader.classes.includes(c))) return { ok: false, reason: 'starting stage classes must be within the Leader permission ceiling' };
+    first.leaderClasses = LEADER_CLASSES.filter((c) => choice.classes.includes(c));
+  }
+
   if (edit.seatPolicies !== undefined) {
     for (const [id, policy] of Object.entries(edit.seatPolicies)) {
       // Exact identities from this server draft only; no new account authority.
@@ -308,6 +330,7 @@ export function grantScopeDiff(current: StandingGrantV1 | null, next: StandingGr
     out.push({ field: 'repos', label: 'Repositories', before: 'no grant', after: list(next.repos.map((r) => r.nameWithOwner)), direction: 'wider' });
     out.push({ field: 'engines', label: 'Engines', before: 'no grant', after: list(next.engines), direction: 'wider' });
     out.push({ field: 'leader', label: 'Leader classes', before: 'no grant', after: list(next.leader.classes), direction: 'wider' });
+    for (const stage of next.rollout.stages) out.push({ field: 'stage-leader', label: `${stage.id}: Leader permissions`, before: 'no grant', after: list(stage.leaderClasses), direction: stage.leaderClasses.length ? 'wider' : 'changed' });
     out.push({ field: 'spend-mode', label: 'Budget up to', before: 'no grant', after: next.spend.maxMode, direction: 'wider' });
     out.push({ field: 'metered', label: 'Metered APIs', before: 'no grant', after: `$${next.spend.meteredUsdPerDay}/day`, direction: next.spend.meteredUsdPerDay > 0 ? 'wider' : 'changed' });
     out.push({ field: 'merge-caps', label: 'Merge volume', before: 'no grant', after: `${volumeLimitLabel(next.merge.maxFiles)} files / ${volumeLimitLabel(next.merge.maxLines)} lines`, direction: 'wider' });
@@ -353,6 +376,8 @@ export function grantScopeDiff(current: StandingGrantV1 | null, next: StandingGr
   }
   for (const stage of next.rollout.stages) {
     const before = current.rollout.stages.find((s) => s.id === stage.id);
+    const classes = setDiff(before?.leaderClasses ?? [], stage.leaderClasses);
+    if (classes.added.length || classes.removed.length) out.push({ field: 'stage-leader', label: `${stage.id}: Leader permissions`, before: before ? list(before.leaderClasses) : 'not granted at this stage', after: list(stage.leaderClasses), direction: classes.added.length ? 'wider' : 'narrower' });
     if (before && (before.maxFiles !== stage.maxFiles || before.maxLines !== stage.maxLines || before.maxMergesPerRepoPerDay !== stage.maxMergesPerRepoPerDay)) {
       const label = (s: typeof stage): string => `${volumeLimitLabel(s.maxFiles)} files / ${volumeLimitLabel(s.maxLines)} lines / ${volumeLimitLabel(s.maxMergesPerRepoPerDay)} merges/repo/day`;
       const wider = stage.maxFiles > before.maxFiles || stage.maxLines > before.maxLines || stage.maxMergesPerRepoPerDay > before.maxMergesPerRepoPerDay;

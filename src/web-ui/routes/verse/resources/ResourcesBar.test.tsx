@@ -10,6 +10,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useCapacityData } from '../usage/CapacityStrip.js';
+import { useQuery } from '../../../data/hooks.js';
 import { buildCapacityRows, type CapacityRow, type CapacityWindowRow } from '../usage/capacity-strip-model.js';
 import { capacity, nativeSeat, seatWindow } from '../seat-fixtures.test-support.js';
 import { barRows, ResourcesBar } from './ResourcesBar.js';
@@ -23,7 +24,7 @@ vi.mock('../usage/CapacityStrip.js', async (original) => ({
 }));
 // Only the shared reads are substituted; rendering exercises the real projection,
 // battery and keyboard tooltip without a provider request or extra polling.
-vi.mock('../../../data/hooks.js', () => ({ useQuery: () => ({ data: undefined }) }));
+vi.mock('../../../data/hooks.js', () => ({ useQuery: vi.fn(() => ({ data: undefined })) }));
 vi.mock('../shell/section-visibility.js', () => ({ usePollWhileVisible: () => {} }));
 
 function win(over: Partial<CapacityWindowRow>): CapacityWindowRow {
@@ -140,6 +141,25 @@ describe('Devin provider identity', () => {
     expect(getByRole('img', { name: 'Devin' })).toHaveAttribute('viewBox', '0 0 425 425');
     expect(container.querySelector('path')!.getAttribute('d')).toBe(asset.match(/<path d="([^"]+)"/)![1]);
     expect(container.querySelector('path')).toHaveAttribute('fill', 'currentColor');
+  });
+});
+
+describe('Devin tracked exposure in the bar', () => {
+  afterEach(() => { vi.mocked(useQuery).mockReset(); vi.mocked(useQuery).mockReturnValue({ data: undefined } as never); });
+
+  it('subtracts unresolved exposure from available headroom and names it in the tooltip', () => {
+    vi.mocked(useCapacityData).mockReturnValue({ seats: [], health: null, budget: null, loading: false, refreshing: false, readFailed: false, rosterUnavailable: false, pendingSeatIds: [] });
+    vi.mocked(useQuery).mockImplementation((query) => ({ data: query.key === 'verse-devin' ? { value: {
+      status: { enabled: true, connected: true },
+      budget: { acuBudgetTotal: 50, acuRemaining: 40, acuUsed: 10, acuInFlight: 8,
+        reportedAcuUsed: 2, unconfirmedAcuExposure: 18, paused: false, running: 1, sessionsToday: 2 },
+    } } : undefined } as never));
+    render(<ResourcesBar expanded />);
+    const devin = screen.getByRole('button', { name: /Devin tracked budget: 30 ACUs of 50 ACUs available, 18 ACUs held exposure/ });
+    expect(within(devin).getByText('30 ACUs budget')).toBeInTheDocument();
+    fireEvent.focus(devin);
+    expect(screen.getByRole('tooltip')).toHaveTextContent('2 ACUs reported usage + adjustment · 18 ACUs held exposure');
+    expect(devin.querySelector('[aria-hidden="true"][data-level] > [style]')).toHaveStyle({ '--fill': '60%' });
   });
 });
 

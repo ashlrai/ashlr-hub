@@ -29,7 +29,7 @@ import { bindingLeftPercent } from '../usage/binding-left.js';
 import { accountStatus, buildCapacityRows, type AccountStatus, type CapacityRow } from '../usage/capacity-strip-model.js';
 import { formatUsd } from './resources-model.js';
 import { cloudCreditsQuery } from './resources-queries.js';
-import { formatAcu } from '../devin/devin-model.js';
+import { devinUsageEvidence, formatAcu } from '../devin/devin-model.js';
 import { devinQuery } from '../devin/devin-queries.js';
 import { openResources } from './resources-store.js';
 import styles from './ResourcesBar.module.css';
@@ -202,8 +202,10 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   const devinRead = useQuery(devinQuery);
   const devin = devinRead.data?.value ?? null;
   const devinShown = devin !== null && devin.status.enabled && devin.status.connected;
-  const devinLeft = devin && devin.budget.acuBudgetTotal > 0 ? (devin.budget.acuRemaining / devin.budget.acuBudgetTotal) * 100 : null;
-  const devinLevel: Level = !devin ? 'unknown' : devin.budget.paused || devin.budget.acuRemaining <= 0 ? 'out' : (devinLeft ?? 0) < 20 ? 'low' : 'ok';
+  const devinUsage = devin ? devinUsageEvidence(devin.budget) : null;
+  const devinAvailable = devinUsage?.free ?? (devin ? Math.max(0, devin.budget.acuRemaining - Math.max(0, devin.budget.acuInFlight)) : 0);
+  const devinLeft = devin && devin.budget.acuBudgetTotal > 0 ? (devinAvailable / devin.budget.acuBudgetTotal) * 100 : null;
+  const devinLevel: Level = !devin ? 'unknown' : devin.budget.paused || devinAvailable <= 0 ? 'out' : (devinLeft ?? 0) < 20 ? 'low' : 'ok';
 
   if (rows.length === 0 && !cloud && !devinShown) return null;
   return (
@@ -285,7 +287,8 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
           content={
             <div className={styles.tip}>
               <div className={styles.tipHead}><ProviderLogo engine="devin" size={14} className={styles.logo} /><strong>Devin</strong></div>
-              <div className={styles.tipSummary}>{formatAcu(devin.budget.acuRemaining)} of {formatAcu(devin.budget.acuBudgetTotal)} left · tracked budget{devin.budget.paused ? ' · paused' : ''}</div>
+              <div className={styles.tipSummary}>{formatAcu(devinAvailable)} of {formatAcu(devin.budget.acuBudgetTotal)} {devinUsage ? 'available' : 'left'} · tracked budget{devin.budget.paused ? ' · paused' : ''}</div>
+              {devinUsage ? <div className={styles.tipLine}>{formatAcu(devinUsage.reported)} reported usage + adjustment · {formatAcu(devinUsage.held)} held exposure</div> : null}
               <div className={styles.tipLine}>{devin.budget.running} running · {devin.budget.sessionsToday} today</div>
               <div className={styles.tipHint}>Click for Resources · ⌘.</div>
             </div>
@@ -297,7 +300,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
             className={styles.row}
             data-level={devinLevel}
             data-resource="devin"
-            aria-label={`Devin tracked budget: ${formatAcu(devin.budget.acuRemaining)} of ${formatAcu(devin.budget.acuBudgetTotal)} left. Open Resources`}
+            aria-label={`Devin tracked budget: ${formatAcu(devinAvailable)} of ${formatAcu(devin.budget.acuBudgetTotal)} ${devinUsage ? 'available' : 'left'}${devinUsage ? `, ${formatAcu(devinUsage.held)} held exposure` : ''}. Open Resources`}
             onClick={() => openResources()}
           >
             {expanded ? (
@@ -308,7 +311,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
                 </span>
                 <span className={styles.line}>
                   <Battery left={devinLeft} level={devinLevel} vertical={false} />
-                  <span className={styles.value}>{formatAcu(devin.budget.acuRemaining)} budget</span>
+                  <span className={styles.value}>{formatAcu(devinAvailable)} budget</span>
                 </span>
               </>
             ) : (

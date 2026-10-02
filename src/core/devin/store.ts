@@ -58,13 +58,11 @@ const SHA1_HEX = /^[0-9a-f]{40}$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const PROPOSAL_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
-/** Budget bounds: they stop a typo (an extra zero, a negative), not the operator. */
+/** Financial bounds; operator session-count preferences have no product ceiling. */
 export const DEVIN_BUDGET_LIMITS = Object.freeze({
   maxAcu: 100_000,
   maxAcuPerSession: 1_000,
   maxUsdPerAcu: 100,
-  maxConcurrent: 10,
-  maxSessionsPerDay: 200,
 });
 
 // ---------------------------------------------------------------------------
@@ -178,6 +176,7 @@ export function isDevinTask(value: unknown): value is DevinTaskV1 {
     && TASK_ORIGINS.includes(value['origin'] as DevinTaskOrigin)
     && (value['requestedBy'] === 'mason' || value['requestedBy'] === 'fleet')
     && isNullableString(value['sessionId'])
+    && (value['launchOrgId'] === undefined || (isString(value['launchOrgId']) && DEVIN_ORG_ID_PATTERN.test(value['launchOrgId'])))
     && isNullableString(value['sessionUrl'])
     && TASK_STATES.includes(value['state'] as DevinTaskState)
     && isNullableString(value['stateReason'])
@@ -275,6 +274,12 @@ function clampCount(value: unknown, fallback: number, min: number, max: number):
   return Math.min(max, Math.max(min, Math.floor(value)));
 }
 
+/** Exact count representation, retaining the existing minimum and explicit zero opt-outs. */
+function operatorCount(value: unknown, fallback: number, min: number): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) return fallback;
+  return Math.max(min, value);
+}
+
 function defaultBudget(): DevinBudgetV1 {
   return { ...DEFAULT_DEVIN_BUDGET, updatedAt: new Date(0).toISOString() };
 }
@@ -294,11 +299,11 @@ function mergeBudget(base: DevinBudgetV1, input: unknown): DevinBudgetV1 {
     reserveAcu: clampNumber(src['reserveAcu'], base.reserveAcu, 0, L.maxAcu),
     // Below one half the lane would pause almost immediately; above 1 it would never pause.
     pauseAtFraction: clampNumber(src['pauseAtFraction'], base.pauseAtFraction, 0.5, 1),
-    maxConcurrent: clampCount(src['maxConcurrent'], base.maxConcurrent, 1, L.maxConcurrent),
-    maxSessionsPerDay: clampCount(src['maxSessionsPerDay'], base.maxSessionsPerDay, 0, L.maxSessionsPerDay),
+    maxConcurrent: operatorCount(src['maxConcurrent'], base.maxConcurrent, 1),
+    maxSessionsPerDay: operatorCount(src['maxSessionsPerDay'], base.maxSessionsPerDay, 0),
     // 0 is a valid choice for both: "the fleet launches no Devin sessions".
-    fleetMaxConcurrent: clampCount(src['fleetMaxConcurrent'], base.fleetMaxConcurrent, 0, L.maxConcurrent),
-    fleetMaxSessionsPerDay: clampCount(src['fleetMaxSessionsPerDay'], base.fleetMaxSessionsPerDay, 0, L.maxSessionsPerDay),
+    fleetMaxConcurrent: operatorCount(src['fleetMaxConcurrent'], base.fleetMaxConcurrent, 0),
+    fleetMaxSessionsPerDay: operatorCount(src['fleetMaxSessionsPerDay'], base.fleetMaxSessionsPerDay, 0),
     updatedAt: isIso(src['updatedAt']) ? (src['updatedAt'] as string) : base.updatedAt,
   };
 }

@@ -1,16 +1,21 @@
 # Releasing @ashlr/hub
 
-> **Current release process — rechecked 2026-09-28 UTC:** releases are manual
-> and local. GitHub Actions stays disabled, and a maintainer builds, verifies,
-> and publishes from a local checkout with npm's interactive web 2FA, following
-> [Releasing without CI](RELEASING-LOCALLY.md). npm `latest` is `3.14.0`;
-> `candidate` still points at the historical `3.3.2`; source is at `3.16.0`
-> while the next release is being integrated. The frozen 3.3.2 `release.yml` and `promote.yml` stay
-> in the repository as fail-closed historical evidence only. They are not a
-> publication path for any later version, and the source version must stay
-> strictly above `3.3.2` (enforced by the M522 identity test). The sections
-> below describe that historical 3.3.2 lane and the 3.4.0 readiness notes of
-> the time; where they conflict with this note, this note is current.
+> **Current release process — rechecked 2026-10-02 UTC:** use
+> [Releasing locally](RELEASING-LOCALLY.md) for the current manual release lane.
+> Run the complete local prepublish suite on the final clean source revision,
+> inspect hosted pull-request checks for that exact revision, and independently
+> verify the tarball and desktop artifacts before publication. Hosted
+> pull-request checks run; the automated desktop-release workflow remains
+> disabled during the Linux dependency quarantine. npm publication uses the
+> maintainer's interactive web 2FA and does not carry CI provenance.
+>
+> `@ashlr/hub@3.22.1` was verified public on 2026-10-02 UTC; `3.22.2` is a
+> candidate until its own checks and registry publication succeed. Check the
+> registry for current dist-tags. The frozen `release.yml` and `promote.yml`
+> procedures below describe the historical 3.3.2 lane, not a publishing path
+> for later versions. Keep source versions strictly above `3.3.2`. Publication
+> does not install the desktop or activate provider credentials, spending
+> permissions, or resident autonomy.
 
 > **Verified distribution state — 2026-09-05 UTC:** `@ashlr/hub@3.3.2` is the
 > accepted npm production version. Both npm dist-tags, `latest` and `candidate`,

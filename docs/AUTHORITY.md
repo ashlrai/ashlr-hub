@@ -178,6 +178,14 @@ The limits that remain are:
 
 **Decisions left to you** (kept, not removed; tell us to change them):
 
+- **Immediate Leader permissions.** The scope editor distinguishes the overall
+  A/B permission ceiling from the original starting stage's permissions.
+  Explicitly select starting-stage classes, preview their stage-level diff,
+  then sign the exact draft with Touch ID. The choice is bound to that stage's
+  ID and cannot exceed the overall ceiling; a changed starting stage requires
+  a fresh choice. Leaving it untouched, renewing, or reapproving preserves
+  existing permissions, including an advisory-only starting stage. This does
+  not skip rollout stages or grant class C authority.
 - **Change volume.** Explicit edits can sign larger file, line and daily merge limits, or **No volume cap**, using `merge.volumePolicy: "operator-signed"`. The protocol accepts positive safe integers for files and lines, and nonnegative safe integers for daily merges; No volume cap is represented by `Number.MAX_SAFE_INTEGER`. Config may still tighten the signed limits. Existing grants without the marker retain 10 files / 300 lines / 24 merges per repo per day, and the legacy local 4 / 150 / 4 limits. Plain renewal or reapproval keeps their effective scope.
 - **Risk.** Medium is the highest mergeable risk. Local-authored work and local-enforcement repositories stay at low risk. Larger volume does not bypass CI, account isolation, spending limits, protected paths, Stop or revocation.
 - **Signing an edit.** The scope editor shows the selected change before Touch ID. CLI edits use `ashlr authority re-approve --max-files N|none --max-lines N|none --repo-max-merges-per-day owner/name=N|none`; use only flags for the limits you intend to change. The new marker requires an upgraded root-owned custody helper. Review and install that helper before signing; an older helper refuses the new contract.
