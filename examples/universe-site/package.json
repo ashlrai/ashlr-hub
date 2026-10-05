@@ -60,7 +60,10 @@
   },
   "overrides": {
     "sharp": "0.35.4",
-    "undici": "^7.29.1"
+    "undici": "^7.29.1",
+    "oxfmt@0.61.0": {
+      "tinypool": "2.1.2"
+    }
   },
   "type": "module"
 }
