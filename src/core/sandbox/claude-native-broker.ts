@@ -6,10 +6,44 @@ import { isAbsolute } from 'node:path';
 import type { NativeSeatLaunch } from '../resources/native-profile.js';
 import { workerEnvironment } from '../resources/worker.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { validateClaudeToolCall, type ClaudeToolCall } from './claude-broker-tool-worker.js';
 
 const HASH = /^[a-f0-9]{64}$/;
 const MAX_REQUEST = 1024 * 1024;
-const TOOLS = ['read_file', 'write_file'] as const;
+const TOOLS = ['read_file', 'write_file', 'list_files', 'search', 'edit_file', 'create_directory'] as const;
+const TOOL_SCHEMA = {
+  read_file: { optional: ['offset', 'limit'], required: ['path'], description: 'Read a worktree file; optional zero-based line window returns content, range and SHA' },
+  write_file: { optional: [], required: ['path', 'text'], description: 'Write a small worktree file' },
+  list_files: { optional: ['offset', 'limit', 'expectedSnapshot'], required: ['path'], description: 'List a directory in sorted pages; snapshot can detect changes between pages' },
+  search: { optional: ['offset', 'limit', 'expectedSnapshot'], required: ['path', 'query'], description: 'Search literal text in sorted, content-bound pages; reports partial coverage' },
+  edit_file: { optional: [], required: ['path', 'expectedSha256', 'oldText', 'newText'], description: 'Replace exactly one occurrence in the file matching the expected SHA' },
+  create_directory: { optional: [], required: ['path'], description: 'Create worktree directories without following links' },
+} as const;
+/** Scrubbing runs on values before encoding, so structured JSON is never sliced
+ * into malformed text. UTF-8 bytes, not character counts, bound all replies. */
+export function formatClaudeBrokerToolResult(call: ClaudeToolCall, text: string): string {
+  const structured = call.name !== 'write_file' && (call.name !== 'read_file' || call.offset !== undefined || call.limit !== undefined);
+  if (structured) {
+    if (Buffer.byteLength(text) > 32 * 1024) return JSON.stringify({ truncated: true, reason: 'Result exceeds byte limit; request a smaller window' });
+    const clean = (value: unknown, key = '', depth = 0): unknown => {
+      // Only source-owned top-level content digests are protocol data. Source
+      // text, match rows and filenames still pass through the shared scrubber.
+      if (depth === 1 && ['sha256', 'snapshot'].includes(key) && typeof value === 'string' && HASH.test(value)) return value;
+      if (typeof value === 'string') return scrubSecrets(value);
+      if (Array.isArray(value)) return value.map(item => clean(item, '', depth + 1));
+      if (record(value)) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clean(item, key, depth + 1)]));
+      return value;
+    };
+    const output = JSON.stringify(clean(JSON.parse(text)));
+    return Buffer.byteLength(output) <= 32 * 1024 ? output : JSON.stringify({ truncated: true, reason: 'Result exceeds byte limit; request a smaller window' });
+  }
+  const output = scrubSecrets(text);
+  if (Buffer.byteLength(output) <= 32 * 1024) return output;
+  const marker = '\n[Tool result truncated]';
+  let result = ''; let bytes = Buffer.byteLength(marker);
+  for (const character of output) { const size = Buffer.byteLength(character); if (bytes + size > 32 * 1024) break; result += character; bytes += size; }
+  return result + marker;
+}
 export interface ClaudeBrokerScope {
   runId: string; seatId: string; accountDigest: string; profileDigest: string; epochDigest: string; model: string;
 }
@@ -17,7 +51,7 @@ export interface ClaudeBrokerScope {
 export interface ClaudeBrokerObservation extends ClaudeBrokerScope {
   observedAtMs: number; expiresAtMs: number; authMethod: 'claude.ai'; extraUsageEnabled: false;
 }
-export type ClaudeBrokerExecutor = (call: { name: typeof TOOLS[number]; path: string; text?: string },
+export type ClaudeBrokerExecutor = (call: ClaudeToolCall,
   signal: AbortSignal, admission: () => boolean) => Promise<string>;
 
 function exactScope(a: ClaudeBrokerScope, b: ClaudeBrokerScope): boolean {
@@ -145,23 +179,25 @@ export async function startClaudeNativeBroker(options: ClaudeBrokerOptions): Pro
         result({ protocolVersion: negotiated, capabilities: { tools: {} }, serverInfo: { name: 'ashlr-fleet-broker', version: '0.1.0' } }); return;
       }
       if (input.method === 'tools/list') {
-        result({ tools: TOOLS.map(name => ({ name, description: name === 'read_file' ? 'Read a worktree file' : 'Write a worktree file',
-          inputSchema: { type: 'object', properties: { path: { type: 'string' }, ...(name === 'write_file' ? { text: { type: 'string' } } : {}) },
-            required: name === 'write_file' ? ['path', 'text'] : ['path'], additionalProperties: false } })) }); return;
+        result({ tools: TOOLS.map(name => {
+          const schema = TOOL_SCHEMA[name];
+          return { name, description: schema.description, inputSchema: { type: 'object',
+            properties: Object.fromEntries([...schema.required, ...schema.optional].map(key => [key,
+              key === 'offset' || key === 'limit' ? { type: 'integer', minimum: key === 'offset' ? 0 : 1 } : { type: 'string' }])),
+            required: [...schema.required], additionalProperties: false } };
+        }) }); return;
       }
       if (input.method !== 'tools/call') { rpcError(-32601,'Method not found'); return; }
       const params = input.params;
-      const args = record(params) ? params.arguments : null;
-      if (!record(params) || !TOOLS.includes(params.name as typeof TOOLS[number]) ||
-        !record(args) || typeof args.path !== 'string' || args.path.length > 4096 ||
-        Object.keys(args).some(key => key !== 'path' && key !== 'text') ||
-        (params.name === 'write_file' ? typeof args.text !== 'string' : args.text !== undefined)) {
-        rpcError(-32602,'Unsupported tool parameters'); return;
-      }
+      let toolCall: ClaudeToolCall;
+      try {
+        if (!record(params) || !record(params.arguments)) throw new Error();
+        toolCall = validateClaudeToolCall({ ...params.arguments, name: params.name }, false);
+        if (Object.hasOwn(params.arguments, 'name')) throw new Error();
+      } catch { rpcError(-32602,'Unsupported tool parameters'); return; }
       let text: string;
       try {
-        text = await options.execute({ name: params.name as typeof TOOLS[number], path: args.path,
-          ...(typeof args.text === 'string' ? { text: args.text } : {}) }, controller.signal,
+        text = await options.execute(toolCall, controller.signal,
         () => !controller.signal.aborted && current());
       } catch {
         if (!current() || controller.signal.aborted) { answer(403,{error:'tool authority changed'}); return; }
@@ -170,7 +206,8 @@ export async function startClaudeNativeBroker(options: ClaudeBrokerOptions): Pro
         result({content:[{type:'text',text:'Tool request refused'}],isError:true}); return;
       }
       if (!current() || controller.signal.aborted) { answer(403, { error: 'tool authority changed' }); return; }
-      result({ content: [{ type: 'text', text: scrubSecrets(text).slice(0, 32 * 1024) }] });
+      try { result({ content: [{ type: 'text', text: formatClaudeBrokerToolResult(toolCall, text) }] }); }
+      catch { result({ content: [{ type: 'text', text: 'Tool result refused' }], isError: true }); }
     })().catch(() => answer(400, {jsonrpc:'2.0',id:null,error:{code:-32700,message:'Invalid request body'}})).finally(() => {
       active.delete(controller); requests.delete(request);
     });

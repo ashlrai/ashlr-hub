@@ -15,12 +15,13 @@
  * This suite has NO live-LLM dependency and touches only tmp dirs.
  */
 
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import childProcess, { execFileSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   makeFixture,
@@ -180,6 +181,89 @@ describe('H1 testkit — makeDisposableRepo', () => {
       .split('\n')
       .sort();
     expect(tracked).toEqual(['docs/readme.md', 'src/index.ts']);
+  });
+
+  it('persists local identity/signing/LF settings using only init, add and commit', () => {
+    // Call-through observation: all three commands execute the real Git binary.
+    const calls = vi.spyOn(childProcess, 'execFileSync');
+    syncBuiltinESMExports();
+    let repo;
+    try {
+      repo = fx.makeRepo();
+      expect(calls.mock.calls.map(([, args]) => args)).toEqual([
+        ['-C', repo.dir, 'init', '--initial-branch=main', '.'],
+        ['-C', repo.dir, 'add', '-A'],
+        ['-C', repo.dir, 'commit', '--no-verify', '-m', 'init'],
+      ]);
+    } finally {
+      calls.mockRestore();
+      syncBuiltinESMExports();
+    }
+    expect(git(repo.dir, ['config', '--local', '--get', 'user.email'])).toBe('h1@ashlr.test');
+    expect(git(repo.dir, ['config', '--local', '--get', 'user.name'])).toBe('Ashlr H1 Test');
+    expect(git(repo.dir, ['config', '--local', '--bool', 'commit.gpgsign'])).toBe('false');
+    expect(git(repo.dir, ['config', '--local', '--bool', 'core.autocrlf'])).toBe('false');
+    expect(git(repo.dir, ['config', '--local', '--get', 'core.eol'])).toBe('lf');
+    expect(git(repo.dir, ['show', '-s', '--format=%an <%ae>'])).toBe('Ashlr H1 Test <h1@ashlr.test>');
+    expect(git(repo.dir, ['config', '--local', '--get', 'core.bare'])).toBe('false');
+    expect(repo.gitStatus()).toBe('');
+  });
+
+  it('overrides hostile global signing and CRLF defaults without changing them', () => {
+    const globalPath = join(fx.home, '.gitconfig');
+    const globalConfig = '[user]\n\tname = Wrong\n\temail = wrong@example.test\n' +
+      '[commit]\n\tgpgsign = true\n[core]\n\tautocrlf = true\n\teol = crlf\n';
+    writeFileSync(globalPath, globalConfig);
+    const repo = fx.makeRepo({ files: { 'lines.txt': 'a\nb\nc\n' } });
+    rmSync(join(repo.dir, 'lines.txt'));
+    git(repo.dir, ['checkout', '--', 'lines.txt']);
+    expect(repo.readFile('lines.txt')).toBe('a\nb\nc\n');
+    expect(git(repo.dir, ['show', 'HEAD:lines.txt'])).toBe('a\nb\nc');
+    expect(repo.gitStatus()).toBe('');
+    expect(readFileSync(globalPath, 'utf8')).toBe(globalConfig);
+  });
+
+  it('preserves custom template keys and Git replacement semantics', () => {
+    const template = join(fx.home, 'git-template');
+    mkdirSync(template);
+    writeFileSync(join(template, 'config'),
+      '[core]\n\tautocrlf = true\n\teol = crlf\n' +
+      '[user]\n\tname = Template Author\n\temail = template@example.test\n' +
+      '[commit]\n\tgpgsign = true\n[fixture]\n\tmarker = preserve me\n');
+    const previous = process.env.GIT_TEMPLATE_DIR;
+    process.env.GIT_TEMPLATE_DIR = template;
+    const calls = vi.spyOn(childProcess, 'execFileSync');
+    syncBuiltinESMExports();
+    let repo;
+    try {
+      repo = fx.makeRepo();
+      expect(calls.mock.calls.filter(([command]) => command === 'git')).toHaveLength(8);
+    } finally {
+      calls.mockRestore();
+      syncBuiltinESMExports();
+      if (previous === undefined) delete process.env.GIT_TEMPLATE_DIR;
+      else process.env.GIT_TEMPLATE_DIR = previous;
+    }
+    expect(git(repo.dir, ['config', '--local', '--get', 'fixture.marker'])).toBe('preserve me');
+    for (const [key, value] of [
+      ['user.email', 'h1@ashlr.test'], ['user.name', 'Ashlr H1 Test'],
+      ['commit.gpgsign', 'false'], ['core.autocrlf', 'false'], ['core.eol', 'lf'],
+    ]) {
+      expect(git(repo.dir, ['config', '--local', '--get-all', key!])).toBe(value);
+    }
+    expect(repo.gitStatus()).toBe('');
+  });
+
+  it('keeps persisted local configuration independent between fresh repos', () => {
+    const a = fx.makeRepo();
+    const b = fx.makeRepo();
+    expect(a.dir).not.toBe(b.dir);
+    git(a.dir, ['config', 'user.name', 'Changed only A']);
+    git(a.dir, ['config', 'core.eol', 'crlf']);
+    expect(git(b.dir, ['config', '--local', '--get', 'user.name'])).toBe('Ashlr H1 Test');
+    expect(git(b.dir, ['config', '--local', '--get', 'core.eol'])).toBe('lf');
+    expect(a.gitStatus()).toBe('');
+    expect(b.gitStatus()).toBe('');
   });
 
   it('defaults to a single README.md when no files are given', () => {

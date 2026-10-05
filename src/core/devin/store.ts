@@ -26,6 +26,7 @@ import {
   DEVIN_BUDGET_SCHEMA_VERSION,
   DEVIN_CONNECTION_SCHEMA_VERSION,
   DEVIN_ORG_ID_PATTERN,
+  isDevinSelfIdentity,
   DEVIN_SESSION_ID_PATTERN,
   DEVIN_TASK_ID_PATTERN,
   DEVIN_TASK_SCHEMA_VERSION,
@@ -362,7 +363,7 @@ export function writeDevinConsumptionConnectionState(state: 'pending' | 'settled
   fsyncDirectory(dir);
 }
 
-export function isDevinConnection(value: unknown): value is DevinConnectionV1 {
+function isDevinConnectionBase(value: unknown): value is DevinConnectionV1 {
   return isRecord(value)
     && value['v'] === DEVIN_CONNECTION_SCHEMA_VERSION
     && isString(value['orgId']) && DEVIN_ORG_ID_PATTERN.test(value['orgId'])
@@ -373,9 +374,25 @@ export function isDevinConnection(value: unknown): value is DevinConnectionV1 {
     && isIso(value['updatedAt']);
 }
 
+function validSelfIdentity(connection: DevinConnectionV1): boolean {
+  if (!Object.prototype.hasOwnProperty.call(connection, 'selfIdentity')) return true;
+  const row = connection.selfIdentity;
+  const keys = ['source', 'observedAt', 'principal', 'serviceUserId', 'userId', 'apiKeyId', 'orgId', 'devinSessionsOrgId'];
+  return isRecord(row) && Object.keys(row).length === keys.length && keys.every(key => Object.prototype.hasOwnProperty.call(row, key)) &&
+    row.source === 'devin-v3-self' && isIso(row.observedAt) &&
+    isDevinSelfIdentity(row) && row.principal === connection.principal;
+}
+export function isDevinConnection(value: unknown): value is DevinConnectionV1 {
+  return isDevinConnectionBase(value) && validSelfIdentity(value);
+}
+
 export function readDevinConnection(): DevinConnectionV1 | null {
   const value = readJsonFile(devinConnectionPath(), MAX_SMALL_BYTES);
-  return isDevinConnection(value) ? value : null;
+  if (!isDevinConnectionBase(value)) return null;
+  if (validSelfIdentity(value)) return value;
+  // Optional observation corruption does not change a legacy usable lane.
+  const legacy = { ...value }; delete legacy.selfIdentity;
+  return legacy;
 }
 
 export function writeDevinConnection(connection: Omit<DevinConnectionV1, 'v' | 'updatedAt'>): DevinConnectionV1 {

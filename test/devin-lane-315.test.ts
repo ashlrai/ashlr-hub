@@ -7,7 +7,7 @@
  * the Keychain (test/helpers/fake-keychain.ts) and `gh`. Files live in the
  * worker's isolated ASHLR_HOME (test/setup/home.ts).
  */
-import { readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -27,6 +27,7 @@ import {
 import {
   devinHome,
   isDevinTask,
+  isDevinConnection,
   listDevinTasks,
   readDevinBudget,
   readDevinConnection,
@@ -151,6 +152,33 @@ describe('persisted provider session identity', () => {
   });
 });
 
+describe('optional private /self identity observation', () => {
+  const now = '2026-10-05T12:00:00.000Z';
+  const identity = { source: 'devin-v3-self' as const, observedAt: now, principal: 'pat_user' as const,
+    serviceUserId: null, userId: 'user-private-1', apiKeyId: 'key-private-2', orgId: 'org-primary', devinSessionsOrgId: 'org-sessions' };
+  const legacy = { orgId: FAKE_ORG, principal: 'pat_user' as const, principalName: 'Display', keyStore: 'keychain' as const, connectedAt: now };
+  it('roundtrips exact metadata privately without modifying a legacy row when it is read', () => {
+    const old = writeDevinConnection(legacy); const path = join(devinHome(), 'connection.json');
+    const oldBytes = readFileSync(path);
+    expect(readDevinConnection()).toEqual(old); expect(readDevinConnection()?.selfIdentity).toBeUndefined();
+    expect(readFileSync(path)).toEqual(oldBytes);
+    const withIdentity = writeDevinConnection({ ...legacy, selfIdentity: identity });
+    expect(readDevinConnection()).toEqual(withIdentity);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+  it.each([null, {}, { ...identity, userId: 'cog_credential' }, { ...identity, observedAt: 'unknown' },
+    { ...identity, principal: 'service_user' }, { ...identity, extra: 'not-retained' }, { ...identity, orgId: '../org' }])(
+    'drops malformed optional read metadata %j but refuses a supplied malformed write', bad => {
+    const old = writeDevinConnection(legacy); const path = join(devinHome(), 'connection.json');
+    const requested = { ...legacy, selfIdentity: bad } as unknown as Parameters<typeof writeDevinConnection>[0];
+    expect(isDevinConnection({ ...old, selfIdentity: bad })).toBe(false);
+    expect(() => writeDevinConnection(requested)).toThrow(/malformed connection/);
+    expect(readDevinConnection()).toEqual(old);
+    const raw = JSON.stringify({ ...old, selfIdentity: bad }); writeFileSync(path, raw, { mode: 0o600 });
+    expect(readDevinConnection()).toEqual(old); expect(readFileSync(path, 'utf8')).toBe(raw);
+  });
+});
+
 describe('key custody: the macOS Keychain, stdin only', () => {
   it('stores the key via `security -i` on stdin — never in argv — and reads it back', async () => {
     await storeDevinKey(FAKE_KEY, { run: keychain.run, platform: 'darwin' });
@@ -184,6 +212,22 @@ describe('connect', () => {
     expect(keychain.items.get('ai.ashlr.devin/api-key')).toBe(FAKE_KEY);
     expect(everyFileText()).not.toContain(FAKE_KEY);
     expect(statSync(join(devinHome(), 'connection.json')).mode & 0o777).toBe(0o600);
+  });
+
+  it('stores only existing successful /self observation and exposes a cache-only presence summary', async () => {
+    api = fakeDevin({ self: { principal_type: 'pat_user', user_id: 'user-private-1', user_name: 'Display', api_key_id: 'key-private-2',
+      api_key_name: 'not-retained', org_id: FAKE_ORG, devin_sessions_org_id: 'org-separate' } });
+    const now = new Date('2026-10-05T12:00:00.000Z');
+    await connectDevin({ key: FAKE_KEY }, deps({ now: () => now }));
+    expect(api.requests.map(r => r.path)).toEqual(['/v3/self', `/v3/organizations/${FAKE_ORG}/sessions?first=1`]);
+    expect(readDevinConnection()?.selfIdentity).toEqual({ source: 'devin-v3-self', observedAt: now.toISOString(), principal: 'pat_user',
+      serviceUserId: null, userId: 'user-private-1', apiKeyId: 'key-private-2', orgId: FAKE_ORG, devinSessionsOrgId: 'org-separate' });
+    const calls = api.requests.length;
+    const status = await devinStatus(deps());
+    expect(status).toMatchObject({ state: 'ready', selfIdentity: { source: 'devin-v3-self', observedAt: now.toISOString(), principal: 'pat_user',
+      hasServiceUserId: false, hasUserId: true, hasApiKeyId: true, hasOrgId: true, hasDevinSessionsOrgId: true } });
+    expect(api.requests).toHaveLength(calls);
+    for (const value of ['user-private-1', 'key-private-2', 'org-separate', 'not-retained', FAKE_KEY]) expect(JSON.stringify(status)).not.toContain(value);
   });
 
   it('a refused key is never stored; an org-scoped service user needs --org', async () => {

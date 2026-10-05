@@ -114,7 +114,7 @@ import {
 import { prepareProjectMemory, readProjectMemory, writeProjectMemory } from './project-memory.js';
 import { discoverProjectsAsync } from './projects.js';
 import { discoverSeats, getSeatReadiness, refreshSeatTelemetry, resolveAccountsRoot, type VerseSeatDiscovery } from './seats.js';
-import { getVerseAccountCollector } from './accounts.js';
+import { getVerseAccountCollector, readVerseAccountIdentities } from './accounts.js';
 import { DEVIN_CLI_SEAT_ID, devinCliTurnReadiness, devinSeatReadiness, discoverDevinSeats, mergeDevinSeats, type DevinSeatDiscoveryOptions } from './devin-seats.js';
 import { buildHandoffPreviewAsync } from './session-handoff.js';
 import { searchSessions } from './session-search.js';
@@ -2005,6 +2005,36 @@ export async function handleVerseApi(
         localRuntime: discovery.localRuntime,
       };
       sendJson(res, 200, body);
+      return true;
+    }
+
+    // A metadata mutation: never load scheduler-owning mounted modules or a
+    // full seat discovery before authenticating and checking the exact target.
+    if (path === `${VERSE_API_PREFIX}/seats/refresh`) {
+      if (method !== 'POST') { sendJson(res, 405, { error: 'method not allowed' }); return true; }
+      const body = await readMutationBody(ctx, req, res);
+      if (!body) return true;
+      if (Object.keys(body).length !== 1 || typeof body.seatId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(body.seatId)) {
+        sendJson(res, 400, { error: 'Expected one native seatId.', code: 'VERSE_INVALID' }); return true;
+      }
+      const accountsRoot = resolveAccountsRoot(ctx.cfg);
+      if (!readVerseAccountIdentities(accountsRoot).some(account => account.id === body.seatId)) {
+        sendJson(res, 400, { error: 'This native account is not configured.', code: 'VERSE_INVALID' }); return true;
+      }
+      const collector = getVerseAccountCollector();
+      if (!collector || collector.accountsRoot !== accountsRoot || !collector.refreshAccount) {
+        sendJson(res, 503, { error: 'The native account collector is unavailable.', code: 'VERSE_COLLECTOR_UNAVAILABLE' }); return true;
+      }
+      const result = await collector.refreshAccount(body.seatId);
+      if (getVerseAccountCollector() !== collector) {
+        sendJson(res, 200, { seatId: body.seatId, state: 'held', reading: 'unknown', reason: 'connection-collector-changed',
+          observedAt: null, expiresAt: null, nextCheckAt: null, joined: false } satisfies import('./types.js').VerseAccountReadingRefresh);
+        return true;
+      }
+      if (result.reason === 'connection-account-not-configured') {
+        sendJson(res, 400, { error: 'This native account is not configured.', code: 'VERSE_INVALID' }); return true;
+      }
+      sendJson(res, 200, result);
       return true;
     }
 

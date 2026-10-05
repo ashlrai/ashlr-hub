@@ -30,10 +30,36 @@ const client = (f: ReturnType<typeof fakeDevin>, key = f.key, retries = 2): Devi
 
 describe('parsers (docs.devin.ai v3 schemas)', () => {
   it('reads ServiceUserSelf and PatUserSelf, with org_id only when it is an org- id', () => {
-    expect(parseDevinSelf({ principal_type: 'service_user', service_user_id: 's', service_user_name: 'CI', org_id: null })).toEqual({ principal: 'service_user', name: 'CI', orgId: null });
-    expect(parseDevinSelf({ principal_type: 'pat_user', user_id: 'u', user_name: 'Mason', api_key_id: 'k', api_key_name: 'n', org_id: 'org-abc' })).toEqual({ principal: 'pat_user', name: 'Mason', orgId: 'org-abc' });
+    expect(parseDevinSelf({ principal_type: 'service_user', service_user_id: 's', service_user_name: 'CI', org_id: null })).toEqual({ principal: 'service_user', name: 'CI', orgId: null, identity: { principal: 'service_user', serviceUserId: 's', userId: null, apiKeyId: null, orgId: null, devinSessionsOrgId: null } });
+    expect(parseDevinSelf({ principal_type: 'pat_user', user_id: 'u', user_name: 'Mason', api_key_id: 'k', api_key_name: 'n', org_id: 'org-abc' })).toEqual({ principal: 'pat_user', name: 'Mason', orgId: 'org-abc', identity: { principal: 'pat_user', serviceUserId: null, userId: 'u', apiKeyId: 'k', orgId: 'org-abc', devinSessionsOrgId: null } });
     expect(parseDevinSelf({ principal_type: 'pat_user', user_name: 'x', org_id: '../evil' })?.orgId).toBeNull();
     expect(parseDevinSelf({})).toBeNull();
+  });
+
+  it('retains exact PAT attribution fields and keeps reported session organization separate', () => {
+    expect(parseDevinSelf({ principal_type: 'pat_user', user_id: 'user:exact-1', user_name: 'Display', api_key_id: 'key.opaque-2',
+      org_id: 'org-primary', devin_sessions_org_id: 'org-session' })?.identity).toEqual({ principal: 'pat_user',
+      serviceUserId: null, userId: 'user:exact-1', apiKeyId: 'key.opaque-2', orgId: 'org-primary', devinSessionsOrgId: 'org-session' });
+    expect(parseDevinSelf({ principal_type: 'service_user', service_user_id: 'service-1', api_key_id: 'not-service-evidence',
+      devin_sessions_org_id: 'org-ignored' })?.identity).toEqual({ principal: 'service_user', serviceUserId: 'service-1',
+      userId: null, apiKeyId: null, orgId: null, devinSessionsOrgId: null });
+  });
+
+  it.each(['', ' padded', 'a b', '../id', 'a/b', 'a\\b', 'a%2fb', 'a\n', 'a'.repeat(257), 'cog_not_an_identifier', 'sk-secret', 123, null])(
+    'drops unsafe opaque metadata %j without changing a usable legacy principal', id => {
+    const raw = { principal_type: 'pat_user', user_name: 'Display', org_id: 'org-safe', user_id: id, api_key_id: 'key-1' };
+    expect(parseDevinSelf(raw)).toEqual({ principal: 'pat_user', name: 'Display', orgId: 'org-safe' });
+    expect(parseDevinSelf({ principal_type: 'service_user', service_user_id: id, service_user_name: 'Display' }))
+      .toEqual({ principal: 'service_user', name: 'Display', orgId: null });
+  });
+
+  it('does not guess missing fields or reinterpret brain/Windsurf principals as PAT users', () => {
+    expect(parseDevinSelf({ principal_type: 'pat_user', user_name: 'Legacy' })).toEqual({ principal: 'pat_user', name: 'Legacy', orgId: null });
+    for (const principal_type of ['devin_brain', 'windsurf_session', 'unknown']) {
+      expect(parseDevinSelf({ principal_type, user_id: 'user-1', api_key_id: 'key-1', org_id: 'org-safe' }))
+        .toEqual({ principal: 'other', name: null, orgId: 'org-safe' });
+    }
+    expect(parseDevinSelf({ principal_type: 'pat_user', user_id: 'user-1', api_key_id: 'key-1', devin_sessions_org_id: '../org' })?.identity).toBeUndefined();
   });
 
   it('reads a full SessionResponse, and the docs\' three-field create response', () => {

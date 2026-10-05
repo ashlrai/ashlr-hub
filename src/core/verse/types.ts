@@ -967,6 +967,19 @@ export interface VerseBootstrap {
   localRuntime: VerseLocalRuntimeSummary;
 }
 
+/** Selected metadata check acknowledgement, never spending or dispatch authority. */
+export interface VerseAccountReadingRefresh {
+  seatId: string;
+  state: 'completed' | 'cached' | 'held';
+  /** A completed native check may still have no current quota or balance. */
+  reading: 'current' | 'unknown';
+  reason: string;
+  observedAt: string | null;
+  expiresAt: string | null;
+  nextCheckAt: string | null;
+  joined: boolean;
+}
+
 /**
  * GET /api/verse/seats (V2.1)
  *

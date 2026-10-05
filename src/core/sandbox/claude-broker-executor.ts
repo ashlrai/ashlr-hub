@@ -11,7 +11,7 @@ import type { ClaudeBrokerExecutor } from './claude-native-broker.js';
 export function claudeBrokerToolExecutor(options: { worktree: string; cfg: AshlrConfig;
   recordEvidence(finish: AutonomousSpawnFinish): Promise<void> | void; retainCleanupFailure(): void }): ClaudeBrokerExecutor {
   const worktree = realpathSync(options.worktree);
-  return async (call, signal, admission) => {
+  const execute: ClaudeBrokerExecutor = async (call, signal, admission) => {
     if (signal.aborted || !admission()) throw new Error('tool authority unavailable');
     const worker = resolveClaudeBrokerToolInvocation();
     const underWorktree = (path: string): boolean => {
@@ -46,5 +46,29 @@ export function claudeBrokerToolExecutor(options: { worktree: string; cfg: Ashlr
       if (!worker.isCurrent() || !result.ok || !evidence.violationsKnown || evidence.violations.length || signal.aborted || !admission()) throw new Error('tool request refused');
       return result.output;
     } finally { if (!finished) disposeAutonomousSpawn(owned); }
+  };
+  return serializeClaudeToolMutations(execute);
+}
+
+/** Run-owned ordering only; external writers still require expected-SHA checks. */
+export function serializeClaudeToolMutations(execute: ClaudeBrokerExecutor): ClaudeBrokerExecutor {
+  // One run owns this queue; directory creation can overlap any file path, so
+  // serialize all our mutations. This is not a lock against external editors.
+  let mutations: Promise<void> = Promise.resolve();
+  return async (call, signal, admission) => {
+    if (!['write_file', 'edit_file', 'create_directory'].includes(call.name)) return execute(call, signal, admission);
+    const previous = mutations;
+    let release!: () => void;
+    const done = new Promise<void>(resolve => { release = resolve; });
+    mutations = previous.then(() => done);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => reject(new Error('tool authority unavailable'));
+        signal.addEventListener('abort', abort, { once: true });
+        void previous.then(() => { signal.removeEventListener('abort', abort); resolve(); });
+        if (signal.aborted) abort();
+      });
+      return await execute(call, signal, admission);
+    } finally { release(); }
   };
 }

@@ -27,6 +27,8 @@ import { scrubSecrets } from '../util/scrub.js';
 import {
   DEVIN_API_BASE_URL,
   DEVIN_ORG_ID_PATTERN,
+  isDevinSelfIdentity,
+  type DevinSelfIdentity,
   DEVIN_SESSION_ID_PATTERN,
   type DevinFailureCode,
   type DevinSessionStatus,
@@ -73,6 +75,7 @@ export interface DevinSelf {
   name: string | null;
   /** null for org-scoped service users (docs: common-flows step 1) — the operator supplies it. */
   orgId: string | null;
+  identity?: DevinSelfIdentity;
 }
 
 /** Organization consumption, not subscription headroom or a credit balance. */
@@ -188,11 +191,15 @@ export function parseDevinSelf(raw: unknown): DevinSelf | null {
   if (!isRecord(raw) || typeof raw['principal_type'] !== 'string') return null;
   const type = raw['principal_type'];
   const orgId = typeof raw['org_id'] === 'string' && DEVIN_ORG_ID_PATTERN.test(raw['org_id']) ? raw['org_id'] : null;
-  if (type === 'service_user') {
-    return { principal: 'service_user', name: typeof raw['service_user_name'] === 'string' ? raw['service_user_name'].slice(0, 120) : null, orgId };
-  }
-  if (type === 'pat_user') {
-    return { principal: 'pat_user', name: typeof raw['user_name'] === 'string' ? raw['user_name'].slice(0, 120) : null, orgId };
+  if (type === 'service_user' || type === 'pat_user') {
+    const reportedOrg = raw['org_id'] === undefined || raw['org_id'] === null ? null : raw['org_id'];
+    const sessionOrg = raw['devin_sessions_org_id'] === undefined || raw['devin_sessions_org_id'] === null ? null : raw['devin_sessions_org_id'];
+    const identity = type === 'service_user'
+      ? { principal: type, serviceUserId: raw['service_user_id'], userId: null, apiKeyId: null, orgId: reportedOrg, devinSessionsOrgId: null }
+      : { principal: type, serviceUserId: null, userId: raw['user_id'], apiKeyId: raw['api_key_id'], orgId: reportedOrg, devinSessionsOrgId: sessionOrg };
+    const display = raw[type === 'service_user' ? 'service_user_name' : 'user_name'];
+    return { principal: type, name: typeof display === 'string' ? display.slice(0, 120) : null, orgId,
+      ...(isDevinSelfIdentity(identity) ? { identity } : {}) };
   }
   return { principal: 'other', name: null, orgId };
 }

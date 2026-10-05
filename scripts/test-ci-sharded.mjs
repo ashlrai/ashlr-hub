@@ -30,6 +30,14 @@ const isolatedSuites = [
 ];
 const isolatedAcceptance = 'test/universe-hub-marker-campaign.test.ts';
 const exclusions = [...isolatedSuites, isolatedAcceptance].map((file) => `--exclude=${file}`);
+// Existing real-I/O acceptance phases describe work within a long-running case;
+// enable them without changing the wrapper's child-output idle deadline. Keep
+// explicit caller choices, including empty values, and leave the parent alone.
+const childEnvironment = {
+  ...process.env,
+  ASHLR_ENGINEERING_SETUP_PHASE_TIMING: process.env.ASHLR_ENGINEERING_SETUP_PHASE_TIMING ?? '1',
+  ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING: process.env.ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING ?? '1',
+};
 const children = new Map();
 let stopping = false;
 let failure = 0;
@@ -52,7 +60,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 function runShard(shard) { return new Promise((resolve) => {
   const child = spawn(process.execPath, [runner, `--shard=${shard}/3`, '--maxWorkers=1', '--fileParallelism=false', '--bail=1', ...exclusions], {
     cwd: process.cwd(),
-    env: process.env,
+    env: childEnvironment,
     stdio: 'inherit',
   });
   children.set(shard, child);
@@ -100,7 +108,7 @@ if (failure || codes.length !== shards.length || !codes.every((code) => code ===
   for (const { file, filter, label } of isolatedCases) {
     if (failure) break;
     const child = spawn(process.execPath, [runner, file, ...(filter ? ['-t', filter] : []), '--maxWorkers=1', '--fileParallelism=false', '--bail=1'], {
-      cwd: process.cwd(), env: process.env, stdio: 'inherit',
+      cwd: process.cwd(), env: childEnvironment, stdio: 'inherit',
     });
     children.set(`isolated-${label}`, child);
     console.error(`[test-ci:sharded] started isolated acceptance ${label} (pid ${child.pid ?? 'unavailable'})`);

@@ -12,7 +12,7 @@ import { clearMutationToken, setMutationToken } from '../../../data/auth-store.j
 import { evictAll } from '../../../data/cache.js';
 import { DevinResource } from './DevinResource.js';
 import { resetGuard, isGuardOpen } from '../shell/guarded-action.js';
-import { runInDevinBlock, devinConsumptionEvidence } from '../devin/devin-model.js';
+import { runInDevinBlock, devinConsumptionEvidence, devinSelfIdentityEvidence } from '../devin/devin-model.js';
 
 const TOKEN = 'test-token';
 let overview: unknown;
@@ -60,6 +60,11 @@ function consumption(over: Record<string, unknown> = {}) {
     fetchedAt: new Date(now - 1000).toISOString(), checkedAt: new Date(now - 1000).toISOString(),
     expiresAt: new Date(now + 300_000).toISOString(), retryAt: null, stale: false, error: null,
     report: { totalAcus: 3.125, days: [{ date: 123, acus: 3.125, products: { devin: 3.125, cascade: null, terminal: 0, automation: null, review: null } }] }, ...over };
+}
+
+function identity(over: Record<string, unknown> = {}) {
+  return { source: 'devin-v3-self', observedAt: '2026-01-01T00:00:00.000Z', principal: 'service_user',
+    hasServiceUserId: true, hasUserId: false, hasApiKeyId: false, hasOrgId: true, hasDevinSessionsOrgId: false, ...over };
 }
 
 beforeEach(() => {
@@ -121,6 +126,68 @@ describe('DevinResource', () => {
     expect(screen.getByText(/1 running · 2 today/)).toBeTruthy();
     expect(screen.getByRole('link', { name: /Real usage on app\.devin\.ai/ }).getAttribute('href')).toBe('https://app.devin.ai/settings/usage');
     expect(screen.getByText('Connected')).toBeTruthy();
+  });
+
+  it('keeps old-server account observations unknown without changing connected status or making extra queries', async () => {
+    mount();
+    const section = await screen.findByRole('region', { name: 'Devin cached account observation' });
+    expect(within(section).getByText('Cloud account: not reported')).toBeInTheDocument();
+    expect(within(section).getByText('Max weekly allowance is not reported; subscription-only spending is unverified.')).toBeInTheDocument();
+    expect(screen.getByText('Connected')).toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual(['/api/verse/devin']);
+    expect(posts).toHaveLength(0);
+  });
+
+  it.each([
+    ['service_user', identity(), 'Service account'],
+    ['pat_user', identity({ principal: 'pat_user', hasServiceUserId: false, hasUserId: true, hasApiKeyId: true, hasOrgId: false, hasDevinSessionsOrgId: true }), 'Personal access token'],
+  ])('shows a cached %s observation separately from org consumption and tracked budget', async (principal, summary, label) => {
+    overview = { ...(overview as Record<string, unknown>), status: status({ principal, selfIdentity: summary }), consumption: consumption() };
+    mount();
+    const section = await screen.findByRole('region', { name: 'Devin cached account observation' });
+    expect(within(section).getByText(new RegExp(`Cloud account: ${label} · captured`))).toBeInTheDocument();
+    expect(section.querySelector('time')?.getAttribute('datetime')).toBe('2026-01-01T00:00:00.000Z');
+    expect(section.textContent).toContain('Cached Devin API /self observation.');
+    expect(section.textContent).toContain('Max weekly allowance is not reported; subscription-only spending is unverified.');
+    expect(section.textContent).not.toMatch(/live|fresh|0%|org-x|Ashlr Verse/);
+    expect(screen.getByText('3.125 ACUs consumed')).toBeInTheDocument();
+    expect(screen.getByText('tracked budget')).toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual(['/api/verse/devin']);
+    expect(posts).toHaveLength(0);
+  });
+
+  it.each([
+    ['malformed', identity({ hasUserId: 'false' })],
+    ['future', identity({ observedAt: new Date(Date.now() + 86_400_000).toISOString() })],
+    ['foreign discriminator', identity({ principal: 'pat_user', hasServiceUserId: false, hasUserId: true, hasApiKeyId: true })],
+    ['raw private field', identity({ userId: 'private-user-do-not-render' })],
+  ])('renders an unknown account for %s optional metadata while preserving ordinary readiness', async (_name, summary) => {
+    overview = { ...(overview as Record<string, unknown>), status: status({ selfIdentity: summary }) };
+    mount();
+    const section = await screen.findByRole('region', { name: 'Devin cached account observation' });
+    expect(within(section).getByText('Cloud account: not reported')).toBeInTheDocument();
+    expect(section.querySelector('time')).toBeNull();
+    expect(screen.getByText('Connected')).toBeInTheDocument();
+    expect(screen.queryByText(/private-user-do-not-render/)).toBeNull();
+  });
+
+  it('accepts historical canonical captured times without an artificial age TTL', () => {
+    expect(devinSelfIdentityEvidence(identity(), Date.parse('2026-10-05T00:00:00.000Z'))).toEqual(identity());
+    expect(devinSelfIdentityEvidence(identity({ hasOrgId: false }))).toEqual(identity({ hasOrgId: false }));
+  });
+
+  it.each([
+    undefined, null, [], {},
+    identity({ source: 'other' }), identity({ principal: 'devin_brain' }),
+    identity({ observedAt: 'not-a-time' }), identity({ observedAt: '2026-01-01' }),
+    identity({ observedAt: '2026-01-01T00:00:00Z' }), identity({ observedAt: '2026-02-30T00:00:00.000Z' }),
+    identity({ observedAt: '2099-01-01T00:00:00.000Z' }),
+    identity({ hasServiceUserId: false }), identity({ hasUserId: true }),
+    identity({ hasApiKeyId: true }), identity({ hasDevinSessionsOrgId: true }),
+    identity({ hasOrgId: 1 }), identity({ principal: 'pat_user' }),
+    identity({ hasOrgId: undefined }), identity({ orgId: 'private-org' }),
+  ])('refuses malformed optional identity evidence %# without guessing account or funding', summary => {
+    expect(devinSelfIdentityEvidence(summary)).toBeNull();
   });
 
   it('reads organization consumption through the guarded token POST and confirms cached readback', async () => {

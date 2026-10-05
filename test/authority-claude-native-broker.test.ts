@@ -6,9 +6,10 @@ import { dirname, join } from 'node:path';
 import { resolveClaudeBrokerToolInvocation } from '../src/core/sandbox/claude-broker-tool-invocation.js';
 import { tmpdir } from 'node:os';
 import { defaultConfig } from '../src/core/config.js';
-import { claudeBrokerCommand, claudeBrokerNativeEnvironment, startClaudeNativeBroker } from '../src/core/sandbox/claude-native-broker.js';
+import { claudeBrokerCommand, claudeBrokerNativeEnvironment, formatClaudeBrokerToolResult, startClaudeNativeBroker } from '../src/core/sandbox/claude-native-broker.js';
 import type { ClaudeBrokerHandle, ClaudeBrokerObservation, ClaudeBrokerScope } from '../src/core/sandbox/claude-native-broker.js';
-import { claudeBrokerToolExecutor } from '../src/core/sandbox/claude-broker-executor.js';
+import { claudeBrokerToolExecutor, serializeClaudeToolMutations } from '../src/core/sandbox/claude-broker-executor.js';
+import { executeClaudeToolRequest } from '../src/core/sandbox/claude-broker-tool-worker.js';
 import { setKernelEvidenceWatcherForTest } from '../src/core/sandbox/autonomous-run.js';
 import type { AutonomousSpawnFinish } from '../src/core/sandbox/autonomous-run.js';
 
@@ -66,7 +67,7 @@ describe('native Claude tool broker', () => {
     const notification = await fetch(handle.url, { method: 'POST', headers: { Authorization: `Bearer ${handle.capability}` },
       body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) });
     expect(notification.status).toBe(202);
-    expect((await (await call(handle, 'tools/list', {})).json()).result.tools.map((tool: { name: string }) => tool.name)).toEqual(['read_file', 'write_file']);
+    expect((await (await call(handle, 'tools/list', {})).json()).result.tools.map((tool: { name: string }) => tool.name)).toEqual(['read_file', 'write_file', 'list_files', 'search', 'edit_file', 'create_directory']);
     expect((await (await call(handle)).json()).result.content[0].text).toBe('fixture content'); expect(execute).toHaveBeenCalledOnce();
   });
   it.each([
@@ -100,7 +101,7 @@ describe('native Claude tool broker', () => {
     const transport=new StreamableHTTPClientTransport(new URL(handle.url),{requestInit:{headers:{Authorization:`Bearer ${handle.capability}`}}});
     try {
       await client.connect(transport);await client.ping();
-      expect((await client.listTools()).tools.map(tool=>tool.name)).toEqual(['read_file','write_file']);
+      expect((await client.listTools()).tools.map(tool=>tool.name)).toEqual(['read_file','write_file','list_files','search','edit_file','create_directory']);
       expect((await fetch(handle.url,{headers:{Authorization:`Bearer ${handle.capability}`}})).status).toBe(405);
       expect((await fetch(handle.url)).status).toBe(403);
       expect((await call(handle,'ping',{}, {'mcp-protocol-version':'2025-11-25'})).status).toBe(400);
@@ -207,5 +208,67 @@ describe('native Claude tool broker', () => {
     expect(evidence.length).toBeGreaterThan(0);
     // The injected watch qualifies this seam, not live kernel logging.
     expect(evidence.every(value => value.violationsKnown === true)).toBe(true);
+  });
+});
+
+
+describe('navigation broker contract and run-owned mutation order', () => {
+  it('uses actual loopback MCP for directory, write, paged read, search and exact edit with private filesystem bytes', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-navigation-mcp-'))); dirs.push(root);
+    const execute = vi.fn(async call => executeClaudeToolRequest({ schemaVersion: 1, root, call }));
+    const handle = await startClaudeNativeBroker({ scope: SCOPE, now: () => TIME, observation: () => OBSERVED, admission: () => true, execute }); handles.push(handle);
+    const invoke = async (name: string, args: object) => (await (await call(handle, 'tools/call', { name, arguments: args })).json()).result;
+    expect(JSON.parse((await invoke('create_directory', { path: 'src' })).content[0].text).created).toBe(true);
+    expect((await invoke('write_file', { path: 'src/a.ts', text: 'first\nsecond' })).content[0].text).toBe('Written');
+    const read = JSON.parse((await invoke('read_file', { path: 'src/a.ts', offset: 1, limit: 1 })).content[0].text);
+    expect(read.content).toBe('2\tsecond\n');
+    const search = JSON.parse((await invoke('search', { path: '.', query: 'second' })).content[0].text);
+    expect(search.matches).toEqual([{ path: 'src/a.ts', line: 2, text: 'second' }]);
+    expect(JSON.parse((await invoke('edit_file', { path: 'src/a.ts', expectedSha256: read.sha256, oldText: 'second', newText: 'updated' })).content[0].text).edited).toBe(true);
+    expect(readFileSync(join(root, 'src/a.ts'), 'utf8')).toBe('first\nupdated');
+    expect(JSON.parse((await invoke('list_files', { path: 'src' })).content[0].text).files).toEqual([{ name: 'a.ts', kind: 'file' }]);
+    expect((await invoke('edit_file', { path: 'src/a.ts', expectedSha256: read.sha256, oldText: 'updated', newText: 'lost' })).isError).toBe(true);
+  });
+  it('refuses malformed new tool parameters before calling the executor', async () => {
+    const { handle, execute } = await setup();
+    for (const params of [{ name: 'search', arguments: { path: '.', query: 'x', offset: 1 } },
+      { name: 'list_files', arguments: { path: '.', limit: -1 } }, { name: 'create_directory', arguments: { path: 'src', text: 'extra' } }]) {
+      expect((await (await call(handle, 'tools/call', params)).json()).error.code).toBe(-32602);
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+  it('keeps oversized structured results valid JSON and legacy Unicode text byte bounded', () => {
+    const text = formatClaudeBrokerToolResult({ name: 'search', path: '.', query: 'π' }, JSON.stringify({ matches: ['π'.repeat(20000)] }));
+    expect(JSON.parse(text)).toMatchObject({ truncated: true }); expect(Buffer.byteLength(text)).toBeLessThanOrEqual(32768);
+    const legacy = formatClaudeBrokerToolResult({ name: 'read_file', path: 'a' }, 'π'.repeat(20000));
+    expect(Buffer.byteLength(legacy)).toBeLessThanOrEqual(32768); expect(legacy).toContain('[Tool result truncated]'); expect(legacy).not.toContain('�');
+  });
+  it('serializes overlapping own mutations, lets reads proceed and refuses a queued mutation after Stop', async () => {
+    let release!: () => void; const blocked = new Promise<void>(resolve => { release = resolve; });
+    const calls: string[] = []; let admitted = true;
+    const execute = serializeClaudeToolMutations(async (call, signal, admission) => {
+      if (signal.aborted || !admission()) throw new Error('held');
+      calls.push(call.path); if (call.path === 'first') await blocked; return 'ok';
+    });
+    const signal = new AbortController().signal;
+    const first = execute({ name: 'write_file', path: 'first', text: '' }, signal, () => admitted);
+    await Promise.resolve(); await Promise.resolve();
+    const next = execute({ name: 'create_directory', path: 'second' }, signal, () => admitted);
+    expect(await execute({ name: 'read_file', path: 'read' }, signal, () => admitted)).toBe('ok');
+    expect(calls).toEqual(['first', 'read']); admitted = false; release(); await first;
+    await expect(next).rejects.toThrow('held'); expect(calls).toEqual(['first', 'read']);
+  });
+  it('settles an aborted queued mutation without releasing earlier work or poisoning later mutations', async () => {
+    let release!: () => void; const blocked = new Promise<void>(resolve => { release = resolve; }); const calls: string[] = [];
+    const execute = serializeClaudeToolMutations(async (call, signal, admission) => {
+      if (signal.aborted || !admission()) throw new Error('held'); calls.push(call.path); if (call.path === 'first') await blocked; return 'ok';
+    });
+    const ordinary = new AbortController().signal; const abort = new AbortController();
+    const first = execute({ name: 'write_file', path: 'first', text: '' }, ordinary, () => true);
+    const second = execute({ name: 'write_file', path: 'aborted', text: '' }, abort.signal, () => true);
+    const refusal = expect(second).rejects.toThrow(); abort.abort(); await refusal;
+    const third = execute({ name: 'create_directory', path: 'last' }, ordinary, () => true);
+    await Promise.resolve(); expect(calls).toEqual(['first']); release(); await first; await third;
+    expect(calls).toEqual(['first', 'last']);
   });
 });

@@ -1,12 +1,14 @@
 /** Explicit native metadata collection. This monitor never enrolls or dispatches workers. */
+import type { VerseAccountReadingRefresh } from '../verse/types.js';
 import { isAbsolute } from 'node:path';
 import type { VerifyProcessGroupLifecycle } from '../run/verify-commands.js';
 import { inspectPrivateDirectory } from '../universe/artifacts.js';
+import { normalizeCodexCredits } from './codex-credits.js';
 import { probeCodexResourceAccount } from './codex-account-probe.js';
 import { probeClaudeAccountUsage } from './claude-account-usage.js';
 import { probeGrokAccount } from './grok-account-probe.js';
 import type { ResourceAccountConnection, ResourceConnectionsSnapshot } from './connection-types.js';
-import type { NativeMetadataCoordinator } from './metadata-coordinator.js';
+import { createNativeMetadataCoordinator, type NativeMetadataCoordinator } from './metadata-coordinator.js';
 import { RESOURCE_POOL_MANIFEST_MAX_BYTES } from './pool-policy.js';
 import type { ResourceReadingCache } from './reading-cache.js';
 
@@ -18,6 +20,8 @@ export interface ResourceConnectionConfig {
 }
 export interface ResourceConnectionMonitor {
   snapshot(): ResourceConnectionsSnapshot;
+  /** Same owned metadata path; coalesces a scheduled check and never bypasses cadence. */
+  refreshAccount?(id: string): Promise<VerseAccountReadingRefresh>;
   /** Pure publication counter; includes settled failures, never reads identity/history. */
   readingRevision?(): number;
   /** Pure lifecycle read; no historical enrichment, metadata IO or provider work. */
@@ -84,10 +88,14 @@ export function expireConnectionRow(row: ResourceAccountConnection, nowMs: numbe
 
 export function createResourceConnectionMonitor(options: { config: ResourceConnectionConfig; cwd: string;
   signal?: AbortSignal; assertOwnership: () => void; coordinator?: NativeMetadataCoordinator;
-  readingCache?: ResourceReadingCache }): ResourceConnectionMonitor {
+  readingCache?: ResourceReadingCache;
+  /** Rechecked at queued contact and publication; never supplied by the browser. */
+  accountCurrent?: (account: ResourceConnectionConfig['accounts'][number]) => boolean }): ResourceConnectionMonitor {
   const config = validateResourceConnectionConfig(options.config); inspectPrivateDirectory(options.cwd);
   const signal = options.coordinator ? AbortSignal.any([options.coordinator.signal, ...(options.signal ? [options.signal] : [])]) : options.signal;
-  const abort = new AbortController(); let closing = false; let uncertain = false; let refreshing = false;
+  const abort = new AbortController();
+  const coordinator = options.coordinator ?? createNativeMetadataCoordinator({ signal: abort.signal });
+  let closing = false; let uncertain = false; let refreshing = false;
   let timer: ReturnType<typeof setTimeout> | undefined; let pending: Promise<void> = Promise.resolve();
   const hints = new Map(config.accounts.filter((row) => row.expectedAccountHint).map((row) => [row.id, row.expectedAccountHint!]));
   const blank = (row: ResourceConnectionConfig['accounts'][number]): ResourceAccountConnection => ({ id: row.id, label: row.label,
@@ -95,6 +103,13 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
     observedAt: null, expiresAt: null, windows: [], accountHint: null, codexCredits: null, reason: 'connection-not-checked', onDemandEnabled: null, executionSupported: row.provider !== 'grok' });
   let rows = config.accounts.map(blank);
   let readingRevision = 0;
+  const inFlight = new Map<number, Promise<void>>();
+  const lastAttempt = new Map<number, number>();
+  const current = (account: ResourceConnectionConfig['accounts'][number]): boolean => {
+    try { return options.accountCurrent === undefined || options.accountCurrent(account) === true; } catch { return false; }
+  };
+  const accountChanged = { status: 'failed' as const, reason: 'connection-account-changed' };
+
   // Only a successful, account-checked Codex probe may supply a retained
   // window. A failed check can display that prior reading until its original
   // expiry, but it cannot renew the reading or attest current authentication.
@@ -119,44 +134,47 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
     try { options.assertOwnership(); }
     catch { uncertain = true; options.coordinator?.abort(); abort.abort(); throw new Error('Connection ownership unavailable'); }
   }
-  async function native<T extends { status: string }>(operation: (processGroupLifecycle?: VerifyProcessGroupLifecycle) => Promise<T>): Promise<T> {
+  async function native<T extends { status: string; reason: string }>(account: ResourceConnectionConfig['accounts'][number], index: number, operation: (processGroupLifecycle?: VerifyProcessGroupLifecycle) => Promise<T>): Promise<T | typeof accountChanged> {
     const collect = async (processGroupLifecycle?: VerifyProcessGroupLifecycle) => {
-      if (options.coordinator) owns();
+      owns();
       if (abort.signal.aborted) throw new Error('Metadata collection stopped');
+      if (!current(account)) return accountChanged;
       const unsettled = (): void => {
         uncertain = true;
         // Cancel the other collector and its queued calls before releasing the permit.
         options.coordinator?.abort(); abort.abort();
       };
       try {
+        lastAttempt.set(index, Date.now());
         const result = await operation(processGroupLifecycle);
         const status = record(result) ? Object.getOwnPropertyDescriptor(result, 'status') : undefined;
         if (!status || !('value' in status) || typeof status.value !== 'string' ||
           !['observed', 'failed', 'timed-out', 'cancelled', 'uncertain'].includes(status.value)) {
           throw new Error('Native connection settlement unavailable');
         }
-        if (status.value === 'uncertain') unsettled();
-        return result;
+        if (status.value === 'uncertain') { unsettled(); return result; }
+        return current(account) ? result : accountChanged;
       } catch {
         // An invocation that throws or rejects has provided no cleanup witness.
         unsettled();
         throw new Error('Native connection settlement unavailable');
       }
     };
-    return options.coordinator ? options.coordinator.run(collect, (value) => value.status !== 'uncertain') : collect();
+    return coordinator.run(collect, (value) => value.status !== 'uncertain');
   }
   async function sample(account: ResourceConnectionConfig['accounts'][number], index: number): Promise<void> {
     let row = blank(account); row.state = 'unavailable'; row.health = 'unavailable'; row.reason = 'connection-probe-unavailable';
     const beforeEpoch = options.readingCache?.captureEpoch(account) ?? null;
     let checkedHint: string | null = null;
     try {
-      owns(); if (abort.signal.aborted) return;
+      if (abort.signal.aborted) return;
+      if (!current(account)) throw new Error(accountChanged.reason);
       if (account.provider === 'codex') {
         // This ephemeral definition supplies the existing probe's validation
         // contract only. No pool files, ledger, task or model selection is made.
         const pool = { schemaVersion: 1 as const, id: 'connection-metadata', workers: [{ id: account.id, provider: 'codex' as const,
           model: 'metadata-only', maxConcurrent: 1, reservePercent: 0, maxTasksPerWindow: 1, taskWindowMs: 60_000, priority: 1 }] };
-        const result = await native((processGroupLifecycle) => probeCodexResourceAccount({ pool, bindings: [{ workerId: account.id, capacityKey: account.id,
+        const result = await native(account, index, (processGroupLifecycle) => probeCodexResourceAccount({ pool, bindings: [{ workerId: account.id, capacityKey: account.id,
           kind: 'native-cli', command: account.command }], workerId: account.id, bucketIds: ['codex'], cwd: options.cwd,
           timeoutMs: 10_000, signal: abort.signal, ...(processGroupLifecycle ? { processGroupLifecycle } : {}),
           ...(hints.has(account.id) ? { expectedAccountHint: hints.get(account.id)! } : {}) }));
@@ -180,7 +198,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
           options.readingCache?.invalidate(account);
         }
       } else if (account.provider === 'claude') {
-        const result = await native((processGroupLifecycle) => probeClaudeAccountUsage({ command: account.command, cwd: options.cwd,
+        const result = await native(account, index, (processGroupLifecycle) => probeClaudeAccountUsage({ command: account.command, cwd: options.cwd,
           timeoutMs: 20_000, signal: abort.signal, ...(processGroupLifecycle ? { processGroupLifecycle } : {}) }));
         if (result.status === 'uncertain') uncertain = true;
         row.reason = result.reason;
@@ -204,7 +222,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
           options.readingCache?.invalidate(account);
         }
       } else {
-        const result = await native((processGroupLifecycle) => probeGrokAccount({ command: account.command, cwd: options.cwd, timeoutMs: 15_000, signal: abort.signal,
+        const result = await native(account, index, (processGroupLifecycle) => probeGrokAccount({ command: account.command, cwd: options.cwd, timeoutMs: 15_000, signal: abort.signal,
           ...(processGroupLifecycle ? { processGroupLifecycle } : {}),
           ...(hints.has(account.id) ? { expectedAccountHint: hints.get(account.id)! } : {}) }));
         if (result.status === 'uncertain') uncertain = true;
@@ -219,13 +237,61 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
         }
       }
       owns();
-    } catch { row = { ...blank(account), state: 'unavailable', health: 'unavailable', reason: 'connection-probe-unavailable' }; }
+    } catch { row = { ...blank(account), state: 'unavailable', health: 'unavailable',
+      reason: current(account) ? 'connection-probe-unavailable' : accountChanged.reason }; }
+    if (!current(account)) {
+      row = { ...blank(account), state: 'unavailable', health: 'unavailable', reason: accountChanged.reason };
+      options.readingCache?.invalidate(account);
+    }
     if (uncertain) abort.abort();
     if (!closing && !abort.signal.aborted) {
       rows[index] = row;
       readingRevision += 1;
       if (checkedHint) options.readingCache?.remember(account, row, checkedHint, beforeEpoch);
     }
+  }
+  // Both automatic and operator checks use this map. It owns every queued and
+  // active promise, including calls made outside the regular cycle.
+  function attempt(index: number): { pending: Promise<void>; cached: boolean; joined: boolean } {
+    const existing = inFlight.get(index);
+    if (existing) return { pending: existing, cached: false, joined: true };
+    const last = lastAttempt.get(index);
+    if (last !== undefined && Date.now() < last + config.intervalMs) {
+      return { pending: Promise.resolve(), cached: true, joined: false };
+    }
+    const pending = Promise.resolve().then(() => sample(config.accounts[index]!, index))
+      .finally(() => { if (inFlight.get(index) === pending) inFlight.delete(index); });
+    inFlight.set(index, pending);
+    return { pending, cached: false, joined: false };
+  }
+  function reply(index: number, state: VerseAccountReadingRefresh['state'], joined = false): VerseAccountReadingRefresh {
+    const now = Date.now();
+    const row = index < 0 ? null : expireConnectionRow(rows[index]!, now);
+    const last = lastAttempt.get(index);
+    const usable = row?.state === 'observed' && row.authentication === 'signed-in' && row.health === 'reachable' &&
+      row.observedAt !== null && Date.parse(row.observedAt) <= now && row.expiresAt !== null && Date.parse(row.expiresAt) > now &&
+      (row.windows.some(window => typeof window.usedPercent === 'number' && Number.isFinite(window.usedPercent) && window.usedPercent >= 0 && window.usedPercent <= 100) || normalizeCodexCredits(row.codexCredits) !== null);
+    return { seatId: index < 0 ? '' : config.accounts[index]!.id, state, joined,
+      reading: usable ? 'current' : 'unknown', reason: row?.reason ?? 'connection-account-not-configured',
+      observedAt: usable ? row!.observedAt : null, expiresAt: usable ? row!.expiresAt : null,
+      nextCheckAt: last === undefined ? null : new Date(last + config.intervalMs).toISOString() };
+  }
+  async function refreshAccount(id: string): Promise<VerseAccountReadingRefresh> {
+    const index = config.accounts.findIndex(account => account.id === id);
+    if (index < 0) return { ...reply(-1, 'held'), seatId: id };
+    if (closing || abort.signal.aborted || !current(config.accounts[index]!)) {
+      return { ...reply(index, 'held'), reading: 'unknown', observedAt: null, expiresAt: null,
+        reason: !current(config.accounts[index]!) ? accountChanged.reason : 'connection-monitor-stopped' };
+    }
+    owns();
+    const work = attempt(index);
+    await work.pending;
+    if (closing || abort.signal.aborted || !current(config.accounts[index]!)) {
+      return { ...reply(index, 'held'), reading: 'unknown', observedAt: null, expiresAt: null,
+        reason: !current(config.accounts[index]!) ? accountChanged.reason : 'connection-monitor-stopped' };
+    }
+    owns();
+    return reply(index, work.cached ? 'cached' : 'completed', work.joined);
   }
   async function cycle(): Promise<void> {
     const startedAt = Date.now();
@@ -238,7 +304,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
       const worker = async (): Promise<void> => {
         while (!abort.signal.aborted && next < config.accounts.length) {
           const index = next++;
-          await sample(config.accounts[index]!, index);
+          await attempt(index).pending;
         }
       };
       await Promise.all(Array.from({ length: Math.min(2, config.accounts.length) }, worker));
@@ -259,17 +325,19 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
   if (!abort.signal.aborted) pending = cycle();
   return {
     isStopped: () => abort.signal.aborted,
+    refreshAccount,
     readingRevision: () => readingRevision,
     snapshot: () => {
       const nowMs = Date.now();
-      return { sampledAt: new Date(nowMs).toISOString(), refreshing,
+      return { sampledAt: new Date(nowMs).toISOString(), refreshing: refreshing || inFlight.size > 0,
         accounts: structuredClone(rows.map((row, index) => {
           const current = expireConnectionRow(row, nowMs);
           const historical = current.observedAt === null ? options.readingCache?.lastKnown(config.accounts[index]!) : null;
           return historical ? { ...current, lastKnownUsage: historical } : current;
         })) };
     },
-    async close() { closing = true; stopped(); signal?.removeEventListener('abort', stopped); await pending;
+    async close() { closing = true; stopped(); signal?.removeEventListener('abort', stopped); await pending; await Promise.allSettled([...inFlight.values()]);
+      if (!options.coordinator) coordinator.dispose();
       rows = rows.map((row) => ({ ...row, health: 'unknown' }));
       if (uncertain) throw new Error('Native connection process cleanup uncertain'); },
   };

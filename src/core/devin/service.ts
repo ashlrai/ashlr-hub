@@ -292,6 +292,15 @@ export async function devinStatus(deps: DevinServiceDeps = {}, tasks: readonly D
     principal: connection?.principal ?? null,
     principalName: connection?.principalName ?? null,
     keyStore: connection?.keyStore ?? null,
+    ...(connection?.selfIdentity ? { selfIdentity: {
+      source: connection.selfIdentity.source, observedAt: connection.selfIdentity.observedAt,
+      principal: connection.selfIdentity.principal,
+      hasServiceUserId: connection.selfIdentity.serviceUserId !== null,
+      hasUserId: connection.selfIdentity.userId !== null,
+      hasApiKeyId: connection.selfIdentity.apiKeyId !== null,
+      hasOrgId: connection.selfIdentity.orgId !== null,
+      hasDevinSessionsOrgId: connection.selfIdentity.devinSessionsOrgId !== null,
+    } } : {}),
     chatLine: state === 'ready' ? 'Chat: ready — pick “Devin (cloud)” in New chat' : `Chat: off — ${devinChatVerdict(state).detail}`,
     fleetLine: devinFleetLine(fleet),
     fleetReady: fleet.ready && state === 'ready',
@@ -333,7 +342,8 @@ export async function connectDevin(input: { key: string; orgId?: string | null }
   return consumptionConnectionTransition(async () => {
     await storeDevinKey(key, deps.keyStore);
     const now = (deps.now ?? (() => new Date()))().toISOString();
-    writeDevinConnection({ orgId, principal: self.principal, principalName: self.name, keyStore: 'keychain', connectedAt: now });
+    writeDevinConnection({ orgId, principal: self.principal, principalName: self.name, keyStore: 'keychain', connectedAt: now,
+      ...(self.identity ? { selfIdentity: { ...self.identity, source: 'devin-v3-self', observedAt: now } } : {}) });
     keyPresence = null;
     noteApiSuccess();
     return { orgId, principal: self.principal, principalName: self.name };

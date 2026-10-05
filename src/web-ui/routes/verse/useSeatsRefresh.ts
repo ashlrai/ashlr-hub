@@ -52,13 +52,13 @@
  *    and is nonetheless correct the instant it is looked at.
  */
 import { useEffect } from 'react';
-import { getAuthSnapshot, subscribeAuth } from '../../data/auth-store.js';
+import { getAuthSnapshot, getMutationToken, subscribeAuth } from '../../data/auth-store.js';
 import type { VerseBootstrap } from '../../data/api-types.js';
-import type { VerseSeatsResponse } from '../../../core/verse/types.js';
+import type { VerseAccountReadingRefresh, VerseSeatsResponse } from '../../../core/verse/types.js';
 import { getQuerySnapshot, refetchQuery, runQuery } from '../../data/cache.js';
 import { apiGet } from '../../data/client.js';
 import { oneShotFetcher } from './health/health-queries.js';
-import { VERSE_BOOTSTRAP_KEY, verseBootstrapQuery } from './verse-queries.js';
+import { VERSE_BOOTSTRAP_KEY, verseBootstrapQuery, VerseMutationLockedError } from './verse-queries.js';
 import { onVerseAccountReadingsChanged } from './verse-list-channel.js';
 
 /** Steady-state cached reads follow the collector's cadence. */
@@ -96,6 +96,23 @@ function readSeats(force: boolean): Promise<void> {
 /** Polls coalesce; a person's refresh always supersedes an older read. */
 export function pollSeats(): Promise<void> { return readSeats(false); }
 export function refreshSeats(): Promise<void> { return readSeats(true); }
+
+/** Keep selected mutation logic out of the chat's shared polling module. */
+export async function refreshAccountReading(seatId: string, isCurrent: () => boolean = () => true): Promise<VerseAccountReadingRefresh> {
+  const token = getMutationToken();
+  if (!token) throw new VerseMutationLockedError();
+  const phase = getAuthSnapshot().phase;
+  let lost = false;
+  // Loading the secondary chunk must not reopen authority lost in the meantime.
+  const unsubscribe = subscribeAuth(() => {
+    if (getMutationToken() !== token || getAuthSnapshot().phase !== phase) lost = true;
+  });
+  try {
+    const selected = await import('./resources/account-reading-refresh.js');
+    if (lost || !isCurrent()) throw new Error('Usage confirmation interrupted. Refresh before trying again.');
+    return await selected.refreshAccountReading(seatId, () => !lost && isCurrent());
+  } finally { unsubscribe(); }
+}
 
 // One visible-page scheduler, shared by the rail, chat, drawer and selectors.
 // Initial collector checks are a pending signal; missing quota never is.
