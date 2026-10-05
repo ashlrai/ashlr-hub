@@ -6894,7 +6894,11 @@ export async function tick(
           // router, and the fabric gateway cannot drift apart.
           const maxPct = resolveSubscriptionMaxPercent(liveCfg);
           // V3.10 (U5) seam: hooks.seatAllows (default: subscriptionAllows, same arguments).
-          const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct, ...(standingTick ? {itemId:item.id,model:selectedModel ?? null} : {}), ...(standingTick && fleetLaneOf(backend, routingCfg) === 'grok-cli' && routed.seatDecision?.seatId ? { seatId: routed.seatDecision.seatId } : {}) });
+          const routedSeatId = routed.seatDecision?.seatId;
+          const routedLane = fleetLaneOf(backend, routingCfg);
+          const boundAccount = standingTick && routedSeatId && (routedLane === 'grok-cli' ||
+            routedLane === 'claude-cli' && engineOfSeatId(routedSeatId) === 'claude');
+          const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct, ...(standingTick ? {itemId:item.id,model:selectedModel ?? null} : {}), ...(boundAccount ? { seatId: routedSeatId } : {}) });
           if (!subCheck.allowed) {
             // M334: shadow the BLOCKED legacy decision — a gateway that would
             // have dispatched here is the safety-relevant divergence class.
@@ -7120,7 +7124,7 @@ export async function tick(
       if (standingTick || isSubscriptionEngine(backend)) {
         const maxPct = resolveSubscriptionMaxPercent(routingCfg);
         // V3.10 (U5) seam: hooks.seatAllows (default: subscriptionAllows, same arguments).
-        const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct, ...(standingTick ? {itemId:item.id,model:selectedModel ?? null} : {}), ...(fleetLaneOf(backend, routingCfg) === 'grok-cli' && standingSeatId ? { seatId: standingSeatId } : {}) });
+        const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct, ...(standingTick ? {itemId:item.id,model:selectedModel ?? null} : {}), ...(['grok-cli', 'claude-cli'].includes(fleetLaneOf(backend, routingCfg) ?? '') && standingSeatId ? { seatId: standingSeatId } : {}) });
         if (!subCheck.allowed) {
           audit({
             action: 'daemon:tick',
