@@ -7,6 +7,7 @@ import {
   getDesktopState,
   isDesktopShell,
   isDesktopState,
+  refreshDesktopState,
   reportThemeToShell,
   resetDesktopStateForTests,
   resolveTheme,
@@ -22,6 +23,7 @@ import {
 type Bridge = {
   reportTheme?: (theme: 'light' | 'dark') => void;
   getState?: () => unknown;
+  refreshState?: () => boolean;
   setPreference?: (name: string, value: boolean) => boolean;
 };
 type ShellWindow = {
@@ -345,5 +347,16 @@ describe('the global hotkey agrees across native and the catalog', () => {
     expect(summon.native?.kind).toBe('global-hotkey');
     expect(constant('SUMMON_ACCELERATOR')).toBe(summon.native!.accelerator);
     expect(constant('SUMMON_DISPLAY')).toBe(formatChord(summon.keys[0]!, 'mac'));
+  });
+});
+
+
+describe('native host observation refresh', () => {
+  it('requests only a refresh and remains inert outside the desktop bridge', () => {
+    expect(refreshDesktopState()).toBe(false);
+    const refreshState = vi.fn(() => true);
+    win.__ASHLR_DESKTOP__ = { refreshState };
+    expect(refreshDesktopState()).toBe(true);
+    expect(refreshState).toHaveBeenCalledWith();
   });
 });

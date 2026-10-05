@@ -87,6 +87,7 @@ import {
 } from './verse-ui-store.js';
 import styles from './VerseApp.module.css';
 import { usedPercentText } from './percent-text.js';
+import { PowerStatus } from './power/PowerStatus.js';
 import { WORK_MODES, workModeForSection } from './shell/work-mode.js';
 
 export { SECTION_MODULES };
@@ -586,6 +587,7 @@ export function VerseApp() {
             if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setTrayOpen(false); setReviewOpen(true); }
             if (event.key === 'Escape') { event.preventDefault(); setReviewOpen(false); }
           }}>Review</button>
+        <PowerStatus />
         </div>
         {ui.mounted.map((id) => (
           <SurfaceHost key={id} id={id} active={id === ui.section} />

@@ -190,12 +190,17 @@
     // The current desktop state, or null before native has sent one. A copy:
     // page code cannot edit what native believes.
     getState: copyState,
-    // Ask native to change a preference. Only the two known names, booleans
+    // Refresh only: native reads authenticated activity; the page supplies no counts.
+    refreshState: function () {
+      invoke('plugin:event|emit', { event: 'shell-state-request', payload: null })
+      return true
+    },
+    // Ask native to change a preference. Only known names, booleans
     // only; native re-validates and answers with an `ashlr:desktop-state`
     // event carrying what actually happened (a hotkey another app holds comes
     // back enabled-but-unregistered, with a reason).
     setPreference: function (name, value) {
-      if (name !== 'globalHotkey' && name !== 'notifications') return false
+      if (name !== 'globalHotkey' && name !== 'notifications' && name !== 'automaticAwake') return false
       if (typeof value !== 'boolean') return false
       var patch = {}
       patch[name] = value

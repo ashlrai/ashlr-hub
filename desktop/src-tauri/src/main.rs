@@ -73,6 +73,8 @@ mod notify;
 mod shell_contract;
 mod sidecar_guard;
 mod sidecar_supervisor;
+mod power;
+mod power_activity;
 mod tray;
 mod voice;
 mod voice_hotkey;
@@ -183,6 +185,8 @@ struct AppState {
     poll_now: AtomicBool,
     /// A Stop confirmation is on screen; a second click does not stack another.
     stopping: AtomicBool,
+    power: Mutex<Option<power::PowerManager<power::NativeInhibitor>>>,
+    sleep_settings: Mutex<power::SleepSettings>,
 }
 
 /// A read token held for the health poll. Deliberately no `Debug`.
@@ -1551,6 +1555,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         prefs: Mutex::new(prefs),
         ..Default::default()
     });
+    let mut power_manager = power::PowerManager::new(power::NativeInhibitor::default());
+    power_manager.set_automatic(prefs.automatic_awake, Instant::now());
+    *lock(&app.state::<AppState>().power) = Some(power_manager);
     app.manage(app_menu::ZoomLevel::default());
     app.manage(browser_pane::BrowserPanes::default());
     // Dictation (voice/): models and the lexicon cache live in the app-data
@@ -1661,7 +1668,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
     {
         let handle = handle.clone();
-        app.listen(desktop_prefs::STATE_REQUEST_EVENT, move |_| push_desktop_state(&handle));
+        app.listen(desktop_prefs::STATE_REQUEST_EVENT, move |_| {
+            if let Some(state) = handle.try_state::<AppState>() {
+                state.poll_now.store(true, Ordering::SeqCst);
+            }
+            push_desktop_state(&handle);
+        });
     }
     // ── the integrated browser pane (shell contract v1, browser_pane.rs) ─────
     // Parsed strictly here, then handled in order on the pane's own worker
@@ -2083,21 +2095,40 @@ fn start_activity_watch(handle: AppHandle) {
         let mut route_missing = false;
         let mut running = 0usize;
         let mut last_error: Option<String> = None;
+        let mut settings_at: Option<Instant> = None;
         loop {
             let shown = window_presence(&handle).is_shown();
-            let wait = activity_watch::next_interval(shown, running, route_missing);
+            let automatic = handle.try_state::<AppState>()
+                .is_some_and(|s| lock(&s.prefs).automatic_awake);
+            let wait = if automatic {
+                power::POLL_INTERVAL
+            } else {
+                activity_watch::next_interval(shown, running, route_missing)
+            };
             if !sleep_until_poll(&handle, wait) {
                 return;
             }
             let Some(state) = handle.try_state::<AppState>() else {
                 return;
             };
+            if settings_at.map_or(true, |at| at.elapsed() >= Duration::from_secs(30)) {
+                *lock(&state.sleep_settings) = power::sleep_settings();
+                settings_at = Some(Instant::now());
+            }
             let token = lock(&state.read_token).as_ref().map(|t| t.0.clone());
             let can_stop = lock(&state.mutation_token).is_some();
+            if let Some(manager) = lock(&state.power).as_mut() {
+                manager.reconcile(Instant::now());
+            }
+            push_desktop_state(&handle);
             let Some(token) = token else {
                 // No server of ours (restarting, or an adopted one): what the
                 // tray last showed is no longer known to be true.
                 running = 0;
+                if let Some(manager) = lock(&state.power).as_mut() {
+                    manager.observe_sources(None, None, Instant::now());
+                }
+                push_desktop_state(&handle);
                 update_tray(&handle, tray::TrayModel::default());
                 continue;
             };
@@ -2108,10 +2139,20 @@ fn start_activity_watch(handle: AppHandle) {
                         .ok()
                         .and_then(|text| activity_watch::parse_activity(&text));
                     let Some(snapshot) = parsed else {
+                        if let Some(manager) = lock(&state.power).as_mut() {
+                            manager.observe_sources(None, None, Instant::now());
+                        }
+                        push_desktop_state(&handle);
                         log_once(&mut last_error, "malformed activity response");
                         continue;
                     };
                     last_error = None;
+                    if let Some(manager) = lock(&state.power).as_mut() {
+                        let (chats, fleet) = snapshot.local_work.as_ref()
+                            .map(|work| work.counts()).unwrap_or((None, None));
+                        manager.observe_sources(chats, fleet, Instant::now());
+                    }
+                    push_desktop_state(&handle);
                     let fold = watch.fold(snapshot);
                     running = fold.running.len();
                     for notice in &fold.notices {
@@ -2128,15 +2169,29 @@ fn start_activity_watch(handle: AppHandle) {
                     );
                 }
                 Err(health_watch::FetchError::Status(404)) => {
+                    if let Some(manager) = lock(&state.power).as_mut() {
+                        manager.observe_sources(None, None, Instant::now());
+                    }
+                    push_desktop_state(&handle);
                     // A sidecar built before C1's route: nothing to watch yet.
                     route_missing = true;
                     log_once(&mut last_error, "activity route not in this build");
                 }
                 Err(health_watch::FetchError::Status(400)) => {
+                    if let Some(manager) = lock(&state.power).as_mut() {
+                        manager.observe_sources(None, None, Instant::now());
+                    }
+                    push_desktop_state(&handle);
                     watch.reject_cursor();
                     log_once(&mut last_error, "activity cursor rejected — starting over");
                 }
-                Err(e) => log_once(&mut last_error, &format!("{e:?}")),
+                Err(e) => {
+                    if let Some(manager) = lock(&state.power).as_mut() {
+                        manager.observe_sources(None, None, Instant::now());
+                    }
+                    push_desktop_state(&handle);
+                    log_once(&mut last_error, &format!("{e:?}"));
+                }
             }
         }
     });
@@ -2157,6 +2212,7 @@ fn desktop_view(handle: &AppHandle) -> Option<desktop_prefs::DesktopStateView> {
     let prefs = *lock(&state.prefs);
     let status = lock(&state.hotkey).clone();
     let delivery = lock(&state.delivery).unwrap_or(notify::Delivery::Script);
+    let sleep = lock(&state.sleep_settings).clone();
     Some(desktop_prefs::DesktopStateView {
         hotkey: desktop_prefs::HotkeyView {
             enabled: prefs.global_hotkey,
@@ -2164,6 +2220,11 @@ fn desktop_view(handle: &AppHandle) -> Option<desktop_prefs::DesktopStateView> {
             accelerator: hotkey::SUMMON_DISPLAY.to_string(),
             error: if prefs.global_hotkey { status.error } else { None },
         },
+        power: lock(&state.power).as_ref().map(|p| serde_json::json!({
+            "automatic": p.automatic, "requested": p.held(), "localRuns": p.local_runs,
+            "checkedAt": p.checked_at, "platform": std::env::consts::OS, "error": p.error,
+            "powerSource": sleep.source, "idleSleepSeconds": sleep.idle_sleep_seconds, "settingsCheckedAt": sleep.checked_at,
+        })),
         notifications: desktop_prefs::NotificationsView {
             enabled: prefs.notifications,
             delivery: delivery.wire_name(),
@@ -2196,6 +2257,10 @@ fn apply_prefs_event(handle: &AppHandle, payload: &str) {
         *guard
     };
     desktop_prefs::store(&prefs);
+    if let Some(manager) = lock(&state.power).as_mut() {
+        manager.set_automatic(prefs.automatic_awake, Instant::now());
+    }
+    state.poll_now.store(true, Ordering::SeqCst);
     if patch.global_hotkey.is_some() {
         let status = hotkey::apply(handle, prefs.global_hotkey);
         *lock(&state.hotkey) = status;
@@ -2351,6 +2416,9 @@ fn main() {
                     }
                 }
                 flush_window_state(&state, true);
+                if let Some(manager) = lock(&state.power).as_mut() {
+                    manager.stop();
+                }
             }
             reap_sidecar(handle);
         }

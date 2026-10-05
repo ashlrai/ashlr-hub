@@ -541,6 +541,8 @@ export interface VerseActivityResponse {
   /** Opaque; send back as `?since=`. A different boot id resets completions (never an error). */
   cursor: string;
   generatedAt: string;
+  /** Host-owned chat orchestration. Null/absent means unknown; excludes remote cloud sessions. */
+  localWork?: { sourceVersion?: 1; localRuns: number | null; chatRuns?: number | null; fleetRuns?: number | null };
   running: VerseActivityRunning[];
   needsYou: NeedsYouItem[];
   /** Turn ends after `since`, oldest first (empty on the first poll: history is not "new"). */

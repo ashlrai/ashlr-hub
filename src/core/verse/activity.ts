@@ -59,6 +59,7 @@ import {
   type VerseMindBadge,
   type VerseTurnEnd,
 } from './workbench-types.js';
+import { localChatRuns, localWorkCounts } from './power-work.js';
 import { orderNeedsYouWithJev } from '../decide/needs-you.js';
 
 // ===========================================================================
@@ -130,6 +131,8 @@ export interface ActivityDeps {
    * Absent / null / throwing = `terminal: null` (unknown), never an error.
    */
   terminal?: (() => VerseActivityTerminal | null) | null;
+  /** Background-cached actual resident dispatch count, never ledger/goal counts. */
+  localFleetRuns?: () => number | null;
   now?: () => number;
 }
 
@@ -626,6 +629,7 @@ export function createActivityReader(deps: ActivityDeps, bootId: string = random
         response: {
           cursor: formatActivityCursor({ boot: bootId, mode, seq: head }),
           generatedAt: nowIso,
+          localWork: localWorkCounts(engine && sources.chats === 'ok' ? localChatRuns(sessions) : null, deps.localFleetRuns?.() ?? null),
           running,
           needsYou,
           completions,

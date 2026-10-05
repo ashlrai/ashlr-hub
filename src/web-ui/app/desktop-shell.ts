@@ -62,6 +62,7 @@ export function resolveTheme(preference: ThemePreference): 'light' | 'dark' {
 interface DesktopBridge {
   reportTheme?: (theme: 'light' | 'dark') => void;
   getState?: () => unknown;
+  refreshState?: () => boolean;
   setPreference?: (name: DesktopPreference, value: boolean) => boolean;
 }
 
@@ -127,13 +128,39 @@ export function subscribeShellCommands(handler: (command: ParsedDesktopCommand) 
 // ===========================================================================
 
 /** Preferences Settings ▸ Desktop may change (desktop_prefs.rs `PrefsPatch`). */
-export type DesktopPreference = 'globalHotkey' | 'notifications';
+export type DesktopPreference = 'globalHotkey' | 'notifications' | 'automaticAwake';
 
 /**
  * What the desktop app reports (desktop_prefs.rs `DesktopStateView`). Every
  * string is the shell's own copy — nothing from the server.
  */
+export interface PowerState {
+  automatic: boolean;
+  requested: boolean;
+  localRuns: number | null;
+  checkedAt: number | null;
+  platform: string;
+  powerSource: 'ac' | 'battery' | null;
+  idleSleepSeconds: number | null;
+  settingsCheckedAt: number | null;
+  error: string | null;
+}
+
+export function isPowerState(value: unknown): value is PowerState {
+  if (!isRecord(value)) return false;
+  return typeof value['automatic'] === 'boolean' && typeof value['requested'] === 'boolean' &&
+    (value['localRuns'] === null || (typeof value['localRuns'] === 'number' && Number.isSafeInteger(value['localRuns']) && value['localRuns'] >= 0)) &&
+    (value['checkedAt'] === null || (typeof value['checkedAt'] === 'number' && Number.isSafeInteger(value['checkedAt']) && value['checkedAt'] > 0)) &&
+    (value['settingsCheckedAt'] === null || (typeof value['settingsCheckedAt'] === 'number' && Number.isSafeInteger(value['settingsCheckedAt']) && value['settingsCheckedAt'] > 0)) &&
+    (value['powerSource'] === null || value['powerSource'] === 'ac' || value['powerSource'] === 'battery') &&
+    (value['idleSleepSeconds'] === null || (typeof value['idleSleepSeconds'] === 'number' && Number.isSafeInteger(value['idleSleepSeconds']) && value['idleSleepSeconds'] >= 0)) &&
+    typeof value['platform'] === 'string' && ['macos', 'windows', 'linux'].includes(value['platform']) &&
+    (value['error'] === null || (typeof value['error'] === 'string' && value['error'].length <= 300));
+}
+
 export interface DesktopState {
+  /** Absent on older shells; null means native power status unavailable. */
+  power?: PowerState | null;
   hotkey: {
     /** The operator's choice. */
     enabled: boolean;
@@ -173,6 +200,7 @@ export function isDesktopState(value: unknown): value is DesktopState {
     h['accelerator'].length > 0 &&
     h['accelerator'].length <= 32 &&
     (h['error'] === null || (typeof h['error'] === 'string' && h['error'].length <= 300)) &&
+    (value['power'] === undefined || value['power'] === null || isPowerState(value['power'])) &&
     typeof n['enabled'] === 'boolean' &&
     (n['delivery'] === 'native' || n['delivery'] === 'script')
   );
@@ -207,6 +235,11 @@ function ensureListening(): void {
   window.addEventListener(DESKTOP_STATE_EVENT, onDesktopState);
 }
 
+/** Request a fresh authenticated host observation without supplying any activity. */
+export function refreshDesktopState(): boolean {
+  try { return bridge()?.refreshState?.() === true; } catch { return false; }
+}
+
 /** The latest desktop state, or null in a browser (and before native answered). */
 export function getDesktopState(): DesktopState | null {
   ensureListening();
@@ -231,7 +264,7 @@ export function subscribeDesktopState(handler: (state: DesktopState) => void): (
  * from the value you asked for.
  */
 export function setDesktopPreference(name: DesktopPreference, value: boolean): boolean {
-  if (name !== 'globalHotkey' && name !== 'notifications') return false;
+  if (name !== 'globalHotkey' && name !== 'notifications' && name !== 'automaticAwake') return false;
   if (typeof value !== 'boolean') return false;
   try {
     return bridge()?.setPreference?.(name, value) === true;

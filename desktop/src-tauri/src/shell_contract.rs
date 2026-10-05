@@ -267,6 +267,7 @@ mod tests {
     fn the_desktop_state_rides_in_the_config_and_the_page_can_ask_for_it() {
         use crate::desktop_prefs::{DesktopStateView, HotkeyView, NotificationsView};
         let view = DesktopStateView {
+            power: None,
             hotkey: HotkeyView {
                 enabled: false,
                 registered: false,

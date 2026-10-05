@@ -38,6 +38,7 @@
  * No new runtime deps; node builtins only; never throws out of public API.
  */
 
+import { startLocalWorkObservation, beginLocalWorkObservation, endLocalWorkObservation, closeLocalWorkObservation } from './local-work-observation.js';
 import { countForInventory, resolveDaemonCountPreferences } from './count-preferences.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, readdirSync, unlinkSync } from 'node:fs';
@@ -3441,6 +3442,7 @@ function recordDispatchStartAgentAction(
     mode: 'swarm' | 'single' | 'best-of-n';
   },
 ): void {
+  beginLocalWorkObservation(fields.runId, fields.backend);
   const rs = routeSnapshot({
     backend: fields.backend,
     tier: fields.tier,
@@ -8026,6 +8028,7 @@ export async function tick(
               }
               throw error;
             } finally {
+              endLocalWorkObservation(attemptId);
               if (outcomeWatch) clearInterval(outcomeWatch);
             }
           },
@@ -9552,6 +9555,7 @@ async function runDaemonInEnrollmentScope(
   const requestOwnershipLoss = (): void => {
     if (ownershipLost) return;
     ownershipLost = true;
+    closeLocalWorkObservation(true);
     if (!shutdown.signal.aborted) shutdown.abort();
     scheduledResolutionObserver?.cancel();
     scheduledCutoffCapture?.cancel();
@@ -9684,6 +9688,7 @@ async function runDaemonInEnrollmentScope(
    */
   const runWindowConclusion: { value: { reason: string; summary: string } | null } = { value: null };
   try {
+    startLocalWorkObservation();
     if (opts.once) {
       // A permit is bound to the exact supplied config snapshot. Other manual
       // one-shot runs retain the established live-reload behavior.
@@ -10262,6 +10267,7 @@ async function runDaemonInEnrollmentScope(
       }
     }
   } catch (error) {
+    closeLocalWorkObservation(true);
     terminalFailure = 'daemon-unexpected-loop-failure';
     audit({
       action: 'daemon:persistence-failed',
@@ -10271,6 +10277,7 @@ async function runDaemonInEnrollmentScope(
       result: 'error',
     });
   }
+  closeLocalWorkObservation();
   transitionToStopping();
   clearInterval(killSwitchPoll);
   // Also stops a publisher the standing pass started in a one-shot run:
@@ -10330,6 +10337,7 @@ async function runDaemonInEnrollmentScope(
   if (prevInDaemon === undefined) delete process.env['ASHLR_IN_DAEMON'];
   else process.env['ASHLR_IN_DAEMON'] = prevInDaemon;
 
+  closeLocalWorkObservation();
   releaseDaemonLock(daemonLock);
 
   const finalState = loadDaemonState();

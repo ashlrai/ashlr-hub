@@ -27,7 +27,7 @@ import {
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fsyncDirectory } from '../util/durability.js';
-import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock, verifiedProcessStartRef } from '../fleet/local-store-lock.js';
 
 const MAX_PARTITION_BYTES = 2 * 1024 * 1024;
 const MAX_ROWS = 5_000;
@@ -136,7 +136,11 @@ function parseRow(value: unknown): DaemonActivityRowV1 | null {
 let selfStartRef: string | null | undefined;
 function processStartRef(pid: number): string | null {
   if (pid === process.pid && selfStartRef !== undefined) return selfStartRef;
-  if (process.platform === 'win32') return null;
+  if (process.platform === 'win32') {
+    const ref = verifiedProcessStartRef(pid) ?? null;
+    if (pid === process.pid) selfStartRef = ref;
+    return ref;
+  }
   try {
     if (!existsSync('/bin/ps')) return null;
     const result = spawnSync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], {
