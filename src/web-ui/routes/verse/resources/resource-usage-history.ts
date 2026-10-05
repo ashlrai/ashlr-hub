@@ -1,3 +1,4 @@
+import { normalizeCodexCredits } from '../../../../core/resources/codex-credits.js';
 import type { ResourceLastKnownUsage } from '../../../../core/resources/reading-cache-types.js';
 import type { VerseSeat } from '../../../data/api-types.js';
 
@@ -24,4 +25,17 @@ export function resourceUsageHistory(seat: VerseSeat, now: number): ResourceLast
 export function historicalLeftPercent(history: ResourceLastKnownUsage): number | null {
   const values = history.windows.flatMap(window => window.limitReached ? [100] : window.usedPercent === null ? [] : [window.usedPercent]);
   return values.length ? 100 - Math.max(...values) : null;
+}
+
+/** Credit history remains independent of current quota windows and live availability. */
+export function resourceCreditHistory(seat: VerseSeat, now: number) {
+  const history = seat.engine === 'codex' ? seat.lastKnownUsage : null;
+  const credit = history?.creditHistory;
+  if (!history || history.source !== 'native-account-checked-history' ||
+    !['native-account-checked', 'native-account-checked-local-epoch'].includes(history.identitySource) ||
+    !credit || !instant(credit.observedAt) || !instant(credit.expiresAt) || Date.parse(credit.observedAt) > now ||
+    Date.parse(credit.expiresAt) <= Date.parse(credit.observedAt) || Date.parse(credit.expiresAt) - Date.parse(credit.observedAt) > 60_000 ||
+    !(credit.planType === null || typeof credit.planType === 'string' && credit.planType.length <= 128)) return null;
+  const reading = normalizeCodexCredits(credit.reading);
+  return reading === null ? null : { ...credit, reading };
 }

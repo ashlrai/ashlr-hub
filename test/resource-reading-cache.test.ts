@@ -49,16 +49,43 @@ afterEach(async () => {
 });
 
 describe('display-only historical reading storage', () => {
-  it('hydrates original historical usage immediately after restart, never credits or current state', async () => {
+  it('hydrates original usage and credit history after restart, never current credits or state', async () => {
     const a = account(); const first = cache(); first.remember(a, reading(a), HINT, local(a)); await first.flush();
     const bytes = readFileSync(join(root, RESOURCE_READING_CACHE_FILENAME), 'utf8');
-    expect(bytes).not.toContain('123.45'); expect(bytes).not.toContain('command'); expect(bytes).not.toContain('signed-in');
+    expect(bytes).toContain('123.45'); expect(bytes).not.toContain('command'); expect(bytes).not.toContain('signed-in');
     const next = cache();
     expect(next.lastKnown(a)).toEqual({ observedAt: NOW, expiresAt: EXPIRES, windows: reading(a).windows,
-      source: 'native-account-checked-history', identitySource: 'native-account-checked-local-epoch' });
+      source: 'native-account-checked-history', identitySource: 'native-account-checked-local-epoch',
+      creditHistory: { reading: reading(a).codexCredits, observedAt: NOW, expiresAt: EXPIRES, planType: 'pro' } });
     vi.mocked(Date.now).mockReturnValue(Date.parse(EXPIRES) + 1);
     expect(next.lastKnown(a)?.expiresAt).toBe(EXPIRES); expect(next.lastKnown(a)?.windows[0]?.usedPercent).toBe(0);
     expect(next.witness(a)?.source).toBe('native-account-checked-local-epoch');
+  });
+  it('retains omitted same-epoch credits with their original date and replaces an authoritative zero', async () => {
+    const a = account(); const first = cache(); first.remember(a, reading(a), HINT, local(a)); await first.flush();
+    vi.mocked(Date.now).mockReturnValue(Date.parse(NOW) + 1_000);
+    const nextReading = { ...reading(a), observedAt: new Date(Date.now()).toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(), codexCredits: null };
+    first.remember(a, nextReading, HINT, local(a)); await first.flush();
+    expect(cache().lastKnown(a)?.creditHistory).toEqual({ reading: reading(a).codexCredits,
+      observedAt: NOW, expiresAt: EXPIRES, planType: 'pro' });
+    const zero = { hasCredits: false, unlimited: false, balance: '0' };
+    first.remember(a, { ...nextReading, codexCredits: zero }, HINT, local(a)); await first.flush();
+    expect(cache().lastKnown(a)?.creditHistory).toEqual({ reading: zero,
+      observedAt: nextReading.observedAt, expiresAt: nextReading.expiresAt, planType: 'pro' });
+    const record = deriveVerseAccountRecord({ ...nextReading, codexCredits: null, lastKnownUsage: first.lastKnown(a)! });
+    expect(record.credits).toBeNull(); expect(record.lastKnownUsage?.creditHistory?.reading).toEqual(zero);
+    first.invalidate(a); await first.flush(); expect(cache().lastKnown(a)).toBeNull();
+  });
+  it('reads old cache documents and refuses malformed optional credit history', async () => {
+    const a = account(); const first = cache(); first.remember(a, reading(a), HINT, local(a)); await first.flush();
+    const file = join(root, RESOURCE_READING_CACHE_FILENAME); const saved = JSON.parse(readFileSync(file, 'utf8'));
+    delete saved.readings[0].creditHistory; writeFileSync(file, JSON.stringify(saved), { mode: 0o600 });
+    expect(cache().lastKnown(a)?.windows).toEqual(reading(a).windows);
+    const history = first.lastKnown(a)!;
+    for (const creditHistory of [{ ...history.creditHistory!, observedAt: '2026-10-02T12:00:00.000Z' },
+      { ...history.creditHistory!, reading: { hasCredits: true } }, { ...history.creditHistory!, token: 'private' }])
+      expect(normalizeResourceLastKnownUsage({ ...history, creditHistory })).toBeNull();
   });
   it('keeps paired Claude history through settings epochs without minting a financial witness', async () => {
     const a = account('claude-a', 'claude'); const before = { ...local(a), accountDigest: HINT };
@@ -310,7 +337,7 @@ describe('immediate historical startup and independent refill (controlled timers
     await vi.advanceTimersByTimeAsync(30);
     const next = handle.snapshot().accounts;
     expect(next[0]?.state).toBe('checking'); expect(next[0]?.lastKnownUsage?.expiresAt).toBe(EXPIRES);
-    expect(next.slice(1).every(r => r.state === 'observed' && r.lastKnownUsage === undefined)).toBe(true);
+    expect(next.slice(1).every(r => r.state === 'observed' && (r.provider === 'codex' ? r.lastKnownUsage?.creditHistory !== undefined : r.lastKnownUsage === undefined))).toBe(true);
     expect(probes.codex).toHaveBeenCalledTimes(3);
     await vi.advanceTimersByTimeAsync(20_000); await handle.close(); await restarted.flush();
   });

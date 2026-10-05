@@ -941,7 +941,8 @@ export function deriveVerseAccountRecord(
   // — and only from the reason that actually means "not authenticated".
   const signedOut = grokSignedOut(connection);
   const state = signedOut ? 'signed-out' : connection.state;
-  const historical = state !== 'signed-out' && connection.observedAt === null ? normalizeResourceLastKnownUsage(connection.lastKnownUsage) : null;
+  const candidateHistory = state !== 'signed-out' ? normalizeResourceLastKnownUsage(connection.lastKnownUsage) : null;
+  const historical = connection.observedAt === null || provider === 'codex' && candidateHistory?.creditHistory ? candidateHistory : null;
   const base = {
     state,
     health: connection.health,
@@ -1966,11 +1967,12 @@ export function buildVerseAccountsSnapshot(options: {
 
   const accounts: VerseAccountRecord[] = [];
   const withHistory = (record: VerseAccountRecord): VerseAccountRecord => {
-    if (record.observedAt !== null || record.state === 'signed-out') return record;
-    const historical = collector?.lastKnownUsage ? collector.lastKnownUsage(record.id) : record.lastKnownUsage ?? null;
+    if (record.state === 'signed-out') return record;
+    const candidate = collector?.lastKnownUsage ? collector.lastKnownUsage(record.id) : record.lastKnownUsage ?? null;
+    const historical = record.observedAt === null || record.provider === 'codex' && candidate?.creditHistory ? candidate : null;
     const last = historical?.observedAt ?? (collector?.identityWitness ? null : collector?.lastReadingAt?.(record.id) ?? null);
     const fresh = { ...record }; delete fresh.lastKnownUsage;
-    return { ...fresh, ...(last === null ? {} : { lastReadingAt: last }), ...(historical ? { lastKnownUsage: historical } : {}) };
+    return { ...fresh, ...(last === null || record.observedAt !== null ? {} : { lastReadingAt: last }), ...(historical ? { lastKnownUsage: historical } : {}) };
   };
   for (const id of ids) {
     const connection = liveById.get(id);

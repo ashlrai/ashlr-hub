@@ -26,7 +26,7 @@ import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import { ENGINE_MONOGRAM } from '../../../../core/verse/workbench-types.js';
 import type { VerseEngine, VerseSeat } from '../../../data/api-types.js';
 import type { ResourceLastKnownUsage } from '../../../../core/resources/reading-cache-types.js';
-import { resourceUsageHistory } from '../resources/resource-usage-history.js';
+import { resourceCreditHistory, resourceUsageHistory } from '../resources/resource-usage-history.js';
 import { buildBudgetRows, STATUS_WORDS, type BudgetSeatStatus } from '../budget/budget-model.js';
 import { relativePhrase } from '../context/context-model.js';
 import { percentText, tidyProse } from '../autonomy/format.js';
@@ -113,6 +113,7 @@ export interface CapacityRow {
   lastReading?: boolean;
   /** Original account-checked historical display; excluded from windows, status and headroom. */
   historicalUsage?: ResourceLastKnownUsage | null;
+  historicalCredits?: ResourceLastKnownUsage['creditHistory'] | null;
 }
 
 export interface CapacityInputs {
@@ -241,6 +242,7 @@ function seatRow(
     connection,
     windows,
     historicalUsage: windows.length === 0 ? resourceUsageHistory(seat, now) : null,
+    historicalCredits: resourceCreditHistory(seat, now),
     credits: view.credits,
     creditBalance: view.creditBalance ?? null,
     creditState: view.creditState ?? 'unknown',
