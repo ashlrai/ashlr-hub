@@ -60,6 +60,7 @@ import {
   DEVIN_SESSION_TAG,
   DEVIN_TASK_SCHEMA_VERSION,
   type DevinFailureCode,
+  type DevinGate,
   type DevinLaunchRequest,
   type DevinLaunchResponse,
   type DevinOverviewResponse,
@@ -180,10 +181,14 @@ const commandFix = (label: string, command: string): ReadinessFix => ({ kind: 'c
 
 /**
  * 3.15: Devin is a chat seat ("Devin (cloud)" in New chat) when the lane is on
- * and connected; otherwise the verdict says how to get there.
+ * and connected. New sessions also need the existing operator budget gate;
+ * this verdict does not govern continuation of an existing Devin session.
  */
-export function devinChatVerdict(state: DevinStatus['state']): ReadinessVerdict {
+export function devinChatVerdict(state: DevinStatus['state'], newSessionGate?: DevinGate): ReadinessVerdict {
   if (state === 'ready') {
+    if (newSessionGate && !newSessionGate.ok) {
+      return { ready: false, tone: 'warn', word: 'New chats paused', detail: newSessionGate.reason ?? 'The Devin budget refused another session.', fix: null } as ReadinessVerdict;
+    }
     return { ready: true, tone: 'ok', word: 'Ready', detail: 'Pick “Devin (cloud)” in New chat. Each chat is one Devin session.', fix: null } as ReadinessVerdict;
   }
   if (state === 'unreachable') {
@@ -283,6 +288,7 @@ export async function devinStatus(deps: DevinServiceDeps = {}, tasks: readonly D
     state = 'unreachable';
     reason = devinFailureSentence(lastAuthFailure.code);
   }
+  const chat = devinChatVerdict(state, view.canLaunch);
   return {
     enabled,
     connected,
@@ -301,10 +307,12 @@ export async function devinStatus(deps: DevinServiceDeps = {}, tasks: readonly D
       hasOrgId: connection.selfIdentity.orgId !== null,
       hasDevinSessionsOrgId: connection.selfIdentity.devinSessionsOrgId !== null,
     } } : {}),
-    chatLine: state === 'ready' ? 'Chat: ready — pick “Devin (cloud)” in New chat' : `Chat: off — ${devinChatVerdict(state).detail}`,
+    chatLine: state === 'ready'
+      ? chat.ready ? 'Chat: ready — pick “Devin (cloud)” in New chat' : `Chat: new sessions paused — ${chat.detail}`
+      : `Chat: off — ${chat.detail}`,
     fleetLine: devinFleetLine(fleet),
     fleetReady: fleet.ready && state === 'ready',
-    chat: devinChatVerdict(state),
+    chat,
     fleet: state === 'unreachable' ? { ...fleet, ready: false, tone: 'blocked', word: 'Key refused', detail: reason, fix: commandFix('Reconnect Devin', 'ashlr devin connect'), roles: [] } : fleet,
   };
 }

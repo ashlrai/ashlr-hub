@@ -246,7 +246,7 @@ describe('connect', () => {
 });
 
 describe('status and readiness lines', () => {
-  it('disabled / not connected / ready, with Chat n/a and the fleet verdict', async () => {
+  it('disabled / not connected / ready, with the chat and fleet verdicts', async () => {
     const off = await devinStatus(deps({ config: () => undefined }));
     expect(off).toMatchObject({ state: 'disabled', connected: false, chatLine: expect.stringMatching(/^Chat: off/) });
     expect(off.fleet).toMatchObject({ ready: false, fix: { kind: 'command', command: 'ashlr devin connect' } });
@@ -256,7 +256,26 @@ describe('status and readiness lines', () => {
     expect(ready).toMatchObject({ state: 'ready', connected: true, enabled: true, orgId: FAKE_ORG });
     // 3.15: Devin is a chat seat once ready.
     expect(ready.chat).toMatchObject({ ready: true, word: 'Ready' });
+    expect(ready.chatLine).toMatch(/^Chat: ready/);
     expect(ready.fleet).toMatchObject({ ready: false, word: 'Off', fix: { command: 'ashlr devin fleet on' } });
+  });
+
+  it('keeps the connection ready while unresolved exposure pauses new chats at the daily cap', async () => {
+    await connect();
+    const now = new Date('2026-10-05T12:00:00Z');
+    const at = now.toISOString();
+    const unknown = task({ state: 'failed', failure: 'network', sessionId: null, sessionUrl: null, session: null, maxAcu: 40,
+      createdAt: at, launchedAt: at, updatedAt: at });
+    writeDevinTask(unknown);
+    const view = devinBudgetView([unknown], readDevinBudget(), now);
+    expect(view).toMatchObject({ paused: false, reportedAcuUsed: 0, unconfirmedAcuExposure: 40, acuRemaining: 10,
+      canLaunch: { ok: false, reason: expect.stringMatching(/daily cap/) } });
+    const status = await devinStatus(deps({ now: () => now }));
+    expect(status).toMatchObject({ state: 'ready', connected: true, enabled: true,
+      chat: { ready: false, tone: 'warn', word: 'New chats paused', detail: view.canLaunch.reason, fix: null } });
+    expect(status.chatLine).toBe(`Chat: new sessions paused — ${view.canLaunch.reason}`);
+    expect(api.requests).toEqual([]);
+    expect(readDevinTask(unknown.id)).toEqual(unknown);
   });
 
   it('distinguishes missing, held, and unknown authority without changing exposure or contacting Devin', async () => {

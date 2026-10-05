@@ -211,6 +211,27 @@ describe('Devin tracked exposure in the bar', () => {
     expect(screen.getByRole('tooltip')).toHaveTextContent('2 ACUs reported usage + adjustment · 18 ACUs held exposure');
     expect(devin.querySelector('[aria-hidden="true"][data-level] > [style]')).toHaveStyle({ '--fill': '60%' });
   });
+
+  it('shows a new-chat admission pause without turning held exposure into spent usage or a provider quota', () => {
+    const reason = 'Another session could take today past the 30 ACUs daily cap (40 ACUs used or held).';
+    vi.mocked(useCapacityData).mockReturnValue({ seats: [], health: null, budget: null, loading: false, refreshing: false, readFailed: false, rosterUnavailable: false, pendingSeatIds: [] });
+    vi.mocked(useQuery).mockImplementation((query) => ({ data: query.key === 'verse-devin' ? { value: {
+      status: { enabled: true, connected: true },
+      budget: { acuBudgetTotal: 50, acuRemaining: 10, acuUsed: 40, acuInFlight: 0,
+        reportedAcuUsed: 0, unconfirmedAcuExposure: 40, paused: false, running: 0, sessionsToday: 0,
+        canLaunch: { ok: false, reason } },
+    } } : undefined } as never));
+    render(<ResourcesBar expanded />);
+    const devin = screen.getByRole('button', { name: `Devin tracked budget: 10 ACUs of 50 ACUs available, 40 ACUs held exposure. New chats paused: ${reason}. Open Resources` });
+    expect(within(devin).getByText('10 ACUs budget')).toBeInTheDocument();
+    expect(within(devin).getByText('New chats paused')).toBeInTheDocument();
+    expect(devin).toHaveAttribute('data-level', 'ok');
+    expect(devin.querySelector('[aria-hidden="true"][data-level] > [style]')).toHaveStyle({ '--fill': '20%' });
+    fireEvent.focus(devin);
+    expect(screen.getByRole('tooltip')).toHaveTextContent(`New chats paused: ${reason}`);
+    expect(screen.getByRole('tooltip')).toHaveTextContent('0 ACUs reported usage + adjustment · 40 ACUs held exposure');
+    expect(within(devin).queryByText(/spent|% left/i)).not.toBeInTheDocument();
+  });
 });
 
 
