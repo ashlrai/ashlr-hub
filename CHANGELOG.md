@@ -9,6 +9,28 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.24.3] — 2026-10-05
+
+### Added
+
+- Show native Devin chat context readings when the official CLI reports them,
+  while retaining unknown values when no reading is available.
+
+### Fixed
+
+- Retain unresolved Devin session exposure across retries and reconcile reported
+  organization consumption independently of remaining plan quota.
+- Account for native Devin provider contacts across retry attempts rather than
+  treating a retried turn as a single contact.
+- Show installed Devin Fleet readiness using the resident authority observation,
+  preserving precise paused and expired reasons. Session launch and message
+  authority checks remain separate from this read-only display.
+- Let pending Fleet status requests finish before the next automatic poll,
+  so slow responses can update the desktop instead of being superseded forever.
+- Forward the routed Claude account into autonomous native dispatch so its
+  account-bound admission can be checked.
+- Update the example website's Oxfmt worker dependency to Tinypool 2.1.2.
+
 ## [3.24.2] — 2026-10-05
 
 ### Added

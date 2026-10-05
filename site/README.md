@@ -45,9 +45,9 @@ keyboard-operated date slider, and the repository links. If JavaScript is
 unavailable, the project descriptions and links remain readable; if the data
 is missing or invalid, the page must show an error instead of a false zero.
 
-## Release 3.24.2 copy
+## Release 3.24.3 copy
 
-The current software metadata and install targets name 3.24.2. Its GitHub
+The current software metadata and install targets name 3.24.3. Its GitHub
 release and downloads must exist and pass release checks before publishing this
 page. A source link or prepared download target is not publication evidence.
 
