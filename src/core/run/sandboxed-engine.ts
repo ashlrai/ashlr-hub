@@ -2900,7 +2900,9 @@ export async function runEngineSandboxed(
                     if (!selectedDevinCurrent()) {
                       const finished = finishAutonomousSpawn(repairSpawn, { output:'' });
                       if (finished.violations.length) await recordAutonomousViolations({ engine, sourceRepo:opts.sourceRepo, runId:id, operations:finished.violations });
-                      if (finished.violationsKnown !== true) await recordSandboxEvidenceUnknown({ engine, sourceRepo:opts.sourceRepo, runId:id, evidence:finished.kernelEvidence });
+                      if (finished.violationsKnown !== true) {
+                        await recordSandboxEvidenceUnknown({ engine, sourceRepo: opts.sourceRepo, runId: id, evidence: finished.kernelEvidence });
+                      }
                       return null;
                     }
                     builtRepairCmd = { ...builtRepairCmd, bin:repairSpawn.bin };
