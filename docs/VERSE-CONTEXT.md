@@ -7,7 +7,7 @@ documentation. **No paid model was prompted to produce any number on this page.*
 This page is the authority for every constant in `src/core/verse/context-math.ts` and for the V3.9
 context fields in `src/core/verse/types.ts` (which cite it as §1 and §2). If code and this page
 disagree, one of them is a bug. The wire shapes are listed in
-[`VERSE-CONTRACT-V1.md`](VERSE-CONTRACT-V1.md#v39-additive-contract--context-orchestration); the
+[`VERSE-CONTRACT-V1.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-CONTRACT-V1.md#v39-additive-contract--context-orchestration); the
 user-facing tour is in [`VERSE.md`](VERSE.md#chat).
 
 What 3.8 got wrong, and why this page exists:

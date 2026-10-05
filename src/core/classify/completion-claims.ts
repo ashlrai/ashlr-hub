@@ -150,6 +150,7 @@ function buildQuestions(): { claim: TypeSafeChoiceQuestion } {
 }
 
 export interface ClassifyCompletionClaimOptions {
+  selectedOutcomeAdmission?: () => boolean;
   readonly confidenceThreshold?: number;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
@@ -183,6 +184,7 @@ export async function classifyCompletionClaim(
   // fallback, plus cache, daily budget, kill switch and the decision ledger.
   const d = await decide<CompletionClaim>('completion-claim', value.slice(0, MAX_CLAIM_CHARS), buildQuestions(), {
     fallback: heuristic,
+    ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
     cfg,
     threshold: opts.confidenceThreshold ?? COMPLETION_CLAIM_CONFIDENCE_THRESHOLD,
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),

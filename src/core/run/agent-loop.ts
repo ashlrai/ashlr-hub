@@ -1,3 +1,4 @@
+import { selectedOutcomeAdmissionCurrent, SelectedOutcomeAdmissionRefusal, withSelectedOutcomeAdmission } from './outcome-admission.js';
 /**
  * agent-loop.ts — bounded ReAct-style loop for a single RunTask.
  *
@@ -30,6 +31,7 @@ import type {
   ChatResult,
   ToolExecutor,
 } from '../types.js';
+import { fitTaskContext } from './context-window.js';
 import { addUsage, overBudget, newUsage } from './budget.js';
 import { nullSink } from './streaming.js';
 import type { StreamSink } from './streaming.js';
@@ -84,6 +86,10 @@ interface ToolSpec {
 /** Context bag for {@link runTask} / {@link runTaskBody}. */
 export type RunTaskContext = {
   tools?: unknown[];
+  /** Qualified effective runtime window, never a profile/trained maximum. */
+  contextWindowTokens?: number;
+  /** Caller-owned revision fence; checked before reserve/contact and each tool effect. */
+  selectedOutcomeAdmission?: () => boolean;
   budget: RunBudget;
   usage: RunUsage;
   /** M11: optional StreamSink for live progress events. Defaults to nullSink. */
@@ -194,6 +200,7 @@ async function runTaskBody(
   client: ProviderClient,
   ctx: RunTaskContext,
 ): Promise<RunTask> {
+  client = withSelectedOutcomeAdmission(client, ctx.selectedOutcomeAdmission);
   // Track per-task usage delta so we can set task.usage at end.
   let taskUsage: RunUsage = task.usage ? { ...task.usage } : newUsage();
   let stepCount = 0;
@@ -246,7 +253,7 @@ async function runTaskBody(
   }
 
   function cancelIfRequested(): boolean {
-    if (!ctx.signal?.aborted) return false;
+    if (!ctx.signal?.aborted && selectedOutcomeAdmissionCurrent(ctx.selectedOutcomeAdmission)) return false;
     task.status = 'failed';
     task.error = 'Task cancelled.';
     delete task.result;
@@ -374,6 +381,15 @@ async function runTaskBody(
         break;
       }
 
+      if (ctx.contextWindowTokens !== undefined) {
+        const projection = fitTaskContext(messages, toolSpecs, ctx.contextWindowTokens);
+        if (projection.omittedGroups > 0 || projection.shortenedToolResults > 0) {
+          messages.splice(0, messages.length, ...projection.messages);
+          emitStream({ kind: 'log', taskId: task.id, text:
+            `context compacted: ${projection.omittedGroups} older groups omitted, ${projection.shortenedToolResults} tool results shortened; runtime window ${ctx.contextWindowTokens}` });
+        }
+      }
+
       // The authority callback is synchronous: parallel tasks cannot all pass a
       // stale pre-check and overshoot the run-wide ceiling as a whole batch.
       let reservation: ModelStepReservation | undefined;
@@ -433,7 +449,10 @@ async function runTaskBody(
           }
         }
       } catch (err) {
-        const reportedUsage = usageReportedBy(err);
+        // A typed synchronous pre-contact refusal proves zero consumption. It
+        // must not be charged as an unknown contacted request.
+        const refusedBeforeContact = err instanceof SelectedOutcomeAdmissionRefusal && err.usageKnown === true;
+        const reportedUsage = refusedBeforeContact ? { tokensIn: 0, tokensOut: 0 } : usageReportedBy(err);
         if (reportedUsage) accumulateUsage(reportedUsage);
         const summary = ctx.signal?.aborted
           ? 'Model call attempted and cancelled.'
@@ -447,7 +466,7 @@ async function runTaskBody(
           finalizeReservation(
             reservation,
             summary,
-            usageAuthorityReportedBy(err) ? reportedUsage : undefined,
+            refusedBeforeContact || usageAuthorityReportedBy(err) ? reportedUsage : undefined,
           );
         } else {
           emitStep('model', summary, stepUsage);
@@ -488,6 +507,7 @@ async function runTaskBody(
       messages.push({
         role: 'assistant',
         content: result.content,
+        ...(useTools && result.toolCalls?.length ? { toolCalls: result.toolCalls } : {}),
       });
 
       // Post-step budget check.

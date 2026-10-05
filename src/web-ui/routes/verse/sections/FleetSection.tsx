@@ -60,6 +60,7 @@ const ShadowDecisions = lazy(() => import('../fleet/ShadowDecisions.js'));
 const FleetAdvanced = lazy(() => import('../fleet/Advanced.js').then((m) => ({ default: () => <m.FleetAdvanced embedded /> })));
 // The rollout ladder (3.14) lives here since 3.15 — Command links to it.
 const AutonomyStatus = lazy(() => import('../command/AutonomyStatus.js'));
+const OutcomesPanel = lazy(() => import('../fleet/OutcomesPanel.js').then(m => ({ default: m.OutcomesPanel })));
 
 export function FleetSection() {
   const { compact } = useViewport();
@@ -107,6 +108,9 @@ export function FleetSection() {
       actions={fleet.status === 'refreshing' ? <RefreshIndicator /> : null}
       lead={
         <>
+          <Suspense fallback={<p className={styles.muted} aria-busy="true">Loading outcomes…</p>}>
+            <OutcomesPanel actions={actions} />
+          </Suspense>
           <div className={styles.taskActions} role="group" aria-label="Delegate and guide work">
             <Button size="sm" variant="primary" onClick={() => executeCatalogCommand('agents.new', { via: 'button' })}>Delegate a task</Button>
             <Button size="sm" variant="ghost" onClick={() => executeCatalogCommand('surface.agents', { via: 'button' })}>Review agents</Button>

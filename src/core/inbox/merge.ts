@@ -3534,6 +3534,10 @@ export async function autoMergeProposal(
     // ── Gate 2: proposal must exist, be a mergeable kind with a diff ─────────
     const proposal = loadProposal(id);
     if (!proposal) return refuse(`proposal not found: ${id}`);
+    if (invocation.verificationSource !== 'manual' &&
+        (proposal.workItemId?.startsWith('goal:outcome-') || proposal.workItemGenerationId?.startsWith('outcome:'))) {
+      return refuse('Outcome proposals require current standing host progression; legacy automatic merge is held', proposal.repo);
+    }
     if (proposal.status !== 'pending' && proposal.status !== 'approved') {
       return refuse(`proposal status '${proposal.status}' has no active merge authority`, proposal.repo);
     }

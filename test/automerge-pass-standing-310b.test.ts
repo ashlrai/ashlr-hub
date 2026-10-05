@@ -40,6 +40,7 @@ vi.mock('../src/core/fleet/standing-merge-pass.js', () => ({
 }));
 
 vi.mock('../src/core/inbox/store.js', () => ({
+  loadProposal: (id: string) => (h.proposals as Proposal[]).find((p) => p.id === id) ?? null,
   listProposalsDetailed: () => ({ sourceState: 'healthy', complete: true, proposals: h.proposals }),
   replayRealizedMergeFanout: () => true,
   setStatus: () => true,

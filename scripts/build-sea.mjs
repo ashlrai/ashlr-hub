@@ -49,6 +49,7 @@ const engineeringReadWorkerEntry = join(distBin, 'engineering-successor-read-wor
 // binary cannot start the worker and runs the scorecard snapshot inline
 // (~1.6 s blocking once a day).
 const fleetHistoryWorkerEntry = join(distBin, 'fleet-history-worker.js');
+const outcomesWorkerEntry = join(distBin, 'outcomes-worker.js');
 const outBin  = join(distBin, process.platform === 'win32' ? 'ashlr.exe' : 'ashlr');
 const pubDest = join(distBin, 'public');
 const buildIdentityPath = join(repoRoot, 'dist', 'build-identity.json');
@@ -148,18 +149,25 @@ await import('../dist/core/verse/fleet-history-worker.js');
 `;
 }
 
+export function createSeaOutcomesWorkerShim({ buildIdentityJson }) {
+  return `// Fixed outcome metadata worker; never an arbitrary planner/provider entry.
+Reflect.set(globalThis, Symbol.for('ashlr.build-identity.v1'), ${javascriptStringLiteral(buildIdentityJson)});
+await import('../dist/core/verse/outcomes-worker.js');
+`;
+}
+
 /**
  * @param {{ entry: string, workerEntry: string, engineeringWorkerEntry?: string,
- *   engineeringReadWorkerEntry?: string, fleetHistoryWorkerEntry?: string, outBin: string }} args
+ *   engineeringReadWorkerEntry?: string, fleetHistoryWorkerEntry?: string, outcomesWorkerEntry?: string, outBin: string }} args
  */
 export function createSeaCompileArgs({
-  entry, workerEntry, engineeringWorkerEntry, engineeringReadWorkerEntry, fleetHistoryWorkerEntry, outBin,
+  entry, workerEntry, engineeringWorkerEntry, engineeringReadWorkerEntry, fleetHistoryWorkerEntry, outcomesWorkerEntry, outBin,
 }) {
   // Bun does not discover Worker URLs automatically. All shims must be
   // siblings: bundled import.meta.url resolves relative to the main entry.
   return ['build', '--compile', entry, workerEntry, ...(engineeringWorkerEntry ? [engineeringWorkerEntry] : []),
     ...(engineeringReadWorkerEntry ? [engineeringReadWorkerEntry] : []),
-    ...(fleetHistoryWorkerEntry ? [fleetHistoryWorkerEntry] : []), '--outfile', outBin];
+    ...(fleetHistoryWorkerEntry ? [fleetHistoryWorkerEntry] : []), ...(outcomesWorkerEntry ? [outcomesWorkerEntry] : []), '--outfile', outBin];
 }
 
 async function main() {
@@ -220,6 +228,7 @@ const shimSrc = createSeaShim({ pkgVersion, buildIdentityJson, verifySafetySourc
 
 writeFileSync(entry, shimSrc, 'utf8');
 writeFileSync(workerEntry, createSeaWorkerShim({ buildIdentityJson }), 'utf8');
+writeFileSync(outcomesWorkerEntry, createSeaOutcomesWorkerShim({ buildIdentityJson }), 'utf8');
 writeFileSync(engineeringWorkerEntry, createSeaEngineeringWorkerShim({ buildIdentityJson }), 'utf8');
 writeFileSync(engineeringReadWorkerEntry, createSeaEngineeringReadWorkerShim({ buildIdentityJson }), 'utf8');
 writeFileSync(fleetHistoryWorkerEntry, createSeaFleetHistoryWorkerShim({ buildIdentityJson }), 'utf8');
@@ -232,7 +241,7 @@ if (existsSync(outBin)) rmSync(outBin);
 console.log(`[build-sea] Compiling → ${outBin} …`);
 const result = spawnSync(
   BUN,
-  createSeaCompileArgs({ entry, workerEntry, engineeringWorkerEntry, engineeringReadWorkerEntry, fleetHistoryWorkerEntry, outBin }),
+  createSeaCompileArgs({ entry, workerEntry, engineeringWorkerEntry, engineeringReadWorkerEntry, fleetHistoryWorkerEntry, outcomesWorkerEntry, outBin }),
   { cwd: repoRoot, encoding: 'utf8' },
 );
 if (result.stdout) process.stdout.write(result.stdout);

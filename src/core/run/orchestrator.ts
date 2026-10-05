@@ -1,3 +1,4 @@
+import { assertSelectedOutcomeAdmission, selectedOutcomeAdmissionCurrent, withSelectedOutcomeAdmission } from './outcome-admission.js';
 /**
  * core/run/orchestrator.ts — M4/M11/M15 local-first agent orchestrator.
  *
@@ -2234,7 +2235,7 @@ export async function runGoal(
     if (standingPolicyLiveForBash()) throw new Error(STANDING_POLICY_BASH_REFUSAL);
     throw new Error('Sandboxed bash is unavailable until OS-enforced filesystem confinement is active');
   }
-  if (opts.signal?.aborted === true) return runGoalInternal(goal, cfg, opts);
+  if (opts.signal?.aborted === true || !selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission)) return runGoalInternal(goal, cfg, opts);
   if (opts.resumeId && opts.runId) opts = { ...opts, runId: undefined };
 
   const id = assertSafeExecutionIdentity(opts.resumeId ?? opts.runId ?? generateRunId());
@@ -2290,7 +2291,7 @@ async function runGoalInternal(
     if (loadRun(runId)) throw new Error(`Run "${runId}" already exists; use resumeId to continue it`);
     opts = { ...opts, runId };
   }
-  const cancelled = (): boolean => opts.signal?.aborted === true;
+  const cancelled = (): boolean => opts.signal?.aborted === true || !selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission);
   if (cancelled() && opts.resumeId) {
     const existing = loadRun(opts.resumeId);
     if (!existing) throw new Error(`Run "${opts.resumeId}" not found in ${runsDir()}`);
@@ -2567,6 +2568,7 @@ async function runGoalInternal(
                 titrrAttempt++;
                 const isLastAttempt = titrrAttempt === titrrMax;
                 const rawApiR = await runApiModelSandboxed(engineId, apiGoal, cfg, {
+                  ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
                   sourceRepo: cwd,
                   model: modelEnv,
                   budget: remainingTitrrBudget(titrrBudget, titrrUsage),
@@ -2906,6 +2908,7 @@ async function runGoalInternal(
               // Preserve the router's exact native account through sandbox delegation.
               ...(opts.seatId ? { seatId: opts.seatId } : {}),
               ...(opts.selectedGrokAdmission ? { selectedGrokAdmission: opts.selectedGrokAdmission } : {}),
+              ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
               ...(opts.harness ? { harness: opts.harness } : {}),
             });
             const fallbackStateWithRetention = withSandboxRetention(
@@ -2997,6 +3000,7 @@ async function runGoalInternal(
                 ...(opts.runId ? { runId: opts.runId } : {}),
                 ...(opts.seatId ? { seatId: opts.seatId } : {}),
                 ...(opts.selectedGrokAdmission ? { selectedGrokAdmission: opts.selectedGrokAdmission } : {}),
+                ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
                 ...(opts.harness ? { harness: opts.harness } : {}),
                 deferTerminalAction: true,
               });
@@ -3241,6 +3245,7 @@ async function runGoalInternal(
         // spawnEngine's runaway-cost backstop default; matches the
         // cfg.foundry?.timeoutMs override pattern used by sandboxed-engine.ts.
         const engineResult = await spawnEngine(cmd, cfg, {
+          ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
           timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_ENGINE_BACKSTOP_MS,
           ...(opts.signal ? { signal: opts.signal } : {}),
           // v333: forward per-line engine stdout (as it arrives, not just at
@@ -3348,12 +3353,12 @@ async function runGoalInternal(
   // (nvidia_nim_kimi: NVIDIA_NIM_API_KEY, OpenAI-compatible, defaults to
   // moonshotai/kimi-k2.6). Route planner+synthesis there under allowCloud so goal
   // milestones are frontier-planned. Flag-off (no allowCloud) keeps the local default.
-  const client = await getActiveClient(
+  const client = withSelectedOutcomeAdmission(await getActiveClient(
     cfg,
     allowCloud
       ? { allowCloud, provider: 'nvidia_nim_kimi' }
       : { allowCloud },
-  );
+  ), opts.selectedOutcomeAdmission);
 
   // -- Load or create RunState -------------------------------------------------
   let state: RunState;
@@ -3532,6 +3537,7 @@ async function runGoalInternal(
       if (!supportsGovernedModelCalls(base)) {
         throw new Error(`Provider "${base.id}" does not support governed model calls.`);
       }
+      assertSelectedOutcomeAdmission(opts.selectedOutcomeAdmission);
       const promptReservation = conservativeRequestTokenReservation(messages, chatTools ?? []);
       const reservation = reserveRunModelStep(
         taskId,
@@ -3542,7 +3548,7 @@ async function runGoalInternal(
       );
       if (!reservation) throw new Error('Run step budget exhausted before model verification.');
       try {
-        const result = await base.chat(
+        const result = await withSelectedOutcomeAdmission(base, opts.selectedOutcomeAdmission).chat(
           messages,
           chatTools,
           signal ?? opts.signal,
@@ -3815,7 +3821,7 @@ async function runGoalInternal(
           typeof pbMod.buildPlaybook === 'function' &&
           typeof pbMod.playbookText === 'function'
         ) {
-          const playbook = await pbMod.buildPlaybook(goal, cfg);
+          const playbook = await pbMod.buildPlaybook(goal, cfg, ...(opts.selectedOutcomeAdmission ? [{ selectedOutcomeAdmission: opts.selectedOutcomeAdmission }] : []));
           const pbText: string = pbMod.playbookText(playbook, GENOME_INJECT_CHAR_CAP);
           if (pbText && pbText.length > 0) {
             memoryContext = pbText;
@@ -4092,6 +4098,7 @@ async function runGoalInternal(
                       onStep: makeTaskOnStep(smallerClient.id),
                       reserveModelStep: taskStepAuthority(task.id, smallerClient.id),
                       ...(effectJournal ? { effectJournal } : {}),
+                      ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
                       ...(opts.signal ? { signal: opts.signal } : {}),
                     });
                     return;
@@ -4110,6 +4117,7 @@ async function runGoalInternal(
                   onStep: taskOnStep,
                   reserveModelStep: taskStepAuthority(task.id, taskClient.id),
                   ...(effectJournal ? { effectJournal } : {}),
+                  ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
                   ...(opts.signal ? { signal: opts.signal } : {}),
                 });
               };
@@ -4124,6 +4132,7 @@ async function runGoalInternal(
                   onStep: taskOnStep,
                   reserveModelStep: taskStepAuthority(task.id, taskClient.id),
                   ...(effectJournal ? { effectJournal } : {}),
+                  ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
                   ...(opts.signal ? { signal: opts.signal } : {}),
                 });
               } else {
@@ -4227,6 +4236,7 @@ async function runGoalInternal(
                 onStep: taskOnStep,
                 reserveModelStep: taskStepAuthority(task.id, escalatedClient.id),
                 ...(effectJournal ? { effectJournal } : {}),
+                ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
                 ...(opts.signal ? { signal: opts.signal } : {}),
               }).catch((err) => {
                 if (task.status !== 'failed') {
@@ -4309,6 +4319,7 @@ async function runGoalInternal(
                 onStep: makeTaskOnStep(retryClient.id),
                 reserveModelStep: taskStepAuthority(task.id, retryClient.id),
                 ...(effectJournal ? { effectJournal } : {}),
+                ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
                 ...(opts.signal ? { signal: opts.signal } : {}),
               });
               throwIfProviderQuotaRefused();

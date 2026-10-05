@@ -9,6 +9,7 @@ import {
   createSeaEngineeringWorkerShim,
   createSeaEngineeringReadWorkerShim,
   createSeaFleetHistoryWorkerShim,
+  createSeaOutcomesWorkerShim,
   createSeaShim, collectVerifySafetySources, VERIFY_SAFETY_SOURCE_KEYS,
 } from '../scripts/build-sea.mjs';
 import { embeddedSafetySourceReader, VERIFY_SAFETY_SOURCE_KEYS as runtimeKeys } from '../src/cli/verify-safety-sources.js';
@@ -55,6 +56,20 @@ describe('native safety source packaging', () => {
 });
 
 describe('Bun sidecar read-worker packaging', () => {
+  it('packages only the fixed outcome metadata worker with the trusted identity', () => {
+    const identity = JSON.stringify({ schemaVersion: 1, revision: 'e'.repeat(40) });
+    const shim = createSeaOutcomesWorkerShim({ buildIdentityJson: identity });
+    const context = { Symbol, loaded: false };
+    runInNewContext(shim.replace("await import('../dist/core/verse/outcomes-worker.js');", 'loaded = true;'), context);
+    expect(context.loaded).toBe(true);
+    expect(runInNewContext("globalThis[Symbol.for('ashlr.build-identity.v1')]", context)).toBe(identity);
+    expect(shim).not.toContain('process.env');
+    expect(shim).not.toContain('workerData');
+    expect(createSeaCompileArgs({ entry: '/owned/_entry.js', workerEntry: '/owned/read-projection-worker.js',
+      outcomesWorkerEntry: '/owned/outcomes-worker.js', outBin: '/owned/ashlr' })).toEqual([
+      'build', '--compile', '/owned/_entry.js', '/owned/read-projection-worker.js', '/owned/outcomes-worker.js', '--outfile', '/owned/ashlr',
+    ]);
+  });
   it('packages the independent journal reader with its trusted identity', () => {
     const identity = JSON.stringify({ schemaVersion: 1, revision: 'c'.repeat(40) });
     const shim = createSeaEngineeringReadWorkerShim({ buildIdentityJson: identity });

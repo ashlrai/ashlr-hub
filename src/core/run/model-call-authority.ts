@@ -20,7 +20,12 @@ export function conservativeRequestTokenReservation(
   messages: ChatMessage[],
   tools?: unknown[],
 ): number {
-  const serializedBytes = Buffer.byteLength(JSON.stringify({ messages, tools: tools ?? [] }), 'utf8');
+  // OpenAI-compatible replay quotes arguments as JSON strings. Reserve those
+  // escaped bytes too rather than undercounting a retained tool-call group.
+  const framed = messages.map(message => message.toolCalls?.length ? { ...message,
+    toolCalls: message.toolCalls.map(call => ({ ...call, arguments: JSON.stringify(call.arguments) })),
+  } : message);
+  const serializedBytes = Buffer.byteLength(JSON.stringify({ messages: framed, tools: tools ?? [] }), 'utf8');
   return serializedBytes + 256 + (messages.length * 16) + ((tools?.length ?? 0) * 32);
 }
 

@@ -187,6 +187,7 @@ const EXPECTED_HANDLERS: Record<WorkbenchRouteFamilyId, string> = {
   'fleet-control': 'handleFleetControlApi',
   // 3.16: run many agents — the board, agent workspaces, Checks, Plan first, spend caps.
   agents: 'handleAgentsApi',
+  outcomes: 'handleOutcomesApi',
 };
 
 const allPrefixes = WORKBENCH_ROUTE_FAMILIES.flatMap((family) => family.prefixes.map((prefix) => ({ family: family.id, prefix })));

@@ -163,6 +163,7 @@ HOW YOU ACT
 You propose; the system classifies and applies. Class A applies at once (Mason can veto any time). Class B waits out a veto window. Anything outside the grant goes to Mason as an "escalate" action with your argument. You cannot raise the grant, spend Mason's reserve, or touch authority. Action kinds and their exact params:
 - goal.focus {goalId} · goal.pause {goalId, until: ISO|null} · goal.archive {goalId} · goal.reorder {goalIds: [2-10 ids, highest priority first]}
 - goal.create {goal: {objective, rationale, targetRepo: "owner/name"|null, deliverable, acceptanceEvidence: [..]}} (class B; daily creation preference: ${limit(preferences.maxNewGoalsPerDay)}; open-goal preference: ${limit(preferences.maxOpenGoals)}; per-memo creation preference: ${limit(preferences.maxGoalProposalsPerMemo)}. The memo transport still permits at most ${preferences.protocol.maxMemoActions} total actions)
+- outcome.refine {outcomeId, scopeRevision, scopeDigest, title, nodes: [{kind: work, key, title, objective, deliverable, riskClass: low|medium|high, targetRepo: saved target-N alias, dependsOn: [node keys], acceptance: [testable criteria]}]} (class A: automatically refine an active desired outcome within its saved targets; preserve its desired result and acceptance. Existing mission graph transport permits up to 24 nodes, 8 dependencies and 8 criteria per node. Plan outcomes lacking a graph or containing failed/aborted tasks before creating unrelated goals. Use recorded failure evidence to revise a corrective task definition; repeating the identical failed node does not retry it or claim success; routine work requires no human gate. This automatic planning action accepts work nodes only; genuine authorization gates remain in the existing runtime. Never replace the saved scope or select resources; actual dispatch/merge authority remains separate.)
 - work.dispatch {task: {repo: "owner/name", title, detail, difficulty: low|medium|high, value: 1-5, goalId?, playbook?: an id from PLAYBOOKS when one fits the task}}
 - standard.add {rule, appliesTo, evidence}
 - router.tune {tuning: {lambdaCost?, lambdaPressure?, lambdaLatency? (0-10), bonThreshold?: low|medium|high}}
@@ -220,6 +221,7 @@ export interface LeaderModelRow {
 
 /** Where evidence comes from. Every source may throw; a thrower is reported as unknown, never as zero. */
 export interface LeaderEvidenceSources {
+  outcomes?(): import('./leader-outcomes.js').LeaderOutcomeEvidence;
   /** Recorded metadata only; source failure remains unknown. */
   executionFeedback?(nowMs: number): import('../fleet/execution-feedback.js').ExecutionFeedbackSnapshot;
   /** Live preference observation; unavailable is not an uncapped policy. */
@@ -245,6 +247,7 @@ export interface LeaderEvidenceSources {
 }
 
 export interface LeaderEvidence {
+  outcomes?: import('./leader-outcomes.js').LeaderOutcomeEvidence;
   executionFeedback?: import('../fleet/execution-feedback-types.js').LeaderExecutionFeedback;
   grant: {
     stageId: string;
@@ -393,6 +396,8 @@ export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs
     })),
   })).sort((a, b) => a.seatId.localeCompare(b.seatId)) : null;
 
+  const outcomes = sources.outcomes ? attempt('outcomes', () => sources.outcomes!()) : null;
+  if (outcomes && !outcomes.complete) unknown.push('outcomes-partial');
   const goalRead = attempt('goals', () => sources.goals());
   // An incomplete read is a LOWER BOUND with its caveat, never null: null read
   // as "zero goals" to the model while 21 were open (leader-goal-evidence.ts).
@@ -444,6 +449,7 @@ export async function gatherLeaderEvidence(sources: LeaderEvidenceSources, nowMs
   const selfNotes = attempt('self-directives', () => listSelfDirectives().map((d) => ({ id: d.id, text: d.text, since: d.createdAt.slice(0, 10) })));
   return {
     grant,
+    ...(outcomes ? { outcomes } : {}),
     budget,
     seats,
     goals,
@@ -523,6 +529,7 @@ export function buildLeaderPrompt(
     untrustedBlock('SEAT HEADROOM (used % bucketed to 10)', evidence.seats),
     ...(evidence.executionFeedback ? [untrustedBlock('RECORDED EXECUTION OUTCOMES (producer success is not verification or merge; incomplete totals are unknown)', evidence.executionFeedback)] : []),
     untrustedBlock('GOALS AND FOCUS', evidence.goals),
+    ...(evidence.outcomes ? [untrustedBlock('DESIRED OUTCOMES AND SAVED TARGET ALIASES (scope is immutable to planner; incomplete sources are unknown)', evidence.outcomes)] : []),
     untrustedBlock('FLEET OUTCOMES (7 days; null = unknown)', evidence.fleet),
     untrustedBlock('MODEL ROI (30 days)', evidence.models),
     untrustedBlock('REASONING INSIGHTS (deterministic digest)', evidence.reasoning),
@@ -719,6 +726,7 @@ export function scheduleSlots(nowMs: number): { previous: number; next: number }
 }
 
 export interface LeaderTriggerSignals {
+  outcomePlanNeeded?: boolean;
   executionFailuresSinceLastRun?: number | null;
   mergesSinceLastRun: number | null;
   revertsSinceLastRun: number | null;
@@ -766,6 +774,7 @@ export function leaderRunDue(nowMs: number, state: LeaderRunState, signals: Lead
   if (signals.mergesSinceLastRun !== null && signals.mergesSinceLastRun >= LEADER_SCHEDULE.mergeTrigger) {
     return { due: true, trigger: 'merges', reason: `${signals.mergesSinceLastRun} fleet merges landed since the last memo.`, nextRunAt };
   }
+  if (signals.outcomePlanNeeded) return { due: true, trigger: 'outcome-plan-needed', reason: 'An active desired outcome needs a plan or corrective refinement.', nextRunAt };
   if (signals.seatResetSinceLastRun) return { due: true, trigger: 'seat-reset', reason: 'A seat window reset.', nextRunAt };
   if (signals.highInsightSinceLastRun) return { due: true, trigger: 'insight', reason: 'A high-severity reasoning insight appeared.', nextRunAt };
   if (signals.executionFailuresSinceLastRun !== undefined && signals.executionFailuresSinceLastRun !== null && signals.executionFailuresSinceLastRun > 0) {
@@ -827,7 +836,16 @@ export async function gatherTriggerSignals(sources: LeaderEvidenceSources, state
         || snapshot.view.coverage.proposalSource === 'unavailable')) executionFailures = null;
     } catch { /* unknown ⇒ no trigger */ }
   }
+  let outcomePlanNeeded = false;
+  if (sources.outcomes) {
+    try { const outcomes = sources.outcomes();
+      outcomePlanNeeded = outcomes.complete && ['healthy', 'missing'].includes(outcomes.sourceState) &&
+        outcomes.outcomes.some(outcome => !outcome.paused && (outcome.graphDigest === null ||
+          outcome.nodes.some(node => node.state === 'failed' || node.state === 'aborted')));
+    } catch { /* unknown is not a planning trigger */ }
+  }
   return {
+    ...(sources.outcomes ? { outcomePlanNeeded } : {}),
     mergesSinceLastRun: facts?.merges ?? null,
     revertsSinceLastRun: facts?.reverts ?? null,
     seatResetSinceLastRun: seatReset,
@@ -946,6 +964,7 @@ export async function loadDefaultLeaderRunDeps(cfg: AshlrConfig): Promise<Leader
     cloudBacklog: { append: (items) => cloudBacklog.appendUserBacklogItems(items) },
     adviseActionClass: defaultLeaderActionAdvisor(cfg),
     sources: {
+      outcomes: () => apply.outcomes!.evidence(),
       executionFeedback: (nowMs) => {
         const root = process.env.ASHLR_HOME;
         if (!feedbackRead || feedbackRead.at !== nowMs || feedbackRead.root !== root) {

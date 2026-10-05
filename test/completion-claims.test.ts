@@ -8,7 +8,7 @@
  * behaviour and the fallback contract. The classifier's own accuracy was
  * measured separately against the live service.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   classifyCompletionClaimHeuristic,
   classifyCompletionClaim,
@@ -172,5 +172,33 @@ describe('changedFileCountFromDiff', () => {
     expect(turnIntegrity('claims-change', changedFileCountFromDiff(''))).toBe('unsupported-claim');
     expect(turnIntegrity('claims-change', changedFileCountFromDiff(diff))).toBe('consistent');
     expect(turnIntegrity('claims-change', changedFileCountFromDiff(undefined))).toBe('unknown');
+  });
+});
+
+
+describe('completion claim outcome admission reaches the real classifier boundary', () => {
+  it('uses the heuristic without a request after the selected outcome is paused', async () => {
+    const savedKey = process.env['TYPESAFE_API_KEY'];
+    const savedDisable = process.env['ASHLR_CLASSIFIER_DISABLE'];
+    const savedJevDisable = process.env['ASHLR_JEV_DISABLE'];
+    process.env['TYPESAFE_API_KEY'] = 'fixture-noncredential';
+    delete process.env['ASHLR_CLASSIFIER_DISABLE'];
+    delete process.env['ASHLR_JEV_DISABLE'];
+    const transport = vi.fn();
+    vi.stubGlobal('fetch', transport);
+    const admission = vi.fn(() => false);
+    try {
+      const result = await classifyCompletionClaim('Fixed the outcome admission fixture.', { phantom: { enabled: false } }, {
+        endpoint: 'https://classifier.invalid/v1/systemone', selectedOutcomeAdmission: admission,
+      });
+      expect(admission).toHaveBeenCalled();
+      expect(transport).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ claim: 'claims-change', source: 'fallback' });
+    } finally {
+      vi.unstubAllGlobals();
+      for (const [key, value] of [['TYPESAFE_API_KEY', savedKey], ['ASHLR_CLASSIFIER_DISABLE', savedDisable], ['ASHLR_JEV_DISABLE', savedJevDisable]]) {
+        if (value === undefined) delete process.env[key!]; else process.env[key!] = value;
+      }
+    }
   });
 });

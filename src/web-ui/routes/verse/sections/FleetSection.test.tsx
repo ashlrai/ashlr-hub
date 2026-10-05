@@ -30,6 +30,15 @@ afterEach(() => {
 });
 
 describe('FleetSection — live', () => {
+  it('shows the outcome editor in Fleet without creating work on mount', async () => {
+    const { posted } = stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/outcomes': {
+      v: 1, sourceState: 'missing', outcomes: [], enrollment: { sourceState: 'healthy', repos: [] },
+    } } });
+    render(<FleetSection />);
+    const panel = await screen.findByRole('region', { name: 'Work for me' });
+    expect(within(panel).getByText('No saved outcomes. Start with the result you want to achieve.')).toBeInTheDocument();
+    expect(posted).toEqual([]);
+  });
   it('keeps capacity timing a compact navigation-free read and reports missing old-server evidence', async () => {
     const { posted } = stubSurfaceFetch({ kind: 'live' });
     const user = userEvent.setup();

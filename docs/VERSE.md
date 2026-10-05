@@ -14,6 +14,13 @@ destinations and keyboard shortcuts remain available. The saved workspace is
 restored on launch. Selecting either workspace does not start or stop agents,
 change permission mode, sign a grant or activate the resident daemon.
 
+**Automatic** connects both workspaces: describe the work in a new chat, or save
+a desired outcome in Fleet for the Leader to plan across enrolled repositories.
+Model and account selection is optional. Outcomes retain revision history,
+pause/edit controls, and task-bound run, proposal, and verified merge evidence.
+See [Automatic work](AUTOMATIC-OUTCOMES.md) for the complete flow and recovery
+semantics. The older `vision approve` CLI remains a separate explicit workflow.
+
 **Review** opens the relevant existing surfaces: changes and sources for the
 current chat, usage, agent review, Needs you, fleet decisions and the module map.
 It preserves the current chat and draft, and does not launch work.
@@ -1488,7 +1495,7 @@ The Tauri app in `desktop/` is a native window around Verse plus a menu-bar
 item. It is locally buildable and installable; there is no notarized public
 installer (see
 `DESKTOP.md`). Full detail, including the native↔web shell contract, is in
-[`desktop/README.md`](../desktop/README.md).
+[`desktop/README.md`](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md).
 
 What it does on launch:
 
@@ -1530,7 +1537,7 @@ chats, new Needs-you items and seat-health changes (notifications are on by
 default; Settings ▸ Desktop). The Dock badge counts Needs-you items. Unsigned
 builds deliver banners through `osascript`, so they appear as Script Editor. The
 tray and the Dock badge are the reliable signals there. Details:
-[`desktop/README.md`](../desktop/README.md).
+[`desktop/README.md`](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md).
 
 ### Install it on this Mac
 
@@ -1575,11 +1582,11 @@ node desktop/scripts/prepare-sidecar.mjs # → desktop/src-tauri/binaries/ashlr-
                                          # → desktop/src-tauri/resources/public/
 
 # 3. Generate the app icons (once, or after changing icons/icon.svg)
-cd desktop && npm run icons
+(cd desktop && npm run icons)
 
 # 4. Bundle
-cd desktop && CI=true cargo tauri build  # release .app + .dmg
-cd desktop && cargo tauri build --debug  # fast, unoptimized
+(cd desktop && CI=true cargo tauri build) # release .app + .dmg
+# For a development bundle instead: (cd desktop && cargo tauri build --debug)
 ```
 
 Output: `desktop/src-tauri/target/release/bundle/macos/Ashlr.app` and
@@ -1597,44 +1604,22 @@ freshly compiled Rust shell wrapped around whatever assets a previous run left
 in `resources/`. That has shipped a stale UI more than once. Run steps 1, 2 and
 4 in that order every time, even when only the web changed.
 
-#### Two gotchas
+#### Build failures
 
-**1. `npm run build` cannot pass on this machine, and `build:binary` calls it.**
-Its `scripts/build-release-dependency-inventory.mjs` step refuses to run when
-the npm on `PATH` resolves through symlinks — here it exits with `npm runtime
-closure contains a symbolic link`. `scripts/build-sea.mjs` shells out to
-`npm run build`, so `npm run build:binary` inherits the failure. Work around it
-with a `PATH` shim that intercepts exactly `npm run build`, runs the remaining
-steps individually, and delegates every other npm invocation untouched:
+The desktop build includes the same dependency inventory and authority-surface
+checks as the CLI build. If `npm run build` or `npm run build:binary` refuses
+an npm runtime closure, stop and inspect the reported toolchain or dependency
+problem. Do not intercept the build command or omit verification steps. Stock
+npm executable shims whose targets remain inside the verified runtime closure
+are supported; escaping links and changed dependency bytes are rejected.
 
-```sh
-REPO=/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub
-SHIM=$(mktemp -d); REAL_NPM=$(which npm)
-cat > "$SHIM/npm" <<EOF
-#!/bin/sh
-REAL_NPM="$REAL_NPM"
-if [ "\$1" = "run" ] && [ "\$2" = "build" ] && [ \$# -eq 2 ]; then
-  set -e; cd "$REPO"
-  "\$REAL_NPM" exec -- tsc -p tsconfig.json
-  node scripts/copy-assets.mjs
-  node scripts/build-preparation-builtin.mjs
-  "\$REAL_NPM" exec -- vite build --config vite.config.web.ts
-  node scripts/build-identity.mjs
-  exit 0
-fi
-exec "\$REAL_NPM" "\$@"
-EOF
-chmod +x "$SHIM/npm"
-cd "$REPO" && PATH="$SHIM:$PATH" npm run build:binary
-```
+Keep the Mac awake and its lid open during release verification. A suspended
+machine can exhaust a bounded filesystem scan even when the source is valid.
+Re-run the complete gate after resolving the cause; a failed run is not release
+acceptance.
 
-The omitted step only writes a release dependency inventory; nothing the `.app`
-needs at runtime comes from it. Keep the shim out of `PATH` for everything else
-— it is a build workaround, not a fix.
-
-**2. `CI=1` is rejected by the Tauri CLI. Use `CI=true`.** The CLI parses the
-variable as a boolean and treats `1` as malformed, so the build exits before it
-bundles anything. `CI=true` is what skips the Finder-driven DMG layout (see
+For unattended Tauri packaging, use `CI=true`, not `CI=1`. The CLI parses this
+variable as a boolean, and `CI=true` skips the Finder-driven DMG layout (see
 below).
 
 #### Verify the bundle actually carries the new assets

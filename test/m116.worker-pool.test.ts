@@ -69,8 +69,15 @@ vi.mock('../src/core/run/orchestrator.js', () => ({
 
 let routeResult: RouteDecision = { backend: 'builtin', tier: 'local', reason: 'test' };
 const mockRouteBackend = vi.fn();
-vi.mock('../src/core/fleet/router.js', () => ({
+vi.mock('../src/core/fleet/router.js', async () => ({
+  ...await vi.importActual<typeof import('../src/core/fleet/router.js')>('../src/core/fleet/router.js'),
   routeBackend: (...args: unknown[]) => mockRouteBackend(...args),
+}));
+
+const mockResourceSnapshot = vi.fn();
+vi.mock('../src/core/fabric/resource-monitor.js', async () => ({
+  ...await vi.importActual<typeof import('../src/core/fabric/resource-monitor.js')>('../src/core/fabric/resource-monitor.js'),
+  getResourceSnapshot: (...args: unknown[]) => mockResourceSnapshot(...args),
 }));
 
 const mockRunAutoMergePass = vi.fn();
@@ -245,6 +252,7 @@ beforeEach(() => {
   engineTierOfImpl = () => 'local';
   subscriptionAllowedImpl = () => true;
 
+  mockResourceSnapshot.mockImplementation(async () => ({ generatedAt: new Date().toISOString(), backends: [{ backend: 'builtin', availability: 'open', cap: null, capUnit: null, usedPct: null }] }));
   mockRouteBackend.mockImplementation(() => routeResult);
   mockRunAutoMergePass.mockImplementation(async () => ({ attempted: 0, merged: 0, results: [] }));
   mockBuildBacklog.mockImplementation(async () => ({
@@ -319,6 +327,112 @@ describe('M116 — default config (batch mode)', () => {
     expect(result.dispatches?.[0]).toMatchObject({ dispatched: true, backend: 'llama-server' });
     expect(mockRunGoal).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it.each(['batch', 'continuous'] as const)('uses null count preferences with actual admitted inventory in %s mode', async (mode) => {
+    enroll(tmpRepo);
+    backlogItems = Array.from({ length: 17 }, (_, i) => makeItem(`adaptive-${i}`, tmpRepo));
+    const cfg = makeCfg({ mode, perTickItems: null, parallel: null, maxConcurrent: null,
+      concurrency: { local: null, cloud: null, total: 1 } });
+    mockLoadConfig.mockReturnValue(cfg);
+    let active = 0; let peak = 0;
+    const run = swarmStub(tmpRepo, 25);
+    mockRunSwarm.mockImplementation(async () => {
+      active++; peak = Math.max(peak, active);
+      try { return await run(); } finally { active--; }
+    });
+    const result = await tick(cfg, { dryRun: false });
+    expect(result.reason).toBe('ok');
+    expect(result.itemsConsidered).toBe(17);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(17);
+    expect(peak).toBe(17); // explicit maxConcurrent null overrides numeric total1
+    expect(active).toBe(0);
+  });
+
+  it('bounds null items by the durable journal and makes no contacts for empty inventory', async () => {
+    enroll(tmpRepo);
+    const cfg = makeCfg({ perTickItems: null, parallel: 1 });
+    mockLoadConfig.mockReturnValue(cfg);
+    backlogItems = [];
+    expect((await tick(cfg, { dryRun: false })).reason).toBe('no-backlog');
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    backlogItems = Array.from({ length: 70 }, (_, i) => makeItem(`adaptive-journal-${i}`, tmpRepo));
+    const result = await tick(cfg, { dryRun: false });
+    expect(result.itemsConsidered).toBe(64);
+    expect(mockRunSwarm).toHaveBeenCalledTimes(64);
+  });
+
+  it('keeps measured local serving slots with all count preferences null', async () => {
+    enroll(tmpRepo);
+    backlogItems = Array.from({ length: 5 }, (_, i) => makeItem(`local-adaptive-${i}`, tmpRepo));
+    routeResult = { backend: 'llama-server', tier: 'local', reason: 'test runtime' };
+    const cfg = makeCfg({ mode: 'continuous', perTickItems: null, parallel: null,
+      maxConcurrent: null, concurrency: { local: null, cloud: null, total: null } });
+    cfg.foundry = { localOnly: true, allowedBackends: ['llama-server'] };
+    mockLoadConfig.mockReturnValue(cfg);
+    registerServingCapacityProbe(async ({ nowMs }) => ({ runtime: 'llama-server', endpoint: 'unit-test', state: 'up', slots: 2, busySlots: 0, model: 'unit-test', managed: true, startedAt: null, observedAt: new Date(nowMs).toISOString(), detail: 'Two actual slots' }));
+    resetServingCapacityCache();
+    let active = 0; let peak = 0;
+    mockRunGoal.mockImplementation(async () => {
+      active++; peak = Math.max(peak, active);
+      try { await new Promise(resolve => setTimeout(resolve, 10)); return { id: `local-${Math.random()}`, status: 'done', usage: { estCostUsd: 0 } }; }
+      finally { active--; }
+    });
+    const result = await tick(cfg, { dryRun: false });
+    expect(result.itemsConsidered).toBe(5);
+    expect(mockRunGoal).toHaveBeenCalledTimes(5);
+    expect(peak).toBe(2);
+  });
+
+  it('keeps an explicit batch parallel ceiling under null tier caps and wider measured local slots', async () => {
+    enroll(tmpRepo);
+    backlogItems = Array.from({ length: 5 }, (_, i) => makeItem(`manual-local-${i}`, tmpRepo));
+    routeResult = { backend: 'llama-server', tier: 'local', reason: 'test runtime' };
+    const cfg = makeCfg({ perTickItems: null, parallel: 2, maxConcurrent: null,
+      concurrency: { local: null, cloud: null, total: null } });
+    cfg.foundry = { localOnly: true, allowedBackends: ['llama-server'] };
+    mockLoadConfig.mockReturnValue(cfg);
+    registerServingCapacityProbe(async ({ nowMs }) => ({ runtime: 'llama-server', endpoint: 'unit-test', state: 'up', slots: 4, busySlots: 0, model: 'unit-test', managed: true, startedAt: null, observedAt: new Date(nowMs).toISOString(), detail: 'Four actual slots' }));
+    resetServingCapacityCache();
+    let active = 0; let peak = 0;
+    mockRunGoal.mockImplementation(async () => {
+      active++; peak = Math.max(peak, active);
+      try { await new Promise(resolve => setTimeout(resolve, 10)); return { id: `manual-${Math.random()}`, status: 'done', usage: { estCostUsd: 0 } }; }
+      finally { active--; }
+    });
+    const result = await tick(cfg, { dryRun: false });
+    expect(result.itemsConsidered).toBe(5);
+    expect(mockRunGoal).toHaveBeenCalledTimes(5);
+    expect(peak).toBe(2);
+  });
+
+  it.each([2, null])('fabric dispatch respects batch preference %s without its old default3 ceiling', async (parallel) => {
+    enroll(tmpRepo);
+    backlogItems = Array.from({ length: 9 }, (_, i) => makeItem(`fabric-count-${i}`, tmpRepo));
+    const cfg = makeCfg({ perTickItems: null, parallel });
+    cfg.foundry = { fabric: { concurrentDispatch: true } };
+    mockLoadConfig.mockReturnValue(cfg);
+    let active = 0; let peak = 0;
+    const run = swarmStub(tmpRepo, 10);
+    mockRunSwarm.mockImplementation(async () => {
+      active++; peak = Math.max(peak, active);
+      try { return await run(); } finally { active--; }
+    });
+    const result = await tick(cfg, { dryRun: false });
+    expect(result.reason).toBe('ok');
+    expect(mockRunSwarm).toHaveBeenCalledTimes(parallel === null ? 9 : 3); // legacy fabric planner slots retained for numeric preferences
+    expect(peak).toBe(parallel === null ? 9 : 2);
+    expect(active).toBe(0);
+  });
+
+  it('explicit zero USD Stop remains Stop with all count preferences null', async () => {
+    enroll(tmpRepo);
+    backlogItems = [makeItem('stopped-adaptive', tmpRepo)];
+    const cfg = makeCfg({ dailyBudgetUsd: 0, perTickItems: null, parallel: null, maxConcurrent: null, concurrency: { local: null, cloud: null, total: null } });
+    mockLoadConfig.mockReturnValue(cfg);
+    expect((await tick(cfg, { dryRun: false })).reason).toBe('budget-exhausted');
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+    expect(mockRunGoal).not.toHaveBeenCalled();
   });
 
   it('runs requested batch concurrency above eight while bounding workers by actual inventory', async () => {

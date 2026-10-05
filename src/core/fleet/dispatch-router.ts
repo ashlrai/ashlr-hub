@@ -35,6 +35,7 @@
  * Honesty: `null` = unknown. Every exclusion carries a specific sentence, and
  * a hold always says why and (when a date is known) until when.
  */
+import { resolveDaemonCountPreferences, countForInventory } from '../daemon/count-preferences.js';
 import { leaderPreferencesReady, resolveLeaderPreferences, type ResolvedLeaderPreferences } from '../vision/leader-preferences.js';
 import { DAEMON_SPEND_GUARD_ITEM_CAPACITY } from '../daemon/state.js';
 import type { AshlrConfig, EngineId, EngineTier, WorkItem, WorkSource } from '../types.js';
@@ -269,13 +270,21 @@ function concreteGrokLanes(value: number | null | undefined): number | null {
 /** Mirrors the daemon's configured batch/pool defaults, bounded by its durable journal. */
 export function grokDispatchBatchCapacity(cfg: AshlrConfig): number {
   const daemon = cfg.daemon;
-  const capacity = (value: unknown, fallback: number): number => value === undefined ? fallback
-    : typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : 0;
-  const batch = capacity(daemon?.perTickItems, 3);
-  const pool = daemon?.mode === 'continuous'
-    ? Math.min(capacity(daemon.concurrency?.cloud, 6), capacity(daemon.maxConcurrent ?? daemon.concurrency?.total, 8))
-    : capacity(daemon?.parallel, 2);
-  return Math.min(batch, pool, DAEMON_SPEND_GUARD_ITEM_CAPACITY);
+  const counts = resolveDaemonCountPreferences(daemon);
+  // Invalid/zero explicit Grok capacity remains an opt-out, not adaptive.
+  const valid = (value: unknown) => value === undefined || value === null || typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+  const continuous = daemon?.mode === 'continuous';
+  const tiered = continuous || daemon?.concurrency !== undefined || daemon?.maxConcurrent !== undefined;
+  if (!valid(daemon?.perTickItems) || (tiered
+    ? !valid(daemon?.concurrency?.cloud) || !valid(daemon?.maxConcurrent !== undefined ? daemon.maxConcurrent : daemon?.concurrency?.total)
+    : !valid(daemon?.parallel)) || !continuous && !valid(daemon?.parallel)) return 0;
+  const batch = countForInventory(counts.perTickItems, DAEMON_SPEND_GUARD_ITEM_CAPACITY);
+  let pool = tiered
+    ? Math.min(countForInventory(counts.concurrency.cloud, batch), countForInventory(counts.maxConcurrent, batch))
+    : countForInventory(counts.parallel, batch);
+  if (!continuous && typeof daemon?.parallel === 'number') pool = Math.min(pool, daemon.parallel);
+  return Math.min(batch, pool);
+
 }
 
 /**

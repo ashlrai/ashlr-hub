@@ -14,7 +14,7 @@
  * is a courtesy gate, never an authority. That is why `applyCapPatch` builds
  * a PARTIAL body and the panel re-reads the server's `applied` snapshot.
  */
-import { VERSE_CAPS_BOUNDS, type VerseCaps, type VerseCapsPatch } from './control-types.js';
+import { VERSE_CAPS_BOUNDS, VERSE_UNCAPPED_COUNT_KEYS, type VerseCaps, type VerseCapsPatch, type VerseUncappedCountKey } from './control-types.js';
 
 export type CapKey =
   | 'dailyBudgetUsd'
@@ -107,7 +107,7 @@ export const CAP_FIELDS: readonly CapFieldSpec[] = [
     max: VERSE_CAPS_BOUNDS.maxConcurrent.max,
     integer: true,
     step: 1,
-    help: 'Absolute ceiling on in-flight dispatches in continuous mode. Takes precedence over the per-tier totals.',
+    help: 'Operator ceiling on in-flight dispatches. Automatic removes this ceiling and takes precedence over All tiers; resource admission still applies.',
     toDisplay: identity,
     fromDisplay: identity,
   },
@@ -119,7 +119,7 @@ export const CAP_FIELDS: readonly CapFieldSpec[] = [
     max: VERSE_CAPS_BOUNDS.concurrency.max,
     integer: true,
     step: 1,
-    help: 'On-device engines. GPU/RAM bound — keep this low.',
+    help: 'On-device work follows measured serving slots. A manual preference may lower concurrency.',
     toDisplay: identity,
     fromDisplay: identity,
   },
@@ -143,7 +143,7 @@ export const CAP_FIELDS: readonly CapFieldSpec[] = [
     max: VERSE_CAPS_BOUNDS.concurrency.max,
     integer: true,
     step: 1,
-    help: 'Hard cap across every tier combined.',
+    help: 'Operator ceiling across tiers when Max concurrent is unset. Resource admission still applies.',
     toDisplay: identity,
     fromDisplay: identity,
   },
@@ -168,18 +168,35 @@ export function capFieldByKey(key: CapKey): CapFieldSpec {
   return found;
 }
 
-/** Current stored value for a cap, or null when the server did not send it. */
+/** Raw transport value: missing is distinct from an explicitly null choice. */
+function capValue(caps: VerseCaps | undefined, key: CapKey): unknown {
+  if (!caps) return undefined;
+  return key === 'concurrency.local' ? caps.concurrency?.local
+    : key === 'concurrency.cloud' ? caps.concurrency?.cloud
+      : key === 'concurrency.total' ? caps.concurrency?.total
+        : (caps as unknown as Record<string, unknown>)[key];
+}
+
+/** Current numeric value, or unknown/unset/Automatic (qualified separately). */
 export function readCap(caps: VerseCaps | undefined, key: CapKey): number | null {
-  if (!caps) return null;
-  const raw =
-    key === 'concurrency.local'
-      ? caps.concurrency?.local
-      : key === 'concurrency.cloud'
-        ? caps.concurrency?.cloud
-        : key === 'concurrency.total'
-          ? caps.concurrency?.total
-          : (caps as unknown as Record<string, unknown>)[key];
+  const raw = capValue(caps, key);
   return typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
+}
+
+export function isCountCapKey(key: CapKey): key is VerseUncappedCountKey {
+  return (VERSE_UNCAPPED_COUNT_KEYS as readonly string[]).includes(key);
+}
+
+/** Older-server nulls and missing/invalid readings never imply Automatic. */
+export function isUncappedCount(caps: VerseCaps | undefined, key: CapKey): boolean {
+  return isCountCapKey(key) && caps?.supportsUncappedCounts === true &&
+    Array.isArray(caps.uncappedCountKeys) && caps.uncappedCountKeys.includes(key) && capValue(caps, key) === null;
+}
+
+/** Remove only operator count ceilings; financial and authority choices are untouched. */
+export function automaticCountsPatch(): VerseCapsPatch {
+  return { perTickItems: null, parallel: null, maxConcurrent: null,
+    concurrency: { local: null, cloud: null, total: null } };
 }
 
 export type CapValidation =
@@ -219,7 +236,8 @@ export function validateCap(spec: CapFieldSpec, raw: string): CapValidation {
 }
 
 /** Build the smallest `POST /api/verse/caps` body that applies one cap. */
-export function capPatch(key: CapKey, stored: number): VerseCapsPatch {
+export function capPatch(key: CapKey, stored: number | null): VerseCapsPatch {
+  if (stored === null && !isCountCapKey(key)) throw new Error("Automatic is supported only for count preferences");
   switch (key) {
     case 'concurrency.local':
       return { concurrency: { local: stored } };

@@ -136,6 +136,12 @@ export function concurrentAssignedRouteReason(fields: {
 
 /** Minimal cfg shape the dispatcher needs. Matches AshlrConfig.foundry.fabric. */
 export interface ConcurrentDispatchCfg {
+  /** Host's existing tier/lane pool; does not replace backend resource slots. */
+  admission?: {
+    canStart(backend: EngineId): boolean;
+    start(backend: EngineId): void;
+    finish(backend: EngineId): void;
+  };
   /** Default slot cap per backend (default 3). */
   maxSlotsPerBackend?: number;
   /**
@@ -400,6 +406,7 @@ export async function runConcurrentDispatch(
   killSwitchFn: () => boolean,
   cfg: ConcurrentDispatchCfg,
 ): Promise<DispatchResult[]> {
+  if (cfg.admission) return runAdmittedDispatch(plan, dispatchFn, killSwitchFn, cfg.admission);
   const maxSlots = Math.max(1, cfg.maxSlotsPerBackend ?? 3);
 
   // Group assignments by backend.
@@ -435,6 +442,57 @@ export async function runConcurrentDispatch(
   }
 
   return results;
+}
+
+/** Drain only admitted assignments, respecting both measured backend slots and
+ * the host pool. Completion wakes the queue; permanently held work never polls. */
+async function runAdmittedDispatch(
+  plan: DispatchPlan,
+  dispatchFn: (item: WorkItem, backend: EngineId) => Promise<unknown>,
+  stopped: () => boolean,
+  admission: NonNullable<ConcurrentDispatchCfg['admission']>,
+): Promise<DispatchResult[]> {
+  const results: DispatchResult[] = new Array(plan.assignments.length);
+  const pending = new Set(plan.assignments.map((_assignment, index) => index));
+  const active = new Map<EngineId, number>();
+  let running = 0;
+  return new Promise(resolve => {
+    const hold = (index: number) => {
+      const { item, backend } = plan.assignments[index]!;
+      results[index] = { item, backend, attempted: false, settled: null };
+      pending.delete(index);
+    };
+    function drain(): void {
+      for (const index of pending) {
+        const { item, backend } = plan.assignments[index]!;
+        if (stopped()) { hold(index); continue; }
+        const slots = plan.slotsMap.get(backend) ?? 0;
+        if ((active.get(backend) ?? 0) >= slots || !admission.canStart(backend)) continue;
+        pending.delete(index);
+        admission.start(backend);
+        active.set(backend, (active.get(backend) ?? 0) + 1);
+        running++;
+        void (async () => {
+          let settled: PromiseSettledResult<unknown>;
+          try { settled = { status: 'fulfilled', value: await dispatchFn(item, backend) }; }
+          catch (reason) { settled = { status: 'rejected', reason }; }
+          finally {
+            admission.finish(backend);
+            active.set(backend, (active.get(backend) ?? 1) - 1);
+            running--;
+          }
+          results[index] = { item, backend, attempted: true, settled };
+          drain();
+        })();
+      }
+      if (running === 0) {
+        // No own completion can free a slot: remaining assignments are held.
+        for (const index of pending) hold(index);
+        resolve(results);
+      }
+    }
+    drain();
+  });
 }
 
 /**

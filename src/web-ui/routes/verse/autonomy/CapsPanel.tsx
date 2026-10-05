@@ -1,5 +1,5 @@
 /**
- * routes/verse/autonomy/CapsPanel.tsx — the leash: every configured cap, the
+ * routes/verse/autonomy/CapsPanel.tsx — operator preferences, the
  * live usage against it, and an inline edit that commits on blur or Enter.
  *
  * Three behaviours the contract calls out explicitly:
@@ -16,9 +16,12 @@
  * concurrency has no live signal, so it gets no usage line — an invented
  * "0 / 8" would be worse than silence.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   CAP_FIELDS,
+  automaticCountsPatch,
+  isCountCapKey,
+  isUncappedCount,
   FOUNDRY_LIMIT_MAX_RANGE,
   capPatch,
   readCap,
@@ -30,7 +33,7 @@ import {
 import { updateVerseCaps } from './control-queries.js';
 import { GoalPreferencesPanel } from './GoalPreferencesPanel.js';
 import { LeaderPreferencesPanel } from './LeaderPreferencesPanel.js';
-import { engineQuotaStanding } from './control-types.js';
+import { engineQuotaStanding, VERSE_UNCAPPED_COUNT_KEYS } from './control-types.js';
 import type { VerseCaps, VerseControlSnapshot, VerseFoundryLimit } from './control-types.js';
 import { budgetMeter, formatAge, formatCount, formatUsd } from './format.js';
 import type { GuardedAction } from './use-guarded-action.js';
@@ -76,22 +79,44 @@ export function CapsPanel({ caps, snapshot, guard, dispatchEnabled }: CapsPanelP
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [appliedKey, setAppliedKey] = useState<string | null>(null);
+  const mounted = useRef(true);
+  const running = useRef(false);
+  const current = useRef({ caps, dispatchEnabled, readOnly: guard.readOnly });
+  current.current = { caps, dispatchEnabled, readOnly: guard.readOnly };
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const locked = !dispatchEnabled || guard.readOnly || guard.busy || guard.tokenOpen;
 
   function commit(id: string, reason: string, run: () => Promise<unknown>) {
+    if (locked || running.current) return;
     setActiveKey(id);
     setAppliedKey(null);
     guard.request(async () => {
+      if (!mounted.current || running.current || !current.current.dispatchEnabled || current.current.readOnly) return;
+      running.current = true;
       setBusyKey(id);
       try {
         await run();
-        setAppliedKey(id);
+        if (mounted.current) setAppliedKey(id);
       } finally {
-        setBusyKey(null);
+        running.current = false;
+        if (mounted.current) setBusyKey(null);
       }
     }, reason);
   }
 
+  async function saveCount(key: CapKey, stored: number | null) {
+    if (stored === null && current.current.caps.supportsUncappedCounts !== true) {
+      throw new Error('Automatic count preferences are unavailable from this server.');
+    }
+    const result = await updateVerseCaps(capPatch(key, stored));
+    if (!result.ok || result.live !== true ||
+      (current.current.caps.supportsUncappedCounts === true && result.caps.supportsUncappedCounts !== true) ||
+      (stored === null ? !isUncappedCount(result.caps, key) : readCap(result.caps, key) !== stored)) {
+      throw new Error('The server did not confirm the count preference. Refresh and retry.');
+    }
+  }
+  const supportsAutomatic = caps.supportsUncappedCounts === true;
+  const allAutomatic = VERSE_UNCAPPED_COUNT_KEYS.every((key) => isUncappedCount(caps, key));
   const limits = caps.foundryLimits ?? [];
 
   return (
@@ -100,6 +125,21 @@ export function CapsPanel({ caps, snapshot, guard, dispatchEnabled }: CapsPanelP
         <h3 className={styles.panelTitle}>Budget and limits</h3>
         <p className={styles.panelNote}>Committed on blur or Enter. The daemon re-reads config each tick, so changes apply live.</p>
       </div>
+
+      {supportsAutomatic ? <div className={styles.panelHead}>
+        <p className={styles.panelNote}>Automatic follows available work and resource capacity, with no operator count ceiling.</p>
+        <button type="button" className={styles.button} disabled={locked || busyKey !== null || allAutomatic}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => commit('automatic-counts', 'Changing count preferences requires the dispatch token.', async () => {
+            if (current.current.caps.supportsUncappedCounts !== true) throw new Error('Automatic count preferences are unavailable from this server.');
+            const result = await updateVerseCaps(automaticCountsPatch());
+            if (!result.ok || result.live !== true || !VERSE_UNCAPPED_COUNT_KEYS.every((key) => isUncappedCount(result.caps, key))) {
+              throw new Error('The server did not confirm Automatic counts. Refresh and retry.');
+            }
+          })}>Use Automatic counts</button>
+        {appliedKey === 'automatic-counts' ? <span className={styles.capApplied}>Automatic counts applied live</span> : null}
+        {activeKey === 'automatic-counts' && guard.error ? <span role="alert" className={styles.capError}>{guard.error}</span> : null}
+      </div> : null}
 
       <div className={styles.capGrid}>
         {CAP_FIELDS.map((spec) => (
@@ -112,6 +152,8 @@ export function CapsPanel({ caps, snapshot, guard, dispatchEnabled }: CapsPanelP
                 : `${spec.help} Journal capacity is unavailable from this server.`,
             } : spec}
             stored={readCap(caps, spec.key)}
+            automatic={isUncappedCount(caps, spec.key)}
+            supportsAutomatic={supportsAutomatic && isCountCapKey(spec.key)}
             usage={usageFor(spec.key, caps, snapshot)}
             disabled={locked || (busyKey !== null && busyKey !== spec.key)}
             busy={busyKey === spec.key}
@@ -119,7 +161,7 @@ export function CapsPanel({ caps, snapshot, guard, dispatchEnabled }: CapsPanelP
             error={activeKey === spec.key ? guard.error : null}
             onCommit={(stored) =>
               commit(spec.key, `Changing ${spec.label.toLowerCase()} requires the dispatch token.`, () =>
-                updateVerseCaps(capPatch(spec.key, stored)),
+                isCountCapKey(spec.key) ? saveCount(spec.key, stored) : updateVerseCaps(capPatch(spec.key, stored)),
               )
             }
           />
@@ -200,6 +242,8 @@ interface FieldShellProps {
   step: number;
   min: number;
   max: number;
+  action?: ReactNode;
+  placeholder?: string;
 }
 
 function FieldShell(props: FieldShellProps) {
@@ -218,6 +262,7 @@ function FieldShell(props: FieldShellProps) {
           inputMode="decimal"
           className={`${styles.capInput} ${props.invalid ? styles.capInputInvalid : ''}`}
           value={props.value}
+          placeholder={props.placeholder}
           step={props.step}
           min={props.min}
           max={props.max}
@@ -245,6 +290,7 @@ function FieldShell(props: FieldShellProps) {
           {props.help}
         </span>
       ) : null}
+      {props.action}
       {props.invalid ? (
         <span className={styles.capError} role="alert">
           {props.invalid}
@@ -263,6 +309,8 @@ function FieldShell(props: FieldShellProps) {
 function CapField({
   spec,
   stored,
+  automatic,
+  supportsAutomatic,
   usage,
   disabled,
   busy,
@@ -272,12 +320,14 @@ function CapField({
 }: {
   spec: CapFieldSpec;
   stored: number | null;
+  automatic: boolean;
+  supportsAutomatic: boolean;
   usage: string | null;
   disabled: boolean;
   busy: boolean;
   applied: boolean;
   error: string | null;
-  onCommit: (stored: number) => void;
+  onCommit: (stored: number | null) => void;
 }) {
   const canonical = stored === null ? '' : String(spec.toDisplay(stored));
   const [draft, setDraft] = useState(canonical);
@@ -289,7 +339,7 @@ function CapField({
   useEffect(() => {
     if (invalid === null) setDraft(canonical);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- adopt server value only when it actually changes
-  }, [canonical]);
+  }, [canonical, automatic]);
 
   function commit() {
     if (draft === canonical) {
@@ -313,6 +363,14 @@ function CapField({
       help={spec.help}
       usage={usage}
       value={draft}
+      placeholder={automatic ? 'Automatic' : stored === null ? 'Not configured' : undefined}
+      action={supportsAutomatic ? <button type="button" className={styles.button}
+        aria-label={`Use Automatic for ${spec.label}`} aria-pressed={automatic}
+        onMouseDown={(event) => event.preventDefault()}
+        disabled={disabled || busy || automatic}
+        onClick={() => { setInvalid(null); onCommit(null); }}>
+        {automatic ? 'Automatic · resource capacity applies' : 'Automatic'}
+      </button> : null}
       invalid={invalid}
       // `stored === null` means "not configured yet" — the ONE state this
       // control most needs to be editable in. Disabling it made Max

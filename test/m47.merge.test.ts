@@ -637,6 +637,25 @@ describe('M47 autoMergeProposal — refusals', () => {
     return loadProposal(p.id)!;
   }
 
+  it('holds automatic outcome proposals before legacy verification, model or git mutation', async () => {
+    initRepo(tmpRepo);
+    enroll(tmpRepo);
+    const proposal = createProposal({
+      repo: tmpRepo, origin: 'agent', kind: 'patch', title: 'outcome pending', summary: '',
+      diff: addFileDiff('src/outcome.ts', 'export const value = 1;'),
+      workItemId: 'goal:outcome-' + 'a'.repeat(64) + ':milestone-' + 'b'.repeat(64),
+      workItemGenerationId: 'outcome:v1:fixture',
+      engineModel: 'codex:gpt-5.5', engineTier: 'frontier',
+    });
+    const before = listBranches(tmpRepo);
+    const result = await autoMergeProposal(proposal.id, cfgWith());
+    expect(result).toMatchObject({ ok: false, merged: false });
+    expect(result.reason).toContain('standing host progression');
+    expect(listBranches(tmpRepo)).toEqual(before);
+    expect(loadProposal(proposal.id)?.status).toBe('pending');
+    expect(loadProposal(proposal.id)?.verifyResult).toBeUndefined();
+  });
+
   it('disabled cfg → refuse, no branch, status unchanged', async () => {
     initRepo(tmpRepo);
     enroll(tmpRepo);

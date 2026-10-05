@@ -138,7 +138,7 @@ Configuration: `comms.enabled: true`, `comms.channel: "telegram"`,
 `comms.telegram.botToken` (or `TELEGRAM_BOT_TOKEN` in the environment) and
 `comms.telegram.chatId`. Messages from any other chat are dropped. The poller
 runs as the launchd job `ai.ashlr.comms-poll` every 3 minutes (see the
-[Comms channel](HUB-REFERENCE.md#comms-channel) in the Hub reference for the config
+[Comms channel](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md#comms-channel) in the Hub reference for the config
 example).
 
 **Talking.** Send plain text and it joins the thread; the Leader's reply comes

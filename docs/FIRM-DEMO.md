@@ -169,7 +169,7 @@ their existing reserves, owner pauses, allocation ceilings or model permissions.
 
 An owner-controlled `0600` JSON file in a private directory contains exactly
 `schemaVersion: 1`, `graphId`, and `host`. The host contract is
-[`FirmEngineeringControlHost`](../src/core/universe/firm-engineering-control-handler.ts):
+[`FirmEngineeringControlHost`](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/universe/firm-engineering-control-handler.ts):
 
 | Field | Meaning |
 | --- | --- |
@@ -352,7 +352,7 @@ tests, not provider activation or unattended production commissioning.
 ### A real Hub source campaign
 
 The first fixed Hub-code evaluator is
-[`scripts/evaluators/backlog-marker-paths.mjs`](../scripts/evaluators/backlog-marker-paths.mjs).
+[`scripts/evaluators/backlog-marker-paths.mjs`](https://github.com/ashlrai/ashlr-hub/blob/master/scripts/evaluators/backlog-marker-paths.mjs).
 This recipe requires the full source checkout; the evaluator and acceptance
 fixture are not shipped in the npm package.
 It measures marker-item path classification against 142 fixed cases. The raw

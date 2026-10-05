@@ -1,3 +1,4 @@
+import { selectedOutcomeAdmissionCurrent } from './outcome-admission.js';
 /**
  * engines.ts — M11: hardened per-engine adapters.
  *
@@ -365,6 +366,8 @@ export function phantomWrap(cmd: EngineCommand, _cfg: AshlrConfig): EngineComman
 // ---------------------------------------------------------------------------
 
 interface SpawnEngineOptions {
+  /** Caller-owned revision fence, evaluated at each actual spawn including recovery. */
+  selectedOutcomeAdmission?: () => boolean;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
   launcher?: { bin: string; prefixArgs: string[] };
@@ -879,6 +882,10 @@ async function spawnEngineInner(
       resolve(result);
     }
 
+    if (!selectedOutcomeAdmissionCurrent(opts?.selectedOutcomeAdmission)) {
+      resolve(cancelledEngineResult());
+      return;
+    }
     const child = spawn(spawnBin, spawnArgs, {
       cwd: effective.cwd,
       env: childEnv,

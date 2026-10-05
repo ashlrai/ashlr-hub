@@ -16,15 +16,15 @@
 
 ## Install
 
-Install Verse 3.22.2 from its versioned GitHub release:
+Install Verse 3.23.0 from its versioned GitHub release:
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.2/ashlr-hub-3.22.2.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.23.0/ashlr-hub-3.23.0.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
 ashlr verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 On an Apple silicon Mac, download the
-[v3.22.2 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.2/Ashlr_3.22.2_aarch64_locally-signed.dmg).
+[v3.23.0 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.23.0/Ashlr_3.23.0_aarch64_locally-signed.dmg).
 It is locally signed, not Apple notarized; macOS may require **Open Anyway** on
 first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
@@ -66,19 +66,20 @@ with the `@ashlr/hub/universe` SDK. "Ashlrverse" is the wider project; existing
 manifests, schemas and stores need no naming migration.
 
 The user guide is [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
+See [Automatic work](docs/AUTOMATIC-OUTCOMES.md) for chat routing, editable outcomes and recovery.
 
-### What's in Verse 3.22
+### What's in Verse 3.23
 
 **Work with me** opens your interactive chats: guide the agent, inspect its
 tools and context, review changes and continue on another account or local model.
-**Work for me** opens the fleet: delegate tasks, review work, guide the Leader
-and manage autonomous execution within the authority you sign. Both workspaces
+**Work for me** opens the fleet: describe a desired result, edit or pause it,
+inspect recorded runs and proposals, and guide the Leader within the authority you sign. Both workspaces
 share accounts and projects, and switching between them does not start work or
 change permission mode. The app restores the workspace you last used.
 
 | Work with me | Work for me |
 |---|---|
-| Guide a chat, choose an account or model, inspect tools and context, review its diff. | Delegate work, follow agents, steer the Leader and review fleet decisions. |
+| Describe work in a project; Automatic chooses an eligible connected resource. Use Advanced for a manual override. | Save a desired result and observable acceptance. The Leader refines dependency-ready work across the fleet. |
 | Keep projects, drafts, terminals and source evidence together. | Keep account capacity, goals, outcomes and the work needing you together. |
 
 **Review** opens the relevant changes, sources, usage, agents or decisions without
@@ -183,7 +184,7 @@ separate Node.js install to run.
 
 ### Install
 
-The [v3.22.2 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.22.2)
+The [v3.23.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.23.0)
 includes an arm64 DMG. It is locally signed, not Apple Developer ID notarized,
 so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
@@ -271,7 +272,7 @@ The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.2/ashlr-hub-3.22.2.tgz
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.23.0/ashlr-hub-3.23.0.tgz
 ashlr --version
 ashlr verse                 # start the server and open http://127.0.0.1:7777/verse/
 ```
@@ -438,6 +439,7 @@ switch, backends, sandboxing, the command reference, the safety model, the
 | **3.14** | Talk to the Leader in Verse, Telegram and the CLI; Leader reliability; accounts ready in both chat and fleet; the rollout ladder on Command and shadow decisions on Fleet; local enforcement for free-plan private repos; `file:../` sibling dependencies; a sidecar that cannot freeze; chart polish | Shipped |
 | **3.15** | Founder-mode Leader; Devin as chat seats, a lane and a fleet producer under a two-judge rule; the workbench panel (terminal blocks, browser, checkpoints, sources and reasoning); every seat together; playbooks and automations; the Jev decision layer; retros and approved knowledge (Growth ▸ Lessons); a private repo wiki and Ask | Included in the published 3.16 release |
 | **3.20** | Reset-aware task/account choices, recorded work estimates, Jev advice and optional decision-call preferences | [3.22.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.22.0) |
+| **3.23** | Automatic chat, editable desired outcomes, dependency-ready fleet work, preserved local context and current-outcome review/merge checks | [3.23.0 release target](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.23.0) |
 | **3.19 workbench changes** | Faster progressive resource readings, expandable usage details, optional goal and Leader preferences, Review navigation and explicit benchmark commands | Included in [3.22.0](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.22.0) |
 | **3.18** | Work with me and Work for me, configurable fleet volume, scalable workspace retention and comparable usage reports | [3.18.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.18.0) |
 | **3.17** | Local module map, scalable account/model rosters, portable efficiency-plugin connection and phone reliability | [3.17.2 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.2) |

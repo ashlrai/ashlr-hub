@@ -11,12 +11,12 @@ Verse Command bar uses `/api/verse/authority`. Every path named here is a Tier-1
 protected path. The fleet can never change one, and `.github/CODEOWNERS`
 requires the owner's review on GitHub as well.
 
-**Current state (3.15).** Autonomy is built and ships dormant. It runs only
+**Runtime activation.** Autonomy is built and ships dormant. It runs only
 after you install custody, sign a standing grant with Touch ID and start the
 resident daemon yourself (`ashlr authority resident start`). A grant starts on
 the **shadow** stage, where every proposal goes through the gates and nothing
-merges. On the maintainer's Mac a grant is active and the ladder is at shadow;
-the dated details, and what is left to do, are in
+merges. A particular Mac's live grant and service state must be checked with
+`ashlr authority status --json`; dated implementation details are in
 [AUTONOMY-GAP.md](AUTONOMY-GAP.md#current-activation-state-315). Devin is
 its own engine: a grant may name it only as a producer, and a Devin PR merges
 only when the stage names `devin` and judges from two different families
@@ -305,7 +305,7 @@ step's command to copy.
     it refuses agents, a dirty build, Stop, the switch at Off and an inactive
     grant, shows the release, plist and daily budget, and asks you to confirm
     — in the app, in a native dialog no page script or agent can answer
-    ([desktop/README.md](../desktop/README.md), "Fleet operations"). Setup
+    ([desktop/README.md](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md), "Fleet operations"). Setup
     never does this step for you ([RESIDENT-RUNTIME.md](RESIDENT-RUNTIME.md)).
 
 Your recurring actions after setup are one Touch ID per 30-day grant, and one

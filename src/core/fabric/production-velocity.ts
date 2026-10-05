@@ -7,6 +7,7 @@
  * local/API caps, and queue selection sized to real slot capacity.
  */
 
+import { countForInventory, resolveDaemonCountPreferences } from '../daemon/count-preferences.js';
 import type { AshlrConfig } from '../types.js';
 import type { ResourceSnapshot } from './resource-monitor.js';
 import { slotsForBackendState } from './concurrent-dispatch.js';
@@ -42,7 +43,9 @@ export interface EffectiveProductionVelocityProfile {
 }
 
 export interface DaemonQueueSelectionInput {
-  perTickItems: number;
+  perTickItems: number | null;
+  /** Raw positive manual preference; legacy/default values may still fill slots. */
+  explicitItemCeiling?: boolean;
   remainingBudgetUsd: number;
   backlogItems: number;
   fillQueueToSlots: boolean;
@@ -129,6 +132,13 @@ export function applyProductionVelocityProfile(cfg: AshlrConfig): AshlrConfig {
   const nim = foundry.nim ?? {};
   const foundryRecord = foundry as Record<string, unknown>;
   const kimi = asRecord(foundryRecord['kimi']) ?? {};
+  const raw = asRecord(productionVelocityRaw(cfg));
+  const counts = resolveDaemonCountPreferences(cfg.daemon);
+  const adaptive = counts.parallel === null || counts.maxConcurrent === null ||
+    counts.concurrency.local === null || counts.concurrency.cloud === null;
+  // Keep explicit resource preferences; do not materialize default3 as a new
+  // operator ceiling when the count policy explicitly requests adaptive work.
+  const materializeSlots = !adaptive || fabric.maxSlotsPerBackend !== undefined || raw?.['maxSlotsPerBackend'] !== undefined;
 
   return {
     ...cfg,
@@ -140,7 +150,7 @@ export function applyProductionVelocityProfile(cfg: AshlrConfig): AshlrConfig {
         resourceAware: true,
         concurrentDispatch: true,
         workhorseDispatch: true,
-        maxSlotsPerBackend: profile.maxSlotsPerBackend,
+        ...(materializeSlots ? { maxSlotsPerBackend: profile.maxSlotsPerBackend } : {}),
       },
       local: {
         ...local,
@@ -186,10 +196,11 @@ export function daemonQueueSelectionLimit(input: DaemonQueueSelectionInput): num
     ? input.minPerItemUsd
     : 0.01;
   const maxByBudget = Math.max(1, Math.floor(input.remainingBudgetUsd / minPerItemUsd));
-  const base = Math.max(1, Math.floor(input.perTickItems));
+  const base = input.perTickItems === null ? countForInventory(null, input.backlogItems)
+    : Math.max(1, Math.floor(input.perTickItems));
   const availableSlots = typeof input.availableSlots === 'number' && Number.isFinite(input.availableSlots)
     ? Math.max(0, Math.floor(input.availableSlots))
     : 0;
-  const desired = input.fillQueueToSlots && availableSlots > base ? availableSlots : base;
+  const desired = !input.explicitItemCeiling && input.fillQueueToSlots && availableSlots > base ? availableSlots : base;
   return Math.min(desired, maxByBudget, input.backlogItems);
 }

@@ -34,6 +34,8 @@ import { scrubPrivateText } from '../util/scrub.js';
 import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
 import { BUDGET_MODES, type BudgetMode, type RoutingDifficulty } from '../routing/types.js';
 import type { FleetTaskInput } from '../fleet/fleet-types.js';
+import { compileEcosystemMissionGraph, MAX_MISSION_GRAPH_NODES, type MissionGraphNodeInput } from './mission-graph.js';
+import { outcomeHash, outcomeIdentity } from '../goals/outcome-types.js';
 import { PLAYBOOK_ID_PATTERN } from '../playbooks/types.js';
 import type {
   HarnessConfigPatch,
@@ -432,6 +434,38 @@ export function parseActionParams<K extends LeaderActionKind>(kind: K, raw: unkn
       if (new Set(ids).size !== ids.length) return fail('goalIds must not repeat');
       return done({ goalIds: ids as string[] });
     }
+    case 'outcome.refine': {
+      if (!hasExactKeys(raw, ['outcomeId', 'scopeRevision', 'scopeDigest', 'title', 'nodes']) ||
+          !outcomeIdentity(raw['outcomeId']) || !outcomeHash(raw['scopeDigest']) ||
+          !Number.isSafeInteger(raw['scopeRevision']) || (raw['scopeRevision'] as number) < 1 ||
+          !Array.isArray(raw['nodes']) || !raw['nodes'].length || raw['nodes'].length > MAX_MISSION_GRAPH_NODES) return fail('invalid outcome refinement identity or nodes');
+      const title = cleanModelText(raw['title'], 200);
+      if (!title) return fail('outcome plan title is required');
+      const nodes: MissionGraphNodeInput[] = [];
+      for (const node of raw['nodes']) {
+        if (!isRecord(node) || !hasExactKeys(node, ['kind', 'key', 'title', 'objective', 'deliverable', 'riskClass', 'acceptance'], ['targetRepo', 'dependsOn']) ||
+            !Array.isArray(node['acceptance']) || !node['acceptance'].length || node['acceptance'].length > 8 ||
+            !node['acceptance'].every(value => typeof value === 'string') ||
+            node['dependsOn'] !== undefined && (!Array.isArray(node['dependsOn']) || !node['dependsOn'].every(value => typeof value === 'string')) ||
+            typeof node['key'] !== 'string' || node['kind'] !== 'work' ||
+            !['low', 'medium', 'high'].includes(String(node['riskClass']))) return fail('automatic outcome plans require work nodes; authenticated operator graph gates remain separate');
+        const target = node['targetRepo'] ?? null;
+        if (node['kind'] === 'work' ? typeof target !== 'string' || !/^target-[1-9][0-9]*$/.test(target) : target !== null) return fail('work targets must use the saved target-N aliases; human gates have no target');
+        const nodeTitle = cleanModelText(node['title'], 200);
+        const objective = cleanModelText(node['objective'], 4000);
+        const deliverable = cleanModelText(node['deliverable'], 1000);
+        const acceptance = node['acceptance'].map(value => cleanModelText(value, 500));
+        if (!nodeTitle || !objective || !deliverable || acceptance.some(value => !value)) return fail('empty outcome node text');
+        nodes.push({ kind: node['kind'] as MissionGraphNodeInput['kind'], key: node['key'], title: nodeTitle, objective, deliverable,
+          riskClass: node['riskClass'] as MissionGraphNodeInput['riskClass'], targetRepo: target as string | null,
+          dependsOn: node['dependsOn'] as string[] | undefined, acceptance: acceptance as string[] });
+      }
+      const aliases = [...new Set(nodes.filter(node => node.kind === 'work').map(node => `/leader-targets/${node.targetRepo}`))];
+      const compiled = compileEcosystemMissionGraph({ missionKey: raw['outcomeId'] as string, title, objective: 'Saved outcome supplied by host',
+        createdAt: '2026-01-01T00:00:00.000Z', nodes: nodes.map(node => ({ ...node, targetRepo: node.targetRepo ? `/leader-targets/${node.targetRepo}` : null })) }, aliases);
+      if (!compiled.ok) return fail('outcome graph violates the existing mission graph protocol');
+      return done({ outcomeId: raw['outcomeId'] as string, scopeRevision: raw['scopeRevision'] as number, scopeDigest: raw['scopeDigest'] as string, title, nodes });
+    }
     case 'goal.create': {
       if (!hasExactKeys(raw, ['goal'])) return fail('expected {goal}');
       const goal = parseGoalProposal(raw['goal']);
@@ -665,6 +699,7 @@ function defaultSummary(kind: LeaderActionKind, params: LeaderActionParamsMap[Le
     case 'goal.pause': return `Pause goal ${String(p['goalId'])}`;
     case 'goal.archive': return `Archive goal ${String(p['goalId'])}`;
     case 'goal.reorder': return `Reorder ${(p['goalIds'] as string[]).length} goals`;
+    case 'outcome.refine': return `Refine outcome: ${p['outcomeId']}`;
     case 'goal.create': return `New goal: ${(p['goal'] as LeaderGoalProposal).objective}`;
     case 'work.dispatch': return `Dispatch: ${(p['task'] as FleetTaskInput).title}`;
     case 'standard.add': return `Add standard: ${String(p['rule'])}`;

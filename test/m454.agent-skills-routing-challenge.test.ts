@@ -548,6 +548,15 @@ describe('M454 pinned upstream routing challenge', () => {
       files?: string[];
       exports?: Record<string, unknown>;
     };
+    // Newly admitted operator guides remain documentation, not m454 fixture consumers.
+    for (const path of [
+      'docs/RESIDENT-RUNTIME.md', 'docs/AUTHORITY.md', 'docs/STANDING-AUTHORITY.md',
+      'docs/CLOUD.md', 'docs/LEADER.md', 'docs/DEVIN.md', 'docs/VERSE-CONTEXT.md',
+      'docs/VERSE-BROWSER.md', 'docs/JEV-INTEGRATION.md',
+    ]) {
+      const source = readFileSync(join(REPO_ROOT, path), 'utf8');
+      for (const canary of consumerCanaries) expect(source).not.toContain(canary);
+    }
     // The exact published allowlist. It grew with the builtin preparation
     // verification helpers and reviewed shipped docs, each of which the release
     // inventory admits individually (m482); none is an m454 consumer, and the
@@ -567,6 +576,18 @@ describe('M454 pinned upstream routing challenge', () => {
       'CHANGELOG.md',
       'docs/README.md',
       'docs/QUICKSTART.md',
+      'docs/AUTOMATIC-OUTCOMES.md',
+      'docs/VERSE.md',
+      'docs/AUTONOMY-SETUP.md',
+      'docs/RESIDENT-RUNTIME.md',
+      'docs/AUTHORITY.md',
+      'docs/STANDING-AUTHORITY.md',
+      'docs/CLOUD.md',
+      'docs/LEADER.md',
+      'docs/DEVIN.md',
+      'docs/VERSE-CONTEXT.md',
+      'docs/VERSE-BROWSER.md',
+      'docs/JEV-INTEGRATION.md',
       'docs/DEMO.md',
       'docs/ARCHITECTURE.md',
       'docs/MISSION-OS.md',
@@ -610,6 +631,18 @@ describe('M454 pinned upstream routing challenge', () => {
       const archive = packed[0];
       const packedPaths = archive?.files.map((entry) => entry.path) ?? [];
       expect(packedPaths.length).toBeGreaterThan(0);
+      expect(packedPaths).toContain('docs/AUTOMATIC-OUTCOMES.md');
+      expect(packedPaths).toContain('docs/VERSE.md');
+      expect(packedPaths).toContain('docs/AUTONOMY-SETUP.md');
+      expect(packedPaths).toContain('docs/RESIDENT-RUNTIME.md');
+      expect(packedPaths).toContain('docs/AUTHORITY.md');
+      expect(packedPaths).toContain('docs/STANDING-AUTHORITY.md');
+      expect(packedPaths).toContain('docs/CLOUD.md');
+      expect(packedPaths).toContain('docs/LEADER.md');
+      expect(packedPaths).toContain('docs/DEVIN.md');
+      expect(packedPaths).toContain('docs/VERSE-CONTEXT.md');
+      expect(packedPaths).toContain('docs/VERSE-BROWSER.md');
+      expect(packedPaths).toContain('docs/JEV-INTEGRATION.md');
       expect(packedPaths).toContain('docs/RUNTIME_ACTIVATION_AUTHORITY.md');
       expect(packedPaths).toContain('docs/REMOTE-PHONE.md');
       expect(packedPaths).toContain('docs/contracts/CONTRACT-M521.md');

@@ -1,3 +1,4 @@
+import { SelectedOutcomeAdmissionRefusal } from './outcome-admission.js';
 /**
  * provider-client.ts — thin chat client over the ACTIVE local provider.
  *
@@ -35,6 +36,7 @@ import {
 } from '../local-runtime/llama/config.js';
 import { resolveProviderKey } from '../integrations/secrets.js';
 import { resolveModelProfile, adaptivePromptsEnabled } from './model-profile.js';
+import { normalizeNumericLoopbackOllamaBaseUrl } from './ollama-identity.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { ENFORCED_PROVIDER_AUTHORITY } from './model-call-authority.js';
 import {
@@ -146,6 +148,27 @@ const OPENAI_COMPAT_CLOUD_PROVIDERS = new Set([
 
 function isCloudProvider(id: string): boolean {
   return CLOUD_PROVIDERS.has(id.toLowerCase());
+}
+
+/** Read only the selected loopback Ollama tag's explicit context pin.
+ * Unknown/unpinned metadata is not a claim about trained or loaded capacity. */
+export async function discoverOllamaRequestContextWindow(baseUrl: string, model: string, signal?: AbortSignal): Promise<number | undefined> {
+  const normalized = normalizeNumericLoopbackOllamaBaseUrl(baseUrl, { allowDefaultLocalhost: true });
+  if (!normalized || signal?.aborted || !model.trim()) return undefined;
+  try {
+    const { probeOllamaModelDetail } = await import('../verse/local-models.js');
+    const boundedFetch: typeof fetch = async (url, init) => {
+      const response = await fetch(url, { ...init, redirect: 'error',
+        signal: signal && init?.signal ? AbortSignal.any([signal, init.signal]) : signal ?? init?.signal });
+      const text = await readBoundedResponseText(response, 1024 * 1024);
+      return new Response(text, { status: response.status, headers: { 'content-type': 'application/json' } });
+    };
+    const detail = await probeOllamaModelDetail(boundedFetch, new URL(normalized).origin, model);
+    if (signal?.aborted || !detail || typeof detail.numCtx !== 'number' || !Number.isSafeInteger(detail.numCtx) || detail.numCtx < 1)
+      return undefined;
+    const window = detail.contextWindow;
+    return window !== null && Number.isSafeInteger(window) && window > 0 ? window : undefined;
+  } catch { return undefined; }
 }
 
 // ---------------------------------------------------------------------------
@@ -432,7 +455,10 @@ function toOllamaMessages(
         name: m.name,
       };
     }
-    return { role: m.role, content: m.content };
+    return { role: m.role, content: m.content,
+      ...(m.role === 'assistant' && m.toolCalls?.length ? { tool_calls: m.toolCalls.map(call => ({
+        id: call.id, type: 'function', function: { name: call.name, arguments: call.arguments },
+      })) } : {}) };
   });
 }
 
@@ -903,7 +929,10 @@ function toOpenAIMessages(
         name: m.name,
       };
     }
-    return { role: m.role, content: m.content };
+    return { role: m.role, content: m.content,
+      ...(m.role === 'assistant' && m.toolCalls?.length ? { tool_calls: m.toolCalls.map(call => ({
+        id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+      })) } : {}) };
   });
 }
 
@@ -972,6 +1001,7 @@ export function buildOpenAICompatibleClient(
     model,
     supportsTools,
     authority: ENFORCED_PROVIDER_AUTHORITY,
+    getContextWindowTokens: callSignal => discoverOllamaRequestContextWindow(baseUrl, model, callSignal ?? signal),
 
     async chat(
       messages: ChatMessage[],
@@ -1018,6 +1048,7 @@ export function buildOpenAICompatibleClient(
         response = opened.response;
         cleanupResponse = opened.cleanup;
       } catch (err: unknown) {
+        if (err instanceof SelectedOutcomeAdmissionRefusal) throw err;
         const msg = err instanceof Error ? err.message : String(err);
         throw new Error(`OpenAI-compat fetch failed (${chatUrl}): ${msg}`);
       }

@@ -1588,3 +1588,35 @@ describe('runSwarm — recursion guard is process-scoped, not call-scoped', () =
     expect(second.result).not.toMatch(/Refused: nested swarm/i);
   });
 });
+
+
+describe('runSwarm — selected outcome admission', () => {
+  it('holds a retired outcome before planning', async () => {
+    const result = await runSwarm({ goal: 'held' }, makeConfig(), { selectedOutcomeAdmission: () => false, noCapture: true }, nullSink);
+    expect(result.status).toBe('aborted'); expect(mockPlanSwarm).not.toHaveBeenCalled(); expect(mockRunGoal).not.toHaveBeenCalled();
+  });
+  it('rechecks after an awaited planner result and keeps the callback out of persisted state', async () => {
+    let current = true; const admission = () => current;
+    mockPlanSwarm.mockImplementationOnce(async () => { await Promise.resolve(); current = false; return minimalPlan('held'); });
+    const result = await runSwarm({ goal: 'held' }, makeConfig(), { selectedOutcomeAdmission: admission, noCapture: true }, nullSink);
+    expect(mockPlanSwarm.mock.calls[0]?.[5]).toBe(admission);
+    expect(result.status).toBe('aborted'); expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(JSON.stringify(loadSwarm(result.id))).not.toContain('selectedOutcomeAdmission');
+  });
+  it('threads the identical fence to each child without replacing causal identities', async () => {
+    const admission = () => true; mockPlanSwarm.mockResolvedValueOnce(minimalPlan('current'));
+    const result = await runSwarm({ goal: 'current' }, makeConfig(), { selectedOutcomeAdmission: admission, noCapture: true, budget: { maxTokens: 1000000, maxSteps: 1000 }, parallel: 3 }, nullSink);
+    expect(result.status).toBe('done'); expect(mockRunGoal).toHaveBeenCalled();
+    for (const call of mockRunGoal.mock.calls) {
+      expect(call[2].selectedOutcomeAdmission).toBe(admission);
+      expect(call[2].delegationScope.swarmId).toBe(result.id);
+    }
+  });
+});
+
+
+it('does not silently drop an outcome fence during detached background handoff', async () => {
+  const result = await runSwarm({ goal: 'held handoff' }, makeConfig(), { background: true, selectedOutcomeAdmission: () => true, noCapture: true }, nullSink);
+  expect(result.status).toBe('failed'); expect(result.result).toContain('foreground owner');
+  expect(mockPlanSwarm).not.toHaveBeenCalled(); expect(mockRunGoal).not.toHaveBeenCalled();
+});

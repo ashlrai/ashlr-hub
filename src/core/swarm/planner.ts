@@ -1,3 +1,4 @@
+import { assertSelectedOutcomeAdmission, SelectedOutcomeAdmissionRefusal, withSelectedOutcomeAdmission } from '../run/outcome-admission.js';
 /**
  * core/swarm/planner.ts — M12 swarm planner.
  *
@@ -361,7 +362,9 @@ export async function planSwarm(
   signal?: AbortSignal,
   providerQuota?: ProviderInferenceQuotaSession,
   signedTokenBudget?: number,
+  selectedOutcomeAdmission?: () => boolean,
 ): Promise<SwarmPlan> {
+  assertSelectedOutcomeAdmission(selectedOutcomeAdmission);
   const { goal, specBody } = input;
 
   if (signal?.aborted) throw abortReason(signal);
@@ -394,13 +397,14 @@ export async function planSwarm(
         maxOutputTokens: Math.min(MAX_GOVERNED_OUTPUT_TOKENS, remaining),
       };
     }
-    const client = await getActiveClient(cfg, { allowCloud: false });
+    const client = withSelectedOutcomeAdmission(await getActiveClient(cfg, { allowCloud: false }), selectedOutcomeAdmission);
     if (signal?.aborted) throw abortReason(signal);
     if (providerQuota && !supportsGovernedModelCalls(client)) {
       throw new GoalConductorQuotaRefusal('goal-conductor-signed-planner-provider-ungoverned');
     }
     // The signed path consumes one of its pre-reserved tickets at the final
     // synchronous boundary before inference. Ordinary swarms omit the session.
+    assertSelectedOutcomeAdmission(selectedOutcomeAdmission);
     providerQuota?.claimNext();
     const result = signedLimits
       ? await client.chat(messages, undefined, signal, signedLimits)
@@ -419,6 +423,7 @@ export async function planSwarm(
     usage = plannerUsage(result.usage);
     if (signal?.aborted) throw abortReason(signal);
   } catch (err) {
+    if (err instanceof SelectedOutcomeAdmissionRefusal) throw err;
     if (signal?.aborted) throw abortReason(signal);
     if (isGoalConductorQuotaRefusal(err)) throw err;
     if (providerQuota) {
