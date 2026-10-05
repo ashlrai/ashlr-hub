@@ -119,10 +119,15 @@ describe('outcome planning retry and verified progress', () => {
     const state = readLeaderRunState(NOW); const signals = await gatherTriggerSignals(f.source, state, NOW + 60000);
     expect(leaderRunDue(NOW + 60000, state, { ...signals, seatResetSinceLastRun: true }).trigger).toBe('seat-reset');
     expect(leaderRunDue(NOW + 60000, state, { ...signals, highInsightSinceLastRun: true }).trigger).toBe('insight');
-    const checkinClock = new Date(NOW); checkinClock.setHours(12, 0, 0, 0);
+    // Cadence uses local working hours and lastMemoAt, so pin both rather than
+    // accidentally depending on the offset between UTC NOW and local noon.
+    const checkinClock = new Date(2026, 9, 2, 12, 0, 0, 0);
+    expect(checkinClock.getDay()).toBe(5); expect(checkinClock.getHours()).toBe(12);
     state.lastRun = { at: checkinClock.toISOString(), outcome: 'failed', reason: null, memoId: null, trigger: 'outcome-plan-needed' };
     state.retry = null; state.outcomePlanningRetry!.retryAt = new Date(checkinClock.getTime() + 3600000).toISOString();
-    state.lastSuccessAt = new Date(checkinClock.getTime() - 3 * 3600000).toISOString();
+    state.lastMemoAt = new Date(checkinClock.getTime() - 3 * 3600000).toISOString();
+    state.lastCheckinEvalAt = null;
+    state.lastSuccessAt = state.lastMemoAt;
     expect(leaderRunDue(checkinClock.getTime(), state, signals, resolveLeaderCadence({} as AshlrConfig)).trigger).toBe('checkin');
   });
   it('reapplying the identical failed immutable node is not progress despite an applied action and new plan revision', async () => {

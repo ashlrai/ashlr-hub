@@ -179,6 +179,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Reject generated ownership drift before expensive builds and tests.
+      # Every platform still runs all of its assigned checks afterward.
+      - name: Check generated authority ownership (hermetic)
+        run: >-
+          npm run test:ci -- --maxWorkers=1 --fileParallelism=false
+          test/authority-codeowners-310b.test.ts
+
       # Whole-project static checks run once in the required minimum-Node job.
       # Every platform still builds and runs its complete assigned tests.
       - name: Typecheck

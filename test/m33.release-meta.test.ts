@@ -240,6 +240,16 @@ describe('release workflow', () => {
       .filter((entry) => entry['label'] === sharedChecksLabel);
     expect(sharedChecksEntries).toHaveLength(1);
     expect(sharedChecksEntries[0]).toMatchObject({ os: 'ubuntu-latest', node_version: '22.15.0' });
+    const ownershipSteps = ciSteps.filter((step) => step.name === 'Check generated authority ownership (hermetic)');
+    expect(ownershipSteps).toHaveLength(1);
+    expect(ownershipSteps[0]?.run?.trim()).toBe('npm run test:ci -- --maxWorkers=1 --fileParallelism=false test/authority-codeowners-310b.test.ts');
+    expect(ownershipSteps[0]?.if).toBeUndefined();
+    expect(ciSteps.indexOf(ownershipSteps[0]!)).toBeGreaterThan(ciSteps.findIndex((step) => step.name === 'Install dependencies'));
+    for (const next of ['Typecheck', 'Lint', 'Build', 'Test (hermetic)']) {
+      expect(ciSteps.indexOf(ownershipSteps[0]!), next).toBeLessThan(ciSteps.findIndex((step) => step.name === next));
+    }
+    const smoke = JSON.parse(readFileSync(join(REPO_ROOT, 'scripts/gate-smoke.json'), 'utf8')) as { backend: Array<{ file: string }> };
+    expect(smoke.backend.filter((entry) => entry.file === 'test/authority-codeowners-310b.test.ts')).toHaveLength(1);
     expect(ciSteps.find((step) => step.name === 'Typecheck')?.run).toBe('npm run typecheck');
     expect(ciSteps.find((step) => step.name === 'Typecheck')?.if)
       .toBe(`matrix.label == '${sharedChecksLabel}'`);
