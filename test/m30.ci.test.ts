@@ -489,6 +489,7 @@ describe('M30 CI workflow', () => {
     // file mentions; existing native portability declarations remain unchanged.
     expect([...declaredFiles].sort()).toEqual([
       ...expectedFiles,
+      'test/authority-codeowners-310b.test.ts',
       ...Array<string>(4).fill('test/m342.dispatch-production-ledger.test.ts'),
     ].sort());
     expect(windowsPortabilityThree).toContain('--reporter=dot');
