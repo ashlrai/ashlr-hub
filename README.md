@@ -402,6 +402,10 @@ use a separately signed elite-direct ceiling.
 
 ## Benchmarks and traces
 
+See the [measured CI fixture comparison](docs/benchmarks/fixture-performance.md):
+three local pairs saved a median paired 27.318 seconds (36.74%) in the affected
+pack fixture, with all 30 shared cases passing in each sample.
+
 Run no model to inspect help or compare compatible saved reports:
 
 ```sh
