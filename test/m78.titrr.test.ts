@@ -1615,6 +1615,74 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     expect(state.usage).toMatchObject({ tokensIn: 0, tokensOut: 0, steps: 1 });
   });
 
+  it.each(['before first contact', 'after one contact', 'forged binding'] as const)(
+    'selected native TITRR preserves actual contacts when refused %s', async scenario => {
+      const runGoal = await loadRunGoal();
+      const admission = await import('../src/core/devin/cli-admission.js');
+      const data = path.join(fs.realpathSync(tmpHome), 'native-data');
+      const previousDataHome = process.env.XDG_DATA_HOME;
+      process.env.XDG_DATA_HOME = data;
+      try {
+        fs.mkdirSync(path.join(data, 'devin'), { recursive: true, mode: 0o700 });
+        const credentials = path.join(data, 'devin', 'credentials.toml');
+        const executable = path.join(fs.realpathSync(tmpHome), 'devin');
+        fs.writeFileSync(credentials, 'synthetic-not-a-login', { mode: 0o600 });
+        fs.chmodSync(credentials, 0o600);
+        fs.writeFileSync(executable, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+        fs.chmodSync(executable, 0o755);
+        const model = 'fixture-native-free';
+        let now = Date.now();
+        if (scenario === 'after one contact') vi.spyOn(Date, 'now').mockImplementation(() => now);
+        const binding = await admission.refreshDevinCliExecutionBinding(model, { cliPath: executable, credentialsPath: credentials,
+          runMetadata: async (_bin, args) => args[0] === 'auth'
+            ? 'Logged in\n  User ID: synthetic-native-user\n  API server: https://server.codeium.com\n  Devin API: https://api.devin.ai\n'
+            : `Available models (1 family)\nFixture (fixture)\n  ${model}  Fixture  [262K context, Free]\n`,
+        });
+        expect(binding).not.toBeNull();
+        // Issue and consume through the same current private native profile.
+        expect(admission.peekDevinCliExecutionBinding(model)).toBe(binding);
+        const selected = scenario === 'forged binding' ? { ...binding! } : binding!;
+        const notification = vi.fn();
+        const nativeState = (contacted: boolean) => ({
+          ...makeKnownDiffState(0), engine: 'devin-cli' as const, engineModel: `devin-cli:${model}`,
+          status: contacted ? 'done' as const : 'failed' as const,
+          usage: { tokensIn: 0, tokensOut: 0, steps: contacted ? 1 : 0, estCostUsd: 0 },
+        });
+        engineMockFn.mockImplementationOnce(async (_engine, _goal, _cfg, opts) => {
+          if (scenario === 'after one contact') {
+            expect(opts.selectedDevinAdmission(model)).toBe(binding);
+            opts.onSelectedDevinSpawn(model, binding);
+            now = binding!.validUntil;
+          }
+          return { state: nativeState(scenario === 'after one contact') };
+        }).mockImplementationOnce(async (_engine, _goal, _cfg, opts) => {
+          expect(admission.peekDevinCliExecutionBinding(model)).toBeNull();
+          expect(opts.selectedDevinAdmission(model)).toBeNull();
+          // The expired retry is refused before any owned-child notification.
+          return { state: nativeState(false) };
+        });
+        const state = await runGoal('fix a bug', sandboxCfg(), {
+          engine: 'devin-cli', model, sandboxEngine: true, tools: false,
+          selectedDevinAdmission: () => scenario === 'forged binding' ? selected : admission.peekDevinCliExecutionBinding(model),
+          onSelectedDevinSpawn: notification,
+          budget: { maxTokens: 100, maxSteps: 10 }, titrrMaxAttempts: 2,
+          delegationScope: { origin: 'daemon', sourceRepo: '/mock/repo',
+            resultContract: { kind: 'proposal', requireDiff: true, requireProposal: true } },
+        } as Parameters<typeof runGoal>[2] & { titrrMaxAttempts: number });
+        const contacts = scenario === 'after one contact' ? 1 : 0;
+        expect(engineMockFn).toHaveBeenCalledTimes(contacts + 1);
+        expect(notification).toHaveBeenCalledTimes(contacts);
+        expect(state.usage).toEqual({ tokensIn: 0, tokensOut: 0,
+          steps: scenario === 'forged binding' ? 1 : contacts, estCostUsd: 0 });
+        expect(removeSandboxMockFn).toHaveBeenCalledOnce();
+      } finally {
+        admission.resetDevinCliAdmissionForTest();
+        if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = previousDataHome;
+      }
+    },
+  );
+
   it('does not retry a known-empty run when the result contract does not require a diff', async () => {
     engineMockFn.mockResolvedValue({ state: makeKnownDiffState(0) });
     detectVCMockFn.mockReturnValue([{ kind: 'test', cmd: ['npm', 'test'] }]);

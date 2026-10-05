@@ -58,6 +58,7 @@ import { assertSelectedOutcomeAdmission, selectedOutcomeAdmissionCurrent, withSe
  *  - NO AUTO-DOWNLOAD: ollama pull is never called from routing or runs.
  */
 
+import { peekDevinCliExecutionBinding } from '../devin/cli-admission.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -1058,7 +1059,11 @@ function remainingTitrrBudget(budget: RunBudget, usage: RunUsage): RunBudget {
   };
 }
 
-function accountedTitrrAttemptUsage(usage: RunUsage): RunUsage {
+function accountedTitrrAttemptUsage(usage: RunUsage, nativeContacts?: number): RunUsage {
+  // Only the selected host-issued native adapter knows that an attempt was
+  // refused before contact. Unknown ordinary engine usage still costs a step.
+  if (nativeContacts === 0 && usage.steps === 0 && usage.tokensIn === 0 &&
+    usage.tokensOut === 0 && usage.estCostUsd === 0) return usage;
   return usage.steps > 0 ? usage : { ...usage, steps: 1 };
 }
 
@@ -2909,7 +2914,8 @@ async function runGoalInternal(
               ...(opts.seatId ? { seatId: opts.seatId } : {}),
               ...(opts.selectedGrokAdmission ? { selectedGrokAdmission: opts.selectedGrokAdmission } : {}),
               ...(opts.selectedDevinAdmission ? { selectedDevinAdmission: opts.selectedDevinAdmission } : {}),
-                ...(opts.selectedClaudeAdmission ? { selectedClaudeAdmission: opts.selectedClaudeAdmission } : {}),
+              ...(opts.onSelectedDevinSpawn ? { onSelectedDevinSpawn: opts.onSelectedDevinSpawn } : {}),
+              ...(opts.selectedClaudeAdmission ? { selectedClaudeAdmission: opts.selectedClaudeAdmission } : {}),
               ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
               ...(opts.harness ? { harness: opts.harness } : {}),
             });
@@ -2924,6 +2930,12 @@ async function runGoalInternal(
             return fallbackState;
           }
 
+          // Capture identity qualification while current. Completion can outlive
+          // the TTL; every later launch retains the adapter's fresh admission.
+          const selectedTitrrDevin = engineId === 'devin-cli' && modelEnv
+            ? peekDevinCliExecutionBinding(modelEnv) : null;
+          const boundTitrrDevin = selectedTitrrDevin &&
+            opts.selectedDevinAdmission?.(selectedTitrrDevin.model) === selectedTitrrDevin ? selectedTitrrDevin : null;
           let titrrAttempt = 0;
           let titrrResult: { ok: boolean; output: string } | null = null;
           let titrrAnnotation = '';
@@ -2988,6 +3000,7 @@ async function runGoalInternal(
               // (or no test command exists), capture the already-verified
               // sandbox diff exactly once without invoking the model again.
               const isLastAttempt = titrrAttempt === titrrMax;
+              let nativeAttemptContacts = 0;
               const rawR = await runEngineSandboxed(engineId, titrrGoal, cfg, {
                 sourceRepo: cwd,
                 model: modelEnv,
@@ -3002,14 +3015,20 @@ async function runGoalInternal(
                 ...(opts.runId ? { runId: opts.runId } : {}),
                 ...(opts.seatId ? { seatId: opts.seatId } : {}),
                 ...(opts.selectedGrokAdmission ? { selectedGrokAdmission: opts.selectedGrokAdmission } : {}),
-              ...(opts.selectedDevinAdmission ? { selectedDevinAdmission: opts.selectedDevinAdmission } : {}),
+                ...(opts.selectedDevinAdmission ? { selectedDevinAdmission: opts.selectedDevinAdmission } : {}),
+                ...(boundTitrrDevin ? { onSelectedDevinSpawn: (model, binding) => {
+                  if (model === modelEnv && binding === boundTitrrDevin) nativeAttemptContacts++;
+                  try { opts.onSelectedDevinSpawn?.(model, binding); } catch { /* observer only */ }
+                } } : opts.onSelectedDevinSpawn ? { onSelectedDevinSpawn: opts.onSelectedDevinSpawn } : {}),
                 ...(opts.selectedClaudeAdmission ? { selectedClaudeAdmission: opts.selectedClaudeAdmission } : {}),
                 ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
                 ...(opts.harness ? { harness: opts.harness } : {}),
                 deferTerminalAction: true,
               });
               const retention = sandboxRetentionFrom(rawR);
-              titrrUsage = addUsage(titrrUsage, accountedTitrrAttemptUsage(rawR.state.usage));
+              titrrUsage = addUsage(titrrUsage, accountedTitrrAttemptUsage(rawR.state.usage,
+                boundTitrrDevin && rawR.state.engine === 'devin-cli' &&
+                  rawR.state.engineModel === `devin-cli:${modelEnv}` ? nativeAttemptContacts : undefined));
               titrrActionCounts = addTitrrActionCounts(
                 titrrActionCounts,
                 rawR.state.runEventSummary?.actionCounts,
