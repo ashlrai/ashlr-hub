@@ -45,6 +45,7 @@ import { GateFunnelCards, LanesStrip, LiveSwimlane, OvernightCard, ParkedCard, W
 import { RepoTable } from '../fleet/RepoTable.js';
 import { FleetScheduling } from '../resources/SchedulingEvidence.js';
 import { ExecutionFeedback } from '../fleet/ExecutionFeedback.js';
+const ResetSpendingControl = lazy(() => import('../budget/ResetSpendingControl.js').then(module => ({ default: module.ResetSpendingControl })));
 import { nothingToDraw } from '../fleet/live-model.js';
 import { fleetDarkSince } from '../fleet/dark-since.js';
 import styles from '../fleet/fleet.module.css';
@@ -146,6 +147,10 @@ export function FleetSection() {
       ) : null}
       <Cell span={12}>
         <SteerPanel live={live} actions={actions} now={now} />
+        <Suspense fallback={<p className={styles.muted}>Loading allowance controls…</p>}>
+          <ResetSpendingControl view={budget.data ?? null} nowMs={now} readOnly={actions.readOnly}
+            onReviewGrant={() => grantFlow.open('re-approve', 'Review subscription reserve floors and producer roles before allowance reserve shrinking.')} />
+        </Suspense>
         <FleetScheduling budget={budget.data ?? null} now={now} />
         <ExecutionFeedback />
       </Cell>

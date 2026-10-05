@@ -253,6 +253,8 @@ export interface VerseAccountRecord {
   /** Machine-readable probe reason, verbatim. Never rewritten into prose. */
   reason: string;
   onDemandEnabled: boolean | null;
+  accountHint?: string | null;
+  subscriptionOnlyBoundary?: import('../routing/reset-spending-types.js').SubscriptionOnlyBoundary | null;
   executionSupported: boolean;
   /** Codex only; null for every other provider and when no signal exists. */
   credits: VerseCodexCredits | null;
@@ -959,6 +961,8 @@ export function deriveVerseAccountRecord(
     windows,
     reason: connection.reason,
     onDemandEnabled: connection.onDemandEnabled,
+    accountHint: connection.accountHint ?? null,
+    subscriptionOnlyBoundary: connection.subscriptionOnlyBoundary ?? null,
     executionSupported: connection.executionSupported,
     credits,
     binding: bindingWindow(windows),

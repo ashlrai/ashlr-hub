@@ -51,6 +51,9 @@ import type { ApiModule } from '../verse/api-modules.js';
 import type { VerseApiContext } from '../verse/verse-api.js';
 import type { AshlrConfig } from '../types.js';
 import type { VerseSeat } from '../verse/types.js';
+import { resolveSubscriptionMaxPercent } from '../config.js';
+import { displaySurfaceTarget, evaluateStandingAuthority } from '../authority/effective-config.js';
+import type { EffectivePolicy } from '../authority/types.js';
 import { getVerseAccountCollector, verseCollectorLive, type VerseAccountCollector } from '../verse/accounts.js';
 import { passesMutationGate, readBody, sendJson } from '../web/api.js';
 import {
@@ -75,6 +78,8 @@ import {
 import { routeSeat } from './router.js';
 import { buildSchedulingView } from './scheduling.js';
 import { readRecordedScheduling } from './scheduling-cache.js';
+import { projectResetSpendingStatus } from './reset-spending.js';
+import type { ResetSpendingStatus } from './reset-spending-types.js';
 import { VERSE_RESOURCE_READINESS_PATH, type ResourceReadinessResponse } from './readiness-types.js';
 import {
   VERSE_BUDGET_PATH,
@@ -100,7 +105,33 @@ const BUDGET_PUBLISH_MIN_MS = 30_000;
 
 const ROUTING_TASKS: readonly RoutingTask[] = ['code', 'review', 'plan', 'bulk', 'leader'];
 const ROUTING_DIFFICULTIES: readonly RoutingDifficulty[] = ['low', 'medium', 'high'];
-const BUDGET_BODY_KEYS: ReadonlySet<string> = new Set(['mode', 'seatId', 'policy']);
+const BUDGET_BODY_KEYS: ReadonlySet<string> = new Set(['mode', 'seatId', 'policy', 'resetSpending']);
+
+interface ResetAuthorityReading {
+  standing: Pick<EffectivePolicy, 'spend'> | null;
+  authorityState: ResetSpendingStatus['authorityState'];
+}
+type ResetAuthoritySource = (cfg: AshlrConfig, nowMs: number) => ResetAuthorityReading;
+const defaultResetAuthoritySource: ResetAuthoritySource = (cfg, nowMs) => {
+  const ev = evaluateStandingAuthority({ mode: 'cached', surface: displaySurfaceTarget(), config: cfg, nowMs });
+  if (ev.policy) return { standing: ev.policy, authorityState: 'active' };
+  // Only verified historical grant states can explain a signed floor. An invalid
+  // signature/host/sequence is never projected as trusted spend authority.
+  const historical = ev.grant && (ev.grantState === 'active' || ev.grantState === 'paused' &&
+    (ev.rejectCode === null || ev.rejectCode === 'surface-mismatch' || ev.rejectCode === 'surface-unverified'));
+  const spend = historical && ev.grant ? { ...ev.grant.spend, seats: Object.fromEntries(Object.entries(ev.grant.spend.seats).map(([seatId, seat]) =>
+    [seatId, { ...seat, seatId, maxSessionWindowPercent: seat.maxSessionWindowPercent ?? null }])) } : null;
+  return { standing: spend ? { spend } : null, authorityState: 'paused' };
+};
+let resetAuthoritySource = defaultResetAuthoritySource;
+/** Hermetic tests replace the read-only authority projection, never provider admission. */
+export function setBudgetResetAuthoritySourceForTest(source: ResetAuthoritySource | null): void {
+  resetAuthoritySource = source ?? defaultResetAuthoritySource;
+}
+function resetAuthority(cfg: AshlrConfig, nowMs: number): ResetAuthorityReading {
+  try { return resetAuthoritySource(cfg, nowMs); }
+  catch { return { standing: null, authorityState: 'unknown' }; }
+}
 
 // ---------------------------------------------------------------------------
 // Capacity source (injectable for tests)
@@ -268,7 +299,8 @@ async function readCapacity(cfg: AshlrConfig, force = false): Promise<CapacityRe
 // View
 // ---------------------------------------------------------------------------
 
-export function buildBudgetView(policy: BudgetPolicy, reading: CapacityReading, nowMs: number): BudgetView {
+export function buildBudgetView(policy: BudgetPolicy, reading: CapacityReading, nowMs: number,
+  authority: ResetAuthorityReading = { standing: null, authorityState: 'unknown' }, maxPercent = 90): BudgetView {
   // The Budget panel lists capacity seats only: Devin budgets in ACUs
   // (devin/budget.ts), and `discoverSeats` never lists a Devin seat anyway.
   const seatInfo: BudgetSeatInfo[] = reading.seats.flatMap((seat) => (seat.engine === 'devin' ? [] : [{
@@ -287,6 +319,9 @@ export function buildBudgetView(policy: BudgetPolicy, reading: CapacityReading, 
     mode: policy.mode,
     seats: policy.seats,
     updatedAt: policy.updatedAt,
+    ...(policy.resetSpending ? { resetSpending: policy.resetSpending } : {}),
+    resetSpendingStatus: projectResetSpendingStatus(policy, reading.seats, authority.standing, nowMs, {},
+      { authorityState: authority.authorityState, maxPercent }),
     headroom,
     scheduling: buildSchedulingView(reading.seats,policy,nowMs),
     seatInfo,
@@ -408,7 +443,7 @@ export const handleBudgetApi: ApiModule = async (ctx, req, res, path, method) =>
         const policy = loadPolicyForPanel();
         const reading = await readCapacity(ctx.cfg);
         const nowMs = Date.now();
-        const view = buildBudgetView(policy,reading,nowMs);
+        const view = buildBudgetView(policy,reading,nowMs,resetAuthority(ctx.cfg,nowMs),resolveSubscriptionMaxPercent(ctx.cfg));
         const recorded = await readRecordedScheduling();
         view.scheduling = {...buildSchedulingView(reading.seats,policy,nowMs,recorded.forecasts),...(recorded.advisory ? {advisory:recorded.advisory}: {})};
         sendJson(res, 200, view);
@@ -431,7 +466,7 @@ export const handleBudgetApi: ApiModule = async (ctx, req, res, path, method) =>
         // down) may still be configured; its engine is then inferred from the id.
         const policy = updateBudgetPolicy(parsed, { engineOf: (seatId) => engines.get(seatId) });
         const nowMs = Date.now();
-        const view = buildBudgetView(policy,reading,nowMs);
+        const view = buildBudgetView(policy,reading,nowMs,resetAuthority(ctx.cfg,nowMs),resolveSubscriptionMaxPercent(ctx.cfg));
         const recorded = await readRecordedScheduling();
         view.scheduling = {...buildSchedulingView(reading.seats,policy,nowMs,recorded.forecasts),...(recorded.advisory ? {advisory:recorded.advisory}: {})};
         sendJson(res, 200, view);

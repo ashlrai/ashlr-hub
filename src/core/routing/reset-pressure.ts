@@ -16,7 +16,8 @@ export function validResetProvenance(value: unknown): value is ResetProvenance {
   if (v.at !== null && !instant(v.at) || v.startsAt != null && !instant(v.startsAt)) return false;
   if (v.kind === 'fixed-period' && (!instant(v.at) || !instant(v.startsAt) || v.startsAt >= v.at || !v.source)) return false;
   if (v.kind === 'weekly-deadline' && (!instant(v.at) || v.startsAt != null ||
-    v.source !== 'claude-native-usage-report' || !['pro', 'max'].includes(v.plan ?? ''))) return false;
+    !(v.source === 'claude-native-usage-report' && ['pro', 'max'].includes(v.plan ?? '') && v.windowDurationMins === undefined ||
+      v.source === 'codex-native-rate-limits' && ['plus', 'pro'].includes(v.plan ?? '') && v.windowDurationMins === 10080))) return false;
   return !(v.kind === 'balance' && v.at !== null);
 }
 
@@ -51,7 +52,8 @@ export function assessResetOpportunity(seat: SeatCapacity, policy: SeatBudgetPol
   const finitePeriods = accountWindows.filter((w) => subscription && w.resetProvenance && validResetProvenance(w.resetProvenance) &&
     w.resetsAt === w.resetProvenance.at && Date.parse(w.resetProvenance.at!) > nowMs &&
     (w.resetProvenance.kind === 'fixed-period' && Date.parse(w.resetProvenance.startsAt!) <= nowMs ||
-      w.resetProvenance.kind === 'weekly-deadline' && seat.engine === 'claude' && w.id === 'seven_day'));
+      w.resetProvenance.kind === 'weekly-deadline' && (seat.engine === 'claude' && w.id === 'seven_day' && w.resetProvenance.source === 'claude-native-usage-report' ||
+        seat.engine === 'codex' && w.id === 'codex_codex_secondary' && w.resetProvenance.source === 'codex-native-rate-limits')));
   const earliest = finitePeriods.sort((a, b) => Date.parse(a.resetProvenance!.at!) - Date.parse(b.resetProvenance!.at!))[0];
   const unknownWindow = seat.windows.find((w) => w.resetDescription || w.resetsAt);
   const reported = accountWindows.find((w) => w.resetProvenance && !hasResetDeadline(w.resetProvenance) && validResetProvenance(w.resetProvenance));

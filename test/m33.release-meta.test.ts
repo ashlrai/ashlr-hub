@@ -235,11 +235,32 @@ describe('release workflow', () => {
       { label: 'ubuntu, authority 3/3', test_args: '--shard=3/3 --exclude=test/m342.dispatch-production-ledger.test.ts' },
     ]);
     const ciSteps = ciJob?.steps ?? [];
+    const sharedChecksLabel = 'ubuntu, authority 3/3';
+    const sharedChecksEntries = (ciJob?.strategy?.matrix?.include ?? [])
+      .filter((entry) => entry['label'] === sharedChecksLabel);
+    expect(sharedChecksEntries).toHaveLength(1);
+    expect(sharedChecksEntries[0]).toMatchObject({ os: 'ubuntu-latest', node_version: '22.15.0' });
+    const ownershipSteps = ciSteps.filter((step) => step.name === 'Check generated authority ownership (hermetic)');
+    expect(ownershipSteps).toHaveLength(1);
+    expect(ownershipSteps[0]?.run?.trim()).toBe('npm run test:ci -- --maxWorkers=1 --fileParallelism=false test/authority-codeowners-310b.test.ts');
+    expect(ownershipSteps[0]?.if).toBeUndefined();
+    expect(ciSteps.indexOf(ownershipSteps[0]!)).toBeGreaterThan(ciSteps.findIndex((step) => step.name === 'Install dependencies'));
+    for (const next of ['Typecheck', 'Lint', 'Build', 'Test (hermetic)']) {
+      expect(ciSteps.indexOf(ownershipSteps[0]!), next).toBeLessThan(ciSteps.findIndex((step) => step.name === next));
+    }
+    const smoke = JSON.parse(readFileSync(join(REPO_ROOT, 'scripts/gate-smoke.json'), 'utf8')) as { backend: Array<{ file: string }> };
+    expect(smoke.backend.filter((entry) => entry.file === 'test/authority-codeowners-310b.test.ts')).toHaveLength(1);
     expect(ciSteps.find((step) => step.name === 'Typecheck')?.run).toBe('npm run typecheck');
+    expect(ciSteps.find((step) => step.name === 'Typecheck')?.if)
+      .toBe(`matrix.label == '${sharedChecksLabel}'`);
     expect(ciSteps.find((step) => step.name === 'Lint')?.run).toBe('npm run lint');
+    expect(ciSteps.find((step) => step.name === 'Lint')?.if)
+      .toBe(`matrix.label == '${sharedChecksLabel}'`);
     expect(ciSteps.find((step) => step.name === 'Build')?.run).toBe('npm run build');
+    expect(ciSteps.find((step) => step.name === 'Build')?.if).toBeUndefined();
     expect(ciSteps.find((step) => step.name === 'Test (hermetic)')?.run)
       .toBe('npm run test:ci -- ${{ matrix.test_args }}');
+    expect(ciSteps.find((step) => step.name === 'Test (hermetic)')?.if).toBeUndefined();
     const ledgerSteps = ciSteps.filter((step) => step.name === 'Test complete dispatch production ledger (hermetic)');
     expect(ledgerSteps).toHaveLength(1);
     expect(ledgerSteps[0]?.if).toBe("matrix.label == 'ubuntu, authority 3/3'");

@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { assessResetOpportunity, forecastFit, hasResetDeadline, opportunityPriority, validResetProvenance } from '../src/core/routing/reset-pressure.js';
 import { forecastWork, observedPercentiles } from '../src/core/routing/work-estimates.js';
-import { buildSchedulingView, historySamples } from '../src/core/routing/scheduling.js';
+import { buildSchedulingView, historySamples, taskForecast } from '../src/core/routing/scheduling.js';
 import { routeSeat } from '../src/core/routing/router.js';
 import { capacityFromSeat, type SeatCapacity } from '../src/core/routing/headroom.js';
 import type { VerseSeat } from '../src/core/verse/types.js';
 import type { BudgetPolicy } from '../src/core/routing/types.js';
 import type { WorkHistorySample } from '../src/core/routing/work-estimates.js';
+import type { FleetJournalRecord } from '../src/core/fleet/fleet-runtime-journal.js';
+import type { WorkItem } from '../src/core/types.js';
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 
 const now = Date.parse('2026-10-01T12:00:00.000Z');
@@ -278,5 +280,26 @@ describe('routing integration',()=>{
     expect(routeSeat({...request,contextTokens:1000},[a,b],policy,{nowMs:now,scheduling,advisorySeatId:'b'}).seatId).toBe('a');
     b.engine='local';b.free=true;
     expect(routeSeat(request,[a,b],policy,{nowMs:now,scheduling,advisorySeatId:'b'}).seatId).toBe('a');
+  });
+});
+
+
+describe('immutable account performance attribution',()=>{
+  const id='attempt-00000000-0000-4000-8000-000000000001';
+  const hint='a'.repeat(64);
+  const event={itemId:'task',backend:'grok-cli',model:'model-a',source:'todo',attemptId:id,runEventSummary:{status:'done',durationMs:30000,tokensIn:10,tokensOut:20}} as DispatchProductionEvent;
+  const row={type:'dispatch',runId:id,itemId:'task',backend:'grok-cli',model:'model-a',seatId:'a',accountHint:hint,dispatched:true} as FleetJournalRecord;
+  it('joins only exact attempt/task/engine/model and refuses ambiguous account records',()=>{
+    expect(historySamples([event],[row])[0]).toMatchObject({seatId:'a',accountHint:hint});
+    for(const changed of [{...row,runId:'other'},{...row,itemId:'other'},{...row,backend:'claude'},{...row,model:'other'}])
+      expect(historySamples([event],[changed])[0]).toMatchObject({seatId:null,accountHint:null});
+    for (const conflicting of [{...row,accountHint:'b'.repeat(64)},{...row,itemId:'other'},{...row,model:'other'},{...row,backend:'claude'}])
+      expect(historySamples([event],[row,conflicting])[0]).toMatchObject({seatId:null,accountHint:null});
+  });
+  it('uses account samples when proved, otherwise explicitly pools compatible completed observations',()=>{
+    const task={id:'task',source:'todo'} as WorkItem;
+    const history=[...historySamples([event],[row]),sample('pooled',{durationMs:90000})];
+    expect(taskForecast(task,'grok-cli','model-a',history,now,'a',hint)).toMatchObject({cohort:{seatId:'a'},durationMs:{p75:30000,samples:1}});
+    expect(taskForecast(task,'grok-cli','model-a',history,now,'a','b'.repeat(64))).toMatchObject({cohort:{seatId:null},durationMs:{p75:90000,samples:2}});
   });
 });

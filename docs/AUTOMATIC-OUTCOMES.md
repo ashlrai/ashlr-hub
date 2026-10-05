@@ -69,6 +69,12 @@ unknown provider effects stays unknown; missing receipts do not prove that no
 work ran. An empty diff or a producer reporting success cannot complete a task.
 Unavailable enrollment or damaged outcome records remain visibly unavailable.
 
+The Leader checks the saved graph after planning. A memo that omits a needed
+plan, or whose refinement is refused, does not count as planning progress.
+Retries follow the existing backoff for the current saved scope; editing the
+scope permits a fresh attempt. Daily and manual runs retain their recovery
+path. Advisory memos cannot stand in for saved executable work.
+
 There is no new goal-count or agent-count preference imposed by outcomes.
 Each plan uses the existing mission graph transport, and plans can evolve over
 time. Actual serving slots, provider quotas, account policy, workspace isolation,

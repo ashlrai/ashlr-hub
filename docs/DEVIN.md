@@ -32,7 +32,12 @@ lane it mirrors is described in [CLOUD.md](CLOUD.md).
 You do every step yourself, in your own terminal and on app.devin.ai. Verse
 never asks for the key in the page, and no HTTP route accepts one.
 
-1. **Plan.** You need a Devin plan with API access (Teams or Enterprise).
+1. **Access.** Check your organization's plan and permissions for the v3
+   session endpoints you intend to use. Organization consumption is a separate
+   read: Devin documents it for all plans, including self-serve, with the
+   organization-level `ViewOrgConsumption` permission
+   ([daily consumption API](https://docs.devin.ai/api-reference/v3/consumption/organizations-consumption-daily)).
+   This availability does not establish session-launch or enterprise API access.
 2. **Training opt-out.** Decide whether Devin may train on your code. On paid
    plans an organization administrator can opt out on Devin's **Data Controls**
    settings page. Cognition documents that opting out also enables zero data
@@ -50,6 +55,10 @@ never asks for the key in the page, and no HTTP route accepts one.
    - a **service user with the Member role** (recommended: it is not tied to a
      person, and Member is enough to create and read sessions), or
    - a **personal access token**.
+
+   Organization consumption needs `ViewOrgConsumption` independently of session
+   access. Connect's session checks do not establish that permission, and Ashlr
+   does not grant it automatically.
 
    Both start with `cog_`. Legacy `apk_` keys are refused because they do not
    work with the v3 API.
@@ -262,13 +271,39 @@ PRs, so there is no Land or Close; the item expires after 7 days.
 ### In the Resources drawer (⌘.)
 
 The Devin card shows the connection state (Connected, Key refused, Not
-connected, Turned off or Not set up) with its reason, ACUs left with a meter,
-sessions running and today, the dollar estimate, and two readiness lines:
+connected, Turned off or Not set up) with its reason, the configured tracked
+budget with a meter, sessions running and today, the recorded-cost estimate,
+and two readiness lines:
 
 - **Chat:** "Pick “Devin (cloud)” in New chat. Each chat is one Devin
   session." when ready, or what to fix.
 - **Fleet:** Off, Waiting, **Not in the grant** (with "Draft a new grant (or
   re-approve) with the Devin fleet opt-in on."), Paused or Ready.
+
+A separate **organization API consumption** section shows the provider's
+fractional consumed ACUs over all available reporting dates, retrieval time,
+and expandable daily/product history. The cloud seat's rail value shows this
+consumption independently of the tracked budget. It does not report remaining
+subscription capacity, reset timing, credit balances, invoiced dollars or a
+personal CLI allocation. Provider date integers retain their original values;
+the documented day boundary is 08:00 UTC, while timestamp units and publication
+delay remain unspecified. Product zeros for Devin, Cascade and Terminal can be
+provider defaults when product data is unavailable; Automation and Review may
+be null. Neither missing buckets nor failed reads become measured zero.
+
+The owned listener schedules a connected organization's metadata read at
+startup, even without active sessions or Fleet enabled. Successful retrievals
+are cached for five minutes. The overview GET only projects that cache;
+**Read consumption** uses an authenticated empty POST and refreshes the shared
+readback. A `403` explains the consumption permission without changing session
+readiness. A `429` retains any previous reading as unconfirmed and respects
+provider retry deadlines; failed or expired readings stay visibly stale.
+Connection changes discard old readings and prevent in-flight responses from
+crossing account or organization boundaries. A private transition marker holds
+consumption after an interrupted or unconfirmed Keychain change, including
+after a listener restart; a successful reconnect or disconnect settles it.
+Unknown or continuation response
+shapes are held rather than presented as a complete reporting history.
 
 A line for the CLI reads "Devin (CLI): usage not reported by the CLI, so CLI
 chats are not counted here", with "run `devin auth login`" when the CLI is

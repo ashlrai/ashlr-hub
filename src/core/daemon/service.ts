@@ -73,8 +73,8 @@ export interface ServiceInstallOptions {
   platform?: Platform;
   /**
    * Wrap the daemon process with `caffeinate -i -s` on macOS so the job keeps
-   * running while the lid is closed and the machine is idle (prevents both idle
-   * sleep and system sleep while on AC power).
+   * running through idle sleep (system-sleep request applies only on AC).
+   * A closed lid, explicit sleep, low battery or thermal policy can still suspend work.
    *
    * Default: false.  Set to true for `ashlr worker` installs.
    *
@@ -220,7 +220,8 @@ function buildLaunchdDefinition(o: BuildOpts): ServiceDefinition {
   const serviceTarget = `${domainTarget}/ai.ashlr.daemon`;
 
   // When keepAwake is set, prepend `caffeinate -i -s --` so launchd keeps the
-  // daemon alive through idle + system sleep while on AC power (lid-closed use).
+  // daemon requesting idle + system sleep inhibition while on AC power.
+  // Closing the lid or explicitly sleeping remains subject to macOS policy.
   // caffeinate's `-i` flag prevents idle sleep; `-s` prevents system sleep on AC.
   // On battery, macOS may still sleep — the user must keep the Mac plugged in.
   const runtimeArguments = o.keepAwake

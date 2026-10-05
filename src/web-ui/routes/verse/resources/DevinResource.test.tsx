@@ -11,7 +11,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { evictAll } from '../../../data/cache.js';
 import { DevinResource } from './DevinResource.js';
-import { runInDevinBlock } from '../devin/devin-model.js';
+import { resetGuard, isGuardOpen } from '../shell/guarded-action.js';
+import { runInDevinBlock, devinConsumptionEvidence } from '../devin/devin-model.js';
 
 const TOKEN = 'test-token';
 let overview: unknown;
@@ -52,8 +53,18 @@ function blockedTask() {
   };
 }
 
+function consumption(over: Record<string, unknown> = {}) {
+  const now = Date.now();
+  return { source: 'devin-v3-organization-daily', scope: 'organization', period: 'all-available-reporting-dates',
+    dateUnit: 'provider-unspecified', dayBoundaryUtc: '08:00', state: 'ready',
+    fetchedAt: new Date(now - 1000).toISOString(), checkedAt: new Date(now - 1000).toISOString(),
+    expiresAt: new Date(now + 300_000).toISOString(), retryAt: null, stale: false, error: null,
+    report: { totalAcus: 3.125, days: [{ date: 123, acus: 3.125, products: { devin: 3.125, cascade: null, terminal: 0, automation: null, review: null } }] }, ...over };
+}
+
 beforeEach(() => {
   evictAll();
+  resetGuard();
   setMutationToken(TOKEN);
   posts = [];
   overview = { generatedAt: '2026-09-27T00:00:00.000Z', status: status(), budget: budget(), tasks: [] };
@@ -61,6 +72,10 @@ beforeEach(() => {
     const url = String(input);
     if ((init?.method ?? 'GET').toUpperCase() === 'POST') {
       posts.push({ url, body: JSON.parse(String(init?.body ?? '{}')), token: new Headers(init?.headers).get('x-ashlr-token') });
+      if (url === '/api/verse/devin/consumption/refresh') {
+        overview = { ...(overview as Record<string, unknown>), consumption: consumption() };
+        return json({ consumption: consumption() });
+      }
       return json({ ok: true, task: blockedTask() });
     }
     if (url === '/api/verse/devin') return overview === 404 ? json({ error: 'not found' }, 404) : json(overview);
@@ -106,6 +121,64 @@ describe('DevinResource', () => {
     expect(screen.getByText(/1 running · 2 today/)).toBeTruthy();
     expect(screen.getByRole('link', { name: /Real usage on app\.devin\.ai/ }).getAttribute('href')).toBe('https://app.devin.ai/settings/usage');
     expect(screen.getByText('Connected')).toBeTruthy();
+  });
+
+  it('reads organization consumption through the guarded token POST and confirms cached readback', async () => {
+    mount();
+    const section = await screen.findByRole('region', { name: 'Devin organization consumption' });
+    expect(within(section).getByText('Consumption not reported by this server')).toBeTruthy();
+    await userEvent.click(within(section).getByRole('button', { name: 'Read consumption' }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]).toEqual({ url: '/api/verse/devin/consumption/refresh', body: {}, token: TOKEN });
+    expect(await within(section).findByText('3.125 ACUs consumed')).toBeTruthy();
+    expect(within(section).queryByRole('meter')).toBeNull();
+    expect(section.textContent).not.toMatch(/\$|% left|resets (Mon|Tue|Wed|Thu|Fri|Sat|Sun)/);
+    await userEvent.click(within(section).getByText('Daily consumption (1 reporting buckets)'));
+    expect(await within(section).findByText('Provider date 123 · 3.125 ACUs')).toBeTruthy();
+    expect(within(section).getByText(/cascade: not reported/)).toBeTruthy();
+    expect(within(section).getByText(/zero defaults when product data is unavailable/)).toBeTruthy();
+  });
+
+  it('does not read consumption until the existing mutation-token gate is unlocked', async () => {
+    clearMutationToken(); mount();
+    const section = await screen.findByRole('region', { name: 'Devin organization consumption' });
+    await userEvent.click(within(section).getByRole('button', { name: 'Read consumption' }));
+    expect(isGuardOpen()).toBe(true); expect(posts).toHaveLength(0);
+  });
+
+  it('rejects unknown or malformed usage and preserves a measured zero independently of capacity', () => {
+    expect(devinConsumptionEvidence(undefined)).toBeNull();
+    expect(devinConsumptionEvidence(consumption({ report: { totalAcus: -1, days: [] } }))).toBeNull();
+    expect(devinConsumptionEvidence(consumption({ report: { totalAcus: '0', days: [] } }))).toBeNull();
+    expect(devinConsumptionEvidence(consumption({ fetchedAt: new Date(Date.now() + 60_000).toISOString() }))).toBeNull();
+    expect(devinConsumptionEvidence(consumption({ report: { totalAcus: 0, days: [] } }))?.value).toBe('0 ACUs consumed');
+  });
+
+  it('retains a permission-qualified last reading without representing current capacity', async () => {
+    overview = { ...(overview as Record<string, unknown>), consumption: consumption({ state: 'unavailable', stale: true,
+      error: { code: 'forbidden', reason: 'ViewOrgConsumption permission is required. Session access is separate.' } }) };
+    mount();
+    const section = await screen.findByRole('region', { name: 'Devin organization consumption' });
+    expect(within(section).getByText('3.125 ACUs consumed · last')).toBeTruthy();
+    expect(within(section).getByText(/Session access is separate/)).toBeTruthy();
+    expect(screen.getByText('Connected')).toBeTruthy();
+    expect(within(section).queryByRole('img')).toBeNull();
+    expect(within(section).getByText(/current consumption unconfirmed/)).toBeTruthy();
+  });
+
+  it('makes all daily buckets reachable in explicit pages without rendering the full history initially', async () => {
+    const days = Array.from({ length: 25 }, (_, date) => ({ date, acus: 0.125, products: { devin: 0.125, cascade: null, terminal: null, automation: null, review: null } }));
+    overview = { ...(overview as Record<string, unknown>), consumption: consumption({ report: { totalAcus: 3.125, days } }) };
+    mount();
+    const section = await screen.findByRole('region', { name: 'Devin organization consumption' });
+    expect(within(section).queryByRole('list', { name: 'Devin daily consumption' })).toBeNull();
+    await userEvent.click(within(section).getByText('Daily consumption (25 reporting buckets)'));
+    const list = await within(section).findByRole('list', { name: 'Devin daily consumption' });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(20);
+    await userEvent.click(within(section).getByRole('button', { name: 'Next' }));
+    expect(within(list).getAllByRole('listitem')).toHaveLength(5);
+    expect(within(section).getByText('Provider date 24 · 0.125 ACUs')).toBeTruthy();
+    expect(within(section).getByText('Page 2 of 2')).toBeTruthy();
   });
 
   it('separates reported usage from uncertain exposure and excludes held spend from the cost estimate', async () => {

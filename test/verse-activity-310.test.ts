@@ -712,3 +712,20 @@ describe('activity routes', () => {
     expect(res.status).toBe(404);
   });
 });
+
+
+describe('server-derived local work for native power', () => {
+  it('includes actual resident Fleet work while chat is idle, and cleans up after completion', () => {
+    const h = harness();
+    let fleet: number | null = 2;
+    h.deps.localFleetRuns = () => fleet;
+    const reader = createActivityReader(h.deps, 'abababab');
+    expect(reader.build(null).response.localWork?.localRuns).toBe(2);
+    fleet = 0;
+    expect(reader.build(null).response.localWork?.localRuns).toBe(0);
+    fleet = null;
+    expect(reader.build(null).response.localWork?.localRuns).toBeNull();
+    h.engine.sessions = [session('running', { engine: 'codex', status: 'running' })];
+    expect(reader.build(null).response.localWork?.localRuns).toBe(1);
+  });
+});

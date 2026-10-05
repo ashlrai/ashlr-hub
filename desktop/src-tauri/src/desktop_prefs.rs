@@ -1,9 +1,10 @@
-//! The two desktop-only preferences Settings ▸ Desktop controls, and the state
+//! The desktop-only preferences Settings ▸ Desktop controls, and the state
 //! the page shows beside them.
 //!
 //! | Preference      | Default | Why the default |
 //! |-----------------|---------|-----------------|
 //! | `globalHotkey`  | off     | A system-wide key steals that chord from every other app; the operator opts in. |
+//! | `automaticAwake` | on | Process-owned idle-sleep requests follow observed local work; system settings remain unchanged. |
 //! | `notifications` | on      | The point of a tray app is hearing about work while the window is hidden. |
 //!
 //! Stored at `~/.ashlr/desktop/prefs.json` (0600, atomic write) next to the
@@ -11,9 +12,9 @@
 //!
 //! The page changes them by emitting `shell-prefs` (the one event channel the
 //! Verse capability already grants; no new permission). The payload is parsed
-//! STRICTLY — an object with only these two keys, booleans only — because any
+//! STRICTLY — an object with only known keys, booleans only — because any
 //! script on the page can emit it. The worst a hostile emit can do is switch a
-//! hotkey on or banners off, both visible and reversible in Settings.
+//! hotkey, banners, or an idle-sleep request, both visible and reversible in Settings.
 
 use std::{fs, path::Path, path::PathBuf};
 
@@ -35,6 +36,8 @@ pub struct DesktopPrefs {
     pub global_hotkey: bool,
     #[serde(default = "yes")]
     pub notifications: bool,
+    #[serde(default = "yes")]
+    pub automatic_awake: bool,
 }
 
 impl Default for DesktopPrefs {
@@ -42,6 +45,7 @@ impl Default for DesktopPrefs {
         Self {
             global_hotkey: false,
             notifications: true,
+            automatic_awake: true,
         }
     }
 }
@@ -54,6 +58,8 @@ pub struct PrefsPatch {
     pub global_hotkey: Option<bool>,
     #[serde(default)]
     pub notifications: Option<bool>,
+    #[serde(default)]
+    pub automatic_awake: Option<bool>,
 }
 
 /// Parse a `shell-prefs` payload. `None` for anything but an object carrying at
@@ -65,7 +71,10 @@ pub fn parse_patch(payload: &str) -> Option<PrefsPatch> {
         return None;
     }
     let patch: PrefsPatch = serde_json::from_value(value).ok()?;
-    (patch.global_hotkey.is_some() || patch.notifications.is_some()).then_some(patch)
+    (patch.global_hotkey.is_some()
+        || patch.notifications.is_some()
+        || patch.automatic_awake.is_some())
+    .then_some(patch)
 }
 
 impl DesktopPrefs {
@@ -73,6 +82,7 @@ impl DesktopPrefs {
         Self {
             global_hotkey: patch.global_hotkey.unwrap_or(self.global_hotkey),
             notifications: patch.notifications.unwrap_or(self.notifications),
+            automatic_awake: patch.automatic_awake.unwrap_or(self.automatic_awake),
         }
     }
 }
@@ -144,6 +154,7 @@ pub fn store(prefs: &DesktopPrefs) {
 pub struct DesktopStateView {
     pub hotkey: HotkeyView,
     pub notifications: NotificationsView,
+    pub power: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -207,14 +218,16 @@ mod tests {
             parse_patch(r#"{"globalHotkey":true}"#),
             Some(PrefsPatch {
                 global_hotkey: Some(true),
-                notifications: None
+                notifications: None,
+                automatic_awake: None
             })
         );
         assert_eq!(
             parse_patch(r#" {"notifications":false,"globalHotkey":false} "#),
             Some(PrefsPatch {
                 global_hotkey: Some(false),
-                notifications: Some(false)
+                notifications: Some(false),
+                automatic_awake: None
             })
         );
         for bad in [
@@ -234,16 +247,32 @@ mod tests {
     }
 
     #[test]
+    fn automatic_awake_defaults_on_and_can_be_disabled_independently() {
+        let prefs = DesktopPrefs::default();
+        assert!(prefs.automatic_awake);
+        let patch = parse_patch(r#"{"automaticAwake":false}"#).unwrap();
+        let disabled = prefs.apply(patch);
+        assert!(!disabled.automatic_awake);
+        assert_eq!(disabled.global_hotkey, prefs.global_hotkey);
+        assert_eq!(disabled.notifications, prefs.notifications);
+        let raw = serde_json::to_string(&disabled).unwrap();
+        assert_eq!(serde_json::from_str::<DesktopPrefs>(&raw).unwrap(), disabled);
+        assert!(parse_patch(r#"{"automaticAwake":"yes"}"#).is_none());
+    }
+
+    #[test]
     fn a_patch_changes_only_what_it_names() {
         let prefs = DesktopPrefs::default().apply(PrefsPatch {
             global_hotkey: Some(true),
             notifications: None,
+            automatic_awake: None,
         });
         assert_eq!(
             prefs,
             DesktopPrefs {
                 global_hotkey: true,
-                notifications: true
+                notifications: true,
+                automatic_awake: true
             }
         );
     }
@@ -261,6 +290,7 @@ mod tests {
         let wanted = DesktopPrefs {
             global_hotkey: true,
             notifications: false,
+            automatic_awake: true,
         };
         assert!(store_to(&path, &wanted));
         assert_eq!(load_from(&path), wanted);
@@ -289,6 +319,7 @@ mod tests {
     #[test]
     fn the_state_script_is_json_encoded_and_guarded() {
         let view = DesktopStateView {
+            power: None,
             hotkey: HotkeyView {
                 enabled: true,
                 registered: false,

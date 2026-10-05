@@ -4,7 +4,7 @@ A Tauri v2 desktop app that wraps **Ashlr Verse** (the operator console at
 `/verse/`, see `../docs/VERSE.md`) in a native macOS window. Opening it starts
 the console; resident autonomy requires its separate local setup and grant.
 
-The versioned [v3.23.0 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.23.0/Ashlr_3.23.0_aarch64_locally-signed.dmg)
+The versioned [v3.24.0 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.0/Ashlr_3.24.0_aarch64_locally-signed.dmg)
 is the publication target for this release candidate. The build is
 locally signed, not Apple Developer ID notarized. macOS may require **Open
 Anyway** on first launch. The desktop CI workflow remains disabled during the
@@ -17,13 +17,13 @@ sidecar (~100 MiB), Rust executable and web assets.
 
 ## Install
 
-After release publication, download the [macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.23.0/Ashlr_3.23.0_aarch64_locally-signed.dmg)
+After release publication, download the [macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.0/Ashlr_3.24.0_aarch64_locally-signed.dmg)
 or use the [npm/CLI quickstart](../docs/QUICKSTART.md) on macOS, Linux and Windows.
 Other desktop formats remain subject to the draft artifact policy below.
 
 | Platform | Availability |
 |----------|-----------------------|
-| macOS arm64 | Locally signed v3.23.0 `.dmg` linked above |
+| macOS arm64 | Locally signed v3.24.0 `.dmg` linked above |
 | Windows | `.msi` / `.exe` draft only |
 | Linux | Not produced while quarantined |
 
@@ -202,7 +202,7 @@ for the same reason. The one system-wide key, ⌃⌥Space, is registered by the 
 ### 6. Desktop state (Settings ▸ Desktop)
 
 ```ts
-import { useDesktopState, setDesktopPreference } from '../app/desktop-shell.js';
+import { useDesktopState, setDesktopPreference } from '../app/desktop-state.js';
 
 const desktop = useDesktopState(); // null in a browser
 // desktop.hotkey        { enabled, registered, accelerator: '⌃⌥Space', error }
@@ -211,8 +211,8 @@ setDesktopPreference('globalHotkey', true); // false in a browser
 ```
 
 - The page asks by emitting `shell-prefs` (`{ globalHotkey?: bool,
-  notifications?: bool }`) over the event permission it already has. Rust parses
-  it strictly — an object, those two keys, booleans only — persists it to
+  notifications?: bool, automaticAwake?: bool }`) over the event permission it already has. Rust parses
+  it strictly — an object, known keys, booleans only — persists it to
   `~/.ashlr/desktop/prefs.json` (0600), applies it and answers with a new state.
 - **Render from the answer, not from what you asked for.** A hotkey another app
   already holds comes back `enabled: true, registered: false` with an
@@ -222,6 +222,35 @@ setDesktopPreference('globalHotkey', true); // false in a browser
 - The init script carries the state from window creation; on load the page
   also emits `shell-state-request` and gets the live one, so a reload after a
   change is never stale.
+
+### Automatic awake during local work
+
+The workbench top bar shows the desktop's power source, the configured system
+idle-sleep timer and separately whether its **idle-sleep request is active**.
+Automatic is enabled by default and can be switched to System settings. The
+screen can sleep; Ashlr does not change the system power plan, lock settings or
+lid behavior. Manual sleep, thermal limits and battery restrictions still apply.
+
+The native app reads authenticated chat activity and owner-verified resident
+Fleet dispatch observations. Subscription CLI orchestration executes locally
+even when inference happens elsewhere; provider-only sessions do not keep this
+host awake. Each source has an independent liveness lease: completion clears
+its evidence immediately, failed observations hide current counts without
+renewing the prior evidence, and unrefreshed evidence expires after 15 seconds.
+This is an observation timeout, not a task budget. Requests renew for long work.
+Native polling continues every five seconds while Automatic is enabled, even
+when the window is hidden. Resident metadata is cached every five seconds;
+there can be an observation delay before a request starts. Page refresh events
+prompt a native check but never supply authoritative activity counts.
+
+macOS uses a process-owned IOPM idle-sleep assertion; Windows uses a SystemRequired
+PowerRequest. Failed requests are visible. System settings readback has its own
+check timestamp. A browser cannot report the host's power state. Standalone CLI
+workers are not observed by this control; resident observations require verified
+PID, process start and daemon instance identity. Windows adapter behavior needs
+Windows runtime acceptance. Quitting the desktop releases its request; an
+independent resident service owns its existing power wrapper separately. This
+control does not promise local browser or screen tools can run asleep or locked.
 
 ### 7. Browser pane (shell contract v1)
 

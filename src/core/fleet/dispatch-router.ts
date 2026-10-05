@@ -593,6 +593,19 @@ function held(
   };
 }
 
+/** Resolve the exact engine/model for a candidate before reserve admission, for metadata forecasts only. */
+export function executionForSeat(item: WorkItem, legacy: LegacyRoute, seat: SeatCapacity, ctx: DispatchRouterContext): LegacyRoute | null {
+  const lane = laneOfSeat(seat);
+  if (lane === null) return null;
+  const installed = ctx.laneEngines[lane];
+  if (installed === null) return null;
+  const backend = fleetLaneOf(legacy.backend, ctx.cfg) === lane ? legacy.backend : installed;
+  const model = (backend === legacy.backend ? legacy.model ?? undefined : configuredModel(ctx.cfg, backend))
+    ?? (lane === 'grok-cli' && routingRequestFor(item).difficulty === 'low' ? grokFastModel() : undefined);
+  return { backend, reason: 'Exact candidate execution for observed task fit.', tier: backend === legacy.backend ? legacyTier(legacy, ctx) : ctx.tierOf(backend) ?? 'local',
+    ...(model ? { model } : {}) };
+}
+
 /**
  * Route one work item under the standing policy. Pure.
  *
@@ -664,7 +677,9 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
       // Keep the legacy engine when it already dispatches through this lane:
       // it may encode item-specific rules (a repair's parent engine, the
       // operator's preferred local runtime).
-      const candidateEngine = fleetLaneOf(legacy.backend, ctx.cfg) === lane ? legacy.backend : engine;
+      const execution = executionForSeat(item, legacy, seat, ctx);
+      if (!execution) continue;
+      const candidateEngine = execution.backend;
       const demoted = activeDemotion(ctx.demotions, candidateEngine, repo, kind, ctx.nowMs);
       if (demoted) {
         // The string form keeps "demoted until <ISO>: <why>" (logs, CLI); the
@@ -769,14 +784,9 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
           + `${decision.seatId ? ` (${decision.seatId})` : ''} is not a producer the grant allows right now.`,
         mode: decision.mode,
       };
-  const tier = chosenEngine === legacy.backend ? legacyTier(legacy, ctx) : ctx.tierOf(chosenEngine) ?? 'local';
-  const model = (chosenEngine === legacy.backend
-    ? legacy.model ?? undefined
-    : configuredModel(ctx.cfg, chosenEngine))
-    // U7: low-difficulty grok-cli work takes the seat's faster sibling unless
-    // the operator pinned a grok-cli model — the fast model spends the same
-    // seat but returns sooner, which is what cheap work wants.
-    ?? (chosenLane === 'grok-cli' && request.difficulty === 'low' ? grokFastModel() : undefined);
+  const execution = executionForSeat(item, legacy, ctx.capacity.find(seat => seat.seatId === chosenSeat)!, ctx)!;
+  const tier = execution.tier ?? 'local';
+  const model = execution.model;
   return {
     backend: chosenEngine,
     tier,

@@ -3,9 +3,11 @@ import {
   closeSync,
   chmodSync,
   linkSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -67,6 +69,60 @@ function runNpm(args: string[], cwd?: string) {
   });
 }
 
+// Cache only npm's path-relative report for identical freshly written fixtures.
+// No dependency inventory, permission observation, or mutable directory is shared.
+let baselinePack: { key: string; files: readonly Readonly<RuntimeReleasePackFileRecord>[] } | null = null;
+
+function baselinePackKey(packageRoot: string): string {
+  const launch = resolveNpmCliLaunch();
+  let toolchain: unknown;
+  try {
+    toolchain = {
+      node: { path: realpathSync(process.execPath), version: process.version, platform: process.platform, arch: process.arch },
+      environment: Object.entries(process.env).sort(([left], [right]) => left.localeCompare(right)),
+      npmCliPath: launch.npmCliPath,
+      npmRuntimeClosureSha256: launch.npmRuntimeClosureSha256,
+      npmRuntimeAncestors: launch.npmRuntimeAncestors,
+      npmCliSha256: createHash('sha256').update(launch.npmCli.bytes).digest('hex'),
+      npmPackageSha256: createHash('sha256').update(launch.packageJson.bytes).digest('hex'),
+    };
+  } finally {
+    closeSync(launch.npmCli.descriptor);
+    closeSync(launch.packageJson.descriptor);
+  }
+  const tree: Array<{ path: string; mode: number; sha256: string | null }> = [];
+  const visit = (path: string, relativePath: string): void => {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) {
+      throw new Error('baseline fixture contains an unsafe entry');
+    }
+    tree.push({ path: relativePath, mode: stat.mode & 0o7777,
+      sha256: stat.isFile() ? createHash('sha256').update(readFileSync(path)).digest('hex') : null });
+    if (stat.isDirectory()) {
+      for (const name of readdirSync(path).sort()) visit(join(path, name), relativePath ? `${relativePath}/${name}` : name);
+    }
+  };
+  visit(packageRoot, '');
+  return createHash('sha256').update(JSON.stringify({ toolchain, tree })).digest('hex');
+}
+
+function baselinePackFiles(packageRoot: string): RuntimeReleasePackFileRecord[] {
+  // Trust validation is fresh even on a cache hit, including changed npm_execpath.
+  const key = baselinePackKey(packageRoot);
+  if (baselinePack?.key !== key) {
+    const dryRun = runNpm(['pack', '--dry-run', '--ignore-scripts', '--json'], packageRoot);
+    if (dryRun.status !== 0) throw new Error(dryRun.stderr);
+    const report = JSON.parse(dryRun.stdout) as Array<{ files: RuntimeReleasePackFileRecord[] }>;
+    const files = report[0]!.files;
+    if (files.some((entry) => entry.path === 'node_modules/example/CHANGELOG.md')) {
+      throw new Error('fixture dependency CHANGELOG was unexpectedly packaged');
+    }
+    if (baselinePackKey(packageRoot) !== key) throw new Error('baseline fixture or toolchain changed during npm pack');
+    baselinePack = { key, files: Object.freeze(files.map(file => Object.freeze({ ...file }))) };
+  }
+  return baselinePack.files.map(file => ({ ...file }));
+}
+
 function fixture(): ContractFixture {
   const packageRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-release-contract-')));
   tempDirs.push(packageRoot);
@@ -113,15 +169,7 @@ function fixture(): ContractFixture {
   write(join(dependencyRoot, 'example', 'index.js'), 'module.exports = 42;\n');
   write(join(dependencyRoot, 'example', 'cli.js'), '#!/usr/bin/env node\n');
   write(join(dependencyRoot, 'example', 'CHANGELOG.md'), 'source-only release notes\n');
-  const dryRun = runNpm(['pack', '--dry-run', '--ignore-scripts', '--json'], packageRoot);
-  if (dryRun.status !== 0) throw new Error(dryRun.stderr);
-  const report = JSON.parse(dryRun.stdout) as Array<{
-    files: RuntimeReleasePackFileRecord[];
-  }>;
-  const packagedFiles = report[0]!.files;
-  if (packagedFiles.some((entry) => entry.path === 'node_modules/example/CHANGELOG.md')) {
-    throw new Error('fixture dependency CHANGELOG was unexpectedly packaged');
-  }
+  const packagedFiles = baselinePackFiles(packageRoot);
   const inventory = buildRuntimeReleaseDependencyInventory(packageRoot, {
     packagedFiles,
   });
@@ -185,6 +233,40 @@ afterEach(() => {
 // takes precedence over the file-level vi.setConfig above, which silently
 // defeated the 180s raise these real `npm pack`/`npm install` cases need.
 describe('release artifact contract v1', () => {
+  it('keeps fresh fixture files and independently mutable copies of cached baseline pack metadata', () => {
+    const first = fixture();
+    const original = structuredClone(first.packagedFiles);
+    first.packagedFiles[0]!.size += 1;
+    write(join(first.dependencyRoot, 'example', 'index.js'), 'changed first fixture bytes\n');
+    const second = fixture();
+    expect(second.packageRoot).not.toBe(first.packageRoot);
+    expect(second.packagedFiles).toEqual(original);
+    expect(second.packagedFiles[0]).not.toBe(first.packagedFiles[0]);
+    expect(readFileSync(join(second.dependencyRoot, 'example', 'index.js'), 'utf8')).toBe('module.exports = 42;\n');
+    expect(observe(first)).toMatchObject({ ok: false });
+    expect(observe(second)).toMatchObject({ ok: true });
+    const changed = baselinePackFiles(first.packageRoot).find(file => file.path === 'node_modules/example/index.js');
+    expect(changed?.size).toBe(Buffer.byteLength('changed first fixture bytes\n'));
+    expect(changed?.size).not.toBe(original.find(file => file.path === 'node_modules/example/index.js')?.size);
+  });
+
+  it('revalidates npm identity before reusing a successful baseline pack report', () => {
+    fixture();
+    const maliciousRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-cached-pack-malicious-npm-')));
+    tempDirs.push(maliciousRoot);
+    const maliciousCli = join(maliciousRoot, 'npm', 'bin', 'npm-cli.js');
+    write(maliciousCli, 'throw new Error("must not run");\n');
+    const prior = process.env['npm_execpath'];
+    try {
+      process.env['npm_execpath'] = maliciousCli;
+      expect(() => fixture()).toThrow('npm_execpath does not match the trusted Node toolchain');
+    } finally {
+      if (prior === undefined) delete process.env['npm_execpath'];
+      else process.env['npm_execpath'] = prior;
+    }
+    expect(observe(fixture())).toMatchObject({ ok: true });
+  });
+
   it.each(['prepack', 'postpack'] as const)(
     'packs with %s disabled when no prepare lifecycle is defined',
     (lifecycle) => {

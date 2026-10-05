@@ -99,11 +99,15 @@ export interface DispatchJournalRecord {
   model: string | null;
   lane: FleetEngine | null;
   seatId: string | null;
+  /** Opaque current native account proof correlated to this attempt; never a credential. */
+  accountHint?: string | null;
   dispatched: boolean;
   skipReason: string | null;
   proposalId: string | null;
   spentUsd: number;
   seatDecision: SeatDecision | null;
+  /** Historical task-admission explanation, never a reusable grant or quota signal. */
+  resetSpending?: import('../routing/reset-spending-types.js').ResetSpendingStatus;
   hold: RouteHold | null;
   /**
    * The harness version (learn/harness-registry.ts) this dispatch ran with:

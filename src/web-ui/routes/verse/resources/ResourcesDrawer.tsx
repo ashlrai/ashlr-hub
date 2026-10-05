@@ -32,7 +32,7 @@
  * then the mutation token): Reconnect opens the provider's own sign-in in
  * Terminal, Check again is the zero-cost health sweep.
  */
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { IconButton } from '../../../components/primitives/Button.js';
 import { useFocusTrap } from '../../../components/primitives/focus-trap.js';
@@ -65,6 +65,8 @@ import { cloudCreditsQuery, resourceReadinessQuery, RESOURCES_POLL_MS } from './
 import { costBases, groupByTier, mergedFacts, readinessStatusRank, seatFacts, type ResourceFactsView, type TierEntry } from './resources-model.js';
 import { closeResources, setResourcesBar, setResourcesPinned, useResourcesUi } from './resources-store.js';
 import styles from './ResourcesDrawer.module.css';
+import { refreshDevinConsumption } from '../devin/devin-queries.js';
+const ResetSpendingControl = lazy(() => import('../budget/ResetSpendingControl.js').then(module => ({ default: module.ResetSpendingControl })));
 
 export const RESOURCES_EMPTY_TEXT =
   'No accounts connected yet. Sign in to Claude Code, Codex, Devin or Grok in a terminal — they show up here within a minute.';
@@ -219,7 +221,10 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
         setBusy({ seatId: row.seatId, kind: action.kind });
         try {
           if (reconnect) await reconnectSeat(row.seatId);
-          else await refreshSeatHealth();
+          else if (row.engine === 'devin') {
+            if (row.seatId !== 'devin') throw new Error('Devin CLI usage is not reported. Organization API consumption belongs to the connected cloud account.');
+            await refreshDevinConsumption();
+          } else await refreshSeatHealth();
         } finally {
           setBusy(null);
         }
@@ -230,7 +235,7 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
           tone: 'neutral',
           text: reconnect
             ? `Opened the sign-in for ${row.label} in Terminal. Finish it there; this drawer picks it up.`
-            : `Checked ${row.label} again.`,
+            : row.engine === 'devin' ? 'Updated the Devin organization consumption status.' : `Checked ${row.label} again.`,
         });
       },
       onError: (message) => setNote({ tone: 'danger', text: message }),
@@ -303,6 +308,9 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
       </header>
 
       <div className={styles.body}>
+        <Suspense fallback={<p className={styles.subtle}>Loading allowance controls…</p>}>
+          <ResetSpendingControl view={data.budget} nowMs={now} onReviewGrant={() => go('fleet', 'authority-grant')} />
+        </Suspense>
         {data.refreshing ? <p className={styles.subtle} role="status">Updating readings…</p> : null}
         {data.readFailed ? <p className={styles.subtle} role="status">Refresh unavailable{data.rosterUnavailable ? '.' : ' · showing last readings.'}</p> : null}
         {data.loading ? (
@@ -336,6 +344,9 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
                         readiness={readinessById.get(row.seatId) ?? null}
                         facts={entry.facts}
                         scheduling={schedulingEvidence(data.budget, row, now)}
+                        resetBudget={data.budget}
+                        resetNowMs={now}
+                        onReviewGrant={() => go('fleet', 'authority-grant')}
                       />
                     );
                   }

@@ -1,6 +1,6 @@
 # Reset-aware fleet scheduling
 
-Verse 3.21 helps the fleet select useful work that can finish before a qualified
+Verse helps the fleet select useful work that can finish before a qualified
 account deadline. Work for me keeps the selected tasks, eligible accounts and
 current routing policies together. Opening resource details only reads recorded evidence;
 it does not start work or call a decision model.
@@ -19,8 +19,11 @@ Grok's structured account report can supply fixed weekly or monthly period bound
 Claude's structured native usage report requires the supported CLI version,
 matching native account and Pro/Max plan, a current weekly-all meter and a
 successful quota-only result with no inference. Legacy prose, API plans and
-rolling recovery windows do not qualify as fixed weekly deadlines. Codex reset
-timestamps alone do not establish whether its window is fixed or rolling.
+rolling recovery windows do not qualify as fixed weekly deadlines. Codex requires
+a current account-matched native Plus/Pro report, the selected Codex bucket and
+a provider-reported 10,080-minute secondary allowance window. Its actual future
+weekly deadline is retained without inventing a start; an arbitrary reset
+timestamp or credit balance does not qualify.
 Cloud-credit estimates, tracked Devin ACUs and local-model readiness are not
 expiring subscription balances.
 
@@ -30,7 +33,7 @@ Track each native account independently. A reset time belongs to the observed
 account and window; another account at the same provider does not inherit it.
 Quota percentages are subscription capacity, not dollars or a token balance.
 Current Codex credit units remain separate, even when the subscription window
-is exhausted. Reset-aware autonomy does not spend those credits.
+is exhausted. Reserve shrinking requires a current provider-enforced subscription-only boundary; a selected subscription cost basis alone cannot prove that a turn will never spill into credits.
 
 Deadline preference requires the effective subscription cost basis. A billing
 date attached to a paid-credit, per-token or free lane does not establish an
@@ -67,7 +70,10 @@ class, priority rises continuously as the remaining time approaches the observed
 work stays ahead of uncertain work. Unknown history does not make a distant
 deadline urgent. Existing quality-tier placement and ordinary routing remain
 when evidence is incomplete. This is a preference during normal fleet ticks,
-not a promise to wake at an exact instant or consume every remaining token.
+not a promise to consume every remaining token. Once an eligible selected task
+has a compatible observed duration, an existing abortable fleet park can shorten
+to its next duration-derived boundary. No extra service or periodic provider
+request is created; the next tick still revalidates all admission evidence.
 
 Optional Jev advice uses a closed list of eligible task/account pairs. The wire
 request contains bounded task-kind and scheduling metadata; task prompts, account
@@ -81,6 +87,61 @@ and authority again after asynchronous work. Jev advice does not widen authority
 or reserve a provider's quota. New metered advice needs an available positive
 signed metered allowance. Its existing decision ledger is separate from dispatch
 accounting; it is not an aggregate provider invoice or dollar reservation.
+
+## Allowance before resets
+
+The global control and per-account overrides save enrollment separately from the
+ordinary reserve. An absent global preference retains legacy deadline priority
+without silently enabling reserve shrinking. Explicit **Off** disables both for
+new scheduling and contacts; it does not stop ordinary fleet work. An account
+override cannot bypass global Off.
+
+With explicit enrollment, current task duration controls the reserve: the saved
+reserve begins shrinking when the remaining time reaches twice the observed
+75th-percentile duration, reaching the signed minimum at one duration. The
+saved value is unchanged. Every binding usage window, account enablement, coding
+role, signed floor, short-window ceiling and native throttle still applies.
+Configured enrollment does not activate a paused grant. A signed 40% minimum
+still holds 40%; lowering it requires review and approval in the existing grant
+editor. This feature never changes a grant or provider billing.
+
+Claude's quota-only native report can establish the billing boundary when its
+current `rate_limits.extra_usage.is_enabled` is literally false and native account
+identity matches before and after the report. The optional report, account and
+usage reading must remain fresh at every new contact. This billing report is
+not an execution binding: the actual producer must use the same independently
+verified account and credential profile. Current standing Claude producers
+remain blocked by the existing credential jail. An account-bound native CLI
+broker with an isolated tool executor is the next integration boundary to verify;
+it is not implemented here, and a native profile alone does not remove the guard. The
+source reports this as `execution-unbound` and retains the saved reserve. Missing, malformed, enabled
+or account-swapped data restores the saved reserve. Codex, Grok and Devin have no
+verified no-spillover boundary in this source and remain held for reserve
+shrinking. Grok's on-demand UI setting alone is not billing enforcement.
+[Claude documents that disabling usage credits leaves included plan usage](https://support.claude.com/en/articles/12429409-manage-usage-credits-for-paid-claude-plans).
+
+A selected task needs compatible completed engine/model/task-kind observations;
+missing history keeps the saved reserve and ordinary admitted work can build
+observations. Exact immutable attempt records can attribute explicitly bound
+Grok runs to an opaque account hash. Unbound or conflicting records remain
+labelled pooled. No quota percentage is converted to tokens or dollars, and no
+made-up cold-start duration is used. Purchased and tracked cloud credits are
+excluded from this enrollment.
+
+The single-run, swarm and best-of-N entry points carry a caller-owned admission
+fence. Current settings, account identity, billing boundary, model, quota, Stop
+and signed authority are checked again before a new supported provider contact
+or native launch. Native CLI internal inference sends rely on the provider's
+verified credits-disabled billing boundary; opaque adapter retries cannot be
+intercepted by this caller fence. Existing native throttles can prevent complete
+allowance consumption, and no zero-billing guarantee is claimed for unsupported
+provider paths.
+
+Historical dispatch explanations record the selected account's saved reserve,
+effective task reserve, signed floor, deadline and observed sample coverage. They
+are metadata for inspection, never reusable admission authority. Resource GETs
+show saved enrollment and constraints; without a current selected task they do
+not claim an applied effective reserve.
 
 ## Preferences and recorded evidence
 

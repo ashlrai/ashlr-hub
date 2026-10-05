@@ -396,12 +396,14 @@ export function clampBudgetPolicy(
       enabled: current.enabled && granted.enabled,
       reservePercent: Math.max(current.reservePercent, granted.reserveFloorPercent),
     };
+    if (typeof current.resetSpending === 'boolean') out.resetSpending = current.resetSpending;
     const ceiling = minDefined(current.maxSessionWindowPercent, granted.maxSessionWindowPercent ?? undefined);
     if (Number.isFinite(ceiling)) out.maxSessionWindowPercent = ceiling;
     if (current.dailyUsdCap !== undefined) out.dailyUsdCap = Math.min(current.dailyUsdCap, standing.spend.meteredUsdPerDay);
     seats[seatId] = out;
   }
-  return { mode, seats, updatedAt: policy.updatedAt };
+  return { mode, seats, updatedAt: policy.updatedAt,
+    ...(typeof policy.resetSpending?.enabled === 'boolean' ? { resetSpending: { enabled: policy.resetSpending.enabled } } : {}) };
 }
 
 /** Filter a capacity list to the seats the grant lets autonomy use at all. */

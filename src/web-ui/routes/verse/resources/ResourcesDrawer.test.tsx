@@ -664,7 +664,7 @@ describe('ResourcesDrawer — equal partners (3.15)', () => {
     render(<ResourcesDrawer mode="docked" now={NOW} />);
     await screen.findByRole('heading', { name: /^Cash Margin Partners/ });
     const titles = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent);
-    expect(titles).toEqual(['Elite', 'Fast', 'Free · local', 'Decision layer']);
+    expect(titles).toEqual(['Use allowance before resets', 'Elite', 'Fast', 'Free · local', 'Decision layer']);
     expect(within(screen.getByRole('region', { name: 'Elite' })).getByText(/equal partners/)).toBeInTheDocument();
   });
 });

@@ -341,3 +341,13 @@ describe('current structured quota-only usage', () => {
     expect(await probeClaudeAccountUsage(options())).toMatchObject({ reason: 'usage-account-changed', windows: [] });
   });
 });
+
+describe('current native usage credits control',()=>{
+  it.each([false,true,null,0,'false',undefined])('retains only literal endpoint boolean %s',value=>{
+    const frames=usageFrames();
+    Object.assign(frames[1]!.usage_report!.rate_limits,{extra_usage:{is_enabled:value}});
+    const parsed=parseClaudeNativeUsageStream(stream(frames),OBSERVED);
+    expect(parsed?.quotaFresh).toBe(true);
+    expect(parsed?.extraUsageEnabled).toBe(typeof value==='boolean'?value:null);
+  });
+});

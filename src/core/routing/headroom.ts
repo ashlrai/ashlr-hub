@@ -89,6 +89,12 @@ export interface SeatCapacity {
   contextWindow: number | null;
   /** When the windows were read; null when never. */
   observedAt: string | null;
+  /** Opaque native before/after account proof; absent old snapshots remain unqualified. */
+  accountHint?: string | null;
+  /** Provider billing boundary, independently qualified by the current account source. */
+  subscriptionOnlyBoundary?: import('./reset-spending-types.js').SubscriptionOnlyBoundary | null;
+  /** Current native billing-mode readback; visibility flags never prove no paid spillover. */
+  onDemandEnabled?: boolean | null;
   /** Today's metered spend in USD; null when unknown or not metered. */
   spentTodayUsd: number | null;
   /**
@@ -177,6 +183,9 @@ export function capacityFromSeat(seat: VerseSeat, liveCapacity?: VerseSeatCapaci
     reachable: free ? true : signedOut ? false : null,
     contextWindow: typeof seat.contextWindow === 'number' && seat.contextWindow > 0 ? seat.contextWindow : null,
     observedAt: current === null ? null : current.observedAt ?? seat.health.observedAt ?? null,
+    accountHint: current?.accountHint ?? null,
+    subscriptionOnlyBoundary: current?.subscriptionOnlyBoundary ?? null,
+    onDemandEnabled: current?.onDemandEnabled ?? null,
     spentTodayUsd: null,
     ...tierFields(seat, model),
   };

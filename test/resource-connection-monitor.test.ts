@@ -129,7 +129,7 @@ describe('native metadata monitoring', () => {
     }
   });
 
-  it('qualifies only current structured Claude quota, and expires it without retaining native identity', async () => {
+  it('qualifies current structured Claude quota with an opaque account hash, then clears its expired identity', async () => {
     const windows = [
       { id: 'five_hour', usedPercent: 0, resetsAt: '2026-09-08T15:00:00.000Z', nativeReport: { source: 'claude-usage-structured', resetDescription: null } },
       { id: 'seven_day', usedPercent: 28.5, resetsAt: '2026-09-10T12:00:00.000Z', nativeReport: { source: 'claude-usage-structured', resetDescription: null },
@@ -138,10 +138,21 @@ describe('native metadata monitoring', () => {
     probes.claude.mockResolvedValue({ ...claude(), accountHint: HINT, quotaFresh: true, windows });
     const handle = start({ config: config(['claude']) }); await settle();
     expect(handle.snapshot().accounts[0]).toMatchObject({ health: 'reachable', windows, observedAt: NOW, expiresAt: EXPIRES });
-    expect(JSON.stringify(handle.snapshot())).not.toContain(HINT);
+    expect(handle.snapshot().accounts[0]?.accountHint).toBe(HINT);
     probes.claude.mockResolvedValue({ status: 'timed-out', reason: 'probe-timed-out' });
     await vi.advanceTimersByTimeAsync(60_000);
     expect(handle.snapshot().accounts[0]).toMatchObject({ health: 'unavailable', windows: [], observedAt: null });
+  });
+
+  it('qualifies a Claude billing boundary only from current explicit native false, and clears it when unavailable',async()=>{
+    probes.claude.mockResolvedValue({...claude(),accountHint:HINT,quotaFresh:true,windows:quota(),extraUsageEnabled:false});
+    const handle=start({config:config(['claude'])});await settle();
+    expect(handle.snapshot().accounts[0]?.subscriptionOnlyBoundary).toMatchObject({source:'claude-native-extra-usage',accountHint:HINT,creditsEnabled:false,observedAt:NOW,expiresAt:EXPIRES});
+    probes.claude.mockResolvedValue({...claude(),accountHint:HINT,quotaFresh:true,windows:quota(),extraUsageEnabled:true});
+    await vi.advanceTimersByTimeAsync(30000);expect(handle.snapshot().accounts[0]?.subscriptionOnlyBoundary).toBeUndefined();
+    probes.claude.mockResolvedValue({status:'timed-out',reason:'probe-timed-out'});
+    await vi.advanceTimersByTimeAsync(30000);expect(handle.snapshot().accounts[0]?.accountHint).toBeNull();
+    expect(handle.snapshot().accounts[0]?.subscriptionOnlyBoundary).toBeUndefined();
   });
 
   it('keeps a verified Codex window for display across transient failures, without renewing its expiry or auth', async () => {
@@ -245,7 +256,8 @@ describe('native metadata monitoring', () => {
     expect(snapshot.accounts[2]).toMatchObject({ authentication: 'signed-in', health: 'reachable', executionSupported: false,
       planType: 'SuperGrok Heavy', onDemandEnabled: false });
     const serialized = JSON.stringify(snapshot);
-    expect(serialized).not.toContain(HINT); expect(serialized).not.toContain(GROK_HINT); expect(serialized).not.toContain('/private/inert-fixture');
+    expect(snapshot.accounts[0]?.accountHint).toBe(HINT); expect(snapshot.accounts[2]?.accountHint).toBe(GROK_HINT);
+    expect(serialized).not.toContain('/private/inert-fixture');
   });
   it('shows explicit Claude signed-out state', async () => {
     probes.claude.mockResolvedValue(claude(false)); const handle = start({ config: config(['claude']) }); await settle();

@@ -7,7 +7,8 @@
  *   npm run gate:full            static checks + the complete backend and web suites
  *   npm run gate -- --json       machine-readable result on stdout
  *
- * GitHub Actions is off, so this is what verifies a release (docs/RELEASING-LOCALLY.md).
+ * This provides fast feedback alongside hosted CI, not full release-admission
+ * evidence. See docs/RELEASING-LOCALLY.md for the complete release checks.
  *
  * Phase A (parallel): root build (tsc, then the static-asset copy from `npm run build` — see
  * GATE_BUILD_ASSET_SCRIPTS), web typecheck, eslint (cached), the real-io lane guard, the
@@ -20,7 +21,7 @@
  * same mechanism as `vitest --changed <ref>` — but hands vitest the changed-file list
  * itself (`vitest related <files>`). The difference is package.json: vitest treats ANY
  * package.json edit as "rerun everything", and every release bumps the version, which would
- * turn every release gate into the 20-minute full run. So the gate decides instead:
+ * turn every release gate into the complete backend and web run. So the gate decides instead:
  *   - package-lock.json changed, or a dependency-shaped key of package.json changed
  *     (dependencies, overrides, engines, exports, ...)  → that suite runs in full;
  *   - a vitest/vite config or a vitest setup file changed → that suite runs in full (what

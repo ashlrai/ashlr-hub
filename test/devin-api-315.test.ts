@@ -5,15 +5,15 @@
  * are fakes injected through setDevinApiDepsForTest; files live in the
  * worker's isolated ASHLR_HOME.
  */
-import { rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { handleDevinApi, setDevinApiDepsForTest } from '../src/core/devin/devin-api.js';
+import { handleDevinApi, setDevinApiDepsForTest, startDevinScheduler, stopDevinScheduler } from '../src/core/devin/devin-api.js';
 import { storeDevinKey } from '../src/core/devin/secret.js';
-import { resetDevinStatusCacheForTest, type DevinServiceDeps } from '../src/core/devin/service.js';
-import { devinHome, writeDevinConnection } from '../src/core/devin/store.js';
+import { resetDevinStatusCacheForTest, refreshDevinConsumption, peekDevinConsumption, resetDevinConsumptionForTest, connectDevin, disconnectDevin, type DevinServiceDeps } from '../src/core/devin/service.js';
+import { devinHome, writeDevinConnection, devinConsumptionConnectionPath } from '../src/core/devin/store.js';
 import { findGithubPrUrls, readDismissedDevinCliPrs, recordDevinCliPrs } from '../src/core/devin/cli-prs.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import type { VerseApiContext } from '../src/core/verse/verse-api.js';
@@ -93,6 +93,146 @@ describe('/api/verse/devin', () => {
     expect(body.status).toMatchObject({ state: 'ready', connected: true, orgId: FAKE_ORG, chat: { word: 'Ready' } }); // 3.15: Devin is a chat seat
     expect(body.budget).toMatchObject({ acuBudgetTotal: 50, canLaunch: { ok: true } });
     expect(text).not.toContain(FAKE_KEY);
+  });
+
+  it('GET consumption is cache-only and the strict authenticated refresh reads only its connected organization', async () => {
+    const wire = { total_acus: 7.25, consumption_by_date: [{ date: 123, acus: 7.25, acus_by_product: { devin: 7.25 } }] };
+    const initial = JSON.parse((await get('/api/verse/devin')).text);
+    expect(initial.consumption).toMatchObject({ state: 'not-checked', report: null });
+    expect(api.requests.filter(r => r.path.includes('/consumption/'))).toHaveLength(0);
+    const path = '/api/verse/devin/consumption/refresh';
+    expect((await post(path, {}, { 'x-ashlr-token': 'wrong' })).status).toBe(401);
+    expect((await post(path, { orgId: 'other' })).status).toBe(400);
+    expect((await post(`${path}?x=1`, {})).status).toBe(400);
+    ctx.allowDispatch = false;
+    expect((await post(path, {})).status).toBe(404); // the shared disabled-dispatch gate hides mutation routes
+    ctx.allowDispatch = true;
+    expect(api.requests.filter(r => r.path.includes('/consumption/'))).toHaveLength(0);
+    api.forced.push({ status: 200, body: wire });
+    const refreshed = await post(path, {});
+    expect(refreshed).toMatchObject({ status: 200, body: { consumption: { state: 'ready', report: { totalAcus: 7.25 } } } });
+    const readback = JSON.parse((await get('/api/verse/devin')).text);
+    expect(readback.consumption).toEqual(refreshed.body.consumption);
+    expect(api.requests.filter(r => r.path.includes('/consumption/'))).toMatchObject([{ method: 'GET', path: `/v3/organizations/${FAKE_ORG}/consumption/daily` }]);
+    expect(api.requests.filter(r => r.method !== 'GET')).toHaveLength(0);
+    expect(JSON.stringify(readback)).not.toContain(FAKE_KEY);
+  });
+
+  it('a consumption permission refusal does not mark valid session access unreachable', async () => {
+    await get('/api/verse/devin'); // establish the independent session-health evidence
+    api.forced.push({ status: 403, body: { detail: `secret ${FAKE_KEY}` } });
+    const result = await post('/api/verse/devin/consumption/refresh', {});
+    expect(result).toMatchObject({ status: 200, body: { consumption: { state: 'unavailable', report: null, error: { code: 'forbidden' } } } });
+    const readback = JSON.parse((await get('/api/verse/devin')).text);
+    expect(readback.status.state).toBe('ready');
+    expect(readback.consumption.error.reason).toContain('ViewOrgConsumption');
+    expect(JSON.stringify(result)).not.toContain(FAKE_KEY);
+  });
+
+  it('fences the actual asynchronous Keychain seam when the same organization is rebound', async () => {
+    let entered!: () => void; let release!: () => void;
+    const admitted = new Promise<void>(resolve => { entered = resolve; });
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    const deps = serviceDeps();
+    deps.keyStore = { platform: 'darwin', run: async (args, stdin) => {
+      if (args[0] === 'find-generic-password' && args.includes('-w')) { entered(); await wait; }
+      return keychain.run(args, stdin);
+    } };
+    const pending = refreshDevinConsumption(deps);
+    await admitted;
+    writeDevinConnection({ orgId: FAKE_ORG, principal: 'service_user', principalName: 'Rebound', keyStore: 'keychain', connectedAt: '2026-10-05T02:00:00Z' });
+    release(); await pending;
+    expect(api.requests).toHaveLength(0);
+    expect(peekDevinConsumption().report).toBeNull();
+  });
+
+  it.each(['connect', 'disconnect'] as const)('blocks consumption throughout an awaited %s Keychain mutation', async operation => {
+    let entered!: () => void; let release!: () => void;
+    const admitted = new Promise<void>(resolve => { entered = resolve; });
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    const deps = serviceDeps();
+    const replacementKey = 'cog_replacementKey_abcdefghijklmnopqrst';
+    const replacementOrg = 'org-replacement';
+    const replacement = fakeDevin({ key: replacementKey, orgId: replacementOrg });
+    if (operation === 'connect') deps.fetch = replacement.fetch;
+    deps.keyStore = { platform: 'darwin', run: async (args, stdin) => {
+      const result = await keychain.run(args, stdin); // the key changes before the awaited process returns
+      if (args[0] === (operation === 'connect' ? '-i' : 'delete-generic-password')) { entered(); await wait; }
+      return result;
+    } };
+    let oldEntered!: () => void; let oldRelease!: () => void;
+    const oldStarted = new Promise<void>(resolve => { oldEntered = resolve; });
+    const oldWait = new Promise<void>(resolve => { oldRelease = resolve; });
+    api.forced.push({ status: 200, body: { total_acus: 999, consumption_by_date: [] } });
+    const oldRead = refreshDevinConsumption({ ...serviceDeps(), fetch: async (url, init) => {
+      const response = await api.fetch(url, init); oldEntered(); await oldWait; return response;
+    } });
+    await oldStarted;
+    const transition = operation === 'connect'
+      ? connectDevin({ key: replacementKey, orgId: replacementOrg }, deps) : disconnectDevin(deps);
+    await admitted;
+    const conflicting = operation === 'connect' ? disconnectDevin(serviceDeps()) : connectDevin({ key: replacementKey, orgId: replacementOrg }, { ...serviceDeps(), fetch: replacement.fetch });
+    await expect(conflicting).rejects.toThrow(/connection change/);
+    expect((await refreshDevinConsumption(serviceDeps(), true)).report).toBeNull();
+    expect(api.requests).toHaveLength(1); // only the old read admitted before the transition
+    oldRelease(); await oldRead;
+    expect(peekDevinConsumption().report).toBeNull();
+    expect(replacement.requests.filter(r => r.path.includes('/consumption/'))).toHaveLength(0);
+    release(); await transition;
+    if (operation === 'connect') {
+      replacement.forced.push({ status: 200, body: { total_acus: 1.5, consumption_by_date: [] } });
+      expect((await refreshDevinConsumption(deps)).report?.totalAcus).toBe(1.5);
+      expect(replacement.requests.at(-1)?.path).toBe(`/v3/organizations/${replacementOrg}/consumption/daily`);
+    } else expect(peekDevinConsumption().report).toBeNull();
+  });
+
+  it('an ambiguous failed Keychain write stays held after the consumption reader restarts', async () => {
+    const replacementKey = 'cog_replacementKey_abcdefghijklmnopqrst';
+    const replacement = fakeDevin({ key: replacementKey, orgId: 'org-replacement' });
+    const deps = { ...serviceDeps(), fetch: replacement.fetch, keyStore: { platform: 'darwin' as const,
+      run: async (args: string[], stdin: string | null) => {
+        const result = await keychain.run(args, stdin);
+        return args[0] === '-i' ? { ...result, code: 1 } : result;
+      } } };
+    await expect(connectDevin({ key: replacementKey, orgId: 'org-replacement' }, deps)).rejects.toThrow();
+    expect(keychain.items.get('ai.ashlr.devin/api-key')).toBe(replacementKey);
+    resetDevinConsumptionForTest(); // simulate a newly created reader: no memory-only authority survives
+    expect((await refreshDevinConsumption(serviceDeps(), true))).toMatchObject({ state: 'unavailable', report: null, error: { code: 'not-connected' } });
+    expect(api.requests).toHaveLength(0);
+    expect(replacement.requests.filter(r => r.path.includes('/consumption/'))).toHaveLength(0);
+    await connectDevin({ key: replacementKey, orgId: 'org-replacement' }, { ...serviceDeps(), fetch: replacement.fetch });
+    replacement.forced.push({ status: 200, body: { total_acus: 1, consumption_by_date: [] } });
+    expect((await refreshDevinConsumption({ ...serviceDeps(), fetch: replacement.fetch })).report?.totalAcus).toBe(1);
+  });
+
+  it('never trusts a corrupt or publicly writable transition marker as confirmed', async () => {
+    writeFileSync(devinConsumptionConnectionPath(), 'unexpected\n', { mode: 0o600 });
+    expect(peekDevinConsumption().state).toBe('unavailable');
+    writeFileSync(devinConsumptionConnectionPath(), 'settled\n');
+    if (process.platform !== 'win32') {
+      chmodSync(devinConsumptionConnectionPath(), 0o644);
+      expect((await refreshDevinConsumption(serviceDeps(), true)).state).toBe('unavailable');
+      expect(api.requests).toHaveLength(0);
+    }
+  });
+
+  it('refuses Keychain mutation if the private transition marker cannot be published', async () => {
+    mkdirSync(devinConsumptionConnectionPath());
+    const before = keychain.calls.filter(call => call.args[0] === '-i').length;
+    await expect(connectDevin({ key: FAKE_KEY, orgId: FAKE_ORG }, serviceDeps())).rejects.toThrow();
+    expect(keychain.calls.filter(call => call.args[0] === '-i')).toHaveLength(before);
+    expect(peekDevinConsumption()).toMatchObject({ state: 'unavailable', report: null });
+    expect(api.requests.filter(r => r.path.includes('/consumption/'))).toHaveLength(0);
+  });
+
+  it('the owned scheduler reads connected metadata at startup without Fleet or active sessions', async () => {
+    api.forced.push({ status: 200, body: { total_acus: 0, consumption_by_date: [] } });
+    try {
+      expect(startDevinScheduler({ NODE_ENV: 'test' })).toBe(false);
+      expect(startDevinScheduler({})).toBe(true);
+      await vi.waitFor(() => expect(peekDevinConsumption().state).toBe('ready'));
+      expect(api.requests).toMatchObject([{ method: 'GET', path: `/v3/organizations/${FAKE_ORG}/consumption/daily` }]);
+    } finally { stopDevinScheduler(); }
   });
 
   it('rejects any query, and POSTs without the token or with unknown fields', async () => {

@@ -44,7 +44,7 @@
  * (listened for by shell/anchor-requests.ts).
  */
 import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
-import { reportThemeToShell, subscribeShellCommands } from '../../app/desktop-shell.js';
+import { reportThemeToShell, subscribeShellCommands, isDesktopShell } from '../../app/desktop-shell.js';
 import { RouteErrorBoundary } from '../../components/primitives/RouteErrorBoundary.js';
 import { Tooltip } from '../../components/primitives/Tooltip.js';
 import { useToast } from '../../components/primitives/Toast.js';
@@ -178,6 +178,8 @@ const NeedsYouDrawer = lazy(() => importDrawer().then((m) => ({ default: m.Needs
 const ShortcutsOverlay = lazy(() => importShortcuts().then((m) => ({ default: m.ShortcutsOverlay })));
 const GearTray = lazy(() => importGearTray().then((m) => ({ default: m.GearTray })));
 const ReviewMenu = lazy(() => import('./shell/ReviewMenu.js'));
+const PowerStatus = lazy(() => import('./power/PowerStatus.js').then((module) => ({ default: module.PowerStatus })));
+
 const OnboardingGate = lazy(() => importOnboarding().then((m) => ({ default: m.OnboardingGate })));
 const ResourcesChrome = lazy(() => importResources().then((m) => ({ default: m.ResourcesChrome })));
 const ResourcesRailButton = lazy(() => importResources().then((m) => ({ default: m.ResourcesRailButton })));
@@ -586,6 +588,7 @@ export function VerseApp() {
             if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setTrayOpen(false); setReviewOpen(true); }
             if (event.key === 'Escape') { event.preventDefault(); setReviewOpen(false); }
           }}>Review</button>
+        {isDesktopShell() ? <Suspense fallback={null}><PowerStatus /></Suspense> : <span className={styles.workMode}>Host power unavailable</span>}
         </div>
         {ui.mounted.map((id) => (
           <SurfaceHost key={id} id={id} active={id === ui.section} />

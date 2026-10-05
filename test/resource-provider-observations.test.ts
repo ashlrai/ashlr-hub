@@ -489,3 +489,17 @@ describe('native Codex credit metadata stays independent of quota admission', ()
       .toEqual({ ...credits, spendControlReached: null });
   });
 });
+
+describe('Codex native weekly deadline sidecar',()=>{
+  it('qualifies only actual weekly Plus/Pro metadata, leaving canonical observations unchanged',async()=>{
+    const {qualifyCodexWeeklyDeadlines}=await import('../src/core/resources/provider-observations.js');
+    const payload=codex();payload.rateLimitsByLimitId.codex.secondary.windowDurationMins=10080;
+    const deadlines=qualifyCodexWeeklyDeadlines('codex-worker',payload,codexOptions,'pro');
+    expect(deadlines).toMatchObject([{windowId:'codex_codex_secondary',resetProvenance:{kind:'weekly-deadline',source:'codex-native-rate-limits',plan:'pro',windowDurationMins:10080}}]);
+    expect(deadlines[0]?.resetProvenance.startsAt).toBeUndefined();
+    expect(normalize(payload)?.windows.some(w=>'resetProvenance' in w)).toBe(false);
+    expect(qualifyCodexWeeklyDeadlines('codex-worker',payload,codexOptions,'enterprise_cbp_usage_based')).toEqual([]);
+    payload.rateLimitsByLimitId.codex.secondary.windowDurationMins=300;
+    expect(qualifyCodexWeeklyDeadlines('codex-worker',payload,codexOptions,'pro')).toEqual([]);
+  });
+});

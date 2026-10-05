@@ -16,6 +16,7 @@
  * launcher command recorded in ~/.ashlr/account-connections/connections.json.
  */
 import type { ResetProvenance } from '../routing/scheduling-types.js';
+import type { SubscriptionOnlyBoundary } from '../routing/reset-spending-types.js';
 import type { TRANSIENT_EVENT_TYPE_LIST } from './transient-events.js';
 import type { ResourceLastKnownUsage } from '../resources/reading-cache-types.js';
 
@@ -275,6 +276,10 @@ export type VerseSeatEvidenceSource = 'collector' | 'shared-evidence' | 'baselin
 
 /** Everything the seat list needs to draw a capacity meter honestly. */
 export interface VerseSeatCapacity {
+  /** Opaque current native account proof; missing legacy evidence remains unknown. */
+  accountHint?: string | null;
+  subscriptionOnlyBoundary?: SubscriptionOnlyBoundary | null;
+  onDemandEnabled?: boolean | null;
   /** e.g. "max", "pro", "SuperGrok". Null when the provider gave none. */
   planType: string | null;
   /**

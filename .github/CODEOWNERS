@@ -322,6 +322,7 @@
 /test/leader-lessons-315.test.ts @masonwyatt23
 /test/leader-local-transport-314.test.ts @masonwyatt23
 /test/leader-memo-310b.test.ts @masonwyatt23
+/test/leader-outcome-planning-retry.test.ts @masonwyatt23
 /test/leader-outcomes.test.ts @masonwyatt23
 /test/leader-preferences.test.ts @masonwyatt23
 /test/leader-reliability-314.test.ts @masonwyatt23
@@ -345,6 +346,7 @@
 /test/local-only-consumer-parity.test.ts @masonwyatt23
 /test/local-only-dispatch-paths.test.ts @masonwyatt23
 /test/local-only-policy.test.ts @masonwyatt23
+/test/local-work-observation.test.ts @masonwyatt23
 /test/locus-firm-onboard.test.ts @masonwyatt23
 /test/locus.probe.test.ts @masonwyatt23
 /test/m100.web-open.test.ts @masonwyatt23
@@ -697,6 +699,8 @@
 /test/red-team-routing-310.test.ts @masonwyatt23
 /test/repo-holds-310b.test.ts @masonwyatt23
 /test/reset-aware-scheduling.test.ts @masonwyatt23
+/test/reset-spending-park-delay.test.ts @masonwyatt23
+/test/reset-spending.test.ts @masonwyatt23
 /test/resource-account-identity-witness.test.ts @masonwyatt23
 /test/resource-allocation-policy.test.ts @masonwyatt23
 /test/resource-console-engineering-acceptance.test.ts @masonwyatt23

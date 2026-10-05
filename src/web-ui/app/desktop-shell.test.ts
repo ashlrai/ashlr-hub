@@ -4,24 +4,28 @@ import { act, renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { findCommand, formatChord } from '../routes/verse/shell/command-catalog.js';
 import {
-  getDesktopState,
   isDesktopShell,
-  isDesktopState,
   reportThemeToShell,
-  resetDesktopStateForTests,
   resolveTheme,
-  setDesktopPreference,
   subscribeDesktopCommands,
-  subscribeDesktopState,
   subscribeShellCommands,
-  useDesktopState,
   type DesktopCommand,
-  type DesktopState,
 } from './desktop-shell.js';
+import {
+  getDesktopState,
+  isDesktopState,
+  refreshDesktopState,
+  resetDesktopStateForTests,
+  setDesktopPreference,
+  subscribeDesktopState,
+  useDesktopState,
+  type DesktopState,
+} from './desktop-state.js';
 
 type Bridge = {
   reportTheme?: (theme: 'light' | 'dark') => void;
   getState?: () => unknown;
+  refreshState?: () => boolean;
   setPreference?: (name: string, value: boolean) => boolean;
 };
 type ShellWindow = {
@@ -198,6 +202,14 @@ describe('desktop state — in a browser the bridge does nothing', () => {
     expect(result.current).toBeNull();
   });
 
+  it('optional power metadata cannot discard valid hotkey and notification state', () => {
+    const handler = vi.fn(); subscribeDesktopState(handler);
+    const state = { ...STATE, power: { requested: 'future-or-malformed' } };
+    window.dispatchEvent(new CustomEvent('ashlr:desktop-state', { detail: state }));
+    expect(handler).toHaveBeenCalledWith(state);
+    expect(getDesktopState()?.hotkey).toEqual(STATE.hotkey);
+  });
+
   it('ignores a desktop-state event whose shape is wrong', () => {
     const handler = vi.fn();
     subscribeDesktopState(handler);
@@ -345,5 +357,16 @@ describe('the global hotkey agrees across native and the catalog', () => {
     expect(summon.native?.kind).toBe('global-hotkey');
     expect(constant('SUMMON_ACCELERATOR')).toBe(summon.native!.accelerator);
     expect(constant('SUMMON_DISPLAY')).toBe(formatChord(summon.keys[0]!, 'mac'));
+  });
+});
+
+
+describe('native host observation refresh', () => {
+  it('requests only a refresh and remains inert outside the desktop bridge', () => {
+    expect(refreshDesktopState()).toBe(false);
+    const refreshState = vi.fn(() => true);
+    win.__ASHLR_DESKTOP__ = { refreshState };
+    expect(refreshDesktopState()).toBe(true);
+    expect(refreshState).toHaveBeenCalledWith();
   });
 });

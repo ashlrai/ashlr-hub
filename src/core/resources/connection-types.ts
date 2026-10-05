@@ -16,6 +16,9 @@ export interface ResourceAccountConnection {
   authentication: 'signed-in' | 'signed-out' | 'unknown';
   health: 'reachable' | 'unknown' | 'unavailable';
   planType: string | null;
+  /** Current account-checked metadata only; never inferred from retained display. */
+  accountHint?: string | null;
+  subscriptionOnlyBoundary?: import('../routing/reset-spending-types.js').SubscriptionOnlyBoundary | null;
   observedAt: string | null;
   expiresAt: string | null;
   windows: ResourceConnectionQuotaWindow[];

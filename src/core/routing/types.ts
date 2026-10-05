@@ -23,6 +23,8 @@ export const BUDGET_MODES: readonly BudgetMode[] = ['all-in', 'balanced', 'reser
 
 export interface SeatBudgetPolicy {
   seatId: string;
+  /** Absent inherits the global reset preference; false excludes this account. */
+  resetSpending?: boolean;
   /** false = autonomy never uses this seat (e.g. codex while it has no usage). */
   enabled: boolean;
   /** Percent (0–100) of the BINDING window kept back for Mason's interactive use. */
@@ -37,6 +39,8 @@ export interface SeatBudgetPolicy {
 }
 
 export interface BudgetPolicy {
+  /** Absent retains legacy reset ranking only; taper requires explicit enabled=true. */
+  resetSpending?: { enabled: boolean };
   mode: BudgetMode;
   /** Keyed by seat id; a seat absent here gets the mode's default policy. */
   seats: Record<string, SeatBudgetPolicy>;
@@ -163,6 +167,7 @@ export interface BudgetResponse extends BudgetPolicy {
  */
 export type BudgetUpdateRequest =
   | { mode: BudgetMode }
+  | { resetSpending: { enabled: boolean } }
   | { seatId: string; policy: Partial<Omit<SeatBudgetPolicy, 'seatId'>> };
 
 export const VERSE_BUDGET_PATH = '/api/verse/budget';

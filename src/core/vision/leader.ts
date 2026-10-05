@@ -40,6 +40,7 @@
  * State lives in ~/.ashlr/vision/leader/ (0700; files 0600). Nothing here
  * activates anything: with no standing grant every memo is a dry run.
  */
+import { outcomePlanningBasis, outcomePlanningProgress } from './leader-outcomes.js';
 import { goalPreferencesReady, knownGoalCount, resolveGoalPreferences, unavailableGoalPreferences, type ResolvedGoalPreferences } from '../goals/preferences.js';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -599,6 +600,8 @@ export interface LeaderRunState {
   lastSuccessAt?: string | null;
   /** A pending bounded retry of a failed full run. */
   retry?: LeaderRetryState | null;
+  /** Host-derived pending outcome identity; exhaustion holds only this event until the daily/manual recovery. */
+  outcomePlanningRetry?: { basis: string; failures: number; retryAt: string | null } | null;
   /** Failed / no-seat / parse-failed runs since the last ok memo. */
   consecutiveFailures?: number;
   lastFailure?: { at: string; outcome: LeaderRunOutcome; reason: string | null } | null;
@@ -617,6 +620,22 @@ export interface LeaderRetryState {
   /** The trigger of the run that failed first (a retried 06:30 run stays deep-eligible). */
   of: LeaderTrigger;
   reason: string | null;
+}
+
+function validOutcomePlanningRetry(value: unknown): value is NonNullable<LeaderRunState['outcomePlanningRetry']> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const entry = value as Record<string, unknown>;
+  return Object.keys(entry).length === 3 && typeof entry['basis'] === 'string' && /^[a-f0-9]{64}$/.test(entry['basis']) &&
+    Number.isSafeInteger(entry['failures']) && (entry['failures'] as number) > 0 && (entry['failures'] as number) <= LEADER_MAX_RETRY_ATTEMPTS + 1 &&
+    (entry['retryAt'] === null ? entry['failures'] === LEADER_MAX_RETRY_ATTEMPTS + 1
+      : (entry['failures'] as number) <= LEADER_MAX_RETRY_ATTEMPTS && typeof entry['retryAt'] === 'string' &&
+        entry['retryAt'].length === 24 && Number.isFinite(Date.parse(entry['retryAt'])) && new Date(entry['retryAt']).toISOString() === entry['retryAt']);
+}
+function outcomeRetryHold(state: LeaderRunState, basis: string | null | undefined, nowMs: number): string | null {
+  const retry = state.outcomePlanningRetry;
+  if (!basis || !retry || retry.basis !== basis) return null;
+  if (retry.retryAt === null) return 'Outcome planning retries are exhausted for this unchanged scope; the next daily run or manual run can recover.';
+  return Date.parse(retry.retryAt) > nowMs ? `Outcome planning retry is backed off until ${retry.retryAt}.` : null;
 }
 
 const MAX_STATE_BYTES = 1024 * 1024;
@@ -650,6 +669,7 @@ export function readLeaderRunState(nowMs = Date.now()): LeaderRunState {
       outcomes: Array.isArray(parsed.outcomes) ? parsed.outcomes : [],
       checkinDays: obj(parsed.checkinDays) ? parsed.checkinDays! : {},
       retry: obj(parsed.retry) && typeof parsed.retry!.at === 'string' && Number.isInteger(parsed.retry!.attempt) ? parsed.retry! : null,
+      outcomePlanningRetry: validOutcomePlanningRetry(parsed.outcomePlanningRetry) ? parsed.outcomePlanningRetry : null,
       // Absent (a pre-3.14 file) stays undefined: health then reads the last run's outcome.
       consecutiveFailures: Number.isInteger(parsed.consecutiveFailures) && parsed.consecutiveFailures! >= 0 ? parsed.consecutiveFailures! : undefined,
       lastFailure: obj(parsed.lastFailure) ? parsed.lastFailure! : null,
@@ -727,6 +747,7 @@ export function scheduleSlots(nowMs: number): { previous: number; next: number }
 
 export interface LeaderTriggerSignals {
   outcomePlanNeeded?: boolean;
+  outcomePlanningBasis?: string | null;
   executionFailuresSinceLastRun?: number | null;
   mergesSinceLastRun: number | null;
   revertsSinceLastRun: number | null;
@@ -765,7 +786,8 @@ export function leaderRunDue(nowMs: number, state: LeaderRunState, signals: Lead
   }
   const lastMs = state.lastRun ? Date.parse(state.lastRun.at) : -Infinity;
   if (lastMs < slots.previous) return { due: true, trigger: 'schedule', reason: 'The daily 06:30 run is due.', nextRunAt };
-  if (state.retry && Date.parse(state.retry.at) <= nowMs) {
+  if (state.retry && Date.parse(state.retry.at) <= nowMs &&
+    !(state.retry.of === 'outcome-plan-needed' && signals.outcomePlanningBasis && state.outcomePlanningRetry && state.outcomePlanningRetry.basis !== signals.outcomePlanningBasis)) {
     return { due: true, trigger: 'retry', reason: `Retry ${state.retry.attempt} of ${LEADER_MAX_RETRY_ATTEMPTS} after a failed run.`, nextRunAt };
   }
   if (signals.revertsSinceLastRun !== null && signals.revertsSinceLastRun > 0) {
@@ -774,13 +796,16 @@ export function leaderRunDue(nowMs: number, state: LeaderRunState, signals: Lead
   if (signals.mergesSinceLastRun !== null && signals.mergesSinceLastRun >= LEADER_SCHEDULE.mergeTrigger) {
     return { due: true, trigger: 'merges', reason: `${signals.mergesSinceLastRun} fleet merges landed since the last memo.`, nextRunAt };
   }
-  if (signals.outcomePlanNeeded) return { due: true, trigger: 'outcome-plan-needed', reason: 'An active desired outcome needs a plan or corrective refinement.', nextRunAt };
+  const planningHold = outcomeRetryHold(state, signals.outcomePlanningBasis, nowMs);
+  if (signals.outcomePlanNeeded && !planningHold) return { due: true, trigger: 'outcome-plan-needed', reason: 'An active desired outcome needs a plan or corrective refinement.', nextRunAt };
   if (signals.seatResetSinceLastRun) return { due: true, trigger: 'seat-reset', reason: 'A seat window reset.', nextRunAt };
   if (signals.highInsightSinceLastRun) return { due: true, trigger: 'insight', reason: 'A high-severity reasoning insight appeared.', nextRunAt };
   if (signals.executionFailuresSinceLastRun !== undefined && signals.executionFailuresSinceLastRun !== null && signals.executionFailuresSinceLastRun > 0) {
     return { due: true, trigger: 'insight', reason: 'A recorded fleet producer failed before a proposal was recorded.', nextRunAt };
   }
   if (checkinWindowOpen(nowMs, state, cadence)) return { due: true, trigger: 'checkin', reason: 'A working-hours check-in is due.', nextRunAt };
+  if (signals.outcomePlanNeeded && planningHold) return { due: false, trigger: null, reason: planningHold,
+    nextRunAt: state.outcomePlanningRetry?.retryAt ?? nextRunAt };
   return { due: false, trigger: null, reason: 'Nothing new since the last memo.', nextRunAt };
 }
 
@@ -836,16 +861,13 @@ export async function gatherTriggerSignals(sources: LeaderEvidenceSources, state
         || snapshot.view.coverage.proposalSource === 'unavailable')) executionFailures = null;
     } catch { /* unknown ⇒ no trigger */ }
   }
-  let outcomePlanNeeded = false;
+  let planningBasis: string | null = null;
   if (sources.outcomes) {
-    try { const outcomes = sources.outcomes();
-      outcomePlanNeeded = outcomes.complete && ['healthy', 'missing'].includes(outcomes.sourceState) &&
-        outcomes.outcomes.some(outcome => !outcome.paused && (outcome.graphDigest === null ||
-          outcome.nodes.some(node => node.state === 'failed' || node.state === 'aborted')));
-    } catch { /* unknown is not a planning trigger */ }
+    try { planningBasis = outcomePlanningBasis(sources.outcomes()); }
+    catch { /* unknown is not a planning trigger */ }
   }
   return {
-    ...(sources.outcomes ? { outcomePlanNeeded } : {}),
+    ...(sources.outcomes ? { outcomePlanNeeded: planningBasis !== null, outcomePlanningBasis: planningBasis } : {}),
     mergesSinceLastRun: facts?.merges ?? null,
     revertsSinceLastRun: facts?.reverts ?? null,
     seatResetSinceLastRun: seatReset,
@@ -1100,6 +1122,21 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
     catch { return unavailableGoalPreferences(); }
   })();
   const evidence = await gatherLeaderEvidence(deps.sources, nowMs, state, goalPreferences);
+  const planningBasis = outcomePlanningBasis(evidence.outcomes);
+  const automaticPlanning = trigger === 'outcome-plan-needed' || trigger === 'retry' &&
+    (state.retry?.of === 'outcome-plan-needed' || planningBasis !== null && state.outcomePlanningRetry?.basis === planningBasis);
+  const policy = (() => {
+    try { return deps.sources.standingPolicy(); } catch { return null; }
+  })();
+  const dryRun = isLeaderDryRun(policy);
+  if (automaticPlanning && !opts.force && (dryRun || !policy?.leader.classes.includes('A'))) {
+    return { outcome: 'skipped-unchanged', reason: 'Automatic outcome planning requires active class A authority; manual advice remains available.', memo: null };
+  }
+  // Recheck inside the existing run lock: a queued/direct caller cannot bypass the tick's backoff.
+  if (automaticPlanning && !opts.force) {
+    const hold = outcomeRetryHold(state, planningBasis, nowMs);
+    if (hold || planningBasis === null) return { outcome: 'skipped-unchanged', reason: hold ?? 'Outcome planning source is unavailable or no longer needs a plan.', memo: null };
+  }
   const digest = evidenceDigest(evidence);
   const material = materialEvidenceDigest(evidence);
   if (mode === 'checkin' && !opts.force && (state.lastMaterialDigest ?? null) === material) {
@@ -1109,7 +1146,7 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
     writeLeaderRunState(state);
     return { outcome: 'skipped-unchanged', reason: state.lastRun.reason, memo: null };
   }
-  if (!opts.force && state.lastEvidenceDigest === digest) {
+  if (!opts.force && !automaticPlanning && !(mode === 'full' && planningBasis !== null) && state.lastEvidenceDigest === digest) {
     state.lastRun = { at: nowIso, outcome: 'skipped-unchanged', reason: 'The evidence has not changed since the last memo.', memoId: null, trigger };
     if (mode === 'checkin') state.lastCheckinEvalAt = nowIso;
     // A retry whose evidence a later run already consumed has nothing left to do.
@@ -1118,10 +1155,6 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
     return { outcome: 'skipped-unchanged', reason: state.lastRun.reason, memo: null };
   }
 
-  const policy = (() => {
-    try { return deps.sources.standingPolicy(); } catch { return null; }
-  })();
-  const dryRun = isLeaderDryRun(policy);
   const basePrompt = buildLeaderPrompt(evidence, { dryRun, goalHygiene: leaderGoalHygieneApplies(policy), nowIso, goalPreferences });
   const systemPrompt = buildLeaderSystemPrompt(goalPreferences, cadence.preferences ?? resolveLeaderPreferences(liveConfig));
   const prompt = mode === 'checkin' ? `${basePrompt}\n\n${LEADER_CHECKIN_SUFFIX}` : basePrompt;
@@ -1145,7 +1178,17 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
   });
   let servedDeep = false;
   let attempts: LeaderSeatAttempt[] = [];
+  let planningCanceled = false;
   const finish = (outcome: LeaderRunOutcome, reason: string | null, countsAsRun: boolean): LeaderRunResult => {
+    if (automaticPlanning && outcome !== 'ok' && !planningCanceled) {
+      try {
+        if (outcomePlanningProgress(evidence.outcomes, deps.sources.outcomes?.()) === 'stale') {
+          planningCanceled = true;
+          outcome = 'skipped-unchanged';
+          reason = 'Outcome scope was edited, paused or removed while planning; no retry was installed for the stale scope.';
+        }
+      } catch { /* Unknown readback does not establish cancellation or progress. */ }
+    }
     memo.status = outcome;
     memo.statusReason = reason === null ? null : scrubPrivateText(reason).slice(0, 400);
     memo.attempts = attempts.map((a) => ({ ...a, reason: a.reason === null ? null : scrubPrivateText(a.reason).slice(0, 300) }));
@@ -1162,25 +1205,35 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
     fresh.lastAttemptsAt = nowIso;
     if (outcome === 'ok') {
       // A failed run does not consume the evidence: the next trigger may retry it.
-      fresh.lastEvidenceDigest = digest;
+      // Advisory/general memos must not consume pending planning evidence.
+      if (planningBasis === null || automaticPlanning) fresh.lastEvidenceDigest = digest;
       fresh.lastMaterialDigest = material;
       fresh.lastSuccessAt = nowIso;
       fresh.consecutiveFailures = 0;
       fresh.lastFailure = null;
       fresh.retry = null;
+      if (mode === 'full') fresh.outcomePlanningRetry = null;
       fresh.lastServed = memo.seatId ? { seatId: memo.seatId, model: memo.model, at: nowIso } : null;
       if (memo.seatId && servedDeep) fresh.lastDeepRunAt = nowIso;
-    } else {
+    } else if (!planningCanceled) {
       fresh.consecutiveFailures = (fresh.consecutiveFailures ?? 0) + 1;
       fresh.lastFailure = { at: nowIso, outcome, reason: memo.statusReason };
       if (mode === 'full') {
         // A bounded retry instead of waiting for tomorrow's slot. A check-in
         // does not retry: the next check-in window is its retry.
-        const attempt = trigger === 'retry' ? (fresh.retry?.attempt ?? 0) + 1 : 1;
+        const attempt = planningBasis !== null
+          ? (fresh.outcomePlanningRetry?.basis === planningBasis ? fresh.outcomePlanningRetry.failures : 0) + 1
+          : trigger === 'retry' ? (fresh.retry?.attempt ?? 0) + 1 : 1;
         const delay = retryDelayMs(attempt);
+        const finishedMs = deps.now();
+        const retryBaseMs = planningBasis !== null && Number.isFinite(finishedMs) ? Math.max(nowMs, finishedMs) : nowMs;
+        if (planningBasis !== null) fresh.outcomePlanningRetry = {
+          basis: planningBasis, failures: Math.min(attempt, LEADER_MAX_RETRY_ATTEMPTS + 1),
+          retryAt: delay === null ? null : new Date(retryBaseMs + delay).toISOString(),
+        };
         fresh.retry = delay === null ? null : {
           attempt,
-          at: new Date(nowMs + delay).toISOString(),
+          at: new Date(retryBaseMs + delay).toISOString(),
           of: trigger === 'retry' ? fresh.retry?.of ?? 'schedule' : trigger,
           reason: memo.statusReason,
         };
@@ -1304,7 +1357,21 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
     fresh.baselines[memoId] = { metric, value, at: nowIso };
     writeLeaderRunState(fresh);
   }
-  return finish('ok', memo.statusReason, true);
+  if (automaticPlanning && !dryRun) {
+    let after: import('./leader-outcomes.js').LeaderOutcomeEvidence | undefined;
+    try { after = deps.sources.outcomes?.(); } catch { /* Fresh readback is required. */ }
+    const progress = outcomePlanningProgress(evidence.outcomes, after);
+    if (progress === 'stale') {
+      planningCanceled = true;
+      return finish('skipped-unchanged', 'Outcome scope was edited, paused or removed while planning; this memo did not advance the current scope.', true);
+    }
+    if (progress !== 'progress') return finish('failed', progress === 'unknown'
+      ? 'Fresh outcome readback is unavailable; planning progress is unconfirmed.'
+      : 'The memo did not create new executable work for the pending outcome.', true);
+  }
+  // A dry-run memo is advice, never evidence of installed planning progress.
+  if (automaticPlanning && dryRun) planningCanceled = true;
+  return finish(automaticPlanning && dryRun ? 'skipped-unchanged' : 'ok', memo.statusReason, true);
 }
 
 /**

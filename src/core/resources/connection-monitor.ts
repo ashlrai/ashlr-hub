@@ -79,7 +79,7 @@ export function validateResourceConnectionConfig(value: unknown): ResourceConnec
 export function expireConnectionRow(row: ResourceAccountConnection, nowMs: number = Date.now()): ResourceAccountConnection {
   if (row.state === 'signed-out' || row.expiresAt === null || Date.parse(row.expiresAt) > nowMs) return row;
   return { ...row, state: 'unavailable', authentication: 'unknown', health: 'unknown', planType: null,
-    observedAt: null, expiresAt: null, windows: [], codexCredits: null, reason: 'connection-reading-expired' };
+    observedAt: null, expiresAt: null, windows: [], accountHint: null, subscriptionOnlyBoundary: undefined, codexCredits: null, reason: 'connection-reading-expired' };
 }
 
 export function createResourceConnectionMonitor(options: { config: ResourceConnectionConfig; cwd: string;
@@ -92,7 +92,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
   const hints = new Map(config.accounts.filter((row) => row.expectedAccountHint).map((row) => [row.id, row.expectedAccountHint!]));
   const blank = (row: ResourceConnectionConfig['accounts'][number]): ResourceAccountConnection => ({ id: row.id, label: row.label,
     provider: row.provider, state: 'checking', authentication: 'unknown', health: 'unknown', planType: null,
-    observedAt: null, expiresAt: null, windows: [], codexCredits: null, reason: 'connection-not-checked', onDemandEnabled: null, executionSupported: row.provider !== 'grok' });
+    observedAt: null, expiresAt: null, windows: [], accountHint: null, codexCredits: null, reason: 'connection-not-checked', onDemandEnabled: null, executionSupported: row.provider !== 'grok' });
   let rows = config.accounts.map(blank);
   let readingRevision = 0;
   // Only a successful, account-checked Codex probe may supply a retained
@@ -100,7 +100,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
   // expiry, but it cannot renew the reading or attest current authentication.
   const lastVerifiedCodex: Array<ResourceAccountConnection | null> = config.accounts.map(() => null);
   const projectStopped = () => { lastVerifiedCodex.fill(null); rows = rows.map((row) => ({ ...row, state: 'unavailable', authentication: 'unknown',
-    health: 'unknown', planType: null, observedAt: null, expiresAt: null, windows: [], codexCredits: null, reason: 'connection-monitor-stopped' })); };
+    health: 'unknown', planType: null, observedAt: null, expiresAt: null, windows: [], accountHint: null, subscriptionOnlyBoundary: undefined, codexCredits: null, reason: 'connection-monitor-stopped' })); };
   abort.signal.addEventListener('abort', projectStopped, { once: true });
   const transientCodexReasons = new Set(['probe-native-unavailable', 'probe-native-exit-failed', 'probe-provider-error',
     'probe-server-request-refused', 'probe-protocol-invalid', 'probe-output-limit', 'probe-quota-invalid',
@@ -113,7 +113,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
     const previous = lastVerifiedCodex[index] ?? null;
     if (!fresh(previous)) return null;
     return { ...previous, state: 'unavailable', authentication: 'unknown', health: 'unavailable',
-      planType: null, onDemandEnabled: null, codexCredits: null, reason };
+      planType: null, onDemandEnabled: null, codexCredits: null, accountHint: null, subscriptionOnlyBoundary: undefined, reason };
   }
   function owns(): void {
     try { options.assertOwnership(); }
@@ -165,8 +165,11 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
         if (result.status === 'observed' && result.observation && result.accountHint) {
           checkedHint = result.accountHint;
           hints.set(account.id, result.accountHint);
-          row = { ...row, state: 'observed', authentication: 'signed-in', health: 'reachable', planType: result.planType,
-            observedAt: result.observation.observedAt, expiresAt: result.observation.expiresAt, windows: result.observation.windows, codexCredits: result.credits ?? null };
+          row = { ...row, state: 'observed', authentication: 'signed-in', health: 'reachable', planType: result.planType, accountHint: result.accountHint,
+            observedAt: result.observation.observedAt, expiresAt: result.observation.expiresAt, windows: result.observation.windows.map(window => {
+              const deadline = result.resetDeadlines?.find(d => d.windowId === window.id);
+              return { ...window, ...(deadline ? { resetProvenance: deadline.resetProvenance } : {}) };
+            }), codexCredits: result.credits ?? null };
           lastVerifiedCodex[index] = row;
         } else if ((result.status === 'failed' || result.status === 'timed-out') && transientCodexReasons.has(result.reason)) {
           row = retained(index, result.reason) ?? row;
@@ -191,6 +194,11 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
           row = { ...row, state: result.loggedIn ? 'observed' : 'signed-out',
           authentication: result.loggedIn ? 'signed-in' : 'signed-out',
           health: result.quotaFresh === true && result.windows.length > 0 ? 'reachable' : 'unknown', planType: result.subscriptionType,
+          accountHint: result.quotaFresh === true ? result.accountHint : null,
+          ...(result.quotaFresh === true && result.extraUsageEnabled === false && result.accountHint ? { subscriptionOnlyBoundary: {
+            source: 'claude-native-extra-usage' as const, creditsEnabled: false as const, accountHint: result.accountHint,
+            observedAt: result.startedAt, expiresAt: new Date(Date.parse(result.startedAt) + 60_000).toISOString(),
+          } } : {}),
           observedAt: result.startedAt, expiresAt: new Date(Date.parse(result.startedAt) + 60_000).toISOString(), windows: result.windows };
         } else if (['usage-account-changed', 'usage-identity-unavailable', 'status-not-logged-in'].includes(result.reason)) {
           options.readingCache?.invalidate(account);
@@ -204,7 +212,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
         if (result.status === 'observed' && result.loggedIn === true && result.accountHint) {
           checkedHint = result.accountHint;
           hints.set(account.id, result.accountHint);
-          row = { ...row, state: 'observed', authentication: 'signed-in', health: 'reachable', planType: result.planType,
+          row = { ...row, state: 'observed', authentication: 'signed-in', health: 'reachable', planType: result.planType, accountHint: result.accountHint,
             observedAt: result.observedAt, expiresAt: result.expiresAt, windows: result.windows, onDemandEnabled: result.onDemandEnabled };
         } else if (['probe-account-changed', 'probe-account-hint-mismatch', 'probe-account-unavailable', 'probe-account-unsupported'].includes(result.reason)) {
           options.readingCache?.invalidate(account);

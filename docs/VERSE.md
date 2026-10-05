@@ -789,6 +789,14 @@ prints exactly what it did. Afterwards the recurring steps are one Touch ID per
 The resident daemon still re-verifies the grant, Stop and the switch on every
 tick.
 
+In the desktop Fleet control, **Custody source checkout** defaults to the detected
+enrolled Hub checkout. Choose another trusted Hub checkout before **Reinstall /
+upgrade** if it contains the reviewed helper version you need; the install menu
+uses the same choice. Native validates the checkout and shows the installer hash
+and command before asking for administrator approval. Choosing a path does not
+change enrollment, a grant, credentials or the running helper. Installation and
+any existing-item Keychain reauthorization still require your confirmation.
+
 Private repositories on GitHub's free plan cannot have rulesets. There, a grant
 uses **local enforcement** with the fleet App's host-verified `ashlr/verify`
 check, and `ashlr authority status` says which repos are enforced which way.
@@ -883,6 +891,35 @@ which feed Mind and the Leader. Harness changes (prompts, effort, sampling,
 routing weights) are tested as paired experiments with a confidence interval
 against held-out tasks, adopted only through the gate, and rolled back
 automatically if a 48-hour canary falls below baseline.
+
+<a id="adoption-fixed-public-project-metadata"></a>
+
+### Adoption: fixed public project metadata (3.24)
+
+Growth's Adoption panel reads only `ashlrai/ashlr-hub` and `@ashlr/hub`, including
+when the Fleet is off. Stars and forks are current repository stocks. npm
+package retrievals cover the source's last 30 available UTC days, which can lag
+today; missing bins remain unknown. GitHub views and clones are separate rolling
+14-day aggregates. Traffic permission failures do not prevent public repository
+or npm readings. Latest release asset downloads are cumulative per uploaded
+asset ID for the latest published release only, including verification downloads.
+These measurements are not unique installations, active engineers, or a combined
+adoption score.
+
+`GET /api/verse/adoption` is an authenticated cache-only metadata port for the
+workbench and agents. An owned collector starts after the local listener is ready
+and is cancelled and drained on shutdown; `ASHLR_ADOPTION_AUTO=0` disables it.
+Successful GitHub readings refresh every 15 minutes and npm every six hours.
+The guarded, empty-body `POST /api/verse/adoption/refresh` requests a refresh
+without overriding provider retry deadlines. Failed refreshes retain previous
+readings with their original observation times and an explicit stale label.
+Public repository/release reads can use credential-free GitHub HTTPS when `gh`
+is absent or unauthenticated; traffic requires the existing GitHub connection's
+[documented permission](https://docs.github.com/en/rest/metrics/traffic).
+The panel does not collect personal identities, scan enrolled private repos,
+provision telemetry, or execute agents. Source semantics are documented by
+[npm](https://raw.githubusercontent.com/npm/registry/main/docs/download-counts.md)
+and [GitHub release assets](https://docs.github.com/en/rest/releases/assets).
 
 ### Lessons: retros and approved knowledge (3.15)
 

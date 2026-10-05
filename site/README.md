@@ -45,9 +45,9 @@ keyboard-operated date slider, and the repository links. If JavaScript is
 unavailable, the project descriptions and links remain readable; if the data
 is missing or invalid, the page must show an error instead of a false zero.
 
-## Release 3.23 copy
+## Release 3.24 copy
 
-The current software metadata and install targets name 3.23.0. Its GitHub
+The current software metadata and install targets name 3.24.0. Its GitHub
 release and downloads must exist and pass release checks before publishing this
 page. A source link or prepared download target is not publication evidence.
 
@@ -60,8 +60,15 @@ Plan verified describes task verification or explicit gate evidence, not an
 independent proof of the user's whole desired result. Source contract:
 [Automatic work](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTOMATIC-OUTCOMES.md).
 
+The 3.24 copy distinguishes native idle-sleep requests from cloud execution,
+reported Devin consumption from tracked budgets, and source-specific Growth
+measurements from user counts. Global and account reset controls do not imply
+live reserve taper: a verified billing boundary must also match the actual
+producer launch. Current execution binding remains held pending a separately
+qualified native CLI broker and isolated tools. Purchased balances are excluded.
+
 Keep the existing 3.22 images and captions labeled as browser demos. They do not
-show the new 3.23 controls or prove current provider activity.
+show the new 3.24 controls or prove current provider activity.
 
 ## What the numbers on it mean
 

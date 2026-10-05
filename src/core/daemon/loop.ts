@@ -1,3 +1,4 @@
+import { resetSpendingParkDelay } from './reset-spending-park-delay.js';
 /**
  * loop.ts — The M24 daemon operator.
  *
@@ -38,6 +39,7 @@
  * No new runtime deps; node builtins only; never throws out of public API.
  */
 
+import { startLocalWorkObservation, beginLocalWorkObservation, endLocalWorkObservation, closeLocalWorkObservation } from './local-work-observation.js';
 import { countForInventory, resolveDaemonCountPreferences } from './count-preferences.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, readdirSync, unlinkSync } from 'node:fs';
@@ -3441,6 +3443,7 @@ function recordDispatchStartAgentAction(
     mode: 'swarm' | 'single' | 'best-of-n';
   },
 ): void {
+  beginLocalWorkObservation(fields.runId, fields.backend);
   const rs = routeSnapshot({
     backend: fields.backend,
     tier: fields.tier,
@@ -6878,7 +6881,7 @@ export async function tick(
           // router, and the fabric gateway cannot drift apart.
           const maxPct = resolveSubscriptionMaxPercent(liveCfg);
           // V3.10 (U5) seam: hooks.seatAllows (default: subscriptionAllows, same arguments).
-          const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct, ...(standingTick && fleetLaneOf(backend, routingCfg) === 'grok-cli' && routed.seatDecision?.seatId ? { seatId: routed.seatDecision.seatId } : {}) });
+          const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct, ...(standingTick ? {itemId:item.id,model:selectedModel ?? null} : {}), ...(standingTick && fleetLaneOf(backend, routingCfg) === 'grok-cli' && routed.seatDecision?.seatId ? { seatId: routed.seatDecision.seatId } : {}) });
           if (!subCheck.allowed) {
             // M334: shadow the BLOCKED legacy decision — a gateway that would
             // have dispatched here is the safety-relevant divergence class.
@@ -7087,13 +7090,23 @@ export async function tick(
         if (lane === 'grok-cli') return seatId;
         return lane === 'codex' && engineOfSeatId(seatId) === 'codex' ? seatId : undefined;
       })();
+      // Every new provider contact keeps the same task scope and rechecks current allowance policy.
+      const selectedTaskAdmission = standingTick ? () => {
+        if (!stillOwnsTick() || stopRequested() || dispatchSignal.aborted) return false;
+        try {
+          return hooks.seatAllows(backend!, { maxPercent: resolveSubscriptionMaxPercent(routingCfg),
+            itemId: item.id, model: selectedModel ?? null, ...(standingSeatId ? {seatId:standingSeatId} : {}) }).allowed === true;
+        } catch { return false; }
+      } : undefined;
+      const selectedDispatchAdmission = () => (!outcomeDispatch || outcomeDispatch.stillAuthorized()) &&
+        (!selectedTaskAdmission || selectedTaskAdmission());
       // A standing tick asks the seat gate about EVERY engine (the live hook
       // checks lane, grant role and seat headroom); master asks only for
       // subscription engines, unchanged.
       if (standingTick || isSubscriptionEngine(backend)) {
         const maxPct = resolveSubscriptionMaxPercent(routingCfg);
         // V3.10 (U5) seam: hooks.seatAllows (default: subscriptionAllows, same arguments).
-        const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct, ...(fleetLaneOf(backend, routingCfg) === 'grok-cli' && standingSeatId ? { seatId: standingSeatId } : {}) });
+        const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct, ...(standingTick ? {itemId:item.id,model:selectedModel ?? null} : {}), ...(fleetLaneOf(backend, routingCfg) === 'grok-cli' && standingSeatId ? { seatId: standingSeatId } : {}) });
         if (!subCheck.allowed) {
           audit({
             action: 'daemon:tick',
@@ -7249,7 +7262,7 @@ export async function tick(
               runId: attemptId, workItemId: item.id, workItemGenerationId,
               workSource: item.source, delegationScope,
               signal: dispatchSignal,
-              ...(outcomeDispatch ? { selectedOutcomeAdmission: () => outcomeDispatch.stillAuthorized() } : {}),
+              ...(outcomeDispatch || selectedTaskAdmission ? { selectedOutcomeAdmission: selectedDispatchAdmission } : {}),
             },
             sink,
           );
@@ -7527,7 +7540,7 @@ export async function tick(
           ? () => {
             if (!stillOwnsTick() || stopRequested() || dispatchSignal.aborted) return false;
             try {
-              return hooks.seatAllows(backend!, { maxPercent:resolveSubscriptionMaxPercent(routingCfg), seatId:standingSeatId }).allowed === true;
+              return hooks.seatAllows(backend!, { maxPercent:resolveSubscriptionMaxPercent(routingCfg), seatId:standingSeatId, itemId:item.id, model:selectedModel ?? null }).allowed === true;
             } catch { return false; }
           }
           : undefined;
@@ -7553,7 +7566,7 @@ export async function tick(
               delegationScope, attemptId, shadowSkillCards, shadowSkillSelectedAt,
               signal: dispatchSignal,
               reserveQuotaUses: (requests) => reserveFleetQuotaUses(requests, routingCfg),
-              ...(outcomeDispatch ? { selectedOutcomeAdmission: () => outcomeDispatch.stillAuthorized() } : {}),
+              ...(outcomeDispatch || selectedTaskAdmission ? { selectedOutcomeAdmission: selectedDispatchAdmission } : {}),
               providerDispatchStillAuthorized: () =>
                 stillOwnsTick() && !stopRequested() && !dispatchSignal.aborted &&
                 (!outcomeDispatch || outcomeDispatch.stillAuthorized()),
@@ -7698,7 +7711,7 @@ export async function tick(
               ...(selectedModel ? { model: selectedModel } : {}),
               ...(standingSeatId ? { seatId: standingSeatId } : {}),
               ...(selectedGrokAdmission ? { selectedGrokAdmission } : {}),
-              ...(outcomeDispatch ? { selectedOutcomeAdmission: () => outcomeDispatch.stillAuthorized() } : {}),
+              ...(outcomeDispatch || selectedTaskAdmission ? { selectedOutcomeAdmission: selectedDispatchAdmission } : {}),
               ...(dispatchHarness ? { harness: dispatchHarness } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,
               signal: dispatchSignal,
@@ -8026,6 +8039,7 @@ export async function tick(
               }
               throw error;
             } finally {
+              endLocalWorkObservation(attemptId);
               if (outcomeWatch) clearInterval(outcomeWatch);
             }
           },
@@ -9552,6 +9566,7 @@ async function runDaemonInEnrollmentScope(
   const requestOwnershipLoss = (): void => {
     if (ownershipLost) return;
     ownershipLost = true;
+    closeLocalWorkObservation(true);
     if (!shutdown.signal.aborted) shutdown.abort();
     scheduledResolutionObserver?.cancel();
     scheduledCutoffCapture?.cancel();
@@ -9684,6 +9699,7 @@ async function runDaemonInEnrollmentScope(
    */
   const runWindowConclusion: { value: { reason: string; summary: string } | null } = { value: null };
   try {
+    startLocalWorkObservation();
     if (opts.once) {
       // A permit is bound to the exact supplied config snapshot. Other manual
       // one-shot runs retain the established live-reload behavior.
@@ -10249,12 +10265,19 @@ async function runDaemonInEnrollmentScope(
           });
         }
 
+        const resetParkDelay = (ordinaryMs: number): number => {
+          const nowMs = Date.now();
+          let wake: number | null = null;
+          try { wake = standing?.hooks.nextResetWake?.(nowMs) ?? null; }
+          catch { /* Optional timing advice cannot stop ordinary fleet work. */ }
+          return resetSpendingParkDelay(ordinaryMs,wake,nowMs,standing !== null);
+        };
         if (afterLoopCfg.mode === 'continuous') {
           if (noWorkDispatched) {
-            if (!(await parkWithinWindow(afterLoopCfg.idleBackoffMs ?? 5_000))) break;
+            if (!(await parkWithinWindow(resetParkDelay(afterLoopCfg.idleBackoffMs ?? 5_000)))) break;
           }
         } else {
-          if (!(await parkWithinWindow(afterLoopCfg.intervalMs))) break;
+          if (!(await parkWithinWindow(resetParkDelay(afterLoopCfg.intervalMs)))) break;
         }
 
         if (!ownsDaemonLock()) break;
@@ -10262,6 +10285,7 @@ async function runDaemonInEnrollmentScope(
       }
     }
   } catch (error) {
+    closeLocalWorkObservation(true);
     terminalFailure = 'daemon-unexpected-loop-failure';
     audit({
       action: 'daemon:persistence-failed',
@@ -10271,6 +10295,7 @@ async function runDaemonInEnrollmentScope(
       result: 'error',
     });
   }
+  closeLocalWorkObservation();
   transitionToStopping();
   clearInterval(killSwitchPoll);
   // Also stops a publisher the standing pass started in a one-shot run:
@@ -10330,6 +10355,7 @@ async function runDaemonInEnrollmentScope(
   if (prevInDaemon === undefined) delete process.env['ASHLR_IN_DAEMON'];
   else process.env['ASHLR_IN_DAEMON'] = prevInDaemon;
 
+  closeLocalWorkObservation();
   releaseDaemonLock(daemonLock);
 
   const finalState = loadDaemonState();

@@ -1,3 +1,4 @@
+import { validSubscriptionOnlyBoundary } from './subscription-only.js';
 /**
  * Budget persistence (V3.10 unit A9) — three small private files:
  *
@@ -148,6 +149,9 @@ export function readBudgetPolicyFileState(file: string = budgetPolicyPath()): Bu
   // a write on top would make that loss permanent.
   if ('mode' in raw && !isBudgetMode(raw['mode'])) return { state: 'unreadable', reason: 'has a mode this build does not know', fingerprint };
   if ('seats' in raw && !isObject(raw['seats'])) return { state: 'unreadable', reason: 'has a malformed seats map', fingerprint };
+  if ('resetSpending' in raw && (!isObject(raw['resetSpending']) || Object.keys(raw['resetSpending']).length !== 1 || typeof raw['resetSpending']['enabled'] !== 'boolean')) {
+    return { state: 'unreadable', reason: 'has an unsupported reset-spending preference', fingerprint };
+  }
   return { state: 'ok', policy: sanitizeBudgetPolicy(raw) };
 }
 
@@ -364,6 +368,10 @@ export function sanitizeSeatCapacity(raw: unknown): SeatCapacity | null {
     observedAt,
     spentTodayUsd: spent,
   };
+  if (typeof raw['accountHint'] === 'string' && /^[a-f0-9]{64}$/.test(raw['accountHint'])) out.accountHint = raw['accountHint'];
+  if (typeof raw['onDemandEnabled'] === 'boolean') out.onDemandEnabled = raw['onDemandEnabled'];
+  if (validSubscriptionOnlyBoundary(raw['subscriptionOnlyBoundary']) && raw['subscriptionOnlyBoundary'].accountHint === out.accountHint &&
+    raw['subscriptionOnlyBoundary'].observedAt === observedAt) out.subscriptionOnlyBoundary = raw['subscriptionOnlyBoundary'];
   // 3.15 tier fields (routing/tiers.ts): optional, and dropped rather than
   // trusted when implausible — only a local seat can be the free tier or
   // cost nothing, the same rule as `free` above.

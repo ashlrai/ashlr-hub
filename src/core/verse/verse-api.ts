@@ -1973,6 +1973,13 @@ export async function handleVerseApi(
   if (!isVerseApiPath(path)) return false;
 
   try {
+    if (path === `${VERSE_API_PREFIX}/adoption` || path.startsWith(`${VERSE_API_PREFIX}/adoption/`)) {
+      // Metadata reads cannot evaluate legacy scheduler-owning mounted modules.
+      if (path !== `${VERSE_API_PREFIX}/adoption` && path !== `${VERSE_API_PREFIX}/adoption/refresh`) {
+        sendJson(res, 404, { error: 'Adoption route not found.' }); return true;
+      }
+      return (await import('./adoption-api.js')).handleAdoptionApi(ctx, req, res, path, method);
+    }
     if (path === `${VERSE_API_PREFIX}/resources/credit-pools` || path.startsWith(`${VERSE_API_PREFIX}/resources/credit-pools/`)) {
       // Unknown children of this read-only namespace must not evaluate the
       // legacy mounted modules (including the active cloud scheduler).

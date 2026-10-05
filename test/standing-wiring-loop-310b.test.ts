@@ -356,3 +356,28 @@ describe('A9 — a SeatRouter shadow beside master\'s real dispatch', () => {
     expect(readShadowDecisions(10)).toEqual([]);
   });
 });
+
+
+describe('standing task policy fences all producer entry points',()=>{
+  it.each(['single','swarm','best-of-n'] as const)('rechecks task admission in the %s caller-owned fence',async(path)=>{
+    fx.makeRepo().enroll();
+    let allowed=true;
+    const checks: unknown[]=[];
+    const hooks=standingHooks({backend:path==='swarm'?'builtin':'claude',plan:()=>path==='best-of-n'?PLAN:null});
+    hooks.seatAllows=(_engine,opts)=>{checks.push(opts);return {allowed,reason:'fixture current policy'};};
+    const execute=async(...args:unknown[])=>{
+      const opts=args[2] as {selectedOutcomeAdmission?:()=>boolean};
+      expect(opts.selectedOutcomeAdmission?.()).toBe(true);
+      allowed=false;
+      expect(opts.selectedOutcomeAdmission?.()).toBe(false);
+      return path==='best-of-n'?{winner:undefined,candidates:[],critique:{n:3,nonEmpty:0,judged:0,topScore:0,winnerIndex:-1,totalCostUsd:0,billableCostUsd:0}}
+        :{id:'fixture-run',status:'done',usage:{totalTokens:1,estCostUsd:0.001,steps:1}};
+    };
+    if(path==='single')mockRunGoal.mockImplementation(execute);
+    if(path==='swarm')mockRunSwarm.mockImplementation(execute);
+    if(path==='best-of-n')mockRunBestOfN.mockImplementation(execute);
+    await tick(cfgFor({allowedBackends:['builtin','claude']}),{dryRun:false,activationCapability:STANDING,hooks});
+    expect(checks.length).toBeGreaterThanOrEqual(3);
+    expect(checks.at(-1)).toMatchObject({itemId:expect.any(String),model:null});
+  });
+});

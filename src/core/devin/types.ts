@@ -313,6 +313,8 @@ export interface DevinOverviewResponse {
   budget: DevinBudgetView;
   /** Newest first, at most 100. */
   tasks: DevinTaskV1[];
+  /** Organization API consumption only; never a CLI allocation, balance or subscription quota. Older servers omit it. */
+  consumption?: import('./consumption.js').DevinConsumptionSnapshot;
   /**
    * The local Devin CLI (the "Devin (CLI)" chat seat), from the shared probe
    * (cli-probe.ts). `usage: 'not-reported'`: the CLI reports no ACU / usage

@@ -15,6 +15,7 @@ import {
   type DevinTaskV1,
 } from '../../../../core/devin/types.js';
 import type { ResourceReadinessRow } from '../../../../core/routing/readiness-types.js';
+import type { DevinConsumptionSnapshot } from '../../../../core/devin/consumption.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -47,6 +48,41 @@ export function devinUsageEvidence(budget: DevinBudgetView): { reported: number;
   if (typeof reported !== 'number' || !Number.isFinite(reported) || reported < 0 ||
     typeof held !== 'number' || !Number.isFinite(held) || held < 0) return null;
   return { reported, held, free: Math.max(0, Math.round((budget.acuBudgetTotal - reported - held) * 100) / 100) };
+}
+
+/** Independent metadata, never interpreted as personal CLI usage or remaining capacity. */
+export function devinConsumptionEvidence(raw: unknown, now = Date.now()): { value: string; lines: string[]; stale: boolean; report: DevinConsumptionSnapshot['report'] } | null {
+  if (!isRecord(raw) || raw['source'] !== 'devin-v3-organization-daily' || raw['scope'] !== 'organization'
+    || raw['period'] !== 'all-available-reporting-dates' || raw['dateUnit'] !== 'provider-unspecified' || raw['dayBoundaryUtc'] !== '08:00'
+    || !['not-checked', 'reading', 'ready', 'unavailable'].includes(String(raw['state']))) return null;
+  const snapshot = raw as unknown as DevinConsumptionSnapshot;
+  const lines = ['Organization API consumption · all available reporting dates · all products.',
+    'Provider day boundary: 08:00 UTC; reporting date units are unspecified.',
+    'Devin, Cascade and Terminal can be zero defaults when product data is unavailable; Automation and Review can be unreported.',
+    'Balance, subscription limits and resets are not reported. No personal CLI allocation is inferred.'];
+  if (snapshot.error) {
+    if (!isRecord(snapshot.error) || typeof snapshot.error.reason !== 'string' || snapshot.error.reason.length > 500) return null;
+    lines.push(snapshot.error.reason);
+  }
+  const report = snapshot.report;
+  if (report === null) return { value: snapshot.state === 'reading' ? 'reading consumption…' : 'consumption not reported', lines, stale: false, report: null };
+  if (!isRecord(report) || typeof report.totalAcus !== 'number' || !Number.isFinite(report.totalAcus) || report.totalAcus < 0
+    || !Array.isArray(report.days) || !report.days.every(day => isRecord(day) && Number.isSafeInteger(day.date)
+      && typeof day.acus === 'number' && Number.isFinite(day.acus) && day.acus >= 0 && isRecord(day.products)
+      && (['devin', 'cascade', 'terminal', 'automation', 'review'] as const).every(key => day.products[key] === null
+        || typeof day.products[key] === 'number' && Number.isFinite(day.products[key]) && day.products[key] >= 0))) return null;
+  const fetched = typeof snapshot.fetchedAt === 'string' ? Date.parse(snapshot.fetchedAt) : NaN;
+  const expires = typeof snapshot.expiresAt === 'string' ? Date.parse(snapshot.expiresAt) : NaN;
+  if (!Number.isFinite(fetched) || !Number.isFinite(expires) || fetched > now || expires <= fetched) return null;
+  const stale = snapshot.state !== 'ready' || snapshot.stale === true || expires <= now;
+  lines.push(`Retrieved ${new Date(fetched).toLocaleString()}${stale ? ' · last reading, current consumption unconfirmed' : ' · retrieval is current; provider publication delay is unknown'}.`);
+  lines.push(`${report.days.length} daily reporting bucket${report.days.length === 1 ? '' : 's'}; dates retained as provider values.`);
+  return { value: `${formatConsumptionAcu(report.totalAcus)} consumed${stale ? ' · last' : ''}`, lines, stale, report };
+}
+
+/** Provider consumption retains fractional ACUs separately from rounded tracked budgets. */
+export function formatConsumptionAcu(value: number): string {
+  return `${value.toLocaleString('en-US', { maximumFractionDigits: 20 })} ACU${value === 1 ? '' : 's'}`;
 }
 
 /**

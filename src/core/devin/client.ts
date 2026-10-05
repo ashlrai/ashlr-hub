@@ -56,11 +56,14 @@ export interface DevinClientOptions {
 export class DevinApiError extends Error {
   readonly code: DevinFailureCode;
   readonly status: number | null;
-  constructor(code: DevinFailureCode, message: string, status: number | null = null) {
+  /** Absolute provider retry deadline, carried only by organization-consumption reads. */
+  readonly retryAfterAt: number | null;
+  constructor(code: DevinFailureCode, message: string, status: number | null = null, retryAfterAt: number | null = null) {
     super(message);
     this.name = 'DevinApiError';
     this.code = code;
     this.status = status;
+    this.retryAfterAt = retryAfterAt;
   }
 }
 
@@ -70,6 +73,38 @@ export interface DevinSelf {
   name: string | null;
   /** null for org-scoped service users (docs: common-flows step 1) — the operator supplies it. */
   orgId: string | null;
+}
+
+/** Organization consumption, not subscription headroom or a credit balance. */
+export interface DevinDailyConsumption {
+  totalAcus: number;
+  days: Array<{ date: number; acus: number; products: Record<'devin' | 'cascade' | 'terminal' | 'automation' | 'review', number | null> }>;
+}
+
+/** https://docs.devin.ai/api-reference/v3/consumption/organizations-consumption-daily */
+export function parseDevinDailyConsumption(raw: unknown): DevinDailyConsumption | null {
+  const acu = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  if (!isRecord(raw) || !acu(raw['total_acus']) || !Array.isArray(raw['consumption_by_date'])) return null;
+  // Only the documented unpaginated envelope establishes all available dates.
+  // A future continuation/pagination protocol must be supported explicitly.
+  if (Object.keys(raw).some(key => key !== 'total_acus' && key !== 'consumption_by_date')) return null;
+  const days: DevinDailyConsumption['days'] = [];
+  const dates = new Set<number>();
+  for (const row of raw['consumption_by_date']) {
+    if (!isRecord(row) || !Number.isSafeInteger(row['date']) || !acu(row['acus']) || !isRecord(row['acus_by_product'])) return null;
+    const date = row['date'] as number;
+    if (dates.has(date)) return null;
+    dates.add(date);
+    const products = {} as DevinDailyConsumption['days'][number]['products'];
+    for (const key of ['devin', 'cascade', 'terminal', 'automation', 'review'] as const) {
+      const value = row['acus_by_product'][key];
+      // Missing/nullable buckets stay unknown; a missing bucket is never inferred to be zero.
+      if (value !== undefined && value !== null && !acu(value)) return null;
+      products[key] = value === undefined || value === null ? null : value;
+    }
+    days.push({ date, acus: row['acus'], products });
+  }
+  return { totalAcus: raw['total_acus'], days };
 }
 
 /** SessionResponse, reduced to what Verse uses. https://docs.devin.ai/api-reference/v3/sessions/get-organizations-session */
@@ -328,6 +363,14 @@ function retryAfterMs(value: string | null): number | null {
   return seconds <= 60 ? seconds * 1000 : null;
 }
 
+/** Bounded header parsing; valid absolute deadlines are honored without allocating a timer. */
+export function parseConsumptionRetryAfter(value: string | null, now = Date.now()): number | null {
+  if (!value || value.length > 64 || !Number.isFinite(now)) return null;
+  const text = value.trim();
+  const until = /^\d{1,13}$/.test(text) ? now + Number(text) * 1000 : Date.parse(text);
+  return Number.isSafeInteger(until) && until >= now && until <= 8_640_000_000_000_000 ? until : null;
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -363,7 +406,7 @@ export class DevinClient {
     return `DevinClient(${this.baseUrl})`;
   }
 
-  private async request(method: 'GET' | 'POST' | 'DELETE', path: string, body: unknown, policy: RetryPolicy): Promise<unknown> {
+  private async request(method: 'GET' | 'POST' | 'DELETE', path: string, body: unknown, policy: RetryPolicy, beforeRead?: () => boolean, consumptionRetry = false): Promise<unknown> {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = { Authorization: `Bearer ${this.apiKey}`, Accept: 'application/json' };
     let payload: string | undefined;
@@ -374,6 +417,8 @@ export class DevinClient {
     let lastError: DevinApiError = new DevinApiError('unknown', STATUS_SENTENCES.unknown);
     for (let attempt = 0; attempt <= this.retries; attempt += 1) {
       if (attempt > 0) await this.sleep(Math.min(MAX_BACKOFF_MS, 500 * 2 ** (attempt - 1)));
+      // Consumption reads re-admit every retry after asynchronous backoff.
+      if (beforeRead && !beforeRead()) throw new DevinApiError('not-connected', STATUS_SENTENCES['not-connected']);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeoutMs);
       timer.unref?.();
@@ -401,10 +446,14 @@ export class DevinClient {
       }
       const code = failureForStatus(response.status);
       const detail = problemDetail(text);
-      lastError = new DevinApiError(code, detail ? `${STATUS_SENTENCES[code]} Devin said: ${detail}` : STATUS_SENTENCES[code], response.status);
+      lastError = new DevinApiError(code, detail ? `${STATUS_SENTENCES[code]} Devin said: ${detail}` : STATUS_SENTENCES[code], response.status, consumptionRetry && code === 'rate-limited' ? parseConsumptionRetryAfter(response.headers.get('retry-after')) : null);
       const retryable = code === 'rate-limited' || (policy === 'read' && code === 'server');
       if (!retryable || attempt === this.retries) throw lastError;
-      const wait = code === 'rate-limited' ? retryAfterMs(response.headers.get('retry-after')) : null;
+      const consumptionWait = consumptionRetry && code === 'rate-limited' && lastError.retryAfterAt !== null
+        ? Math.max(0, lastError.retryAfterAt - Date.now()) : null;
+      // Long provider deadlines are cached; never keep a worker asleep or retry early.
+      if (consumptionWait !== null && consumptionWait > 60_000) throw lastError;
+      const wait = consumptionWait ?? (code === 'rate-limited' ? retryAfterMs(response.headers.get('retry-after')) : null);
       if (wait !== null) await this.sleep(wait);
     }
     throw lastError;
@@ -414,6 +463,14 @@ export class DevinClient {
   async getSelf(): Promise<DevinSelf> {
     const parsed = parseDevinSelf(await this.request('GET', '/self', undefined, 'read'));
     if (!parsed) throw new DevinApiError('unparsed', STATUS_SENTENCES.unparsed);
+    return parsed;
+  }
+
+  /** All available reporting dates; the docs do not specify date/filter timestamp units. */
+  async getDailyConsumption(orgId: string, beforeRead?: () => boolean): Promise<DevinDailyConsumption> {
+    const org = checkOrg(orgId);
+    const parsed = parseDevinDailyConsumption(await this.request('GET', `/organizations/${encodeURIComponent(org)}/consumption/daily`, undefined, 'read', beforeRead, true));
+    if (!parsed) throw new DevinApiError('unparsed', 'Devin consumption was not recognized; no usage was inferred.');
     return parsed;
   }
 

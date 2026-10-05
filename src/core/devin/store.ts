@@ -12,9 +12,10 @@
  * The API key is not stored here or anywhere on disk by Verse: see secret.ts.
  */
 import { randomInt } from 'node:crypto';
-import { readdirSync, rmSync } from 'node:fs';
+import { lstatSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { fsyncDirectory } from '../util/durability.js';
 import { ashlrHome, CLOUD_REPO_PATTERN } from '../cloud/store.js';
 import type { CloudTaskPr, CloudTaskReport } from '../cloud/types.js';
 import { isPlaybookRef } from '../playbooks/types.js';
@@ -326,6 +327,39 @@ export function updateDevinBudget(update: DevinBudgetUpdate): DevinBudgetV1 {
 // ---------------------------------------------------------------------------
 // Connection (non-secret)
 // ---------------------------------------------------------------------------
+
+/** Fixed non-secret crash marker, independent of the connection/account schema. */
+export function devinConsumptionConnectionPath(): string {
+  return join(devinHome(), 'consumption-connection.state');
+}
+
+export function devinConsumptionConnectionUnconfirmed(): boolean {
+  const path = devinConsumptionConnectionPath();
+  let observed = false;
+  try {
+    const directory = lstatSync(devinHome());
+    const own = (uid: number) => typeof process.getuid !== 'function' || uid === process.getuid();
+    if (!directory.isDirectory() || directory.isSymbolicLink() || !own(directory.uid)
+      || process.platform !== 'win32' && (directory.mode & 0o077) !== 0) return true;
+    const before = lstatSync(path);
+    observed = true;
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || !own(before.uid)
+      || process.platform !== 'win32' && (before.mode & 0o077) !== 0) return true;
+    const file = readPrivateFileCapped(path, 32);
+    const after = lstatSync(path);
+    return before.dev !== after.dev || before.ino !== after.ino || file?.truncated !== false || file.text !== 'settled\n';
+  } catch (error) {
+    // No marker is the legacy case; unreadable/corrupt records never establish settlement.
+    return observed || (error as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+}
+
+export function writeDevinConsumptionConnectionState(state: 'pending' | 'settled'): void {
+  const dir = ensureDevinDirectory();
+  writePrivateFileAtomic(devinConsumptionConnectionPath(), `${state}\n`);
+  // The marker must survive a crash before the Keychain starts changing.
+  fsyncDirectory(dir);
+}
 
 export function isDevinConnection(value: unknown): value is DevinConnectionV1 {
   return isRecord(value)

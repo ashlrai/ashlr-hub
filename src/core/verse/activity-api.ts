@@ -36,6 +36,7 @@
  * of a process pays the engine's store scan and resolves the Track B
  * producer modules once; the inbox scan never runs on a request's stack.
  */
+import { startLocalWorkReader, peekLocalFleetRuns } from '../daemon/local-work-observation.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { passesMutationGate, readBody, sendJson } from '../web/api.js';
@@ -204,6 +205,7 @@ function currentWiring(): Wiring {
   // reads or writes the previous one's meta file.
   const home = process.env['HOME'];
   if (wiring && wiring.home === home) return wiring;
+  startLocalWorkReader();
   const meta = createSessionMetaStore();
   const approvals = new ApprovalsScanner();
   const w: Wiring = {
@@ -230,6 +232,7 @@ function currentWiring(): Wiring {
     latestMemoAt: () => (w.hooks.latestMemoAt ? w.hooks.latestMemoAt() : null),
     cloud: () => (w.hooks.cloud ? w.hooks.cloud() : []),
     terminal: () => (w.hooks.terminal ? w.hooks.terminal() : null),
+    localFleetRuns: peekLocalFleetRuns,
     ...depsOverride,
   });
   // Mind is only a badge once the Leader module exists; until then the

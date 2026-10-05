@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   existsSync,
   lstatSync,
@@ -12,6 +12,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { startLocalWorkObservation, beginLocalWorkObservation, endLocalWorkObservation, closeLocalWorkObservation } from '../src/core/daemon/local-work-observation.js';
 
 import {
   daemonActivityDirectory,
@@ -35,6 +36,25 @@ describe('daemon activity — observational private state', () => {
     if (previousAshlrHome === undefined) delete process.env['ASHLR_HOME'];
     else process.env['ASHLR_HOME'] = previousAshlrHome;
     rmSync(home, { recursive: true, force: true });
+  });
+
+  it('persists actual resident dispatch overlap and completion privately without running agents', async () => {
+    expect(writeDaemonActivity({ instanceId, daemonStartedAt: new Date(Date.now() - 1_000).toISOString(), phase: 'tick' })).toBe(true);
+    // A restricted host cannot prove process identity; no observation is invented.
+    if (readDaemonActivity().ownerState !== 'alive') return;
+    const file = join(daemonActivityDirectory(), 'local-work.json');
+    const count = () => JSON.parse(readFileSync(file, 'utf8')).localRuns;
+    try {
+      startLocalWorkObservation();
+      await vi.waitFor(() => expect(count()).toBe(0));
+      beginLocalWorkObservation('one', 'codex'); beginLocalWorkObservation('two', 'claude');
+      await vi.waitFor(() => expect(count()).toBe(2));
+      endLocalWorkObservation('one');
+      await vi.waitFor(() => expect(count()).toBe(1));
+      endLocalWorkObservation('two');
+      await vi.waitFor(() => expect(count()).toBe(0));
+      if (process.platform !== 'win32') expect(lstatSync(file).mode & 0o777).toBe(0o600);
+    } finally { closeLocalWorkObservation(); }
   });
 
   it('does not create storage while reading a missing source', () => {

@@ -5,7 +5,9 @@ export interface ResetProvenance {
   description: string | null;
   source: string | null;
   /** Native subscription plan qualified before/after the current quota reply. */
-  plan?: 'pro' | 'max';
+  plan?: 'pro' | 'max' | 'plus';
+  /** Exact native length used to qualify a Codex weekly deadline, never an inferred start. */
+  windowDurationMins?: 10080;
   /** Provider-reported start, never inferred from a percentage. */
   startsAt?: string | null;
 }

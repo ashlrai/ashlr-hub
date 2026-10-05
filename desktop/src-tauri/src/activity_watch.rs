@@ -35,6 +35,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::notify::{self, NeedsYouCounts, Notice};
+use crate::power_activity::{self, LocalWork};
 
 pub const ACTIVITY_PATH: &str = "/api/verse/activity";
 /// While the window is shown or anything runs. Well above the spec's 2 s floor.
@@ -172,6 +173,8 @@ fn lenient_terminal<'de, D: Deserializer<'de>>(
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct ActivitySnapshot {
+    #[serde(rename = "localWork", default, deserialize_with = "power_activity::decode")]
+    pub local_work: Option<LocalWork>,
     pub cursor: String,
     #[serde(default)]
     pub running: Vec<RunningChat>,
@@ -520,6 +523,16 @@ mod tests {
     const EMPTY: &str = r#"{"cursor":"v1.ab12.e.0","running":[],"needsYou":[],"completions":[],
         "counts":{"running":0,"needsYou":0,"unread":0},"sources":{},"autonomy":null,"capacity":null,"mind":null,
         "generatedAt":"2026-09-24T10:00:00.000Z"}"#;
+
+    #[test]
+    fn malformed_optional_power_does_not_discard_running_or_completions() {
+        let body = r#"{"cursor":"v1.abc.0.0","running":[{"sessionId":"active","title":"Current work"}],"completions":[{"sessionId":"finished","title":"Done","outcome":"ok"}],"localWork":{"localRuns":-1}}"#;
+        let snapshot = parse_activity(body).unwrap();
+        assert_eq!(snapshot.cursor, "v1.abc.0.0");
+        assert_eq!(snapshot.running[0].session_id, "active");
+        assert_eq!(snapshot.completions[0].session_id, "finished");
+        assert!(snapshot.local_work.is_none());
+    }
 
     #[test]
     fn parses_the_contract_shape_and_ignores_fields_it_does_not_read() {

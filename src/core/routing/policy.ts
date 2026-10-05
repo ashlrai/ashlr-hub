@@ -99,6 +99,7 @@ export interface BudgetView extends BudgetResponse {
   readingMaxAgeMs: number;
   /** When the seat readings behind `headroom` were sampled. */
   sampledAt: string;
+  resetSpendingStatus?: import('./reset-spending-types.js').ResetSpendingStatus;
 }
 
 /** Per-engine default in one mode; `seatId` is filled in by `defaultSeatPolicy`. */
@@ -241,6 +242,7 @@ export function sanitizeSeatPolicy(seatId: string, raw: unknown): SeatBudgetPoli
   if (isPercent(raw['maxSessionWindowPercent'], 1)) {
     out.maxSessionWindowPercent = wholePercent(raw['maxSessionWindowPercent']);
   }
+  if (typeof raw['resetSpending'] === 'boolean') out.resetSpending = raw['resetSpending'];
   if (isUsd(raw['dailyUsdCap'])) out.dailyUsdCap = cents(raw['dailyUsdCap']);
   return out;
 }
@@ -250,6 +252,9 @@ export function sanitizeBudgetPolicy(raw: unknown): BudgetPolicy {
   const out = defaultBudgetPolicy();
   if (!isObject(raw)) return out;
   if (isBudgetMode(raw['mode'])) out.mode = raw['mode'];
+  if (isObject(raw['resetSpending']) && sameKeys(raw['resetSpending'], ['enabled']) && typeof raw['resetSpending']['enabled'] === 'boolean') {
+    out.resetSpending = { enabled: raw['resetSpending']['enabled'] };
+  }
   const updatedAt = raw['updatedAt'];
   if (typeof updatedAt === 'string' && Number.isFinite(Date.parse(updatedAt))) {
     out.updatedAt = new Date(Date.parse(updatedAt)).toISOString();
@@ -285,6 +290,7 @@ export class BudgetPolicyError extends Error {
  */
 export interface SeatPolicyPatch {
   enabled?: boolean;
+  resetSpending?: boolean | null;
   reservePercent?: number;
   maxSessionWindowPercent?: number | null;
   dailyUsdCap?: number | null;
@@ -292,10 +298,12 @@ export interface SeatPolicyPatch {
 
 export type ParsedBudgetUpdate =
   | { kind: 'mode'; mode: BudgetMode }
+  | { kind: 'reset-spending'; enabled: boolean }
   | { kind: 'seat'; seatId: string; patch: SeatPolicyPatch };
 
 const SEAT_PATCH_KEYS: ReadonlySet<string> = new Set([
   'enabled',
+  'resetSpending',
   'reservePercent',
   'maxSessionWindowPercent',
   'dailyUsdCap',
@@ -314,6 +322,14 @@ function sameKeys(value: Record<string, unknown>, keys: readonly string[]): bool
  */
 export function parseBudgetUpdate(value: unknown): ParsedBudgetUpdate {
   if (!isObject(value)) throw new BudgetPolicyError('VERSE_INVALID', 'budget update must be a JSON object');
+
+  if (sameKeys(value, ['resetSpending'])) {
+    const preference = value['resetSpending'];
+    if (!isObject(preference) || !sameKeys(preference, ['enabled']) || typeof preference['enabled'] !== 'boolean') {
+      throw new BudgetPolicyError('VERSE_INVALID', 'resetSpending must contain exactly one boolean enabled field');
+    }
+    return { kind: 'reset-spending', enabled: preference['enabled'] };
+  }
 
   if (sameKeys(value, ['mode'])) {
     if (!isBudgetMode(value['mode'])) {
@@ -335,6 +351,10 @@ export function parseBudgetUpdate(value: unknown): ParsedBudgetUpdate {
       if (!SEAT_PATCH_KEYS.has(key)) throw new BudgetPolicyError('VERSE_INVALID', `unknown policy key: ${key}`);
     }
     const patch: SeatPolicyPatch = {};
+    if ('resetSpending' in policy) {
+      if (policy['resetSpending'] !== null && typeof policy['resetSpending'] !== 'boolean') throw new BudgetPolicyError('VERSE_INVALID', 'resetSpending must be a boolean or null to inherit');
+      patch.resetSpending = policy['resetSpending'] as boolean | null;
+    }
     if ('enabled' in policy) {
       if (typeof policy['enabled'] !== 'boolean') throw new BudgetPolicyError('VERSE_INVALID', 'enabled must be a boolean');
       patch.enabled = policy['enabled'];
@@ -362,7 +382,7 @@ export function parseBudgetUpdate(value: unknown): ParsedBudgetUpdate {
     return { kind: 'seat', seatId, patch };
   }
 
-  throw new BudgetPolicyError('VERSE_INVALID', 'budget update must be exactly one of {mode} or {seatId, policy}');
+  throw new BudgetPolicyError('VERSE_INVALID', 'budget update must be exactly one of {mode}, {resetSpending}, or {seatId, policy}');
 }
 
 /**
@@ -380,10 +400,11 @@ export function applyModeSwitch(
     const stored = policy.seats[seatId]!;
     const next = defaultSeatPolicy(mode, seatId, engineOf?.(seatId) ?? engineOfSeatId(seatId));
     next.enabled = stored.enabled;
+    if (stored.resetSpending !== undefined) next.resetSpending = stored.resetSpending;
     if (stored.dailyUsdCap !== undefined) next.dailyUsdCap = stored.dailyUsdCap;
     seats[seatId] = next;
   }
-  return { mode, seats, updatedAt: nowIso };
+  return { mode, seats, updatedAt: nowIso, ...(policy.resetSpending ? { resetSpending: { ...policy.resetSpending } } : {}) };
 }
 
 /** Apply one validated per-seat patch on top of the seat's effective policy. */
@@ -396,6 +417,10 @@ export function applySeatPatch(
 ): BudgetPolicy {
   const next = effectiveSeatPolicy(policy, seatId, engine);
   if (patch.enabled !== undefined) next.enabled = patch.enabled;
+  if (patch.resetSpending !== undefined) {
+    if (patch.resetSpending === null) delete next.resetSpending;
+    else next.resetSpending = patch.resetSpending;
+  }
   if (patch.reservePercent !== undefined) next.reservePercent = patch.reservePercent;
   if (patch.maxSessionWindowPercent !== undefined) {
     if (patch.maxSessionWindowPercent === null) delete next.maxSessionWindowPercent;
@@ -408,7 +433,7 @@ export function applySeatPatch(
   const seats: Record<string, SeatBudgetPolicy> = { ...policy.seats, [seatId]: next };
   const sorted: Record<string, SeatBudgetPolicy> = {};
   for (const id of Object.keys(seats).sort()) sorted[id] = seats[id]!;
-  return { mode: policy.mode, seats: sorted, updatedAt: nowIso };
+  return { mode: policy.mode, seats: sorted, updatedAt: nowIso, ...(policy.resetSpending ? { resetSpending: { ...policy.resetSpending } } : {}) };
 }
 
 /** Apply exactly one update form. Pure — the caller persists. */
@@ -419,6 +444,7 @@ export function applyBudgetUpdate(
   engineOf?: (seatId: string) => BudgetEngine | undefined,
 ): BudgetPolicy {
   const parsed: ParsedBudgetUpdate = 'kind' in update ? update : parseBudgetUpdate(update);
+  if (parsed.kind === 'reset-spending') return { ...policy, resetSpending: { enabled: parsed.enabled }, updatedAt: nowIso };
   if (parsed.kind === 'mode') return applyModeSwitch(policy, parsed.mode, nowIso, engineOf);
   return applySeatPatch(policy, parsed.seatId, parsed.patch, nowIso, engineOf?.(parsed.seatId));
 }
