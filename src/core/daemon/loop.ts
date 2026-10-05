@@ -99,7 +99,7 @@ import {
   clearDaemonSpendGuard,
   DAEMON_SPEND_GUARD_ITEM_CAPACITY,
   daemonStatePath,
-  heartbeatDaemonLock,
+  heartbeatDaemonLockOutcome,
   loadDaemonState,
   loadDaemonStateStrict,
   readDaemonLockOwner,
@@ -1637,11 +1637,9 @@ function configuredModelForBackend(backend: EngineId, cfg: AshlrConfig): string 
  * was never called from the resident loop at all, leaving it frozen at
  * acquiredAt forever (M303/guard-health).
  *
- * Fail-closed: heartbeatDaemonLock() re-derives ownership itself (exact pid
- * + token match) before writing, and returns false on ANY failure — lost
- * ownership or a write I/O error alike. Either failure routes to
- * onOwnershipLost() rather than being swallowed, matching the pre-existing
- * fail-closed contract of this interval.
+ * Fail-closed for changed/unknown ownership and I/O failures. Verified
+ * contention defers the write without renewing liveness or cancelling this
+ * owner: maintenance can hold the mutation fence across an awaited pass.
  */
 function startDaemonLockHeartbeat(
   lock: DaemonLock,
@@ -1649,8 +1647,9 @@ function startDaemonLockHeartbeat(
   onOwnershipLost?: () => void,
 ): () => void {
   const interval = setInterval(() => {
-    if (heartbeatDaemonLock(lock)) afterHeartbeat?.();
-    else onOwnershipLost?.();
+    const outcome = heartbeatDaemonLockOutcome(lock);
+    if (outcome === 'updated') afterHeartbeat?.();
+    else if (outcome === 'lost') onOwnershipLost?.();
   }, 30_000);
   (interval as { unref?: () => void }).unref?.();
   return () => clearInterval(interval);
