@@ -22,6 +22,8 @@ export type DevinTurnLine =
   | { type: 'text-delta'; text: string }
   | { type: 'thinking'; text: string }
   | { type: 'thinking-delta'; text: string }
+  /** Passive ACP context occupancy, not billed token usage or remaining quota. */
+  | { type: 'context'; contextTokens: number; contextWindow: number }
   | { type: 'tool-use'; toolUseId: string; name: string; input: unknown }
   | { type: 'tool-result'; toolUseId: string; output: string; isError: boolean }
   | { type: 'progress'; phase: 'thinking' | 'tool' | 'writing' | 'waiting'; elapsedMs: number; tool?: string }

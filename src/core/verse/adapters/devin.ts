@@ -107,6 +107,13 @@ function httpsUrl(value: unknown): string | null | undefined {
 /** One protocol line → an event, or null (dropped). Exported for tests. */
 export function devinLineToEvent(line: Record<string, unknown>, turnId: string): VerseParsedEvent | null {
   switch (line['type']) {
+    case 'context': {
+      const used = line['contextTokens'];
+      const size = line['contextWindow'];
+      if (typeof used !== 'number' || !Number.isSafeInteger(used) || used < 0
+        || typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) return null;
+      return { type: 'context', turnId, contextTokens: used, contextWindow: size, exact: true };
+    }
     case 'assistant-message':
     case 'text-delta':
     case 'thinking':
