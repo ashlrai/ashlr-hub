@@ -174,7 +174,7 @@ import {
   writeDaemonActivity,
   type DaemonActivityPhase,
 } from './activity.js';
-import { beginTickProgress, noteTickPhase } from './tick-progress.js';
+import { beginTickProgress, noteTickPhase, readTickProgress } from './tick-progress.js';
 import { boundedBeforeTick } from './tick-deadline.js';
 import {
   consumeDaemonActivationPermit,
@@ -4122,8 +4122,12 @@ export async function tick(
     ) return null;
     const fence = ownershipAlreadyFenced ? undefined : acquireTickMutationFence();
     if (!ownershipAlreadyFenced && opts.ownerLock && !fence) return null;
+    let previousProgress: ReturnType<typeof readTickProgress> = null;
+    const maintenancePhase = 'verification and proposal maintenance';
     try {
       if (!stillOwnsTick()) return null;
+      previousProgress = readTickProgress({ expectPid: process.pid });
+      noteTickPhase(maintenancePhase);
       // V3.10 (U3): the pass needs the tick's capability kind — a
       // `resident-standing` tick takes ONLY the standing gates and never falls
       // back to the legacy path (fail closed when the policy is unreadable).
@@ -4137,6 +4141,15 @@ export async function tick(
       return null;
     } finally {
       releaseLocalStoreLock(fence);
+      // This is observational only: never overwrite a newer tick/phase or
+      // advertise resumed selection after Stop or loss of resident ownership.
+      const currentProgress = readTickProgress({ expectPid: process.pid });
+      if (previousProgress && currentProgress
+        && currentProgress.progress.tickStartedAt === previousProgress.progress.tickStartedAt
+        && currentProgress.progress.phase === maintenancePhase
+        && !stopRequested()) {
+        noteTickPhase(previousProgress.progress.phase, previousProgress.progress.detail);
+      }
     }
   };
   let preDispatchAutoMergePassResult: AutoMergePassResult | null = null;

@@ -17,18 +17,17 @@
  *     projects every field, so a name drift between the route and this client
  *     degrades to "unknown" rather than throwing at render time.
  *
- * Polling: the fleet and the runtime are the two things on this screen that
- * change while nobody clicks anything, and neither has an SSE event yet, so
- * `useFleetPolling` re-reads them on an interval — pausing while the tab is
- * hidden, because a background tab polling a runtime probe is pure waste.
+ * Polling: the fleet, runtime and daemon control change independently of
+ * page actions. The dedicated console has no daemon SSE, so `useFleetPolling`
+ * re-reads them only while this section and the document are visible.
  */
-import { useEffect } from 'react';
 import { ApiError, apiGet, apiPost } from '../../../data/client.js';
 import { getMutationToken, touchMutationHold } from '../../../data/auth-store.js';
 import { invalidate } from '../../../data/cache.js';
 import type { QueryDef } from '../../../data/queries.js';
 import { useRefetch } from '../../../data/hooks.js';
-import { VERSE_CONTROL_KEY, VerseControlLockedError } from './control-queries.js';
+import { VERSE_CONTROL_KEY, verseControlQuery, VerseControlLockedError } from './control-queries.js';
+import { usePollWhileVisible } from '../shell/section-visibility.js';
 import type {
   FleetSnapshot,
   LocalOnlyPolicy,
@@ -147,51 +146,22 @@ export async function setLocalOnly(enabled: boolean): Promise<LocalOnlyUpdateRes
 export const FLEET_POLL_MS = 4000;
 
 /**
- * Keep the runtime and fleet reads live while this section is mounted and the
- * tab is visible.
+ * Keep runtime, fleet and daemon control reads live while the section and
+ * document are visible.
  *
- * Both routes probe a local process, so this is cheap — but only while someone
- * is looking. `visibilitychange` stops the timer when the tab is hidden and
- * takes one immediate reading when it comes back, so a fleet view returned to
- * after lunch is current on the first frame rather than up to an interval old.
+ * Reuse the shell's visibility gate: hidden keep-alive panels stop polling and
+ * returning to the section takes an immediate reading. No account or model
+ * discovery reads are added.
  */
 export function useFleetPolling(intervalMs: number = FLEET_POLL_MS): void {
   const refetchRuntime = useRefetch(servingRuntimeQuery);
   const refetchFleet = useRefetch(fleetQuery);
-
-  useEffect(() => {
-    let timer: ReturnType<typeof setInterval> | null = null;
-
-    const tick = (): void => {
-      refetchRuntime();
-      refetchFleet();
-    };
-
-    const start = (): void => {
-      if (timer !== null) return;
-      timer = setInterval(tick, intervalMs);
-    };
-
-    const stop = (): void => {
-      if (timer === null) return;
-      clearInterval(timer);
-      timer = null;
-    };
-
-    const onVisibility = (): void => {
-      if (document.visibilityState === 'hidden') {
-        stop();
-        return;
-      }
-      tick();
-      start();
-    };
-
-    if (document.visibilityState !== 'hidden') start();
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => {
-      stop();
-      document.removeEventListener('visibilitychange', onVisibility);
-    };
-  }, [intervalMs, refetchRuntime, refetchFleet]);
+  const refetchControl = useRefetch(verseControlQuery);
+  // Dedicated Verse streams carry session/account metadata, not daemon SSE.
+  // The Advanced header therefore needs its own visible control read too.
+  usePollWhileVisible(() => {
+    refetchRuntime();
+    refetchFleet();
+    refetchControl();
+  }, intervalMs);
 }

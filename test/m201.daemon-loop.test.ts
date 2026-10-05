@@ -461,6 +461,7 @@ import {
   saveDaemonState,
 } from '../src/core/daemon/state.js';
 import { diagnoseGuardHealth } from '../src/core/daemon/guard-health.js';
+import { beginTickProgress, noteTickPhase, readTickProgress } from '../src/core/daemon/tick-progress.js';
 import {
   createProposal,
   inboxDir,
@@ -3445,6 +3446,80 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
+
+  it.each(['completed', 'failed', 'stopped', 'ownership-lost', 'newer-phase', 'newer-tick'] as const)(
+    'A1b progress: deferred maintenance reports actual work and preserves %s settlement',
+    async (settlement) => {
+      const repo = fx.makeRepo();
+      repo.enroll();
+      mockBuildBacklog.mockResolvedValue({
+        generatedAt: new Date().toISOString(), repos: [repo.dir], items: [],
+      });
+      let enter!: () => void;
+      const entered = new Promise<void>((resolve) => { enter = resolve; });
+      let finish!: () => void;
+      const pending = new Promise<void>((resolve) => { finish = resolve; });
+      mockRunAutoMergePass.mockImplementationOnce(async () => {
+        enter();
+        await pending;
+        if (settlement === 'failed') throw new Error('fixture maintenance failure');
+        return { merged: 2 };
+      });
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const controller = new AbortController();
+      const acquired = settlement === 'ownership-lost' ? acquireDaemonLock() : null;
+      if (acquired) expect(acquired.acquired).toBe(true);
+      const ownerLock = acquired?.acquired ? acquired.lock : undefined;
+      const endProgress = beginTickProgress();
+      let endNewerProgress: (() => void) | undefined;
+      const resultPromise = tick({
+        ...cfgBuiltin(), foundry: { autoMerge: { enabled: true } },
+      } as AshlrConfig, { dryRun: false, signal: controller.signal, ownerLock });
+      try {
+        await entered;
+        expect(readTickProgress()?.progress.phase).toBe('verification and proposal maintenance');
+        expect(mockRunSwarm).not.toHaveBeenCalled();
+        if (settlement === 'stopped') controller.abort();
+        if (settlement === 'ownership-lost') {
+          fs.writeFileSync(daemonLockPath(), JSON.stringify({
+            pid: process.pid, token: 'maintenance-successor', hostname: 'successor-host',
+            acquiredAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(),
+          }));
+        }
+        if (settlement === 'newer-phase') noteTickPhase('finishing successor work', 'newer observation');
+        if (settlement === 'newer-tick') endNewerProgress = beginTickProgress(new Date(Date.now() + 1000));
+        finish();
+        const result = await resultPromise;
+        expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
+        expect(mockRunSwarm).not.toHaveBeenCalled();
+        expect(readTickProgress()?.progress.phase).toBe(
+          settlement === 'newer-tick' ? 'starting'
+            : settlement === 'newer-phase' ? 'finishing successor work'
+            : settlement === 'stopped' || settlement === 'ownership-lost'
+              ? 'verification and proposal maintenance' : 'selection and dispatch',
+        );
+        if (settlement === 'completed') expect(result.merged).toBe(2);
+        if (settlement === 'failed') {
+          expect(result.merged).toBeUndefined();
+          expect(warning).toHaveBeenCalledWith(
+            '[ashlr] daemon:tick runAutoMergePass failed:', 'fixture maintenance failure',
+          );
+        }
+        if (settlement === 'ownership-lost') expect(result.reason).toBe('shutdown-requested');
+        if (ownerLock) expect(fs.existsSync(`${daemonLockPath()}.mutation.lock`)).toBe(false);
+      } finally {
+        finish();
+        await resultPromise;
+        endProgress();
+        endNewerProgress?.();
+        warning.mockRestore();
+        if (ownerLock) {
+          releaseDaemonLock(ownerLock);
+          fs.rmSync(daemonLockPath(), { force: true });
+        }
+      }
+    },
+  );
 
   it('A1b2: withheld direction authority blocks maintenance for an initially empty backlog', async () => {
     const repo = fx.makeRepo();

@@ -14,10 +14,11 @@
  */
 import { apiGet, apiPost } from '../../../data/client.js';
 import { getMutationToken, touchMutationHold } from '../../../data/auth-store.js';
-import { invalidate } from '../../../data/cache.js';
-import { VerseControlLockedError } from '../autonomy/control-queries.js';
+import { getQuerySnapshot, invalidate, refetchQuery } from '../../../data/cache.js';
+import { verseControlQuery, VerseControlLockedError } from '../autonomy/control-queries.js';
+import { fleetQuery } from '../autonomy/fleet-queries.js';
 import { refreshActivity } from '../shell/useActivity.js';
-import { SURFACE_KEYS, optionalQuery } from '../command/surface-data.js';
+import { authorityQuery, fleetLiveQuery, SURFACE_KEYS, optionalQuery } from '../command/surface-data.js';
 import type {
   FleetControlAction,
   FleetControlActionResultV1,
@@ -63,14 +64,22 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   return result;
 }
 
+/** Native operations change disk state outside the HTTP mutation/SSE path. */
+export function refreshFleetControlReads(): void {
+  for (const query of [fleetControlQuery, fleetQueueQuery, fleetLiveQuery, authorityQuery, verseControlQuery, fleetQuery]) {
+    // Preserve lazy panels: don't fetch a projection nobody has read yet.
+    // Force a new read so an outstanding pre-operation answer cannot win.
+    if (getQuerySnapshot(query.key).status !== 'idle') {
+      void refetchQuery<unknown>(query.key, () => query.fetch(), true);
+    }
+  }
+  void refreshActivity();
+}
+
 /** One control action; the answer carries the state READ BACK after it. */
 export async function postFleetControl(action: FleetControlAction): Promise<FleetControlActionResultV1> {
   const result = await post<FleetControlActionResultV1>(FLEET_CONTROL_PATH, action);
-  invalidate(FLEET_CONTROL_KEYS.state);
-  invalidate(FLEET_CONTROL_KEYS.queue);
-  invalidate(SURFACE_KEYS.fleetLive);
-  invalidate(SURFACE_KEYS.authority);
-  void refreshActivity();
+  refreshFleetControlReads();
   return result;
 }
 
