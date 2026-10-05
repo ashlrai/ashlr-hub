@@ -2204,6 +2204,8 @@ export interface RunOptions {
   selectedGrokAdmission?: () => boolean;
   /** Host-issued exact native Devin principal/model binding; never serialized or sent to a model. */
   selectedDevinAdmission?: (model: string) => DevinCliExecutionBinding | null;
+  /** Host-only notification after an admitted native Devin child actually spawns; never grants billing authority. */
+  onSelectedDevinSpawn?: (model: string, binding: DevinCliExecutionBinding) => void;
   /** Host-only exact selected Claude account/authority fence; never model input. */
   selectedClaudeAdmission?: () => boolean;
   /** Internal caller-owned outcome revision fence; never persisted or sent to a model. */

@@ -253,6 +253,8 @@ export interface RunEngineSandboxedOptions {
   selectedGrokAdmission?: () => boolean;
   /** Host-held exact native Devin execution identity; never passed to the CLI. */
   selectedDevinAdmission?: (model: string) => DevinCliExecutionBinding | null;
+  /** Notification only, after the already-admitted owned native child actually spawns. */
+  onSelectedDevinSpawn?: (model: string, binding: DevinCliExecutionBinding) => void;
   /** Host-only exact selected Claude account/authority fence; never model input. */
   selectedClaudeAdmission?: () => boolean;
   /** Caller-owned current outcome revision, ignored for immutable signed shadows. */
@@ -2234,6 +2236,12 @@ export async function runEngineSandboxed(
   let selectedGrokCommand: { launcher: EngineCommand; direct: NonNullable<ReturnType<typeof grokCliDirectCommand>> } | null = null;
   let selectedGrokIdentityStillCurrent: (() => boolean) | null = null;
   let selectedDevinBinding: DevinCliExecutionBinding | null = null;
+  let selectedDevinSpawns = 0;
+  const notifySelectedDevinSpawn = (): void => {
+    if (!selectedDevinBinding) return;
+    selectedDevinSpawns++;
+    try { opts.onSelectedDevinSpawn?.(model ?? '', selectedDevinBinding); } catch { /* Notification never changes spawn authority. */ }
+  };
   // Initial cleanup deletes its private login copy before verification. Repairs
   // retain the host seal and fence their own fresh copy, never the deleted one.
   const selectedDevinCurrent = (spawn: AutonomousSpawn | null = autonomousFinished ? null : autonomousSpawn): boolean => {
@@ -2529,12 +2537,14 @@ export async function runEngineSandboxed(
       }
       incrementRunActionCount(actionCounts, 'spawnAttempts');
       const _spawnStart = Date.now();
+      const devinSpawnsBefore = selectedDevinSpawns;
       res = selectedStandingClaude
         ? await runSelectedClaude(goalWithContext,cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,(ev) => { const described=describeRunEventForStream(ev);if(described)emitSinkEvent(streamSink,described); })
         : await spawnEngine(cmd, spawnCfg, {
         ...(selectedDevinBinding ? { selectedOutcomeAdmission:() => selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission) && selectedDevinCurrent() }
           : opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
         env: spawnEnv,
+        ...(selectedDevinBinding ? { onSpawn: notifySelectedDevinSpawn } : {}),
         timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         launcher: launcher ?? undefined,
         ...(opts.signal ? { signal: opts.signal } : {}),
@@ -2562,7 +2572,8 @@ export async function runEngineSandboxed(
         const grokUsage = grokStreamUsage(res.output);
         if (grokUsage) res = { ...res, usage: grokUsage };
       }
-      const invocationCount = selectedStandingClaude && res.providerContacted !== true ? 0 : 1 + (res.configRecoveryAttempts ?? 0);
+      const invocationCount = selectedDevinBinding ? selectedDevinSpawns - devinSpawnsBefore
+        : selectedStandingClaude && res.providerContacted !== true ? 0 : 1 + (res.configRecoveryAttempts ?? 0);
       if (res.configRecoveryAttempts) {
         incrementRunActionCount(actionCounts, 'spawnAttempts', res.configRecoveryAttempts);
       }
@@ -2975,6 +2986,7 @@ export async function runEngineSandboxed(
                   incrementRunActionCount(actionCounts, 'verifyRepairAttempts');
                   incrementRunActionCount(actionCounts, 'spawnAttempts');
                   let r: SpawnEngineResult | null = null;
+                  const devinSpawnsBefore = selectedDevinSpawns;
                   try {
                     r = selectedStandingClaude
                       ? await runSelectedClaude(repairGoal,_v2g.perRunTimeoutMs ?? 180_000)
@@ -2983,6 +2995,7 @@ export async function runEngineSandboxed(
                         repairSpawn !== null && selectedDevinCurrent(repairSpawn) }
                         : opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
                       env:repairSpawn?.env ?? env,
+                      ...(selectedDevinBinding ? { onSpawn: notifySelectedDevinSpawn } : {}),
                       timeoutMs:_v2g.perRunTimeoutMs ?? 180_000,
                       launcher:repairSpawn?.launcher ?? launcher ?? undefined,
                       ...(opts.signal ? { signal:opts.signal } : {}),
@@ -3003,7 +3016,8 @@ export async function runEngineSandboxed(
                     const reported = grokStreamUsage(r.output);
                     if (reported) r = {...r,usage:reported};
                   }
-                  const invocationCount = selectedStandingClaude && r.providerContacted !== true ? 0 : 1 + (r.configRecoveryAttempts ?? 0);
+                  const invocationCount = selectedDevinBinding ? selectedDevinSpawns - devinSpawnsBefore
+                    : selectedStandingClaude && r.providerContacted !== true ? 0 : 1 + (r.configRecoveryAttempts ?? 0);
                   if (r.configRecoveryAttempts) {
                     incrementRunActionCount(actionCounts, 'spawnAttempts', r.configRecoveryAttempts);
                   }
