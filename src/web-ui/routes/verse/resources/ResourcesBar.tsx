@@ -198,9 +198,11 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   const cloudRead = useQuery(cloudCreditsQuery);
   const devinRead = useQuery(devinQuery);
   const devin = devinRead.data?.value ?? null;
-  const [now, setNow] = useState(() => Date.now());
-  // One shared local clock expires display metadata; it makes no provider request.
-  usePollWhileVisible(() => setNow(Date.now()), ACCOUNT_CLOCK_MS);
+  const [, setClock] = useState(() => Date.now());
+  // The poll triggers expiry renders; query arrivals use the actual render time,
+  // so a freshly retrieved reading is not rejected by an older clock tick.
+  usePollWhileVisible(() => setClock(Date.now()), ACCOUNT_CLOCK_MS);
+  const now = Date.now();
   const rows = useMemo(
     () => (data.loading ? [] : barRows(buildCapacityRows(data.seats, { health: data.health, budget: data.budget, local: 'collapse', now }), { healthRead: data.health !== null, now, pendingSeatIds: data.pendingSeatIds, devinConsumption: devin?.consumption })),
     [data.loading, data.seats, data.health, data.budget, data.pendingSeatIds, now, devin?.consumption],

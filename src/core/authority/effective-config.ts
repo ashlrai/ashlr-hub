@@ -657,6 +657,17 @@ export function primeStandingPolicyCache(evaluation: StandingEvaluation): void {
  * and expiry are re-read on every call so lowering is instant.
  */
 export function currentStandingPolicy(): EffectivePolicy | null {
+  return currentStandingPolicyReadiness().policy;
+}
+
+/** Display-only explanation; the policy retains every existing execution check. */
+export interface StandingPolicyReadiness {
+  policy: EffectivePolicy | null;
+  grantState: GrantState | null;
+  reason: string | null;
+}
+
+export function currentStandingPolicyReadiness(): StandingPolicyReadiness {
   try {
     const nowMs = Date.now();
     const key = ledgerPath();
@@ -676,11 +687,13 @@ export function currentStandingPolicy(): EffectivePolicy | null {
       policyCache.set(key, entry);
     }
     const ev = entry!.evaluation;
-    if (!ev.policy || !ev.grant) return null;
-    if (kill || nowMs >= Date.parse(ev.grant.expiresAt)) return null;
-    return ev.policy;
+    if (ev.grant && nowMs >= Date.parse(ev.grant.expiresAt)) {
+      return { policy: null, grantState: 'expired', reason: 'The standing grant has expired.' };
+    }
+    const policy = ev.policy && ev.grant && !kill ? ev.policy : null;
+    return { policy, grantState: ev.grantState, reason: policy ? null : ev.inactiveReason ?? ev.grantReason };
   } catch {
-    return null;
+    return { policy: null, grantState: null, reason: null };
   }
 }
 

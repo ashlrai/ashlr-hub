@@ -16,7 +16,7 @@
  * a failure whose spend counts the full cap until the operator checks
  * app.devin.ai (budget.ts, fail closed).
  */
-import { currentStandingPolicy, standingAuthorizesDevin } from '../authority/effective-config.js';
+import { currentStandingPolicy, currentStandingPolicyReadiness, standingAuthorizesDevin, type StandingPolicyReadiness } from '../authority/effective-config.js';
 import type { EffectivePolicy } from '../authority/types.js';
 import { isSafeBranchName } from '../cloud/checkout.js';
 import { CLOUD_REPO_PATTERN } from '../cloud/store.js';
@@ -80,6 +80,8 @@ export interface DevinServiceDeps {
   config?: () => AshlrConfig['devin'] | undefined;
   /** The live standing policy (default: currentStandingPolicy). */
   policy?: () => EffectivePolicy | null;
+  /** Display diagnostics for an injected policy; never used to authorize a launch. */
+  policyReadiness?: () => Pick<StandingPolicyReadiness, 'grantState' | 'reason'>;
   /** The local CLI's state for the overview (tests; default: the shared cli-probe). */
   cliProbe?: () => Promise<Pick<DevinCliProbe, 'state'> & { cliPath?: string | null }>;
   /** The CLI's model catalog for the overview (tests; default: models.ts, never listing on the request). */
@@ -204,6 +206,7 @@ export function devinFleetVerdict(input: {
   connected: boolean;
   optIn: boolean;
   policy: EffectivePolicy | null;
+  authority?: Pick<StandingPolicyReadiness, 'grantState' | 'reason'> | null;
   fleetGate: { ok: boolean; reason: string | null };
 }): FleetReadinessVerdict {
   const v = (ready: boolean, tone: ReadinessVerdict['tone'], word: string, detail: string, fix: ReadinessFix | null = null): FleetReadinessVerdict =>
@@ -213,7 +216,12 @@ export function devinFleetVerdict(input: {
   if (!input.optIn) {
     return v(false, 'off', 'Off', 'The fleet may not launch Devin sessions; you can still run them yourself.', commandFix('Let the fleet use Devin', 'ashlr devin fleet on'));
   }
-  if (!input.policy) return v(false, 'warn', 'Waiting', 'No standing grant is in force.');
+  if (!input.policy) {
+    if (input.authority?.grantState === 'none') return v(false, 'warn', 'Waiting', 'No standing grant is installed.');
+    return v(false, 'warn', 'Waiting', input.authority?.reason
+      ? `The effective standing policy is held: ${input.authority.reason}`
+      : 'The effective standing policy is unavailable; grant readiness is unconfirmed.');
+  }
   const granted = standingAuthorizesDevin(input.policy);
   if (!granted.ok) {
     return v(false, 'warn', 'Not in the grant', `${granted.reason} Draft a new grant (or re-approve) with the Devin fleet opt-in on.`,
@@ -243,8 +251,20 @@ export async function devinStatus(deps: DevinServiceDeps = {}, tasks: readonly D
   const present = connection ? await keyPresent(deps) : false;
   const connected = connection !== null && present;
   const view = devinBudgetView(tasks, readDevinBudget(), (deps.now ?? (() => new Date()))());
-  const policy = enabled && connected && devinFleetOptIn(section) ? safePolicy(deps) : null;
-  const fleet = devinFleetVerdict({ enabled, connected, optIn: devinFleetOptIn(section), policy, fleetGate: view.canFleetLaunch });
+  let readiness: StandingPolicyReadiness = { policy: null, grantState: null, reason: null };
+  if (enabled && connected && devinFleetOptIn(section)) {
+    if (deps.policy) {
+      readiness.policy = safePolicy(deps);
+      try {
+        const diagnostic = deps.policyReadiness?.();
+        readiness.grantState = diagnostic?.grantState ?? null;
+        readiness.reason = diagnostic?.reason ?? null;
+      } catch { /* Unknown display evidence stays unknown. */ }
+    } else {
+      readiness = currentStandingPolicyReadiness();
+    }
+  }
+  const fleet = devinFleetVerdict({ enabled, connected, optIn: devinFleetOptIn(section), policy: readiness.policy, authority: readiness, fleetGate: view.canFleetLaunch });
   let state: DevinStatus['state'] = 'ready';
   let reason = 'Connected. Devin sessions deliver pull requests through the standing gates.';
   if (!enabled) {

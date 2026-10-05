@@ -193,6 +193,24 @@ describe('status and readiness lines', () => {
     expect(ready.fleet).toMatchObject({ ready: false, word: 'Off', fix: { command: 'ashlr devin fleet on' } });
   });
 
+  it('distinguishes missing, held, and unknown authority without changing exposure or contacting Devin', async () => {
+    const gate = { ok: true, reason: null };
+    const input = { enabled: true, connected: true, optIn: true, policy: null, fleetGate: gate };
+    expect(devinFleetVerdict({ ...input, authority: { grantState: 'none', reason: 'No grant' } }))
+      .toMatchObject({ ready: false, word: 'Waiting', detail: 'No standing grant is installed.' });
+    expect(devinFleetVerdict({ ...input, authority: { grantState: 'active', reason: 'The autonomy switch is Off.' } }))
+      .toMatchObject({ ready: false, word: 'Waiting', detail: 'The effective standing policy is held: The autonomy switch is Off.' });
+    expect(devinFleetVerdict(input)).toMatchObject({ ready: false, detail: 'The effective standing policy is unavailable; grant readiness is unconfirmed.' });
+    await connect(); resetDevinStatusCacheForTest();
+    const status = await devinStatus(deps({ config: () => ({ enabled: true, fleet: true }),
+      policyReadiness: () => ({ grantState: 'paused', reason: 'The authority code changed.' }) }));
+    expect(status.fleet).toMatchObject({ ready: false, detail: 'The effective standing policy is held: The authority code changed.' });
+    const unknown = await devinStatus(deps({ config: () => ({ enabled: true, fleet: true }),
+      policy: () => { throw new Error('unavailable'); }, policyReadiness: () => { throw new Error('unavailable'); } }));
+    expect(unknown.fleet).toMatchObject({ ready: false, detail: 'The effective standing policy is unavailable; grant readiness is unconfirmed.' });
+    expect(api.requests).toEqual([]);
+  });
+
   it('fleet verdict: opt-in, then a grant that names Devin, then the reserve; ready names the two-judge rule', () => {
     const gate = { ok: true, reason: null };
     const withoutDevin = standingPolicy([repoPolicy(REPO)]);
