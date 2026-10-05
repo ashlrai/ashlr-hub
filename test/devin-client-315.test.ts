@@ -193,6 +193,26 @@ describe('requests', () => {
 });
 
 describe('retries and failures', () => {
+  it('preserves a local pre-contact refusal without contacting or retrying the provider', async () => {
+    const f = fakeDevin();
+    await expect(client(f).createSession(FAKE_ORG, { prompt:'x' }, () => {
+      throw new DevinApiError('budget', 'Current local budget refused.');
+    })).rejects.toMatchObject({ code:'budget', message:'Current local budget refused.' });
+    expect(f.requests).toEqual([]);
+  });
+
+  it('re-admits after a create 429 wait and preserves the refusal rather than reporting network ambiguity', async () => {
+    const f = fakeDevin();
+    f.forced.push({ status:429 });
+    let admitted = true;
+    const c = new DevinClient({ apiKey:f.key, fetch:f.fetch, sleep:async () => { admitted=false; } });
+    await expect(c.createSession(FAKE_ORG, { prompt:'x' }, () => {
+      if (!admitted) throw new DevinApiError('not-enabled', 'Stop changed during backoff.');
+    })).rejects.toMatchObject({ code:'not-enabled' });
+    expect(f.requests).toHaveLength(1);
+    expect(f.sessions.size).toBe(0);
+  });
+
   it('retries a read on 429 (honouring a sane Retry-After) and on 5xx, then succeeds', async () => {
     const f = fakeDevin();
     const slept: number[] = [];

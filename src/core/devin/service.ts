@@ -16,7 +16,7 @@
  * a failure whose spend counts the full cap until the operator checks
  * app.devin.ai (budget.ts, fail closed).
  */
-import { currentStandingPolicy, currentStandingPolicyReadiness, standingAuthorizesDevin, type StandingPolicyReadiness } from '../authority/effective-config.js';
+import { clampBudgetPolicy, currentStandingPolicy, currentStandingPolicyReadiness, standingAuthorizesDevin, type StandingPolicyReadiness } from '../authority/effective-config.js';
 import type { EffectivePolicy } from '../authority/types.js';
 import { isSafeBranchName } from '../cloud/checkout.js';
 import { CLOUD_REPO_PATTERN } from '../cloud/store.js';
@@ -24,6 +24,9 @@ import { defaultCloudGh } from '../cloud/tracker.js';
 import { loadConfigReadOnly, saveConfig, loadConfig } from '../config.js';
 import { repoPolicyFor } from '../fleet/merge-gates.js';
 import type { FleetReadinessVerdict, ReadinessFix, ReadinessVerdict } from '../routing/readiness-types.js';
+import { loadBudgetPolicy } from '../routing/budget-store.js';
+import { DEVIN_SEAT_ID, effectiveSeatPolicy } from '../routing/policy.js';
+import { killSwitchOn } from '../sandbox/policy.js';
 import type { AshlrConfig } from '../types.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { join } from 'node:path';
@@ -80,6 +83,8 @@ export interface DevinServiceDeps {
   config?: () => AshlrConfig['devin'] | undefined;
   /** The live standing policy (default: currentStandingPolicy). */
   policy?: () => EffectivePolicy | null;
+  /** Fleet Stop, re-read before each create attempt; manual use does not require standing authority. */
+  killActive?: () => boolean;
   /** Display diagnostics for an injected policy; never used to authorize a launch. */
   policyReadiness?: () => Pick<StandingPolicyReadiness, 'grantState' | 'reason'>;
   /** The local CLI's state for the overview (tests; default: the shared cli-probe). */
@@ -463,6 +468,7 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
   const repo = typeof req.repo === 'string' ? req.repo.trim() : '';
   if (!CLOUD_REPO_PATTERN.test(repo)) return refusal('The repo must look like owner/name, for example ashlrai/ashlr-hub.');
   if (!ORIGINS.includes(req.origin)) return refusal('The launch came from an unknown place.');
+  const origin = req.origin;
   const rawPrompt = typeof req.prompt === 'string' ? req.prompt.replace(/\0/g, '').trim() : '';
   if (rawPrompt === '') return refusal('Describe the task before launching it.');
   const prompt = rawPrompt.slice(0, DEVIN_PROMPT_MAX_CHARS);
@@ -471,7 +477,7 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
   const givenBase = typeof req.baseBranch === 'string' ? req.baseBranch.trim() : '';
   if (givenBase !== '' && !isSafeBranchName(givenBase)) return refusal(`"${givenBase.slice(0, 80)}" isn't a branch name the Devin lane accepts.`);
   const internal = req as Partial<DevinInternalLaunch>;
-  const chatLaunch = req.origin === 'chat' && (req as Partial<DevinChatLaunch>).contract === 'chat';
+  const chatLaunch = origin === 'chat' && (req as Partial<DevinChatLaunch>).contract === 'chat';
   const planOnly = chatLaunch && (req as Partial<DevinChatLaunch>).planOnly === true;
   const backlogItemId = typeof internal.backlogItemId === 'string' && REF_ID_RE.test(internal.backlogItemId) ? internal.backlogItemId : null;
 
@@ -480,7 +486,9 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
   if (!devinEnabled(section)) return refusal(devinFailureSentence('not-enabled') + ' Turn it on with `ashlr devin enable`.', 'not-enabled');
   const connection = readDevinConnection();
   if (!connection) return refusal(devinFailureSentence('not-connected'), 'not-connected');
-  if (req.origin === 'fleet') {
+  const connectionIdentity = consumptionIdentity();
+  if (connectionIdentity === null) return refusal('The Devin connection change is not confirmed, so nothing was launched.', 'not-connected');
+  if (origin === 'fleet') {
     if (!devinFleetOptIn(section)) return refusal('The fleet may not launch Devin sessions (`ashlr devin fleet on`).', 'not-enabled');
     const policy = safePolicy(deps);
     if (!policy) return refusal('No standing grant is in force, so the fleet may not launch Devin sessions.', 'not-enabled');
@@ -507,7 +515,7 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
   const now = clock();
   const budget = readDevinBudget();
   const view = devinBudgetView(listDevinTasks(Number.MAX_SAFE_INTEGER), budget, now);
-  const verdict = req.origin === 'fleet' ? view.canFleetLaunch : view.canLaunch;
+  const verdict = origin === 'fleet' ? view.canFleetLaunch : view.canLaunch;
   if (!verdict.ok) return refusal(verdict.reason ?? 'The Devin budget refused this launch.', 'budget');
   const id = newDevinTaskId(now);
   const createdAt = now.toISOString();
@@ -519,8 +527,8 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
     branch: `${DEVIN_BRANCH_PREFIX}${id}`,
     title,
     prompt,
-    origin: req.origin,
-    requestedBy: req.origin === 'fleet' ? 'fleet' : 'mason',
+    origin,
+    requestedBy: origin === 'fleet' ? 'fleet' : 'mason',
     sessionId: null,
     launchOrgId: connected.orgId,
     sessionUrl: null,
@@ -545,8 +553,13 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
   } catch {
     return refusal("Couldn't save the Devin task, so it wasn't launched.", 'unknown');
   }
+  let ownedTaskRecord = JSON.stringify(task);
 
   const fail = (failure: DevinFailureCode, reason: string): DevinLaunchResponse => {
+    // An operator or another process may have changed the row during a 429 wait.
+    // A refused stale launch must not resurrect or overwrite that actor's state.
+    const current = readDevinTask(id);
+    if (!current || JSON.stringify(current) !== ownedTaskRecord) return { ok: false, task: current, error: reason, failure };
     Object.assign(task, { state: 'failed', failure, stateReason: reason });
     try { writeDevinTask(task); } catch { /* the response still carries the failure */ }
     return { ok: false, task, error: reason, failure };
@@ -567,9 +580,39 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
 
   const { client, orgId } = connected;
   const tag = devinSessionTaskTag(id);
+  const beforeContact = (): void => {
+    const sectionNow = readConfig(deps);
+    if (!devinEnabled(sectionNow)) throw new DevinApiError('not-enabled', 'The Devin lane was turned off before launch.');
+    if (consumptionIdentity() !== connectionIdentity || orgId !== connection.orgId) {
+      throw new DevinApiError('not-connected', 'The Devin connection changed before launch. Recheck it before trying again.');
+    }
+    const current = readDevinTask(id);
+    if (!current || JSON.stringify(current) !== ownedTaskRecord || current.state !== 'launching' || current.sessionId !== null) {
+      throw new DevinApiError('not-enabled', 'This Devin task changed before launch, so the stale create was refused.');
+    }
+    if (origin === 'fleet') {
+      if ((deps.killActive ?? killSwitchOn)()) throw new DevinApiError('not-enabled', 'Stop is on, so the fleet launches nothing.');
+      if (!devinFleetOptIn(sectionNow)) throw new DevinApiError('not-enabled', 'The Devin fleet opt-in was turned off before launch.');
+      const policy = safePolicy(deps);
+      if (!policy || !repoPolicyFor(policy, repo)) throw new DevinApiError('not-enabled', 'The current standing grant no longer authorizes this Devin repo.');
+      const granted = standingAuthorizesDevin(policy);
+      if (!granted.ok) throw new DevinApiError('not-enabled', granted.reason);
+      const clamped = clampBudgetPolicy(loadBudgetPolicy(), policy, [DEVIN_SEAT_ID]);
+      if (!effectiveSeatPolicy(clamped, DEVIN_SEAT_ID, 'devin').enabled) throw new DevinApiError('budget', 'The current budget policy keeps autonomy off Devin.');
+    }
+    const budgetNow = readDevinBudget();
+    if (task.maxAcu > budgetNow.maxAcuPerSession) throw new DevinApiError('budget', 'The Devin session cap was lowered before launch.');
+    // Check the actual outgoing cap against current limits, excluding exactly
+    // this unchanged reservation. Every other task and unknown hold still counts.
+    const viewNow = devinBudgetView(listDevinTasks(Number.MAX_SAFE_INTEGER).filter(row => row.id !== id),
+      { ...budgetNow, maxAcuPerSession: task.maxAcu }, clock());
+    const verdictNow = origin === 'fleet' ? viewNow.canFleetLaunch : viewNow.canLaunch;
+    if (!verdictNow.ok) throw new DevinApiError('budget', verdictNow.reason ?? 'The current Devin budget refused this launch.');
+  };
   try {
     Object.assign(task, { state: 'launching' });
     writeDevinTask(task);
+    ownedTaskRecord = JSON.stringify(task);
     const session = await client.createSession(orgId, {
       prompt: chatLaunch ? buildDevinChatPrompt(task, { planOnly, playbook: playbook.block }) : buildDevinPrompt(task, playbook.block),
       title: `${DEVIN_PR_TITLE_PREFIX} ${title}`,
@@ -581,7 +624,7 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
         structuredOutputRequired: false,
       }),
       devinMode: task.devinMode,
-    });
+    }, beforeContact);
     noteApiSuccess();
     return adopt(session);
   } catch (error) {

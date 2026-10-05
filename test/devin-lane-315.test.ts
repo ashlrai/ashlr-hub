@@ -32,10 +32,12 @@ import {
   readDevinTask,
   updateDevinBudget,
   writeDevinConnection,
+  writeDevinConsumptionConnectionState,
   writeDevinTask,
 } from '../src/core/devin/store.js';
 import { refreshDevinTasks, resetDevinTrackerCursorForTest, stateFromSession } from '../src/core/devin/tracker.js';
 import { DEFAULT_DEVIN_BUDGET, type DevinBudgetV1, type DevinTaskV1 } from '../src/core/devin/types.js';
+import { updateBudgetPolicy } from '../src/core/routing/budget-store.js';
 import { scrubSecrets } from '../src/core/util/scrub.js';
 import type { CloudPrPreview } from '../src/core/cloud/pr-preview.js';
 import { CloudInputError } from '../src/core/cloud/cloud-api.js';
@@ -337,6 +339,124 @@ describe('launch', () => {
     const inGrant = devinPolicy([repoPolicy(REPO)]);
     expect(await launchDevinTask(fleet, deps({ config: () => ({ enabled: true, fleet: true }), policy: () => inGrant }))).toMatchObject({ ok: false, failure: 'budget', error: expect.stringMatching(/kept for you/) });
     expect(api.requests.filter((r) => r.method === 'POST')).toEqual([]);
+  });
+});
+
+describe('create admission after asynchronous preparation', () => {
+  type Phase = 'key' | 'branch' | '429';
+  type Change = 'stop' | 'grant' | 'repo' | 'producer' | 'opt-out' | 'lane-off' | 'connection' | 'pending-connection' | 'routing-off' | 'session-cap' | 'daily-cap' | 'other-hold';
+  async function pendingLaunch(phase: Phase, origin: 'fleet' | 'operator' = 'fleet') {
+    await connect();
+    updateDevinBudget({ acuBudgetTotal:100, reserveAcu:0, pauseAtFraction:1, maxAcuPerSession:10, maxAcuPerDay:100 });
+    updateBudgetPolicy({ mode:'balanced' });
+    updateBudgetPolicy({ seatId:'devin', policy:{ enabled:true } });
+    let section = { enabled:true, fleet:true };
+    let policy: ReturnType<typeof devinPolicy> | null = devinPolicy([repoPolicy(REPO)]);
+    let stop = false;
+    let entered!: () => void;
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { entered=resolve; });
+    const paused = new Promise<void>(resolve => { release=resolve; });
+    const wait = async () => { entered(); await paused; };
+    if (phase === '429') api.forced.push({ status:429 });
+    const request = { repo:REPO, prompt:'Synthetic admission work', origin };
+    const launch = launchDevinTask(request, deps({
+      config:() => section,
+      policy:() => policy,
+      killActive:() => stop,
+      keyStore:{ platform:'darwin', run:async (args, stdin) => {
+        if (phase === 'key' && args[0] === 'find-generic-password' && args.includes('-w')) await wait();
+        return keychain.run(args, stdin);
+      } },
+      gh:async () => { if (phase === 'branch') await wait(); return { ok:true, stdout:'main\n', stderr:'' }; },
+      sleep:async () => { if (phase === '429') await wait(); },
+    }));
+    await waiting;
+    const mutate = (change: Change) => {
+      switch (change) {
+        case 'stop': stop=true; break;
+        case 'grant': policy=null; break;
+        case 'repo': policy=devinPolicy([repoPolicy('ashlrai/replaced')]); break;
+        case 'producer': policy=devinPolicy([repoPolicy(REPO)], ['judge']); break;
+        case 'opt-out': section={ enabled:true, fleet:false }; break;
+        case 'lane-off': section={ enabled:false, fleet:true }; break;
+        case 'connection': writeDevinConnection({ ...readDevinConnection()!, orgId:'org-replaced' }); break;
+        case 'pending-connection': writeDevinConsumptionConnectionState('pending'); break;
+        case 'routing-off': updateBudgetPolicy({ seatId:'devin', policy:{ enabled:false } }); break;
+        case 'session-cap': updateDevinBudget({ maxAcuPerSession:1 }); break;
+        case 'daily-cap': updateDevinBudget({ maxAcuPerDay:0 }); break;
+        case 'other-hold': writeDevinTask(task({ state:'failed', sessionId:null, sessionUrl:null, session:null, failure:'network', maxAcu:100 })); break;
+      }
+    };
+    return { launch, mutate, release, request };
+  }
+
+  const changes: Change[] = ['stop','grant','repo','producer','opt-out','lane-off','connection','pending-connection','routing-off','session-cap','daily-cap','other-hold'];
+  for (const phase of ['key','branch','429'] as const) {
+    it.each(changes.filter(change => phase === '429' || change !== 'session-cap'))(`refuses %s changed during ${phase} without a new POST or ambiguous exposure`, async change => {
+      const pending = await pendingLaunch(phase);
+      pending.mutate(change);
+      pending.release();
+      const result = await pending.launch;
+      expect(result.ok).toBe(false);
+      expect(api.requests.filter(r => r.method === 'POST')).toHaveLength(phase === '429' ? 1 : 0);
+      expect(api.sessions.size).toBe(0);
+      if (result.task) {
+        expect(result.task).toMatchObject({ state:'failed', sessionId:null });
+        expect(result.failure).not.toBe('network');
+        expect(result.failure).not.toBe('unparsed');
+        expect(devinTaskAcuUsed(result.task)).toBe(0);
+      }
+      if (change === 'other-hold') expect(listDevinTasks().find(row => row.maxAcu === 100)?.failure).toBe('network');
+    });
+  }
+
+  it.each(['key','branch'] as const)('uses a smaller current cap chosen after %s preparation', async phase => {
+    const pending = await pendingLaunch(phase);
+    pending.mutate('session-cap');
+    pending.release();
+    expect(await pending.launch).toMatchObject({ ok:true, task:{ maxAcu:1 } });
+    expect(api.requests.filter(r => r.method === 'POST')).toMatchObject([{ body:{ max_acu_limit:1 } }]);
+  });
+
+  it('preserves an independently closed own row when a stale retry is refused', async () => {
+    const pending = await pendingLaunch('429');
+    const row = listDevinTasks()[0]!;
+    writeDevinTask({ ...row, state:'closed', stateReason:'Closed by another actor.' });
+    const before = readDevinTask(row.id);
+    pending.release();
+    expect(await pending.launch).toMatchObject({ ok:false, task:{ state:'closed' }, failure:'not-enabled' });
+    expect(readDevinTask(row.id)).toEqual(before);
+    expect(api.requests.filter(r => r.method === 'POST')).toHaveLength(1);
+    expect(api.sessions.size).toBe(0);
+  });
+
+  it('does not let a caller change a reserved fleet launch into operator authority during backoff', async () => {
+    const pending = await pendingLaunch('429');
+    pending.request.origin='operator';
+    pending.mutate('grant');
+    pending.release();
+    expect(await pending.launch).toMatchObject({ ok:false, task:{ origin:'fleet', requestedBy:'fleet' }, failure:'not-enabled' });
+    expect(api.requests.filter(r => r.method === 'POST')).toHaveLength(1);
+    expect(api.sessions.size).toBe(0);
+  });
+
+  it('excludes only its unchanged reservation when one fleet session exactly fits current limits', async () => {
+    const pending = await pendingLaunch('429');
+    updateDevinBudget({ acuBudgetTotal:10, maxAcuPerDay:10, maxConcurrent:1, maxSessionsPerDay:1,
+      fleetMaxConcurrent:1, fleetMaxSessionsPerDay:1 });
+    pending.release();
+    expect(await pending.launch).toMatchObject({ ok:true, task:{ state:'running', maxAcu:10 } });
+    expect(api.requests.filter(r => r.method === 'POST')).toHaveLength(2);
+    expect(api.sessions.size).toBe(1);
+  });
+
+  it('keeps explicit operator use available without a grant or fleet Stop permission', async () => {
+    const pending = await pendingLaunch('branch', 'operator');
+    pending.mutate('stop'); pending.mutate('grant'); pending.mutate('opt-out'); pending.mutate('routing-off');
+    pending.release();
+    expect(await pending.launch).toMatchObject({ ok:true, task:{ requestedBy:'mason', origin:'operator' } });
+    expect(api.sessions.size).toBe(1);
   });
 });
 
