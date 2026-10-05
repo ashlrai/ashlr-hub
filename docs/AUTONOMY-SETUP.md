@@ -4,7 +4,7 @@
 
 ## Autonomy commissioning path
 
-**Current release status (3.18):** `ashlr authority setup` is a resumable preparation
+**Setup and runtime behavior:** `ashlr authority setup` is a resumable preparation
 workflow. Its dry run is read-only; a live run can create custody, GitHub and
 grant state after your explicit actions. Setup itself never installs or restarts
 the daemon. The legacy service paths (`ashlr daemon install`, `ashlr setup`,
