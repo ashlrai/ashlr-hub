@@ -26,6 +26,7 @@ import {
   DEVIN_BUDGET_SCHEMA_VERSION,
   DEVIN_CONNECTION_SCHEMA_VERSION,
   DEVIN_ORG_ID_PATTERN,
+  DEVIN_SESSION_ID_PATTERN,
   DEVIN_TASK_ID_PATTERN,
   DEVIN_TASK_SCHEMA_VERSION,
   type DevinBudgetUpdate,
@@ -176,7 +177,7 @@ export function isDevinTask(value: unknown): value is DevinTaskV1 {
     && isString(value['prompt'])
     && TASK_ORIGINS.includes(value['origin'] as DevinTaskOrigin)
     && (value['requestedBy'] === 'mason' || value['requestedBy'] === 'fleet')
-    && isNullableString(value['sessionId'])
+    && (value['sessionId'] === null || (isString(value['sessionId']) && DEVIN_SESSION_ID_PATTERN.test(value['sessionId'])))
     && (value['launchOrgId'] === undefined || (isString(value['launchOrgId']) && DEVIN_ORG_ID_PATTERN.test(value['launchOrgId'])))
     && isNullableString(value['sessionUrl'])
     && TASK_STATES.includes(value['state'] as DevinTaskState)

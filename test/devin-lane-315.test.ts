@@ -26,6 +26,7 @@ import {
 } from '../src/core/devin/service.js';
 import {
   devinHome,
+  isDevinTask,
   listDevinTasks,
   readDevinConnection,
   readDevinTask,
@@ -128,6 +129,24 @@ function task(patch: Partial<DevinTaskV1> = {}): DevinTaskV1 {
 }
 
 // ---------------------------------------------------------------------------
+
+describe('persisted provider session identity', () => {
+  it.each(['0123456789abcdef0123456789abcdef', 'devin-legacy_ABC-123', null])('roundtrips supported nullable identity %j', sessionId => {
+    const row = task({ sessionId, sessionUrl:sessionId ? `https://app.devin.ai/sessions/${sessionId}` : null });
+    writeDevinTask(row);
+    expect(readDevinTask(row.id)).toMatchObject({ sessionId });
+    expect(listDevinTasks().map(t => t.sessionId)).toEqual([sessionId]);
+  });
+
+  it.each(['a'.repeat(31), 'a'.repeat(33), 'A'.repeat(32), '../sessions', 'devin-../x', 'devin-ok/messages', 'devin-ok%2fmessages'])('refuses malformed persisted identity %j without overwriting a valid legacy row', sessionId => {
+    const row = task();
+    writeDevinTask(row);
+    const before = readDevinTask(row.id);
+    expect(isDevinTask({ ...row, sessionId })).toBe(false);
+    expect(() => writeDevinTask({ ...row, sessionId })).toThrow(/malformed task/);
+    expect(readDevinTask(row.id)).toEqual(before);
+  });
+});
 
 describe('key custody: the macOS Keychain, stdin only', () => {
   it('stores the key via `security -i` on stdin — never in argv — and reads it back', async () => {
