@@ -27,7 +27,6 @@
  * each batch exactly once. The first poll of a page carries none (history is
  * not news).
  */
-import { refreshDesktopState } from '../../../app/desktop-shell.js';
 import { useSyncExternalStore } from 'react';
 import type { VerseActivityCompletion, VerseActivityResponse } from '../../../../core/verse/workbench-types.js';
 import { VERSE_ACTIVITY_PATH } from '../../../../core/verse/workbench-types.js';
@@ -88,9 +87,7 @@ export function refreshActivity(): Promise<void> {
       const data = await fetcher(path);
       const firstPoll = cursor === null;
       cursor = typeof data.cursor === 'string' ? data.cursor : null;
-      const previousRuns = snapshot.data?.localWork?.localRuns;
       emit({ status: 'ready', data, updatedAt: Date.now(), error: null });
-      if (data.localWork?.localRuns !== previousRuns) refreshDesktopState();
       if (!firstPoll && Array.isArray(data.completions) && data.completions.length > 0) {
         for (const l of [...completionListeners]) {
           try { l(data.completions); } catch { /* a listener must not stop the loop */ }

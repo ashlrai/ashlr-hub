@@ -13,7 +13,7 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { resetDesktopStateForTests, type DesktopState } from '../../../app/desktop-shell.js';
+import { resetDesktopStateForTests, type DesktopState } from '../../../app/desktop-state.js';
 import { ToastProvider } from '../../../components/primitives/Toast.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { evictAll } from '../../../data/cache.js';

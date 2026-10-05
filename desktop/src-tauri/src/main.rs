@@ -2213,6 +2213,12 @@ fn desktop_view(handle: &AppHandle) -> Option<desktop_prefs::DesktopStateView> {
     let status = lock(&state.hotkey).clone();
     let delivery = lock(&state.delivery).unwrap_or(notify::Delivery::Script);
     let sleep = lock(&state.sleep_settings).clone();
+    let power = lock(&state.power).as_ref().map(|p| serde_json::json!({
+        "automatic": p.automatic, "requested": p.held(), "localRuns": p.local_runs,
+        "checkedAt": p.checked_at, "platform": std::env::consts::OS, "error": p.error,
+        "powerSource": sleep.source, "idleSleepSeconds": sleep.idle_sleep_seconds,
+        "settingsCheckedAt": sleep.checked_at,
+    }));
     Some(desktop_prefs::DesktopStateView {
         hotkey: desktop_prefs::HotkeyView {
             enabled: prefs.global_hotkey,
@@ -2220,11 +2226,7 @@ fn desktop_view(handle: &AppHandle) -> Option<desktop_prefs::DesktopStateView> {
             accelerator: hotkey::SUMMON_DISPLAY.to_string(),
             error: if prefs.global_hotkey { status.error } else { None },
         },
-        power: lock(&state.power).as_ref().map(|p| serde_json::json!({
-            "automatic": p.automatic, "requested": p.held(), "localRuns": p.local_runs,
-            "checkedAt": p.checked_at, "platform": std::env::consts::OS, "error": p.error,
-            "powerSource": sleep.source, "idleSleepSeconds": sleep.idle_sleep_seconds, "settingsCheckedAt": sleep.checked_at,
-        })),
+        power,
         notifications: desktop_prefs::NotificationsView {
             enabled: prefs.notifications,
             delivery: delivery.wire_name(),

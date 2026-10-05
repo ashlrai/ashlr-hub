@@ -1,4 +1,4 @@
-.status { position: relative; margin-left: auto; font-size: 12px; color: var(--text-secondary); }
+.status { position: relative; margin-left: 0; font-size: 12px; color: var(--text-secondary); }
 .status > summary { cursor: pointer; padding: 8px 12px; border-radius: 8px; list-style: none; }
 .status > summary:hover { background: var(--bg-hover); }
 .status > summary:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 2px; }

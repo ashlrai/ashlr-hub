@@ -6,14 +6,13 @@
  * variables, a drag-region mirror, a command event (menu bar, tray, clicked
  * notifications, the global hotkey), the desktop state behind Settings ▸
  * Desktop, and two page→native calls (theme, preferences). This module is the
- * ONLY place the web UI touches any of it, so the console keeps exactly one
- * seam to the desktop app and never references Tauri.
+ * common command/theme seam; desktop-state.ts owns optional preferences.
+ * Neither exposes Tauri to the console.
  *
  * Everything here is inert in a browser: the markers are absent, the global
  * is undefined, and the event is never dispatched. No caller needs a
  * conditional build or a feature flag.
  */
-import { useSyncExternalStore } from 'react';
 import type { ThemePreference } from '../data/theme-store.js';
 import { parseDesktopCommand, type ParsedDesktopCommand } from '../routes/verse/shell/command-keys.js';
 
@@ -61,9 +60,6 @@ export function resolveTheme(preference: ThemePreference): 'light' | 'dark' {
 
 interface DesktopBridge {
   reportTheme?: (theme: 'light' | 'dark') => void;
-  getState?: () => unknown;
-  refreshState?: () => boolean;
-  setPreference?: (name: DesktopPreference, value: boolean) => boolean;
 }
 
 function bridge(): DesktopBridge | undefined {
@@ -123,173 +119,5 @@ export function subscribeShellCommands(handler: (command: ParsedDesktopCommand) 
   return () => window.removeEventListener(DESKTOP_COMMAND_EVENT, onCommand);
 }
 
-// ===========================================================================
-// Desktop state — Settings ▸ Desktop (V3.10, C8)
-// ===========================================================================
-
-/** Preferences Settings ▸ Desktop may change (desktop_prefs.rs `PrefsPatch`). */
-export type DesktopPreference = 'globalHotkey' | 'notifications' | 'automaticAwake';
-
-/**
- * What the desktop app reports (desktop_prefs.rs `DesktopStateView`). Every
- * string is the shell's own copy — nothing from the server.
- */
-export interface PowerState {
-  automatic: boolean;
-  requested: boolean;
-  localRuns: number | null;
-  checkedAt: number | null;
-  platform: string;
-  powerSource: 'ac' | 'battery' | null;
-  idleSleepSeconds: number | null;
-  settingsCheckedAt: number | null;
-  error: string | null;
-}
-
-export function isPowerState(value: unknown): value is PowerState {
-  if (!isRecord(value)) return false;
-  return typeof value['automatic'] === 'boolean' && typeof value['requested'] === 'boolean' &&
-    (value['localRuns'] === null || (typeof value['localRuns'] === 'number' && Number.isSafeInteger(value['localRuns']) && value['localRuns'] >= 0)) &&
-    (value['checkedAt'] === null || (typeof value['checkedAt'] === 'number' && Number.isSafeInteger(value['checkedAt']) && value['checkedAt'] > 0)) &&
-    (value['settingsCheckedAt'] === null || (typeof value['settingsCheckedAt'] === 'number' && Number.isSafeInteger(value['settingsCheckedAt']) && value['settingsCheckedAt'] > 0)) &&
-    (value['powerSource'] === null || value['powerSource'] === 'ac' || value['powerSource'] === 'battery') &&
-    (value['idleSleepSeconds'] === null || (typeof value['idleSleepSeconds'] === 'number' && Number.isSafeInteger(value['idleSleepSeconds']) && value['idleSleepSeconds'] >= 0)) &&
-    typeof value['platform'] === 'string' && ['macos', 'windows', 'linux'].includes(value['platform']) &&
-    (value['error'] === null || (typeof value['error'] === 'string' && value['error'].length <= 300));
-}
-
-export interface DesktopState {
-  /** Absent on older shells; null means native power status unavailable. */
-  power?: PowerState | null;
-  hotkey: {
-    /** The operator's choice. */
-    enabled: boolean;
-    /** Whether macOS actually gave Ashlr the chord. */
-    registered: boolean;
-    /** Display form, e.g. "⌃⌥Space". */
-    accelerator: string;
-    /** Why `registered` is false while `enabled` is true; null otherwise. */
-    error: string | null;
-  };
-  notifications: {
-    enabled: boolean;
-    /**
-     * `native` — a signed build, banners come from Ashlr.
-     * `script` — an unsigned build, banners come through osascript and show
-     * as Script Editor (say so beside the toggle).
-     */
-    delivery: 'native' | 'script';
-  };
-}
-
-const DESKTOP_STATE_EVENT = 'ashlr:desktop-state';
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** Boundary check: the value crossed from another runtime. */
-export function isDesktopState(value: unknown): value is DesktopState {
-  if (!isRecord(value) || !isRecord(value['hotkey']) || !isRecord(value['notifications'])) return false;
-  const h = value['hotkey'];
-  const n = value['notifications'];
-  return (
-    typeof h['enabled'] === 'boolean' &&
-    typeof h['registered'] === 'boolean' &&
-    typeof h['accelerator'] === 'string' &&
-    h['accelerator'].length > 0 &&
-    h['accelerator'].length <= 32 &&
-    (h['error'] === null || (typeof h['error'] === 'string' && h['error'].length <= 300)) &&
-    (value['power'] === undefined || value['power'] === null || isPowerState(value['power'])) &&
-    typeof n['enabled'] === 'boolean' &&
-    (n['delivery'] === 'native' || n['delivery'] === 'script')
-  );
-}
-
-// One module-level listener feeds a cached snapshot, so readers (and
-// useSyncExternalStore, which needs a STABLE snapshot) never see a stale or
-// freshly-copied object.
-let cachedState: DesktopState | null | undefined;
-let listening = false;
-const stateListeners = new Set<(state: DesktopState) => void>();
-
-function readBridgeState(): DesktopState | null {
-  try {
-    const raw = bridge()?.getState?.();
-    return isDesktopState(raw) ? raw : null;
-  } catch {
-    return null;
-  }
-}
-
-function onDesktopState(event: Event): void {
-  const detail = (event as CustomEvent<unknown>).detail;
-  if (!isDesktopState(detail)) return;
-  cachedState = detail;
-  for (const listener of [...stateListeners]) listener(detail);
-}
-
-function ensureListening(): void {
-  if (listening) return;
-  listening = true;
-  window.addEventListener(DESKTOP_STATE_EVENT, onDesktopState);
-}
-
-/** Request a fresh authenticated host observation without supplying any activity. */
-export function refreshDesktopState(): boolean {
-  try { return bridge()?.refreshState?.() === true; } catch { return false; }
-}
-
-/** The latest desktop state, or null in a browser (and before native answered). */
-export function getDesktopState(): DesktopState | null {
-  ensureListening();
-  if (cachedState === undefined || cachedState === null) cachedState = readBridgeState();
-  return cachedState;
-}
-
-/** Called with every new state native sends. Returns an unsubscribe function. */
-export function subscribeDesktopState(handler: (state: DesktopState) => void): () => void {
-  ensureListening();
-  stateListeners.add(handler);
-  return () => {
-    stateListeners.delete(handler);
-  };
-}
-
-/**
- * Ask the desktop app to change a preference. True when the request was sent
- * (a desktop bridge exists), false in a browser. The answer arrives as a new
- * state — e.g. a hotkey another app holds comes back
- * `{ enabled: true, registered: false, error }` — so render from state, never
- * from the value you asked for.
- */
-export function setDesktopPreference(name: DesktopPreference, value: boolean): boolean {
-  if (name !== 'globalHotkey' && name !== 'notifications' && name !== 'automaticAwake') return false;
-  if (typeof value !== 'boolean') return false;
-  try {
-    return bridge()?.setPreference?.(name, value) === true;
-  } catch {
-    return false;
-  }
-}
-
-function subscribeStore(onChange: () => void): () => void {
-  return subscribeDesktopState(() => onChange());
-}
-
-/**
- * React: the live desktop state, or null in a browser. Settings ▸ Desktop
- * renders its hotkey and notification rows from this and hides them (or says
- * "available in the desktop app") when it is null.
- */
-export function useDesktopState(): DesktopState | null {
-  return useSyncExternalStore(subscribeStore, getDesktopState, () => null);
-}
-
-/** Tests only: forget the cached state and the module listener. */
-export function resetDesktopStateForTests(): void {
-  if (listening) window.removeEventListener(DESKTOP_STATE_EVENT, onDesktopState);
-  listening = false;
-  cachedState = undefined;
-  stateListeners.clear();
-}
+// State/preferences live behind lazy desktop controls, not the common shell.
+export type { DesktopState, DesktopPreference, PowerState } from './desktop-state.js';

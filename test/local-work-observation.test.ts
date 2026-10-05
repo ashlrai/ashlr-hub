@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { LocalWorkObserver, verifiedLocalRuns, hostDispatchEngine, type LocalWorkObservation } from '../src/core/daemon/local-work-observation.js';
+import { LocalWorkObserver, verifiedLocalRuns, hostDispatchEngine, readLocalWorkObservation, type LocalWorkObservation } from '../src/core/daemon/local-work-observation.js';
+import { constants, closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { DaemonActivityReadResult } from '../src/core/daemon/activity.js';
 import type { DaemonLivenessV1 } from '../src/core/daemon/liveness.js';
 const now = Date.parse('2026-10-05T10:00:00.000Z');
@@ -57,4 +61,34 @@ describe('resident local work observation', () => {
     expect(verifiedLocalRuns(row, { ...activity, freshness: 'stale' }, live, now)).toBeNull();
   });
   it('verified last completion reports zero rather than retaining historic active work', () => { expect(verifiedLocalRuns({ ...row, localRuns: 0 }, activity, live, now)).toBe(0); });
+});
+
+
+describe('bounded private activity reads', () => {
+  it.skipIf(process.platform === 'win32')('rejects a FIFO promptly and can read the next real observation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ashlr-power-fifo-'));
+    const path = join(dir, 'local-work.json');
+    let rescue: number | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let pending: Promise<unknown> | undefined;
+    try {
+      expect(spawnSync('mkfifo', ['-m', '600', path], { timeout: 2_000 }).status).toBe(0);
+      pending = readLocalWorkObservation(path);
+      const outcome = await Promise.race([
+        pending.then(value => ({ settled: true, value })),
+        new Promise<{ settled: false }>(resolve => { timer = setTimeout(() => resolve({ settled: false }), 300); }),
+      ]);
+      // Also unblocks a regressed blocking open before asserting, so failed tests
+      // do not leave an occupied libuv worker or a hanging test process.
+      if (!outcome.settled) rescue = openSync(path, constants.O_RDWR | constants.O_NONBLOCK);
+      await pending;
+      expect(outcome).toEqual({ settled: true, value: null });
+      rmSync(path); writeFileSync(path, JSON.stringify({ localRuns: 2 }), { mode: 0o600 });
+      expect(await readLocalWorkObservation(path)).toEqual({ localRuns: 2 });
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (rescue !== undefined) closeSync(rescue);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

@@ -1,5 +1,7 @@
-import { useState } from 'react';
-import { setDesktopPreference, useDesktopState } from '../../../app/desktop-shell.js';
+import { useEffect, useState } from 'react';
+import { refreshDesktopState, setDesktopPreference, useDesktopState } from '../../../app/desktop-state.js';
+import { useActivity } from '../shell/useActivity.js';
+import { isPowerState } from './power-state.js';
 import styles from './PowerStatus.module.css';
 
 function checked(at: number | null): string {
@@ -8,7 +10,12 @@ function checked(at: number | null): string {
 
 /** Native owns policy and its OS request. Never infer host power from this tab. */
 export function PowerStatus() {
-  const power = useDesktopState()?.power;
+  const activity = useActivity();
+  const work = activity.status === 'ready' ? activity.data?.localWork : undefined;
+  // The native-only surface requests observation, never supplies activity counts.
+  useEffect(() => { refreshDesktopState(); }, [work?.sourceVersion, work?.chatRuns, work?.fleetRuns, work?.localRuns]);
+  const rawPower = useDesktopState()?.power;
+  const power = isPowerState(rawPower) ? rawPower : null;
   const [error, setError] = useState<string | null>(null);
   const label = !power ? 'Host power unavailable' : !power.automatic ? 'System sleep settings' : power.error ? 'Awake request failed' : power.requested ? 'Awake request active' : power.localRuns === null ? 'Automatic · checking activity' : 'Automatic awake';
   return (

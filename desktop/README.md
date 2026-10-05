@@ -202,7 +202,7 @@ for the same reason. The one system-wide key, ⌃⌥Space, is registered by the 
 ### 6. Desktop state (Settings ▸ Desktop)
 
 ```ts
-import { useDesktopState, setDesktopPreference } from '../app/desktop-shell.js';
+import { useDesktopState, setDesktopPreference } from '../app/desktop-state.js';
 
 const desktop = useDesktopState(); // null in a browser
 // desktop.hotkey        { enabled, registered, accelerator: '⌃⌥Space', error }

@@ -1,11 +1,12 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PowerState } from '../../../app/desktop-shell.js';
-const mocks = vi.hoisted(() => ({ power: null as PowerState | null, send: vi.fn(() => true) }));
-vi.mock('../../../app/desktop-shell.js', () => ({ useDesktopState: () => ({ power: mocks.power }), setDesktopPreference: mocks.send }));
+import type { PowerState } from '../../../app/desktop-state.js';
+const mocks = vi.hoisted(() => ({ power: null as unknown, refresh: vi.fn(), work: undefined as { sourceVersion: number; chatRuns: number; fleetRuns: number } | undefined, send: vi.fn(() => true) }));
+vi.mock('../../../app/desktop-state.js', () => ({ useDesktopState: () => ({ power: mocks.power }), setDesktopPreference: mocks.send, refreshDesktopState: mocks.refresh }));
+vi.mock('../shell/useActivity.js', () => ({ useActivity: () => ({ status: 'ready', data: { localWork: mocks.work } }) }));
 import { PowerStatus } from './PowerStatus.js';
 const state: PowerState = { automatic: true, requested: true, localRuns: 2, checkedAt: 1791169200000, platform: 'macos', error: null, powerSource: 'ac', idleSleepSeconds: 1200, settingsCheckedAt: 1791169200000 };
-beforeEach(() => { mocks.power = { ...state }; mocks.send.mockReset(); mocks.send.mockReturnValue(true); });
+beforeEach(() => { mocks.power = { ...state }; mocks.work = undefined; mocks.refresh.mockClear(); mocks.send.mockReset(); mocks.send.mockReturnValue(true); });
 describe('computer power status', () => {
   it('reports accepted native request and actual system timer separately', () => {
     render(<PowerStatus />);
@@ -23,6 +24,18 @@ describe('computer power status', () => {
     mocks.power = { ...state, requested: false, error: 'macOS refused the idle-sleep request.' }; render(<PowerStatus />);
     expect(screen.getByLabelText('Computer power: Awake request failed')).toBeTruthy();
     expect(screen.getByRole('alert', { hidden: true }).textContent).toContain('macOS refused');
+  });
+  it('source changes request authenticated refresh even when total work stays equal', () => {
+    mocks.work = { sourceVersion: 1, chatRuns: 1, fleetRuns: 0 };
+    const view = render(<PowerStatus />); expect(mocks.refresh).toHaveBeenCalledTimes(1);
+    mocks.work = { sourceVersion: 1, chatRuns: 0, fleetRuns: 1 };
+    view.rerender(<PowerStatus />); expect(mocks.refresh).toHaveBeenCalledTimes(2);
+    view.rerender(<PowerStatus />); expect(mocks.refresh).toHaveBeenCalledTimes(2);
+  });
+  it('malformed optional power data cannot create a control or awake claim', () => {
+    mocks.power = { ...state, requested: 'yes' }; render(<PowerStatus />);
+    expect(screen.getByLabelText('Computer power: Host power unavailable')).toBeTruthy();
+    expect(screen.queryByRole('checkbox', { hidden: true })).toBeNull();
   });
   it('a browser cannot invent or change host power', () => {
     mocks.power = null; render(<PowerStatus />); expect(screen.getByLabelText('Computer power: Host power unavailable')).toBeTruthy();

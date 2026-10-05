@@ -4,21 +4,23 @@ import { act, renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { findCommand, formatChord } from '../routes/verse/shell/command-catalog.js';
 import {
-  getDesktopState,
   isDesktopShell,
+  reportThemeToShell,
+  resolveTheme,
+  subscribeDesktopCommands,
+  subscribeShellCommands,
+  type DesktopCommand,
+} from './desktop-shell.js';
+import {
+  getDesktopState,
   isDesktopState,
   refreshDesktopState,
-  reportThemeToShell,
   resetDesktopStateForTests,
-  resolveTheme,
   setDesktopPreference,
-  subscribeDesktopCommands,
   subscribeDesktopState,
-  subscribeShellCommands,
   useDesktopState,
-  type DesktopCommand,
   type DesktopState,
-} from './desktop-shell.js';
+} from './desktop-state.js';
 
 type Bridge = {
   reportTheme?: (theme: 'light' | 'dark') => void;
@@ -198,6 +200,14 @@ describe('desktop state — in a browser the bridge does nothing', () => {
     expect(setDesktopPreference('notifications', false)).toBe(false);
     const { result } = renderHook(() => useDesktopState());
     expect(result.current).toBeNull();
+  });
+
+  it('optional power metadata cannot discard valid hotkey and notification state', () => {
+    const handler = vi.fn(); subscribeDesktopState(handler);
+    const state = { ...STATE, power: { requested: 'future-or-malformed' } };
+    window.dispatchEvent(new CustomEvent('ashlr:desktop-state', { detail: state }));
+    expect(handler).toHaveBeenCalledWith(state);
+    expect(getDesktopState()?.hotkey).toEqual(STATE.hotkey);
   });
 
   it('ignores a desktop-state event whose shape is wrong', () => {

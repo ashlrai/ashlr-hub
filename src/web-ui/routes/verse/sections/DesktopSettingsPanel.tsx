@@ -21,13 +21,13 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { Switch } from '../../../components/primitives/index.js';
+import { isDesktopShell } from '../../../app/desktop-shell.js';
 import {
-  isDesktopShell,
   setDesktopPreference,
   useDesktopState,
   type DesktopPreference,
   type DesktopState,
-} from '../../../app/desktop-shell.js';
+} from '../../../app/desktop-state.js';
 import { Panel, SettingRow } from './SettingRow.js';
 import styles from './SettingsSection.module.css';
 

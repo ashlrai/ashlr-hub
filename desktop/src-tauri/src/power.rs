@@ -58,9 +58,6 @@ impl<T: Inhibitor> PowerManager<T> {
             fleet: Evidence::default(),
         }
     }
-    pub fn observe(&mut self, runs: Option<usize>, now: Instant) {
-        self.observe_sources(runs, runs.map(|_| 0), now);
-    }
     pub fn observe_sources(&mut self, chats: Option<usize>, fleet: Option<usize>, now: Instant) {
         // Each source owns its evidence: completion clears that source immediately;
         // a failed poll hides its count and cannot renew the prior evidence.
@@ -317,12 +314,12 @@ mod tests {
     fn overlapping_runs_share_a_request_until_last_finishes() {
         let (mut m, c) = manager(false);
         let now = Instant::now();
-        m.observe(Some(1), now);
-        m.observe(Some(3), now);
-        m.observe(Some(1), now);
+        m.observe_sources(Some(1), Some(0), now);
+        m.observe_sources(Some(3), Some(0), now);
+        m.observe_sources(Some(1), Some(0), now);
         assert!(m.held());
         assert_eq!(c.lock().unwrap().acquire, 1);
-        m.observe(Some(0), now);
+        m.observe_sources(Some(0), Some(0), now);
         assert!(!m.held());
         assert_eq!(c.lock().unwrap().release, 1);
     }
@@ -331,7 +328,7 @@ mod tests {
         let (mut m, _) = manager(false);
         let now = Instant::now();
         for i in 0..10000 {
-            m.observe(Some(2), now + Duration::from_secs(i * 10));
+            m.observe_sources(Some(2), Some(0), now + Duration::from_secs(i * 10));
             assert!(m.held());
         }
     }
@@ -339,7 +336,7 @@ mod tests {
     fn manual_off_releases_and_on_reconciles_latest_work() {
         let (mut m, _) = manager(false);
         let now = Instant::now();
-        m.observe(Some(2), now);
+        m.observe_sources(Some(2), Some(0), now);
         m.set_automatic(false, now);
         assert!(!m.held());
         m.set_automatic(true, now);
@@ -351,27 +348,27 @@ mod tests {
     fn unknown_and_stale_activity_never_claim_awake() {
         let (mut m, _) = manager(false);
         let now = Instant::now();
-        m.observe(Some(1), now);
+        m.observe_sources(Some(1), Some(0), now);
         m.reconcile(now + FRESH_FOR);
         assert_eq!(m.local_runs, None);
         assert!(!m.held());
-        m.observe(None, now);
+        m.observe_sources(None, None, now);
         assert!(!m.held());
     }
     #[test]
     fn failed_poll_hides_current_count_but_preserves_only_fresh_request() {
         let (mut m, _) = manager(false);
         let now = Instant::now();
-        m.observe(Some(2), now);
+        m.observe_sources(Some(2), Some(0), now);
         let checked = m.checked_at;
-        m.observe(None, now + Duration::from_secs(5));
+        m.observe_sources(None, None, now + Duration::from_secs(5));
         assert!(m.held());
         assert_eq!(m.local_runs, None);
         assert_eq!(m.checked_at, checked);
-        m.observe(None, now + FRESH_FOR);
+        m.observe_sources(None, None, now + FRESH_FOR);
         assert!(!m.held());
-        m.observe(Some(1), now + FRESH_FOR);
-        m.observe(Some(0), now + FRESH_FOR);
+        m.observe_sources(Some(1), Some(0), now + FRESH_FOR);
+        m.observe_sources(Some(0), Some(0), now + FRESH_FOR);
         assert!(!m.held());
     }
     #[test]
@@ -403,16 +400,16 @@ mod tests {
     fn denied_request_is_visible_and_retried_on_fresh_work() {
         let (mut m, c) = manager(true);
         let now = Instant::now();
-        m.observe(Some(1), now);
+        m.observe_sources(Some(1), Some(0), now);
         assert!(!m.held());
         assert_eq!(m.error, Some("denied"));
-        m.observe(Some(1), now);
+        m.observe_sources(Some(1), Some(0), now);
         assert_eq!(c.lock().unwrap().acquire, 2);
     }
     #[test]
     fn owner_exit_releases_only_its_own_request() {
         let (mut m, c) = manager(false);
-        m.observe(Some(1), Instant::now());
+        m.observe_sources(Some(1), Some(0), Instant::now());
         drop(m);
         assert_eq!(c.lock().unwrap().release, 1);
     }

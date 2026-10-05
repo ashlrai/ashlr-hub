@@ -123,22 +123,30 @@ async function refresh(): Promise<void> {
   refreshing = true;
   const path = observationPath();
   let count: number | null = null;
+  try {
+    const row = await readLocalWorkObservation(path);
+    if (row !== null) count = verifiedLocalRuns(row, readDaemonActivity(), probeDaemonLiveness(), Date.now());
+  } catch { /* Unknown is never zero. */ }
+  finally { cache = { path, at: Date.now(), count }; refreshing = false; }
+}
+/** Bounded private JSON read; a FIFO must not stall subsequent owner observations. */
+export async function readLocalWorkObservation(path: string): Promise<unknown> {
+  let row: unknown = null;
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    // Bounded, no symlink/hardlink/foreign-owner read. All I/O runs off the activity request.
-    handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
     const before = await handle.stat();
     if (!before.isFile() || before.nlink !== 1 || before.size > 2048 ||
       (typeof process.getuid === 'function' && (before.uid !== process.getuid() || (before.mode & 0o077) !== 0))) throw new Error('unsafe observation');
     const buffer = Buffer.alloc(2049);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
     if (bytesRead > 2048) throw new Error('observation too large');
-    const raw = buffer.subarray(0, bytesRead).toString('utf8');
     const named = await lstat(path);
     if (named.isSymbolicLink() || named.ino !== before.ino || named.dev !== before.dev) throw new Error('observation replaced');
-    count = verifiedLocalRuns(JSON.parse(raw), readDaemonActivity(), probeDaemonLiveness(), Date.now());
+    row = JSON.parse(buffer.subarray(0, bytesRead).toString('utf8'));
   } catch { /* Unknown is never zero. */ }
-  finally { try { await handle?.close(); } catch { count = null; } cache = { path, at: Date.now(), count }; refreshing = false; }
+  finally { try { await handle?.close(); } catch { row = null; } }
+  return row;
 }
 /** Start the background reader; peeking itself is an in-memory operation. */
 export function startLocalWorkReader(): void {
