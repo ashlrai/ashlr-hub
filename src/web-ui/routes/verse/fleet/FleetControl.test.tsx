@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { FleetSection } from '../sections/FleetSection.js';
-import { evictAll } from '../../../data/cache.js';
+import { evictAll, getQuerySnapshot, runQuery } from '../../../data/cache.js';
+import { refreshFleetControlReads } from './fleet-control-queries.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
 import { fleetControl, fleetLive, grantDraft } from '../command/fixtures.test-support.js';
@@ -47,6 +48,74 @@ async function control(): Promise<HTMLElement> {
   await waitFor(() => expect(region).not.toHaveAttribute('data-state', 'unknown'));
   return region;
 }
+
+describe('shared native readback', () => {
+  const projections = [
+    ['verse-fleet-control', '/api/verse/fleet/control'],
+    ['verse-fleet-control-queue', '/api/verse/fleet/control/queue'],
+    ['verse-fleet-live', '/api/verse/fleet/live'],
+    ['verse-authority', '/api/verse/authority'],
+    ['verse-control', '/api/verse/control'],
+    ['verse-fleet', '/api/verse/fleet'],
+  ] as const;
+
+  it('refreshes all previously read metadata projections without starting unseen provider reads', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((path: string) => {
+      calls.push(path);
+      return Promise.resolve(json({ v: 1, state: 'running', headline: 'new', controls: {}, grant: {}, daemon: {}, tasks: [], goals: [], targets: {}, marker: 'new' }));
+    }));
+    for (const [key] of projections) await runQuery(key, async () => ({ marker: 'old' }));
+    await runQuery('verse-usage-accounts', async () => ({ marker: 'provider reading' }));
+    refreshFleetControlReads();
+    await waitFor(() => expect(calls.filter(path => projections.some(([, wanted]) => wanted === path)).sort())
+      .toEqual(projections.map(([, path]) => path).sort()));
+    await waitFor(() => expect(getQuerySnapshot<{ marker: string }>('verse-control').data?.marker).toBe('new'));
+    expect(calls).not.toContain('/api/verse/usage/accounts');
+    expect(calls).not.toContain('/api/verse/runtime');
+    expect(getQuerySnapshot<{ marker: string }>('verse-usage-accounts').data?.marker).toBe('provider reading');
+  });
+
+  it('does not mount unopened Advanced projections', async () => {
+    const { fetchMock } = stubSurfaceFetch();
+    await runQuery('verse-fleet-control', async () => ({}));
+    refreshFleetControlReads();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const paths = fetchMock.mock.calls.map(([path]) => path);
+    expect(paths).toContain('/api/verse/fleet/control');
+    expect(paths).not.toContain('/api/verse/control');
+    expect(paths).not.toContain('/api/verse/fleet');
+    expect(paths).not.toContain('/api/verse/runtime');
+  });
+
+  it('issues a post-operation read even while the old PID response is outstanding', async () => {
+    let finishOld!: (value: { pid: number }) => void;
+    const old = runQuery('verse-control', () => new Promise<{ pid: number }>(resolve => { finishOld = resolve; }));
+    await Promise.resolve();
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(json({ pid: 35431 }))));
+    refreshFleetControlReads();
+    await waitFor(() => expect(getQuerySnapshot<{ pid: number }>('verse-control').data?.pid).toBe(35431));
+    finishOld({ pid: 56295 });
+    await old;
+    expect(getQuerySnapshot<{ pid: number }>('verse-control').data?.pid).toBe(35431);
+  });
+
+  it.each(['done', 'failed', 'cancelled'] as const)('reads shared state after a native %s event without assuming success', async (phase) => {
+    let request: { id: string; op: string } | null = null;
+    (window as unknown as Record<string, unknown>).__ASHLR_DESKTOP__ = {
+      fleet: { version: 1, ops: ['resident-restart'], send: (message: { id: string; op: string }) => { request = message; return true; } },
+    };
+    stubSurfaceFetch({ routes: { '/api/verse/control': { pid: 35431 } } });
+    await runQuery('verse-control', async () => ({ pid: 56295 }));
+    render(<FleetSection />);
+    const region = await control();
+    await userEvent.setup().click(within(region).getByRole('button', { name: 'Restart' }));
+    expect(request).toMatchObject({ op: 'resident-restart' });
+    expect(getQuerySnapshot<{ pid: number }>('verse-control').data?.pid).toBe(56295);
+    act(() => { window.dispatchEvent(new CustomEvent('ashlr:fleet', { detail: { ...request, phase, message: 'Native operation finished.' } })); });
+    await waitFor(() => expect(getQuerySnapshot<{ pid: number }>('verse-control').data?.pid).toBe(35431));
+  });
+});
 
 describe('the header', () => {
   it('shows preparation and the last completed tick while no agents are working', async () => {
@@ -145,6 +214,7 @@ describe('the controls', () => {
     setMutationToken(TOKEN);
     const now = Date.now();
     const sent: unknown[] = [];
+    let nativeFinished = false;
     (window as unknown as Record<string, unknown>).__ASHLR_DESKTOP__ = {
       fleet: {
         version: 1,
@@ -153,6 +223,7 @@ describe('the controls', () => {
           sent.push(msg);
           setTimeout(() => {
             window.dispatchEvent(new CustomEvent('ashlr:fleet', { detail: { id: msg.id, op: msg.op, phase: 'running', message: 'Starting the fleet daemon…', command: '/opt/homebrew/bin/ashlr authority resident start' } }));
+            nativeFinished = true;
             window.dispatchEvent(new CustomEvent('ashlr:fleet', { detail: { id: msg.id, op: msg.op, phase: 'done', message: 'The fleet daemon is running under your grant.', exitCode: 0, output: '✓ ai.ashlr.daemon is running' } }));
           }, 0);
           return true;
@@ -164,7 +235,7 @@ describe('the controls', () => {
     const { posted } = stubSurfaceFetch({
       kind: 'live',
       now,
-      routes: { '/api/verse/fleet/control': stopped },
+      routes: { '/api/verse/fleet/control': () => json(nativeFinished ? fleetControl('live', now) : stopped) },
       post: (url) => (url === '/api/verse/fleet/control'
         ? answer('start', after, { did: ['Cleared Stop.'], needs: { kind: 'resident-start', label: 'Start the daemon', command: 'ashlr authority resident start', native: true } })
         : undefined),
@@ -181,6 +252,7 @@ describe('the controls', () => {
     await waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0]).toMatchObject({ op: 'resident-start' });
     await waitFor(() => expect(region).toHaveTextContent('Done — The fleet daemon is running under your grant.'));
+    await waitFor(() => expect(region).toHaveTextContent('Running · pid 4242'));
     expect(within(region).getByText('/opt/homebrew/bin/ashlr authority resident start')).toBeInTheDocument();
   });
 

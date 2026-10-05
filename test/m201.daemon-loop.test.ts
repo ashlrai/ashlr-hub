@@ -461,6 +461,7 @@ import {
   saveDaemonState,
 } from '../src/core/daemon/state.js';
 import { diagnoseGuardHealth } from '../src/core/daemon/guard-health.js';
+import { beginTickProgress, noteTickPhase, readTickProgress } from '../src/core/daemon/tick-progress.js';
 import {
   createProposal,
   inboxDir,
@@ -3445,6 +3446,80 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm).not.toHaveBeenCalled();
   });
+
+  it.each(['completed', 'failed', 'stopped', 'ownership-lost', 'newer-phase', 'newer-tick'] as const)(
+    'A1b progress: deferred maintenance reports actual work and preserves %s settlement',
+    async (settlement) => {
+      const repo = fx.makeRepo();
+      repo.enroll();
+      mockBuildBacklog.mockResolvedValue({
+        generatedAt: new Date().toISOString(), repos: [repo.dir], items: [],
+      });
+      let enter!: () => void;
+      const entered = new Promise<void>((resolve) => { enter = resolve; });
+      let finish!: () => void;
+      const pending = new Promise<void>((resolve) => { finish = resolve; });
+      mockRunAutoMergePass.mockImplementationOnce(async () => {
+        enter();
+        await pending;
+        if (settlement === 'failed') throw new Error('fixture maintenance failure');
+        return { merged: 2 };
+      });
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const controller = new AbortController();
+      const acquired = settlement === 'ownership-lost' ? acquireDaemonLock() : null;
+      if (acquired) expect(acquired.acquired).toBe(true);
+      const ownerLock = acquired?.acquired ? acquired.lock : undefined;
+      const endProgress = beginTickProgress();
+      let endNewerProgress: (() => void) | undefined;
+      const resultPromise = tick({
+        ...cfgBuiltin(), foundry: { autoMerge: { enabled: true } },
+      } as AshlrConfig, { dryRun: false, signal: controller.signal, ownerLock });
+      try {
+        await entered;
+        expect(readTickProgress()?.progress.phase).toBe('verification and proposal maintenance');
+        expect(mockRunSwarm).not.toHaveBeenCalled();
+        if (settlement === 'stopped') controller.abort();
+        if (settlement === 'ownership-lost') {
+          fs.writeFileSync(daemonLockPath(), JSON.stringify({
+            pid: process.pid, token: 'maintenance-successor', hostname: 'successor-host',
+            acquiredAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(),
+          }));
+        }
+        if (settlement === 'newer-phase') noteTickPhase('finishing successor work', 'newer observation');
+        if (settlement === 'newer-tick') endNewerProgress = beginTickProgress(new Date(Date.now() + 1000));
+        finish();
+        const result = await resultPromise;
+        expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1);
+        expect(mockRunSwarm).not.toHaveBeenCalled();
+        expect(readTickProgress()?.progress.phase).toBe(
+          settlement === 'newer-tick' ? 'starting'
+            : settlement === 'newer-phase' ? 'finishing successor work'
+            : settlement === 'stopped' || settlement === 'ownership-lost'
+              ? 'verification and proposal maintenance' : 'selection and dispatch',
+        );
+        if (settlement === 'completed') expect(result.merged).toBe(2);
+        if (settlement === 'failed') {
+          expect(result.merged).toBeUndefined();
+          expect(warning).toHaveBeenCalledWith(
+            '[ashlr] daemon:tick runAutoMergePass failed:', 'fixture maintenance failure',
+          );
+        }
+        if (settlement === 'ownership-lost') expect(result.reason).toBe('shutdown-requested');
+        if (ownerLock) expect(fs.existsSync(`${daemonLockPath()}.mutation.lock`)).toBe(false);
+      } finally {
+        finish();
+        await resultPromise;
+        endProgress();
+        endNewerProgress?.();
+        warning.mockRestore();
+        if (ownerLock) {
+          releaseDaemonLock(ownerLock);
+          fs.rmSync(daemonLockPath(), { force: true });
+        }
+      }
+    },
+  );
 
   it('A1b2: withheld direction authority blocks maintenance for an initially empty backlog', async () => {
     const repo = fx.makeRepo();
@@ -10967,6 +11042,65 @@ describe('M201 — Group E: runDaemon config reload + loop mechanics', () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(['completed', 'changed-owner', 'corrupt-owner', 'stopped'] as const)(
+    'E10b: a heartbeat during deferred actual maintenance preserves %s ownership/Stop semantics',
+    async (settlement) => {
+      vi.useFakeTimers();
+      const repo = fx.makeRepo();
+      repo.enroll();
+      mockBuildBacklog.mockResolvedValue({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [] });
+      let finish!: () => void;
+      const pending = new Promise<void>((resolve) => { finish = resolve; });
+      mockRunAutoMergePass.mockImplementationOnce(async () => {
+        await pending;
+        return { merged: 2 };
+      });
+      let settled = false;
+      const running = runDaemon({
+        ...cfgBuiltin(), foundry: { autoMerge: { enabled: true } },
+      } as AshlrConfig, { once: true, dryRun: false }).then((state) => { settled = true; return state; });
+      try {
+        await vi.waitFor(() => expect(mockRunAutoMergePass).toHaveBeenCalledTimes(1));
+        const initial = readDaemonLockOwner();
+        expect(initial).not.toBeNull();
+        expect(fs.existsSync(`${daemonLockPath()}.mutation.lock`)).toBe(true);
+        // Long maintenance crosses several heartbeat deadlines. Deferral is
+        // not a renewed heartbeat, and a live owner is not stale-reclaimable.
+        await vi.advanceTimersByTimeAsync(150_000);
+        expect(settled).toBe(false);
+        expect(readDaemonLockOwner()).toEqual(initial);
+        expect(mockRunSwarm).not.toHaveBeenCalled();
+        if (settlement === 'changed-owner') fs.writeFileSync(daemonLockPath(), JSON.stringify({
+          ...initial, token: 'maintenance-successor',
+        }));
+        if (settlement === 'corrupt-owner') fs.writeFileSync(daemonLockPath(), '{');
+        if (settlement === 'stopped') fx.setKill(true);
+        if (settlement !== 'completed') await vi.advanceTimersByTimeAsync(30_001);
+        finish();
+        const state = await running;
+        // A lost owner must not rewrite resident state belonging to a successor.
+        expect(state.running).toBe(settlement === 'changed-owner' || settlement === 'corrupt-owner');
+        expect(mockRunSwarm).not.toHaveBeenCalled();
+        if (settlement === 'completed') {
+          expect(state.ticks.at(-1)).toMatchObject({ reason: 'no-backlog', merged: 2 });
+          expect(fs.existsSync(daemonLockPath())).toBe(false);
+          // The released singleton is available to a genuine next resident.
+          const successor = acquireDaemonLock();
+          expect(successor.acquired).toBe(true);
+          if (successor.acquired) expect(releaseDaemonLock(successor.lock)).toBe(true);
+        } else if (settlement === 'changed-owner') {
+          expect(readDaemonLockOwner()?.token).toBe('maintenance-successor');
+        } else if (settlement === 'corrupt-owner') {
+          expect(fs.readFileSync(daemonLockPath(), 'utf8')).toBe('{');
+        }
+      } finally {
+        finish?.();
+        await running;
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('E11: the daemon lock heartbeat keeps advancing purely from residency in the loop, independent of tick/dispatch activity', async () => {
     // Complementary to E10: proves the interval is scoped to the WHOLE

@@ -33,7 +33,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir, hostname as osHostname } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import type { DaemonState } from '../types.js';
-import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+import { acquireLocalStoreLock, acquireLocalStoreLockWithOutcome, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { fsyncDirectory } from '../util/durability.js';
 
 // ---------------------------------------------------------------------------
@@ -1114,23 +1114,36 @@ export function acquireDaemonLock(opts?: { staleMs?: number }): AcquireDaemonLoc
   }
 }
 
-/** Update the heartbeat for the current lock owner; returns false if ownership was lost. */
-export function heartbeatDaemonLock(lock: DaemonLock): boolean {
-  const mutationLock = acquireLocalStoreLock(daemonLockMutationPath(lock.path));
-  if (!mutationLock) return false;
+/** Contention does not renew liveness, but a stable current owner has not lost its lock. */
+export function heartbeatDaemonLockOutcome(lock: DaemonLock): 'updated' | 'contended' | 'lost' {
+  // This fence can be held by an awaited operation in this same process; a
+  // synchronous wait cannot let that operation finish and release it.
+  const acquisition = acquireLocalStoreLockWithOutcome(daemonLockMutationPath(lock.path), 0);
+  if (acquisition.state !== 'acquired') {
+    if (acquisition.state !== 'contended') return 'lost';
+    const snapshot = readDaemonLockSnapshot(lock.path);
+    return snapshot?.owner?.pid === lock.pid && snapshot.owner.token === lock.token
+      && sameDaemonLockSnapshot(snapshot, readDaemonLockSnapshot(lock.path)) ? 'contended' : 'lost';
+  }
+  const mutationLock = acquisition.lock;
   try {
-    const current = readDaemonLockOwner();
-    if (!current || current.pid !== lock.pid || current.token !== lock.token) return false;
+    const current = readDaemonLockSnapshot(lock.path)?.owner;
+    if (!current || current.pid !== lock.pid || current.token !== lock.token) return 'lost';
     const next: DaemonLockOwner = { ...current, heartbeatAt: new Date().toISOString() };
     const tmp = `${lock.path}.${lock.token}.tmp`;
     writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', 'utf8');
     renameSync(tmp, lock.path);
-    return true;
+    return 'updated';
   } catch {
-    return false;
+    return 'lost';
   } finally {
     releaseLocalStoreLock(mutationLock);
   }
+}
+
+/** Recovery/publication callers still require an actual heartbeat write. */
+export function heartbeatDaemonLock(lock: DaemonLock): boolean {
+  return heartbeatDaemonLockOutcome(lock) === 'updated';
 }
 
 /** Release the daemon lock only if this process still owns the same token. */

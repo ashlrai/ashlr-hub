@@ -4,7 +4,7 @@
  * link, and the cloud evidence timeline when a cloud task filed the proposal.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { evictAll } from '../../../data/cache.js';
 import { clearMutationToken } from '../../../data/auth-store.js';
@@ -52,7 +52,7 @@ describe('Shadow decisions on Fleet', () => {
     const user = userEvent.setup();
     render(<FleetSection />);
     const card = await screen.findByRole('region', { name: 'Merge decisions' }, { timeout: 3_000 });
-    expect(card).toHaveTextContent('1 would merge · 0 merged · 1 refused');
+    await waitFor(() => expect(card).toHaveTextContent('1 would merge · 0 merged · 1 refused'));
 
     const rows = within(within(card).getByRole('list', { name: 'Decisions, newest first' })).getAllByRole('listitem', { name: undefined }).filter((li) => li.hasAttribute('data-outcome'));
     expect(rows).toHaveLength(2);

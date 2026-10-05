@@ -54,6 +54,7 @@ import {
   armDaemonSpendGuard,
   clearDaemonSpendGuard,
   heartbeatDaemonLock,
+  heartbeatDaemonLockOutcome,
   loadDaemonState,
   loadDaemonStateStrict,
   readDaemonSpendGuard,
@@ -62,6 +63,7 @@ import {
   saveDaemonStateResult,
   resetDayIfNeeded,
 } from '../src/core/daemon/state.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -663,6 +665,68 @@ describe('M24 daemon singleton lock', () => {
     expect(heartbeatDaemonLock(first.lock)).toBe(true);
     expect(heartbeatDaemonLock({ ...first.lock, token: 'wrong-token' })).toBe(false);
     expect(releaseDaemonLock(first.lock)).toBe(true);
+  });
+
+  it('defers a contended heartbeat without renewing it, then writes after the fence releases', () => {
+    const acquired = acquireDaemonLock();
+    expect(acquired.acquired).toBe(true);
+    if (!acquired.acquired) return;
+    const before = fs.readFileSync(acquired.lock.path, 'utf8');
+    const fence = acquireLocalStoreLock(`${acquired.lock.path}.mutation.lock`, 0);
+    expect(fence).not.toBeNull();
+    try {
+      expect(heartbeatDaemonLockOutcome(acquired.lock)).toBe('contended');
+      // Recovery/publication callers cannot confuse deferral with a write.
+      expect(heartbeatDaemonLock(acquired.lock)).toBe(false);
+      expect(fs.readFileSync(acquired.lock.path, 'utf8')).toBe(before);
+      expect(acquireDaemonLock({ staleMs: 0 }).acquired).toBe(false);
+    } finally {
+      releaseLocalStoreLock(fence);
+    }
+    expect(heartbeatDaemonLockOutcome(acquired.lock)).toBe('updated');
+    expect(releaseDaemonLock(acquired.lock)).toBe(true);
+  });
+
+  it.each(['changed-token', 'changed-pid', 'corrupt', 'missing'] as const)(
+    'refuses a contended heartbeat with %s owner evidence', (change) => {
+      const acquired = acquireDaemonLock();
+      expect(acquired.acquired).toBe(true);
+      if (!acquired.acquired) return;
+      const before = fs.readFileSync(acquired.lock.path, 'utf8');
+      const fence = acquireLocalStoreLock(`${acquired.lock.path}.mutation.lock`, 0);
+      expect(fence).not.toBeNull();
+      try {
+        if (change === 'missing') fs.unlinkSync(acquired.lock.path);
+        else if (change === 'corrupt') fs.writeFileSync(acquired.lock.path, '{');
+        else fs.writeFileSync(acquired.lock.path, JSON.stringify({ ...JSON.parse(before),
+          ...(change === 'changed-token' ? { token: 'successor-token' } : { pid: acquired.lock.pid + 1 }),
+        }));
+        expect(heartbeatDaemonLockOutcome(acquired.lock)).toBe('lost');
+      } finally {
+        fs.writeFileSync(acquired.lock.path, before);
+        releaseLocalStoreLock(fence);
+        releaseDaemonLock(acquired.lock);
+      }
+    },
+  );
+
+  it('refuses unavailable mutation storage and heartbeat write failure', () => {
+    const acquired = acquireDaemonLock();
+    expect(acquired.acquired).toBe(true);
+    if (!acquired.acquired) return;
+    const mutationPath = `${acquired.lock.path}.mutation.lock`;
+    const tmpPath = `${acquired.lock.path}.${acquired.lock.token}.tmp`;
+    try {
+      fs.mkdirSync(mutationPath);
+      expect(heartbeatDaemonLockOutcome(acquired.lock)).toBe('lost');
+      fs.rmdirSync(mutationPath);
+      fs.mkdirSync(tmpPath);
+      expect(heartbeatDaemonLockOutcome(acquired.lock)).toBe('lost');
+    } finally {
+      fs.rmSync(mutationPath, { recursive: true, force: true });
+      fs.rmSync(tmpPath, { recursive: true, force: true });
+      releaseDaemonLock(acquired.lock);
+    }
   });
 
   it('steals a stale lock whose owner pid is dead', () => {
