@@ -2194,6 +2194,8 @@ export interface RunOptions {
   seatId?: string;
   /** Internal synchronous same-seat authority fence; never serialized or passed to a model. */
   selectedGrokAdmission?: () => boolean;
+  /** Host-only exact selected Claude account/authority fence; never model input. */
+  selectedClaudeAdmission?: () => boolean;
   /** Internal caller-owned outcome revision fence; never persisted or sent to a model. */
   selectedOutcomeAdmission?: () => boolean;
   /** Partial budget overrides (merged over defaults). */

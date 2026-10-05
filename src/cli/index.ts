@@ -59,6 +59,7 @@ import { loadConfig, saveConfig, CONFIG_PATH } from '../core/config.js';
 import type { EffectiveConfigSnapshot, EffectiveConfigValue } from '../core/effective-config.js';
 import { buildIndex, loadIndex, writeIndex } from '../core/index-engine.js';
 import { PROBE_HELPER_FLAGS } from '../core/resources/probe-helper-invocation.js';
+import { CLAUDE_TOOL_WORKER_FLAG } from '../core/sandbox/claude-broker-tool-invocation.js';
 import { ANTHROPIC_PROXY_HOST_FLAG } from '../core/local-runtime/llama/proxy-invocation.js';
 import { DEVIN_CHAT_TURN_FLAG } from '../core/devin/chat-turn-invocation.js';
 import { VERSE_MCP_STDIO_COMMAND } from '../core/verse/verse-mcp-stdio-invocation.js';
@@ -1732,9 +1733,14 @@ async function main(): Promise<void> {
   // bundled module's import.meta.url lives in the virtual /$bunfs root), so
   // the probe re-executes this binary instead. Each flag is operand-free,
   // must be the entire argv, and maps to exactly one hard-coded import — argv
-  // selects which of two package-owned helpers runs and nothing else. It is
+  // selects a known package-owned helper and nothing else. It is
   // matched before any parsing and is absent from help and completions.
   if (argv.length === 1) {
+    if (argv[0] === CLAUDE_TOOL_WORKER_FLAG) {
+      const { runClaudeBrokerToolWorker } = await import('../core/sandbox/claude-broker-tool-worker.js');
+      await runClaudeBrokerToolWorker();
+      return;
+    }
     if (argv[0] === PROBE_HELPER_FLAGS.codex) {
       await import('../core/resources/codex-account-probe-process.js');
       return;

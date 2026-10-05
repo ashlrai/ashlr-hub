@@ -59,7 +59,7 @@ export const RESOURCE_NATIVE_PROFILE_MANIFEST_KEYS = ['schemaVersion', 'scope', 
   'nodeExecutable', 'commandPath', 'launcherPath', 'nativeStatePath', 'anthropicStatePath', 'manifestPath', 'command', 'loginCommand'] as const;
 
 /** Standalone source deliberately has no dependency on an installed Hub path. */
-function launcherSource(profile: ResourceNativeProfile, directories: Array<{ path: string; dev: string; ino: string }>): string {
+function launcherSource(profile: ResourceNativeProfile, directories: Array<{ path: string; dev: string; ino: string }>, brokerSafety = true): string {
   return `${LAUNCHER_HEADER}
 import {accessSync,constants,lstatSync,realpathSync} from 'node:fs';
 ${LAUNCHER_PROFILE_PREFIX}${JSON.stringify({ provider: profile.provider, executable: profile.executable, nativeStatePath: profile.nativeStatePath,
@@ -99,7 +99,9 @@ try {
     env.GROK_HOME=profile.nativeStatePath;
   }else{
     env.CLAUDE_CONFIG_DIR=profile.nativeStatePath;env.ANTHROPIC_CONFIG_DIR=profile.anthropicStatePath;env.DISABLE_UPDATES='1';
-  }
+${brokerSafety ? `    // Fixed nonsecret native safety flags. Ambient auth/proxy/loader vars stay excluded.
+    for(const key of ['CLAUDE_CODE_SUBPROCESS_ENV_SCRUB','DISABLE_AUTOUPDATER','DISABLE_TELEMETRY','DISABLE_ERROR_REPORTING','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'])env[key]='1';
+` : ''}  }
   // POSIX exec keeps the caller's PID, process group and standard descriptors.
   // Node 22/24 can abort on an OS-level execve failure; the owner observes that
   // native process outcome. Preflight does not eliminate filesystem races.
@@ -584,6 +586,8 @@ export function resolveNativeSeatLaunch(options: {
   accountsRoot: string;
   provider: ResourceNativeProfileProvider;
   seatId?: string | null;
+  /** Host-owned broker requires the current fixed safety environment. */
+  requireClaudeBrokerSafety?: boolean;
 }): NativeSeatLaunchResult {
   const { accountsRoot, provider } = options;
   const seatId = options.seatId ?? null;
@@ -613,16 +617,15 @@ export function resolveNativeSeatLaunch(options: {
     manifestCommand[0] !== command[0] || manifestCommand[1] !== command[1]) return seatFailure('profile-invalid');
   const nativeStatePath = state.manifest['nativeStatePath'];
   if (typeof nativeStatePath !== 'string') return seatFailure('profile-invalid');
-  // The launcher is CODE the unattended daemon executes. inspectRepinTarget
-  // checks its landmark lines only (repin must accept older templates); a seat
-  // launch demands the WHOLE file be exactly what this template generates for
-  // this manifest and these recorded directories, so an appended or edited
-  // line is refused. A profile prepared by an older template fails here and
-  // must be re-prepared — the honest outcome for code this path cannot vouch for.
+  // Execute only a whole pristine recognized template. Ordinary routes retain
+  // the exact previous template; the new broker requires current safety bytes.
   try {
     const directoriesLine = state.launcherLines.find((line) => line.startsWith(LAUNCHER_DIRECTORIES_PREFIX))!;
     const directories = exactJson(directoriesLine.slice(LAUNCHER_DIRECTORIES_PREFIX.length, -1), 0) as Array<{ path: string; dev: string; ino: string }>;
-    if (launcherSource(state.manifest as unknown as ResourceNativeProfile, directories) !== state.files.launcher.text) throw new Error();
+    const profile = state.manifest as unknown as ResourceNativeProfile;
+    const current = launcherSource(profile, directories);
+    if (current !== state.files.launcher.text && (options.requireClaudeBrokerSafety === true ||
+      launcherSource(profile, directories, false) !== state.files.launcher.text)) throw new Error();
   } catch { return seatFailure('profile-invalid'); }
   return {
     ok: true,

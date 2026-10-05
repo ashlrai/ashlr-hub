@@ -868,6 +868,8 @@ async function runBestOfNInternal(
     seatId?: string;
     /** Internal same-seat pre-spawn fence, forwarded only to its routed Grok candidate. */
     selectedGrokAdmission?: () => boolean;
+  /** Host-only exact selected Claude account/authority fence; never model input. */
+  selectedClaudeAdmission?: () => boolean;
     /** Caller-owned outcome revision shared by all ordinary candidates and critics. */
     selectedOutcomeAdmission?: () => boolean;
     /**
@@ -1049,9 +1051,9 @@ async function runBestOfNInternal(
     }]);
   }
   // The routed seat only ever applies to the routed engine (see opts.seatId).
-  const seatFor = (e: EngineId): { seatId?: string; selectedGrokAdmission?: () => boolean } =>
+  const seatFor = (e: EngineId): { seatId?: string; selectedGrokAdmission?: () => boolean; selectedClaudeAdmission?: () => boolean } =>
     opts?.seatId && opts.engine !== undefined && e === opts.engine
-      ? { seatId:opts.seatId,...(String(e) === 'grok-cli' && opts.selectedGrokAdmission ? {selectedGrokAdmission:opts.selectedGrokAdmission} : {}) } : {};
+      ? { seatId:opts.seatId,...(String(e) === 'grok-cli' && opts.selectedGrokAdmission ? {selectedGrokAdmission:opts.selectedGrokAdmission} : {}), ...(['claude','claude-cli'].includes(String(e)) && opts.selectedClaudeAdmission ? {selectedClaudeAdmission:opts.selectedClaudeAdmission} : {}) } : {};
   const runnerFor = (e: EngineId): typeof runEngineSandboxed => {
     const spec = resolveEngineSpec(e, cfg);
     return spec?.kind === 'api-model' ? runApiModelSandboxed : runEngineSandboxed;

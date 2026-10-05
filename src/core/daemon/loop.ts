@@ -7556,6 +7556,12 @@ export async function tick(
             } catch { return false; }
           }
           : undefined;
+        const selectedClaudeAdmission = standingSeatId && ['claude','claude-cli'].includes(String(backend))
+          ? () => {
+            if (!stillOwnsTick() || stopRequested() || dispatchSignal.aborted) return false;
+            try { return hooks.seatAllows(backend!, { maxPercent:resolveSubscriptionMaxPercent(routingCfg), seatId:standingSeatId, itemId:item.id, model:selectedModel ?? null }).allowed === true; }
+            catch { return false; }
+          } : undefined;
         let runState: Awaited<ReturnType<typeof runGoal>>;
         if (fanOut) {
           // Route through runBestOfN; use its winner's underlying runState.
@@ -7570,6 +7576,7 @@ export async function tick(
               ...(outcomeDispatch ? { goal } : {}),
               ...(standingSeatId ? { seatId: standingSeatId } : {}),
               ...(selectedGrokAdmission ? { selectedGrokAdmission } : {}),
+              ...(selectedClaudeAdmission ? { selectedClaudeAdmission } : {}),
               ...(dispatchHarness ? { harness: dispatchHarness } : {}),
               budget: itemBudget,
               ...(_bonCandidates ? { candidates: _bonCandidates as never } : {}),
@@ -7723,6 +7730,7 @@ export async function tick(
               ...(selectedModel ? { model: selectedModel } : {}),
               ...(standingSeatId ? { seatId: standingSeatId } : {}),
               ...(selectedGrokAdmission ? { selectedGrokAdmission } : {}),
+              ...(selectedClaudeAdmission ? { selectedClaudeAdmission } : {}),
               ...(outcomeDispatch || selectedTaskAdmission ? { selectedOutcomeAdmission: selectedDispatchAdmission } : {}),
               ...(dispatchHarness ? { harness: dispatchHarness } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,

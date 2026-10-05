@@ -365,13 +365,19 @@ export function phantomWrap(cmd: EngineCommand, _cfg: AshlrConfig): EngineComman
 // spawnEngine
 // ---------------------------------------------------------------------------
 
-interface SpawnEngineOptions {
+export interface SpawnEngineOptions {
+  /** Source-owned bounded prompt/request; absent preserves closed stdin. */
+  stdin?: string;
+  /** Native profile wrappers keep the original Claude stream identity. */
+  nativeEngine?: 'claude';
   /** Caller-owned revision fence, evaluated at each actual spawn including recovery. */
   selectedOutcomeAdmission?: () => boolean;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
   launcher?: { bin: string; prefixArgs: string[] };
   onEvent?: (ev: RunEvent) => void;
+  /** Metadata callback after the owned child reports an actual spawn. */
+  onSpawn?: () => void;
   /**
    * Caller ownership contract. Signaled POSIX runs own their invocation's
    * detached process group only. Descendants that deliberately escape it via
@@ -387,13 +393,15 @@ interface SpawnEngineOptions {
   _processKill?: (pid: number, signal: NodeJS.Signals | 0) => void;
 }
 
-interface SpawnEngineResult {
+export interface SpawnEngineResult {
   ok: boolean;
   output: string;
   usage?: { tokensIn: number; tokensOut: number };
   error?: string;
   terminationReason?: TerminationReason;
   configRecoveryAttempts?: number;
+  /** Native adapter producer-process contact; absent preserves ordinary routes. */
+  providerContacted?: boolean;
 }
 
 function cancelledEngineResult(
@@ -453,6 +461,9 @@ export async function spawnEngine(
   // CONTRACT: spawnEngine NEVER throws. Any failure is reported as { ok:false, error }.
   try {
     if (opts?.signal?.aborted) return cancelledEngineResult();
+    if (opts?.stdin !== undefined && (typeof opts.stdin !== 'string' || Buffer.byteLength(opts.stdin, 'utf8') > 1024 * 1024)) {
+      return { ok: false, output: '', error: 'Engine stdin exceeds the bounded request protocol', terminationReason: 'error-exit' };
+    }
     // LOCAL-ONLY: refuse a cloud agent binary before the subprocess exists.
     // Reported through the normal never-throws contract so callers that do not
     // know about the mode still surface a named reason instead of a mystery.
@@ -849,7 +860,7 @@ async function spawnEngineInner(
     const callerOnEvent = opts?.onEvent;
     // One normaliser per spawn: Anthropic-wire tool calls span several lines.
     const normaliser = createEngineOutputNormaliser(cmd);
-    const captureClaudeRateLimitEvents = isClaudeEngineBin(cmd.bin);
+    const captureClaudeRateLimitEvents = opts?.nativeEngine === 'claude' || isClaudeEngineBin(cmd.bin);
     const ownsProcessGroup = opts?.signal !== undefined && platform !== 'win32';
     const processKill = opts?._processKill ?? ((pid: number, signal: NodeJS.Signals | 0) => {
       process.kill(pid, signal);
@@ -890,9 +901,10 @@ async function spawnEngineInner(
       cwd: effective.cwd,
       env: childEnv,
       // pipe stdout + stderr for line reading; stdin closed (no input).
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [opts?.stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       ...(ownsProcessGroup ? { detached: true } : {}),
     });
+    child.once('spawn', () => { try { opts?.onSpawn?.(); } catch { /* metadata never grants authority */ } });
 
     // A detached POSIX child is its process-group leader, so its invocation-local
     // PID is also the only PGID we are authorized to signal. The group can outlive
@@ -914,6 +926,7 @@ async function spawnEngineInner(
       // A descendant can inherit the leader's pipe writers. Destroy our readers
       // and unref the ChildProcess so those inherited descriptors cannot keep the
       // daemon alive after this invocation's bounded settlement deadline.
+      child.stdin?.destroy();
       child.stdout?.removeAllListeners();
       child.stderr?.removeAllListeners();
       if (typeof child.stdout?.destroy === 'function') child.stdout.destroy();
@@ -1091,6 +1104,12 @@ async function spawnEngineInner(
     // ---------------------------------------------------------------------------
     opts?.signal?.addEventListener('abort', onAbort, { once: true });
     if (opts?.signal?.aborted) onAbort();
+
+    // The caller supplies one bounded request; no interactive input or secret env bridge.
+    if (opts?.stdin !== undefined && child.stdin) {
+      child.stdin.on('error', () => requestTermination('error-exit', true));
+      child.stdin.end(opts.stdin, 'utf8');
+    }
 
     // Backstop kill timer (runaway-cost safety net — fires only after timeoutMs).
     const backstopMs = opts?.timeoutMs ?? DEFAULT_ENGINE_BACKSTOP_MS;

@@ -82,6 +82,8 @@ export interface KernelEvidence {
 
 export interface SandboxDenialWatch {
   readonly tag: string;
+  /** True only after the kernel stream starts; completion still needs its barrier. */
+  readonly ready?: boolean;
   /** Stop the stream (after the barrier) and return what the kernel reported. Idempotent; never throws. */
   finish(): KernelEvidence;
   /** Stop without collecting (a run that never started). Idempotent. */
@@ -190,7 +192,7 @@ export function startSandboxDenialWatch(
   const deps = options.deps ?? defaultKernelEvidenceDeps;
   let done: KernelEvidence | null = null;
   const inert = (reason: string): SandboxDenialWatch => ({
-    tag,
+    tag, ready: false,
     finish: () => (done ??= unavailable(reason)),
     abort: () => { done ??= unavailable(reason); },
   });
@@ -206,10 +208,15 @@ export function startSandboxDenialWatch(
   const capture = join(dir, 'stream.ndjson');
   const cleanup = (): void => { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } };
   let stream: ReturnType<KernelEvidenceDeps['startStream']> | null = null;
+  let streamUnavailable = false;
   try {
     const fd = openSync(capture, 'wx', 0o600);
     try {
       stream = deps.startStream(`sender == "Sandbox" AND eventMessage CONTAINS "${tag}"`, fd);
+      const observable = stream as { once?: (event: string, listener: () => void) => unknown };
+      if (typeof observable.once === 'function') {
+        for (const event of ['error', 'exit', 'close']) observable.once(event, () => { streamUnavailable = true; });
+      }
     } finally {
       closeSync(fd);
     }
@@ -242,6 +249,10 @@ export function startSandboxDenialWatch(
 
   return {
     tag,
+    get ready() {
+      const observed = stream as { exitCode?: number | null; signalCode?: NodeJS.Signals | null } | null;
+      return done === null && stream !== null && !streamUnavailable && observed?.exitCode == null && observed?.signalCode == null;
+    },
     finish(): KernelEvidence {
       if (done) return done;
       try {

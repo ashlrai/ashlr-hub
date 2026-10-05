@@ -1,3 +1,4 @@
+import { runClaudeNativeAdapter } from '../sandbox/claude-native-adapter.js';
 import { assertSelectedOutcomeAdmission, selectedOutcomeAdmissionCurrent, SelectedOutcomeAdmissionRefusal } from './outcome-admission.js';
 /**
  * sandboxed-engine.ts — M45: run an external agent CLI (Claude Code / Codex)
@@ -251,6 +252,8 @@ export interface RunEngineSandboxedOptions {
   seatId?: string;
   /** Internal synchronous fence for the explicitly bound Grok account before each native spawn. */
   selectedGrokAdmission?: () => boolean;
+  /** Host-only exact selected Claude account/authority fence; never model input. */
+  selectedClaudeAdmission?: () => boolean;
   /** Caller-owned current outcome revision, ignored for immutable signed shadows. */
   selectedOutcomeAdmission?: () => boolean;
   /** Internal whole-attempt generation for mutating-tool evidence. */
@@ -342,6 +345,8 @@ type SpawnEngineResult = {
   error?: string;
   terminationReason?: TerminationReason;
   configRecoveryAttempts?: number;
+  /** Native adapter confirms only an actually spawned producer process. */
+  providerContacted?: boolean;
 };
 
 const PROCESS_CLEANUP_UNCONFIRMED_RE =
@@ -2187,6 +2192,8 @@ export async function runEngineSandboxed(
   const env = buildContainedEnv(cfg, hooksDir);
   let sandboxRetention: SandboxRetentionEvidence | undefined;
   let processCleanupFailure: SpawnEngineResult | undefined;
+  let claudeCaptureDenied = false;
+  let claudeEffort: string | undefined;
 
   // M248: inject CLAUDE_SESSION_ID so fleet savings land under nameable
   // ashlr-fleet-* keys in ~/.ashlr/stats.json — visible in ashlr__savings.
@@ -2205,6 +2212,16 @@ export async function runEngineSandboxed(
   // EngineId predates the registry-only ids (grok-cli); compare as a string.
   const engineKey: string = engine;
   const selectedStandingGrok = engineKey === GROK_CLI_ENGINE_ID && opts.seatId !== undefined && opts.selectedGrokAdmission !== undefined;
+  const selectedStandingClaude = ['claude','claude-cli'].includes(engineKey) && opts.seatId !== undefined && opts.selectedClaudeAdmission !== undefined;
+  const claudeEvidence = async (finished: import('../sandbox/autonomous-run.js').AutonomousSpawnFinish): Promise<void> => {
+    if (finished.violations.length) await recordAutonomousViolations({engine,sourceRepo:opts.sourceRepo,runId:id,operations:finished.violations});
+    if (finished.violationsKnown !== true) await recordSandboxEvidenceUnknown({engine,sourceRepo:opts.sourceRepo,runId:id,evidence:finished.kernelEvidence});
+  };
+  const runSelectedClaude = (prompt: string, timeoutMs: number, onEvent?: (event: import('./engines.js').RunEvent) => void): Promise<import('./engines.js').SpawnEngineResult> =>
+    runClaudeNativeAdapter({cfg,runId:id,seatId:opts.seatId!,model:model!,prompt,worktree:sb.worktreePath,signal:opts.signal!,timeoutMs,onEvent,
+      admission:() => { try { return opts.selectedClaudeAdmission?.() === true && (!opts.selectedOutcomeAdmission || opts.selectedOutcomeAdmission()); } catch { return false; } },
+      recordEvidence:claudeEvidence,retainCleanupFailure:() => { sandboxRetention=retainedSandboxEvidence(sb); },
+      ...(claudeEffort ? {effort:claudeEffort} : {})}).then(result => { if(result.captureDenied)claudeCaptureDenied=true;return result; });
   let autonomousSpawn: AutonomousSpawn | null = null;
   let autonomousFinished = false;
   let selectedGrokCommand: { launcher: EngineCommand; direct: NonNullable<ReturnType<typeof grokCliDirectCommand>> } | null = null;
@@ -2219,7 +2236,7 @@ export async function runEngineSandboxed(
   // V3.10 (INT4, B-U2 request): NEVER for an autonomous run — the sidecar is
   // an unconfined ashlr MCP server the agent could drive (its tools run as
   // Mason, outside the sandbox profile).
-  const fleetMcpEnabled = !autonomousRun && !selectedStandingGrok && (cfg.foundry as Record<string, unknown> | undefined)?.['fleetMcp'] !== false;
+  const fleetMcpEnabled = !autonomousRun && !selectedStandingGrok && !selectedStandingClaude && (cfg.foundry as Record<string, unknown> | undefined)?.['fleetMcp'] !== false;
   const fleetMcpConfig = fleetMcpEnabled ? prepareFleetMcpConfig(sb.worktreePath) : null;
 
   // M154: prepend repo-map + localization context to goal when flags are ON.
@@ -2228,8 +2245,8 @@ export async function runEngineSandboxed(
   const goalWithContext = `${renderDelegationScopeForPrompt(delegationScope)}${contextPrefix ? contextPrefix + goal : goal}`;
 
   try {
-    if (selectedStandingGrok && !autonomousRun) {
-      const outcome = proposalOutcome('sandbox-unavailable','selected Grok standing authority no longer supports autonomous confinement');
+    if ((selectedStandingGrok || selectedStandingClaude) && !autonomousRun) {
+      const outcome = proposalOutcome('sandbox-unavailable','selected native standing authority no longer supports autonomous confinement');
       recordSandboxedRunAgentAction({engine,engineModel,tier,runId:id,sourceRepo:opts.sourceRepo,
         workItemId:opts.workItemId,workSource:opts.workSource,outcome,status:'failed',actionCounts});
       return {state:withProposalOutcome(mk({status:'failed',result:outcome.reason}),outcome,actionCounts),proposalOutcome:outcome};
@@ -2252,6 +2269,7 @@ export async function runEngineSandboxed(
     if (cmd && harnessTuning) {
       const tuned = applyHarnessToEngineCommand(engineKey, cmd, harnessTuning, harnessCommandContext);
       cmd = tuned.cmd;
+      if (selectedStandingClaude) { const index=cmd.args.indexOf('--effort');if(index>=0)claudeEffort=cmd.args[index+1]; }
       const line = describeHarnessApplication(engineKey, harnessTuning, tuned.application);
       if (line) emitSinkEvent(streamSink, { kind: 'log', taskId: 't1', text: line });
     }
@@ -2338,7 +2356,7 @@ export async function runEngineSandboxed(
     // vendor-state copy, credentials stripped, the hardened profile — and
     // refused (never run unconfined) when that cannot be done.
     let spawnEnv: NodeJS.ProcessEnv = env;
-    let launcher: ReturnType<typeof buildSandboxLauncher>;
+    let launcher: ReturnType<typeof buildSandboxLauncher> = null;
     if (autonomousRun) {
       const refuse = (kind: 'engine-unsupported' | 'sandbox-unavailable' | 'engine-command-missing', reason: string): SandboxedEngineResult => {
         proposalOutcomeResult = proposalOutcome(kind, reason);
@@ -2352,11 +2370,10 @@ export async function runEngineSandboxed(
           proposalOutcome: proposalOutcomeResult,
         };
       };
-      // SPEC-310B residual risks: "Claude as a producer waits for a credential
-      // proxy in 3.11." The overlay gives claude an empty ephemeral config dir
-      // and no token, so it could only fail after taking a slot — say why now.
+      // Claude producer contact requires the source-owned native adapter.
+      // A generic empty-auth overlay cannot stand in for native account proof.
       if (confinementProfile.networkEgress && (engineKey === 'claude' || engineKey === 'claude-cli')) {
-        return refuse('engine-unsupported', 'claude producers are not run under a standing policy until the 3.11 credential proxy (the claude-a token only reaches restricted, tool-less judge / Leader calls)');
+        if (!selectedStandingClaude || !model) return refuse('engine-unsupported', 'Claude producers require a selected native profile, current host authority and fresh native account/credit-protection proof');
       }
       // 3.15: autonomy runs the Devin CLI on a FREE SWE-2 model only. A billed
       // Devin model's spend cannot be read back (the CLI prints no usage), so
@@ -2364,6 +2381,7 @@ export async function runEngineSandboxed(
       if (engineKey === DEVIN_CLI_ENGINE_ID && !isDevinCliFreeModel(model)) {
         return refuse('engine-unsupported', `devin-cli model "${model ?? ''}" is billed by Devin; autonomous runs use a free SWE-2 model only (${DEVIN_CLI_FREE_MODELS.join(', ')})`);
       }
+      if (!selectedStandingClaude) {
       let seatId: string | null = opts.seatId ?? null;
       let nativeStatePath: string | null = null;
       if (engineKey === GROK_CLI_ENGINE_ID) {
@@ -2395,6 +2413,7 @@ export async function runEngineSandboxed(
       launcher = autonomousSpawn.launcher;
       // The capture of this worktree must run through a verified `.git`
       // (worktree.ts agentTreeGitContext); test doubles may lack the hook.
+      }
       optionalWorktreeExport(wt, 'requireVerifiedSandboxGit')?.(sb.id);
     } else {
       // Legacy / opt-in M52 profile: a grok-cli seat runs `node launcher.mjs`,
@@ -2478,7 +2497,9 @@ export async function runEngineSandboxed(
       }
       incrementRunActionCount(actionCounts, 'spawnAttempts');
       const _spawnStart = Date.now();
-      res = await spawnEngine(cmd, spawnCfg, {
+      res = selectedStandingClaude
+        ? await runSelectedClaude(goalWithContext,cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,(ev) => { const described=describeRunEventForStream(ev);if(described)emitSinkEvent(streamSink,described); })
+        : await spawnEngine(cmd, spawnCfg, {
         ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
         env: spawnEnv,
         timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -2507,7 +2528,7 @@ export async function runEngineSandboxed(
         const grokUsage = grokStreamUsage(res.output);
         if (grokUsage) res = { ...res, usage: grokUsage };
       }
-      const invocationCount = 1 + (res.configRecoveryAttempts ?? 0);
+      const invocationCount = selectedStandingClaude && res.providerContacted !== true ? 0 : 1 + (res.configRecoveryAttempts ?? 0);
       if (res.configRecoveryAttempts) {
         incrementRunActionCount(actionCounts, 'spawnAttempts', res.configRecoveryAttempts);
       }
@@ -2578,6 +2599,13 @@ export async function runEngineSandboxed(
       break;
     }
 
+    if (claudeCaptureDenied) {
+      const outcome=proposalOutcome('sandbox-unavailable',res.error ?? 'Native Claude admission or confinement evidence unavailable');
+      recordSandboxedRunAgentAction({engine,engineModel,tier,runId:id,sourceRepo:opts.sourceRepo,
+        workItemId:opts.workItemId,workSource:opts.workSource,outcome,status:'failed',usage,durationMs:_spawnDurationMs,actionCounts});
+      return {state:withSandboxRetention(withProposalOutcome(mk({status:'failed',result:outcome.reason,usage}),outcome,actionCounts),sandboxRetention),proposalOutcome:outcome,
+        ...(sandboxRetention ? {sandboxRetention} : {})};
+    }
     const terminationReason: TerminationReason | undefined = res.terminationReason;
 
     if (autonomousSpawn) {
@@ -2897,7 +2925,9 @@ export async function runEngineSandboxed(
                   incrementRunActionCount(actionCounts, 'spawnAttempts');
                   let r: SpawnEngineResult | null = null;
                   try {
-                    r = await spawnEngine(repairCmd, cfg, {
+                    r = selectedStandingClaude
+                      ? await runSelectedClaude(repairGoal,_v2g.perRunTimeoutMs ?? 180_000)
+                      : await spawnEngine(repairCmd, cfg, {
                       ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
                       env:repairSpawn?.env ?? env,
                       timeoutMs:_v2g.perRunTimeoutMs ?? 180_000,
@@ -2918,7 +2948,7 @@ export async function runEngineSandboxed(
                     const reported = grokStreamUsage(r.output);
                     if (reported) r = {...r,usage:reported};
                   }
-                  const invocationCount = 1 + (r.configRecoveryAttempts ?? 0);
+                  const invocationCount = selectedStandingClaude && r.providerContacted !== true ? 0 : 1 + (r.configRecoveryAttempts ?? 0);
                   if (r.configRecoveryAttempts) {
                     incrementRunActionCount(actionCounts, 'spawnAttempts', r.configRecoveryAttempts);
                   }
@@ -2935,6 +2965,13 @@ export async function runEngineSandboxed(
                   return { ok: r.ok };
                 },
               });
+              if (claudeCaptureDenied) {
+                const outcome=proposalOutcome('sandbox-unavailable','Native Claude repair admission or confinement evidence unavailable');
+                recordSandboxedRunAgentAction({engine,engineModel,tier,runId:id,sourceRepo:opts.sourceRepo,
+                  workItemId:opts.workItemId,workSource:opts.workSource,outcome,status:'failed',usage,durationMs:_spawnDurationMs,actionCounts});
+                return {state:withSandboxRetention(withProposalOutcome(mk({status:'failed',result:outcome.reason,usage}),outcome,actionCounts),sandboxRetention),proposalOutcome:outcome,
+                  ...(sandboxRetention ? {sandboxRetention} : {})};
+              }
               if (processCleanupFailure) {
                 return failedAfterAuthoritativeTermination(processCleanupFailure, true);
               }
