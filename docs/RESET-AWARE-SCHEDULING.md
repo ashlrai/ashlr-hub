@@ -108,7 +108,12 @@ editor. This feature never changes a grant or provider billing.
 Claude's quota-only native report can establish the billing boundary when its
 current `rate_limits.extra_usage.is_enabled` is literally false and native account
 identity matches before and after the report. The optional report, account and
-usage reading must remain fresh at every new contact. Missing, malformed, enabled
+usage reading must remain fresh at every new contact. This billing report is
+not an execution binding: the actual producer must use the same independently
+verified account and credential profile. Current standing Claude producers
+remain blocked by the existing credential jail until an account-bound credential
+proxy is implemented; a native profile alone does not remove that guard. The
+source reports this as `execution-unbound` and retains the saved reserve. Missing, malformed, enabled
 or account-swapped data restores the saved reserve. Codex, Grok and Devin have no
 verified no-spillover boundary in this source and remain held for reserve
 shrinking. Grok's on-demand UI setting alone is not billing enforcement.

@@ -18,7 +18,7 @@ const seat = (): SeatCapacity => ({seatId:'claude',engine:'claude',label:'Claude
   windows:[{id:'five_hour',usedPercent:10,resetsAt:at(3600000),resetDescription:null,limitReached:false},
     {id:'seven_day',usedPercent:65,resetsAt:at(45000),resetDescription:null,limitReached:false,resetProvenance:{kind:'weekly-deadline',at:at(45000),description:'Weekly.',source:'claude-native-usage-report',plan:'max'}}]});
 const forecast = (): TaskWorkForecast => ({taskId:'task',recordedAt:at(0),cohort:{engine:'claude',model:'fable',seatId:'claude',taskKind:'todo'},durationMs:{p25:15000,p50:20000,p75:30000,samples:4},tokens:null,fit:'unknown',limitations:[]});
-const project = (s=seat(),p=policy(),g:Pick<EffectivePolicy,'spend'>|null=standing(),f:TaskWorkForecast|undefined=forecast(),time=now) => projectResetSpendingStatus(p,[s],g,time,f?{claude:f}:{}).accounts.claude!;
+const project = (s=seat(),p=policy(),g:Pick<EffectivePolicy,'spend'>|null=standing(),f:TaskWorkForecast|undefined=forecast(),time=now) => projectResetSpendingStatus(p,[s],g,time,f?{claude:f}:{},{executionAccountMatches:()=>true}).accounts.claude!;
 describe('reset spending enrollment and current task admission',()=>{
   it('preserves legacy priority without silently enrolling taper, and OFF blocks both',()=>{
     const old=defaultBudgetPolicy(); expect(resetPriorityEnabled(old)).toBe(true);expect(reserveTaperEnabled(old,'claude')).toBe(false);
@@ -43,7 +43,7 @@ describe('reset spending enrollment and current task admission',()=>{
     expect(clampBudgetPolicy(malformed,granted).resetSpending).toBeUndefined();
   });
   it('uses current observed work slack, retains the saved reserve and signed floor',()=>{
-    const before=policy();const result=taskResetBudget(before,[seat()],standing(),now,{claude:forecast()});
+    const before=policy();const result=taskResetBudget(before,[seat()],standing(),now,{claude:forecast()},{executionAccountMatches:()=>true});
     expect(result.status.accounts.claude).toMatchObject({state:'ready',savedReservePercent:40,effectiveReservePercent:20,signedFloorPercent:0});
     expect(result.budget.seats.claude?.reservePercent).toBe(20);expect(before.seats.claude?.reservePercent).toBe(40);
     expect(project(seat(),before,standing(40)).state).toBe('signed-floor');
@@ -81,6 +81,12 @@ describe('reset spending enrollment and current task admission',()=>{
     const credits=seat();credits.costBasis='credits';expect(project(credits).state).toBe('unqualified');
     const noRole=standing();noRole.spend.seats.claude!.roles=['judge'];expect(project(seat(),policy(),noRole).state).toBe('producer-not-granted');
   });
+  it('holds an unbound producer even when its collector has a valid credits-disabled reading',()=>{
+    const source=projectResetSpendingStatus(policy(),[seat()],standing(),now,{claude:forecast()});
+    expect(source.accounts.claude).toMatchObject({state:'execution-unbound',effectiveReservePercent:null,subscriptionOnly:'verified'});
+    expect(nextResetSpendingWake(source,now)).toBeNull();
+    expect(projectResetSpendingStatus(policy(),[seat()],standing(),now,{claude:forecast()},{executionAccountMatches:()=>{throw new Error('unreadable');}}).accounts.claude?.state).toBe('execution-unbound');
+  });
   it('never converts billing visibility or falsy malformed native data into a capability',()=>{
     const s=seat();expect(subscriptionOnlyCurrent(s,now)).toBe(true);
     expect(validSubscriptionOnlyBoundary({...s.subscriptionOnlyBoundary,creditsEnabled:0})).toBe(false);
@@ -90,7 +96,7 @@ describe('reset spending enrollment and current task admission',()=>{
     expect(clean.subscriptionOnlyBoundary).toBeUndefined();
   });
   it('schedules only a positive work-derived boundary and labels pooled forecasts',()=>{
-    const status=projectResetSpendingStatus(policy(),[seat()],standing(),now,{claude:forecast()});
+    const status=projectResetSpendingStatus(policy(),[seat()],standing(),now,{claude:forecast()},{executionAccountMatches:()=>true});
     expect(nextResetSpendingWake(status,now)).toBe(now+15000);
     const pooled=forecast();pooled.cohort.seatId=null;expect(project(seat(),policy(),standing(),pooled).forecastBasis?.pooled).toBe(true);
     expect(nextResetSpendingWake(projectResetSpendingStatus({...policy(),resetSpending:{enabled:false}},[seat()],standing(),now,{claude:forecast()}),now)).toBeNull();

@@ -14,7 +14,7 @@ export interface ResetSpendingForecastBasis {
   seatId: string | null; p75Ms: number; samples: number; pooled: boolean;
 }
 export type ResetSpendingState = 'disabled' | 'legacy-priority' | 'authority-paused' | 'account-disabled' |
-  'producer-not-granted' | 'signed-floor' | 'unqualified' | 'overage-unverified' | 'waiting-for-estimate' |
+  'producer-not-granted' | 'signed-floor' | 'unqualified' | 'overage-unverified' | 'execution-unbound' | 'waiting-for-estimate' |
   'cannot-fit' | 'held' | 'ordinary' | 'ready';
 export interface ResetSpendingAccountStatus {
   mode: 'inherit' | 'enabled' | 'disabled'; enabled: boolean;

@@ -20,6 +20,8 @@ export interface ResetSpendingProjectionOptions {
   authorityState?: ResetSpendingStatus['authorityState'];
   /** Preserve the actual native gate; this feature cannot silently raise it. */
   maxPercent?: number;
+  /** Source-owned synchronous native-launch proof; never serialized or supplied by operator settings. */
+  executionAccountMatches?: (seat: SeatCapacity, forecast: TaskWorkForecast | null) => boolean;
 }
 /** No forecast on a GET means no current task-derived effective reserve is claimed. */
 export function projectResetSpendingStatus(policy: BudgetPolicy, seats: readonly SeatCapacity[],
@@ -68,6 +70,12 @@ export function projectResetSpendingStatus(policy: BudgetPolicy, seats: readonly
     }
     status.deadline = opportunity.reset.at;
     if (status.subscriptionOnly !== 'verified') { finish('overage-unverified', 'Reserve shrinking is held until this account has a verified subscription-only billing boundary.'); continue; }
+    let executionMatched = false;
+    try { executionMatched = options.executionAccountMatches?.(seat,forecast ?? null) === true; } catch { /* Unknown execution identity holds the saved reserve. */ }
+    if (!executionMatched) {
+      status.constraints.push('The native producer must be bound to this observed billing account and credential profile.');
+      finish('execution-unbound', 'Reserve shrinking is held until the native producer has a verified account-bound launch.'); continue;
+    }
     const duration = forecast?.durationMs;
     const recorded = forecast?.recordedAt ? Date.parse(forecast.recordedAt) : NaN;
     if (!forecast || !duration || !Number.isFinite(recorded) || recorded > nowMs ||

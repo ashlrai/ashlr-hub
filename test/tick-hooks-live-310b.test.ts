@@ -1337,7 +1337,7 @@ describe('reset-aware selected batch — real routing seam with injected advice'
 });
 
 describe('task-scoped reset reserve reaches actual dispatch admission',()=>{
-  function resetHarness() {
+  function resetHarness(executionAccountMatches:LiveHooksDeps['executionAccountMatches']|null=()=>true) {
     let clock=NOW; let model='model-a';
     let budget={...defaultBudgetPolicy(),resetSpending:{enabled:true},seats:{claude:{seatId:'claude',enabled:true,reservePercent:40,maxSessionWindowPercent:70}}};
     const hint='a'.repeat(64);
@@ -1347,7 +1347,7 @@ describe('task-scoped reset reserve reaches actual dispatch admission',()=>{
     policy={...policy!,engines:['claude-cli']};
     const nativeGate=vi.fn<LiveHooksDeps['subscriptionAllows']>(()=>({allowed:true,reason:'fixture current native throttle'}));
     const advice=vi.fn(async()=>null);
-    const hooks=createLiveTickHooks({deps:{...h.deps,now:()=>clock,loadBudget:()=>budget,
+    const hooks=createLiveTickHooks({deps:{...h.deps,executionAccountMatches:executionAccountMatches??undefined,now:()=>clock,loadBudget:()=>budget,
       capacitySnapshot:()=>({v:1,publishedAt:NOW_ISO,seats:[capacity]}),
       legacyRoute:()=>({backend:'claude',tier:'frontier',model,reason:'explicit fixture model'}),
       subscriptionAllows:nativeGate,resourceAdvice:advice,
@@ -1378,6 +1378,12 @@ describe('task-scoped reset reserve reaches actual dispatch admission',()=>{
     expect(r.hooks.seatAllows('claude',{maxPercent:90,itemId:'item-1',model:'model-a'}).allowed).toBe(false);
     expect(r.nativeGate).not.toHaveBeenCalled();
     expect(r.hooks.nextResetWake?.(kind==='expired'?NOW+60000:kind==='reset'?NOW+45001:NOW)).toBeNull();
+  });
+  it('keeps an actual unbound native producer at the saved reserve, regardless of collector billing proof',async()=>{
+    const r=resetHarness(null);
+    expect((await prepare(r)).hold).not.toBeNull();
+    expect(r.nativeGate).not.toHaveBeenCalled();
+    expect(r.hooks.nextResetWake?.(NOW)).toBeNull();
   });
   it('keeps the signed floor and every other native account binding',async()=>{
     const r=resetHarness();policy!.spend.seats.claude!.reserveFloorPercent=40;

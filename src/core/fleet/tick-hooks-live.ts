@@ -66,7 +66,7 @@ import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { buildSchedulingView, readWorkHistory, taskForecast } from '../routing/scheduling.js';
 import { writeRecordedScheduling } from '../routing/scheduling-cache.js';
-import { taskResetBudget, resetPriorityEnabled, nextResetSpendingWake } from '../routing/reset-spending.js';
+import { taskResetBudget, resetPriorityEnabled, nextResetSpendingWake, type ResetSpendingProjectionOptions } from '../routing/reset-spending.js';
 import type { TaskWorkForecast } from '../routing/scheduling-types.js';
 import type { ResetSpendingStatus } from '../routing/reset-spending-types.js';
 import { hasResetDeadline, opportunityPriority } from '../routing/reset-pressure.js';
@@ -284,6 +284,8 @@ export interface LiveHooksDeps {
   recordReserveBreaches(input: { capacity: unknown; policy: EffectivePolicy; now?: Date; usedSeatIds?: readonly string[] }): Promise<number>;
   installed(engine: EngineId, cfg: AshlrConfig): boolean;
   tierOf(engine: EngineId, cfg: AshlrConfig): EngineTier | null;
+  /** Trusted source port only. Missing does not infer a launch binding from a collector or account name. */
+  executionAccountMatches?: ResetSpendingProjectionOptions['executionAccountMatches'];
   subscriptionAllows(engine: EngineId, opts: { maxPercent: number; autonomous: true; budget?: BudgetPolicy }): SubscriptionAllowResult;
   isSubscriptionEngine(engine: EngineId): boolean;
   legacyRoute(item: WorkItem, cfg: AshlrConfig): RouteDecision;
@@ -1078,7 +1080,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         return actual?.backend === forecast.cohort.engine && (actual.model ?? null) === forecast.cohort.model;
       } catch { return false; }
     }));
-    const result = taskResetBudget(current.budget, current.capacity, current.policy, current.nowMs, forecasts, {maxPercent});
+    const result = taskResetBudget(current.budget, current.capacity, current.policy, current.nowMs, forecasts, {maxPercent,...(deps.executionAccountMatches ? {executionAccountMatches:deps.executionAccountMatches} : {})});
     current.itemResetStatus.set(itemId, result.status);
     return result.budget;
   };
