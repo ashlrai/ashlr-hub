@@ -113,6 +113,8 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/fleet/backpressure.ts',
   'src/core/fleet/mirrors.ts',
   'src/core/fleet/tick-hooks-live.ts',
+  // Native principal/executable/pricing proof before autonomous Devin contact.
+  'src/core/devin/cli-admission.ts',
   'src/core/fleet/manager.ts',
   'src/core/fleet/reviewer-independence.ts',
   // Spend / engine deciders (3.10 review d4): each decides which paid seat or

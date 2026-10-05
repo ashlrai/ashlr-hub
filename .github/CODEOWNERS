@@ -151,6 +151,7 @@
 /src/core/fleet/backpressure.ts @masonwyatt23
 /src/core/fleet/mirrors.ts @masonwyatt23
 /src/core/fleet/tick-hooks-live.ts @masonwyatt23
+/src/core/devin/cli-admission.ts @masonwyatt23
 /src/core/fleet/manager.ts @masonwyatt23
 /src/core/fleet/reviewer-independence.ts @masonwyatt23
 /src/core/fleet/subscription-usage.ts @masonwyatt23
@@ -233,6 +234,7 @@
 /test/decide-critics-315.test.ts @masonwyatt23
 /test/decide-judge-manager-315.test.ts @masonwyatt23
 /test/decide-resource-choice.test.ts @masonwyatt23
+/test/devin-cli-admission.test.ts @masonwyatt23
 /test/devin-cli-engine-315.test.ts @masonwyatt23
 /test/devin-cli-engine-realio-315.test.ts @masonwyatt23
 /test/devin-engine-identity-315.test.ts @masonwyatt23

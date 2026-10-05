@@ -1,3 +1,4 @@
+import { devinCliBindingCurrent, peekDevinCliExecutionBinding } from '../devin/cli-admission.js';
 import { resetSpendingParkDelay } from './reset-spending-park-delay.js';
 /**
  * loop.ts — The M24 daemon operator.
@@ -7556,6 +7557,14 @@ export async function tick(
             } catch { return false; }
           }
           : undefined;
+        const selectedDevinBinding = fleetLaneOf(backend, routingCfg) === 'devin-cli'
+          ? peekDevinCliExecutionBinding(selectedModel ?? resolveDevinCliFleetModel(routingCfg.devin)) : null;
+        const selectedDevinAdmission = fleetLaneOf(backend, routingCfg) === 'devin-cli'
+          ? (model: string) => {
+            if (!stillOwnsTick() || stopRequested() || dispatchSignal.aborted || !devinCliBindingCurrent(selectedDevinBinding, model)) return null;
+            try { return hooks.seatAllows(backend!, { maxPercent:resolveSubscriptionMaxPercent(routingCfg), itemId:item.id, model }).allowed === true ? selectedDevinBinding : null; }
+            catch { return null; }
+          } : undefined;
         let runState: Awaited<ReturnType<typeof runGoal>>;
         if (fanOut) {
           // Route through runBestOfN; use its winner's underlying runState.
@@ -7570,6 +7579,7 @@ export async function tick(
               ...(outcomeDispatch ? { goal } : {}),
               ...(standingSeatId ? { seatId: standingSeatId } : {}),
               ...(selectedGrokAdmission ? { selectedGrokAdmission } : {}),
+              ...(selectedDevinAdmission ? { selectedDevinAdmission } : {}),
               ...(dispatchHarness ? { harness: dispatchHarness } : {}),
               budget: itemBudget,
               ...(_bonCandidates ? { candidates: _bonCandidates as never } : {}),
@@ -7723,6 +7733,7 @@ export async function tick(
               ...(selectedModel ? { model: selectedModel } : {}),
               ...(standingSeatId ? { seatId: standingSeatId } : {}),
               ...(selectedGrokAdmission ? { selectedGrokAdmission } : {}),
+              ...(selectedDevinAdmission ? { selectedDevinAdmission } : {}),
               ...(outcomeDispatch || selectedTaskAdmission ? { selectedOutcomeAdmission: selectedDispatchAdmission } : {}),
               ...(dispatchHarness ? { harness: dispatchHarness } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,

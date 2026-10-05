@@ -394,6 +394,7 @@ interface SpawnEngineResult {
   error?: string;
   terminationReason?: TerminationReason;
   configRecoveryAttempts?: number;
+  terminationDiagnostics?: import('../types.js').RunState['terminationDiagnostics'];
 }
 
 function cancelledEngineResult(
@@ -857,6 +858,8 @@ async function spawnEngineInner(
     let terminationReason: TerminationReason | undefined;
     let settled = false;
     let terminationRequested = false;
+    let terminationRequestedAt: string | null = null;
+    let leaderExitedAt: string | null = null;
     let escalationTimer: ReturnType<typeof setTimeout> | null = null;
     let drainTimer: ReturnType<typeof setTimeout> | null = null;
     let backstopTimer: ReturnType<typeof setTimeout> | null = null;
@@ -879,7 +882,10 @@ async function spawnEngineInner(
       if (drainTimer !== null) clearTimeout(drainTimer);
       opts?.signal?.removeEventListener('abort', onAbort);
       releaseProcessResources();
-      resolve(result);
+      resolve(terminationRequestedAt && terminationReason ? { ...result, terminationDiagnostics: {
+        initiator:terminationReason, requestedAt:terminationRequestedAt, leaderExitedAt,
+        cleanupAuthorityLost:groupAuthorityFailure !== undefined,
+      } } : result);
     }
 
     if (!selectedOutcomeAdmissionCurrent(opts?.selectedOutcomeAdmission)) {
@@ -1040,6 +1046,7 @@ async function spawnEngineInner(
     function requestTermination(reason: TerminationReason, graceful: boolean): void {
       if (settled || terminationRequested) return;
       terminationRequested = true;
+      terminationRequestedAt = new Date().toISOString();
       terminationReason = reason;
       monitor.detach();
 
@@ -1056,8 +1063,8 @@ async function spawnEngineInner(
           beginTerminationDrain();
           return;
         }
-        // The leader may exit while descendants remain in its detached group.
-        // Keep the PGID authority and escalate the original group at deadline.
+        // Escalation is permitted only while the invocation leader remains
+        // unreaped and proves the original group. Leader exit fails closed.
         escalationTimer = setTimeout(() => {
           escalationTimer = null;
           const killResult = signalOwnedGroup('SIGKILL');
@@ -1153,6 +1160,7 @@ async function spawnEngineInner(
 
     child.on('exit', () => {
       leaderExited = true;
+      leaderExitedAt = new Date().toISOString();
       if (!terminationRequested || !ownsProcessGroup) return;
       if (hardKillSent) {
         // SIGKILL was authorized while the unreaped leader still proved the

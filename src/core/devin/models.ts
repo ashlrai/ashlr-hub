@@ -167,7 +167,7 @@ export function parseDevinModelMeta(bracket: string): Pick<DevinModel, 'contextT
 }
 
 /** `devin models list` → families (empty families dropped). Pure; never throws. */
-export function parseDevinModelsList(text: string): { declaredFamilyCount: number | null; families: DevinModelFamily[] } {
+export function parseDevinModelsList(text: string, opts: { retainDuplicateIds?: boolean } = {}): { declaredFamilyCount: number | null; families: DevinModelFamily[] } {
   const families: DevinModelFamily[] = [];
   let declaredFamilyCount: number | null = null;
   let current: DevinModelFamily | null = null;
@@ -195,9 +195,14 @@ export function parseDevinModelsList(text: string): { declaredFamilyCount: numbe
       continue;
     }
     const row = ROW_RE.exec(line);
-    if (!row || rows >= MAX_ROWS) continue;
+    if (!row) continue;
+    // A truncated UI catalog is useful for display, but cannot prove unique billing rows.
+    if (rows >= MAX_ROWS) {
+      if (opts.retainDuplicateIds) return { declaredFamilyCount:null, families:[] };
+      continue;
+    }
     const id = row[1]!;
-    if (!DEVIN_MODEL_ID_RE.test(id) || seen.has(id)) continue;
+    if (!DEVIN_MODEL_ID_RE.test(id) || (!opts.retainDuplicateIds && seen.has(id))) continue;
     seen.add(id);
     rows++;
     current.models.push({

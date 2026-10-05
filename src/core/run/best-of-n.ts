@@ -763,7 +763,7 @@ interface RuntimeCandidateSpec extends BestOfNCandidateSpec {
 
 const ENGINE_IDS = new Set<EngineId>([
   'builtin', 'local-coder', 'ashlrcode', 'aw', 'claude', 'codex', 'hermes',
-  'kimi', 'nim', 'opencode', 'meta-muse', 'grok', 'grok-cli',
+  'kimi', 'nim', 'opencode', 'meta-muse', 'grok', 'grok-cli', 'devin-cli',
 ]);
 
 function materializeCandidateSpecs(
@@ -868,6 +868,7 @@ async function runBestOfNInternal(
     seatId?: string;
     /** Internal same-seat pre-spawn fence, forwarded only to its routed Grok candidate. */
     selectedGrokAdmission?: () => boolean;
+    selectedDevinAdmission?: import('../types.js').RunOptions['selectedDevinAdmission'];
     /** Caller-owned outcome revision shared by all ordinary candidates and critics. */
     selectedOutcomeAdmission?: () => boolean;
     /**
@@ -1049,9 +1050,11 @@ async function runBestOfNInternal(
     }]);
   }
   // The routed seat only ever applies to the routed engine (see opts.seatId).
-  const seatFor = (e: EngineId): { seatId?: string; selectedGrokAdmission?: () => boolean } =>
-    opts?.seatId && opts.engine !== undefined && e === opts.engine
-      ? { seatId:opts.seatId,...(String(e) === 'grok-cli' && opts.selectedGrokAdmission ? {selectedGrokAdmission:opts.selectedGrokAdmission} : {}) } : {};
+  const seatFor = (e: EngineId): Pick<import('../types.js').RunOptions, 'seatId' | 'selectedGrokAdmission' | 'selectedDevinAdmission'> => ({
+    ...(opts?.seatId && opts.engine !== undefined && e === opts.engine
+      ? { seatId:opts.seatId,...(String(e) === 'grok-cli' && opts.selectedGrokAdmission ? {selectedGrokAdmission:opts.selectedGrokAdmission} : {}) } : {}),
+    ...(String(e) === 'devin-cli' && opts?.selectedDevinAdmission ? { selectedDevinAdmission:opts.selectedDevinAdmission } : {}),
+  });
   const runnerFor = (e: EngineId): typeof runEngineSandboxed => {
     const spec = resolveEngineSpec(e, cfg);
     return spec?.kind === 'api-model' ? runApiModelSandboxed : runEngineSandboxed;

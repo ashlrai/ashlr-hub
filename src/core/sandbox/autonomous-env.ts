@@ -52,6 +52,7 @@ import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'no
 
 import { CUSTODY_DATA_DIR_RELATIVE, CUSTODY_HELPER_PATH } from '../authority/custody-client.js';
 import { devinCliCredentialsPath } from '../devin/cli-probe.js';
+import { devinCliBindingCurrent, type DevinCliExecutionBinding } from '../devin/cli-admission.js';
 
 export interface AutonomousEnvInput {
   /** Engine id as the registry knows it (e.g. `claude`, `grok-cli`, `local-coder`). */
@@ -79,6 +80,8 @@ export interface AutonomousEnvInput {
    * else `<home>/.local/share/devin/credentials.toml` (devin/cli-probe.ts).
    */
   devinCredentialsPath?: string;
+  /** Host-issued native account/model identity around the existing private copy. */
+  devinExecutionBinding?: DevinCliExecutionBinding;
 }
 
 /** A per-run copy of a seat's vendor home (grok-cli / codex). */
@@ -93,6 +96,20 @@ export interface AutonomousVendorState {
   snapshot: Readonly<Record<string, string>>;
   /** Files the daemon may write back after the run, once validated. */
   writeBack: readonly string[];
+}
+
+const devinCopyChecks = new WeakMap<object, () => boolean>();
+
+function privateCopyEpoch(file: string): string {
+  const stat = lstatSync(file, { bigint:true });
+  if (!stat.isFile() || stat.nlink !== 1n || (stat.mode & 0o777n) !== 0o600n ||
+    (typeof process.getuid === 'function' && stat.uid !== BigInt(process.getuid())) || realpathSync(file) !== file) throw new Error('unqualified Devin private copy');
+  return [stat.dev,stat.ino,stat.size,stat.mtimeNs,stat.ctimeNs,stat.mode,stat.uid].map(String).join(':');
+}
+
+/** Host-memory fence for the exact private login copy; no credential contents or fingerprints leave it. */
+export function autonomousDevinIdentityCurrent(overlay: AutonomousEnvOverlay): boolean {
+  try { return devinCopyChecks.get(overlay)?.() === true; } catch { return false; }
 }
 
 export interface AutonomousEnvOverlay {
@@ -184,6 +201,7 @@ export const AUTONOMOUS_UNSET_ENV: readonly string[] = Object.freeze([
   'GROK_HOME',
   'OPENAI_API_KEY',
   'XAI_API_KEY',
+  'WINDSURF_API_KEY',
   'GITHUB_TOKEN',
   'GH_TOKEN',
   'GH_ENTERPRISE_TOKEN',
@@ -458,8 +476,11 @@ export function buildAutonomousEnvOverlay(input: AutonomousEnvInput): Autonomous
   // agent does to its copy dies with the run dir, and Mason's real file is
   // denied to the agent outright. Missing / odd → the run is refused (fail
   // closed), never run logged-out or against the real directory.
+  let devinCopyCheck: (() => boolean) | undefined;
   if (engineClass === 'devin-cli') {
-    const real = input.devinCredentialsPath ?? devinCliCredentialsPath(process.env, home);
+    const binding = input.devinExecutionBinding;
+    if (binding && !devinCliBindingCurrent(binding, binding.model)) throw new AutonomousEnvError('the selected Devin native identity changed before its private copy');
+    const real = binding?.credentialsPath ?? input.devinCredentialsPath ?? devinCliCredentialsPath(process.env, home);
     if (!isAbsolute(real)) throw new AutonomousEnvError('the Devin CLI credentials path must be absolute');
     if (regularFile(real, MAX_AUTH_FILE_BYTES) === null) {
       throw new AutonomousEnvError('the Devin CLI is logged out (no credentials file) — run `devin auth login`');
@@ -471,6 +492,11 @@ export function buildAutonomousEnvOverlay(input: AutonomousEnvInput): Autonomous
     const target = join(devinData, 'credentials.toml');
     copyFileSync(real, target, fsConstants.COPYFILE_EXCL);
     chmodSync(target, 0o600);
+    if (binding && !devinCliBindingCurrent(binding, binding.model)) throw new AutonomousEnvError('the selected Devin native identity changed during its private copy');
+    if (binding) {
+      const copiedEpoch = privateCopyEpoch(target);
+      devinCopyCheck = () => devinCliBindingCurrent(binding,binding.model) && privateCopyEpoch(target) === copiedEpoch;
+    }
     deniedReadPaths.push(dirname(real));
     // No DEVIN_* variable reaches the run: buildContainedEnv is an allowlist,
     // so DEVIN_PERMISSION_MODE / DEVIN_SANDBOX / DEVIN_MODEL from the daemon's
@@ -493,7 +519,7 @@ export function buildAutonomousEnvOverlay(input: AutonomousEnvInput): Autonomous
   }
 
   const unset = AUTONOMOUS_UNSET_ENV.filter((key) => !(key in set));
-  return Object.freeze({
+  const overlay = Object.freeze({
     set: Object.freeze(set),
     unset: Object.freeze(unset),
     writablePaths: Object.freeze([run]),
@@ -502,6 +528,8 @@ export function buildAutonomousEnvOverlay(input: AutonomousEnvInput): Autonomous
     engineClass,
     vendorState: Object.freeze(vendorState),
   });
+  if (devinCopyCheck) devinCopyChecks.set(overlay,devinCopyCheck);
+  return overlay;
 }
 
 /**

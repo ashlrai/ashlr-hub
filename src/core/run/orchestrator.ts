@@ -2908,6 +2908,7 @@ async function runGoalInternal(
               // Preserve the router's exact native account through sandbox delegation.
               ...(opts.seatId ? { seatId: opts.seatId } : {}),
               ...(opts.selectedGrokAdmission ? { selectedGrokAdmission: opts.selectedGrokAdmission } : {}),
+              ...(opts.selectedDevinAdmission ? { selectedDevinAdmission: opts.selectedDevinAdmission } : {}),
               ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
               ...(opts.harness ? { harness: opts.harness } : {}),
             });
@@ -3000,6 +3001,7 @@ async function runGoalInternal(
                 ...(opts.runId ? { runId: opts.runId } : {}),
                 ...(opts.seatId ? { seatId: opts.seatId } : {}),
                 ...(opts.selectedGrokAdmission ? { selectedGrokAdmission: opts.selectedGrokAdmission } : {}),
+              ...(opts.selectedDevinAdmission ? { selectedDevinAdmission: opts.selectedDevinAdmission } : {}),
                 ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
                 ...(opts.harness ? { harness: opts.harness } : {}),
                 deferTerminalAction: true,

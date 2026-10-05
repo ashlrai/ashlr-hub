@@ -100,7 +100,8 @@ import { loadBudgetPolicy, readCapacitySnapshot, recordShadowDecision, type Capa
 import { assessSeat, type SeatCapacity } from '../routing/headroom.js';
 import { DEVIN_SEAT_ID, effectiveSeatPolicy } from '../routing/policy.js';
 import { probeDevinCli, type DevinCliProbe } from '../devin/cli-probe.js';
-import { devinCliLaneVerdict, isDevinCliFreeModel, resolveDevinCliFleetModel } from '../devin/cli-engine.js';
+import { devinCliLaneVerdict, devinCliPolicyVerdict, resolveDevinCliFleetModel } from '../devin/cli-engine.js';
+import { devinCliBindingCurrent, peekDevinCliExecutionBinding, refreshDevinCliExecutionBinding, type DevinCliExecutionBinding } from '../devin/cli-admission.js';
 import type { BudgetPolicy } from '../routing/types.js';
 import type { ReasoningInsight } from '../reasoning/types.js';
 import type { LeaderDirectivesV1 } from '../vision/leader-types.js';
@@ -258,6 +259,8 @@ export interface LiveHooksDeps {
    * Devin CLI lane. Optional: absent = not probed, so that lane stays closed.
    */
   probeDevinCli?(): Promise<DevinCliProbe>;
+  /** Same native account/executable/model evidence; absent uses the source-owned reader. */
+  devinCliExecutionBinding?(model: string, cliPath: string): Promise<DevinCliExecutionBinding | null>;
   presence(nowMs: number): Promise<OperatorPresence>;
   directives(): LeaderDirectivesV1 | null;
   /** Strict live operator policy; failed reads close Grok admission without inventing defaults. */
@@ -839,7 +842,7 @@ export async function devinCliReadiness(
   cfg: AshlrConfig,
   policy: EffectivePolicy,
   budget: BudgetPolicy | null,
-  deps: Pick<LiveHooksDeps, 'probeDevinCli'>,
+  deps: Pick<LiveHooksDeps, 'probeDevinCli' | 'devinCliExecutionBinding'>,
 ): Promise<{ ok: boolean; reason: string }> {
   try {
     const base = {
@@ -849,7 +852,7 @@ export async function devinCliReadiness(
       budgetMode: budget?.mode ?? null,
       model: resolveDevinCliFleetModel(cfg.devin),
     };
-    const pre = devinCliLaneVerdict({ ...base, probe: { state: 'ready', reason: null } });
+    const pre = devinCliPolicyVerdict({ ...base, probe: null });
     if (!pre.ok) return pre;
     let probe: DevinCliProbe | null = null;
     try {
@@ -857,7 +860,13 @@ export async function devinCliReadiness(
     } catch {
       probe = null;
     }
-    return devinCliLaneVerdict({ ...base, probe });
+    let binding: DevinCliExecutionBinding | null = null;
+    if (probe?.state === 'ready' && probe.cliPath) {
+      binding = await (deps.devinCliExecutionBinding
+        ? deps.devinCliExecutionBinding(base.model, probe.cliPath)
+        : refreshDevinCliExecutionBinding(base.model, { cliPath: probe.cliPath }));
+    }
+    return devinCliLaneVerdict({ ...base, probe, nativeFreeModelVerified: devinCliBindingCurrent(binding, base.model) });
   } catch (err) {
     return { ok: false, reason: `The Devin CLI lane could not be evaluated (${describeError(err)}).` };
   }
@@ -884,8 +893,8 @@ function devinCliSeatAllows(current: TickContext): SubscriptionAllowResult {
     return { allowed: false, reason: `The ${current.budget.mode} budget mode keeps the Devin seat off for autonomy.` };
   }
   const model = resolveDevinCliFleetModel(current.cfg.devin);
-  if (!isDevinCliFreeModel(model)) {
-    return { allowed: false, reason: `devin.fleetModel "${model}" is billed by Devin, so autonomy holds it.` };
+  if (!peekDevinCliExecutionBinding(model)) {
+    return { allowed: false, reason: `devin.fleetModel "${model}" has no current account-bound native free-pricing evidence, so autonomy holds it.` };
   }
   return { allowed: true, reason: `devin-cli (${model}, free) is open under the grant's Devin authorization.` };
 }

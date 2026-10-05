@@ -1,5 +1,6 @@
 import type { LeaderPreferenceConfig } from './vision/leader-preferences.js';
 import type { GoalPreferenceConfig } from './goals/preferences.js';
+import type { DevinCliExecutionBinding } from './devin/cli-admission.js';
 
 /**
  * THE CONTRACT.
@@ -2168,6 +2169,13 @@ export interface RunState {
    * Why an external run was stopped, including explicit caller cancellation.
    */
   terminationReason?: 'idle-stall' | 'loop-stall' | 'no-diff-stall' | 'backstop-timeout' | 'cancelled' | 'clean-exit' | 'error-exit';
+  /** Original host termination request remains distinct from a later cleanup failure. No argv/output. */
+  terminationDiagnostics?: {
+    initiator: 'idle-stall' | 'loop-stall' | 'no-diff-stall' | 'backstop-timeout' | 'cancelled' | 'clean-exit' | 'error-exit';
+    requestedAt: string;
+    leaderExitedAt: string | null;
+    cleanupAuthorityLost: boolean;
+  };
 }
 
 /**
@@ -2194,6 +2202,8 @@ export interface RunOptions {
   seatId?: string;
   /** Internal synchronous same-seat authority fence; never serialized or passed to a model. */
   selectedGrokAdmission?: () => boolean;
+  /** Host-issued exact native Devin principal/model binding; never serialized or sent to a model. */
+  selectedDevinAdmission?: (model: string) => DevinCliExecutionBinding | null;
   /** Internal caller-owned outcome revision fence; never persisted or sent to a model. */
   selectedOutcomeAdmission?: () => boolean;
   /** Partial budget overrides (merged over defaults). */

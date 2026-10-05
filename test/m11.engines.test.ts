@@ -647,6 +647,9 @@ describe('spawnEngine — never throws on failure', () => {
     await expect(pending).resolves.toMatchObject({
       terminationReason: 'error-exit',
       error: expect.stringContaining('leader identity is no longer provable'),
+      terminationDiagnostics: {
+        initiator: 'cancelled', requestedAt:expect.any(String), leaderExitedAt:expect.any(String), cleanupAuthorityLost:true,
+      },
     });
   });
 

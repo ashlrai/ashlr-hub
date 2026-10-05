@@ -1,4 +1,5 @@
 import { assertSelectedOutcomeAdmission, selectedOutcomeAdmissionCurrent, SelectedOutcomeAdmissionRefusal } from './outcome-admission.js';
+import { devinCliBindingCurrent, refreshDevinCliExecutionBinding, type DevinCliExecutionBinding } from '../devin/cli-admission.js';
 /**
  * sandboxed-engine.ts — M45: run an external agent CLI (Claude Code / Codex)
  * INSIDE a throwaway git worktree and capture ONLY its diff as a PENDING inbox
@@ -77,7 +78,6 @@ import {
 import { buildEngineCommand, spawnEngine, describeRunEventForStream, resolveBinAbsolute } from './engines.js';
 import {
   DEVIN_CLI_ENGINE_ID,
-  DEVIN_CLI_FREE_MODELS,
   DEVIN_CLI_STALL_IDLE_MS,
   isDevinCliFreeModel,
   resolveDevinCliFleetModel,
@@ -130,7 +130,7 @@ import {
   recordAutonomousViolations,
   type AutonomousSpawn,
 } from '../sandbox/autonomous-run.js';
-import { autonomousVendorIdentityCurrent, captureAutonomousVendorIdentityCheck } from '../sandbox/autonomous-env.js';
+import { autonomousVendorIdentityCurrent, autonomousDevinIdentityCurrent, captureAutonomousVendorIdentityCheck } from '../sandbox/autonomous-env.js';
 import { recordSandboxEvidenceUnknown } from '../authority/rollout.js';
 import { audit as auditConfinement } from '../sandbox/audit.js';
 import {
@@ -251,6 +251,8 @@ export interface RunEngineSandboxedOptions {
   seatId?: string;
   /** Internal synchronous fence for the explicitly bound Grok account before each native spawn. */
   selectedGrokAdmission?: () => boolean;
+  /** Host-held exact native Devin execution identity; never passed to the CLI. */
+  selectedDevinAdmission?: (model: string) => DevinCliExecutionBinding | null;
   /** Caller-owned current outcome revision, ignored for immutable signed shadows. */
   selectedOutcomeAdmission?: () => boolean;
   /** Internal whole-attempt generation for mutating-tool evidence. */
@@ -342,6 +344,7 @@ type SpawnEngineResult = {
   error?: string;
   terminationReason?: TerminationReason;
   configRecoveryAttempts?: number;
+  terminationDiagnostics?: RunState['terminationDiagnostics'];
 };
 
 const PROCESS_CLEANUP_UNCONFIRMED_RE =
@@ -1941,9 +1944,11 @@ export async function runEngineSandboxed(
       })
     : undefined;
   let delegationScopeSummary = summarizeDelegationScope(delegationScope);
+  let terminationDiagnostics: RunState['terminationDiagnostics'];
 
   const mk = (over: Partial<RunState>): RunState => ({
     id,
+    ...(terminationDiagnostics ? { terminationDiagnostics } : {}),
     goal,
     engine,
     provider: 'external',
@@ -2209,6 +2214,13 @@ export async function runEngineSandboxed(
   let autonomousFinished = false;
   let selectedGrokCommand: { launcher: EngineCommand; direct: NonNullable<ReturnType<typeof grokCliDirectCommand>> } | null = null;
   let selectedGrokIdentityStillCurrent: (() => boolean) | null = null;
+  let selectedDevinBinding: DevinCliExecutionBinding | null = null;
+  const selectedDevinCurrent = (): boolean => {
+    if (!selectedDevinBinding || !devinCliBindingCurrent(selectedDevinBinding, model ?? '') ||
+      (autonomousSpawn && !autonomousDevinIdentityCurrent(autonomousSpawn.overlay))) return false;
+    try { return opts.selectedDevinAdmission === undefined || opts.selectedDevinAdmission(model ?? '') === selectedDevinBinding; }
+    catch { return false; }
+  };
   const selectedAdmissionCurrent = (): boolean => {
     try { return opts.selectedGrokAdmission === undefined || opts.selectedGrokAdmission() === true; }
     catch { return false; }
@@ -2233,6 +2245,10 @@ export async function runEngineSandboxed(
       recordSandboxedRunAgentAction({engine,engineModel,tier,runId:id,sourceRepo:opts.sourceRepo,
         workItemId:opts.workItemId,workSource:opts.workSource,outcome,status:'failed',actionCounts});
       return {state:withProposalOutcome(mk({status:'failed',result:outcome.reason}),outcome,actionCounts),proposalOutcome:outcome};
+    }
+    if (engineKey === DEVIN_CLI_ENGINE_ID && opts.selectedDevinAdmission && !autonomousRun) {
+      const outcome = proposalOutcome('sandbox-unavailable', 'selected Devin standing identity requires autonomous confinement');
+      return { state:withProposalOutcome(mk({status:'failed',result:outcome.reason}),outcome,actionCounts), proposalOutcome:outcome };
     }
     let cmd = buildEngineCommand(engine, goalWithContext, cfg, {
       cwd: sb.worktreePath,
@@ -2358,11 +2374,17 @@ export async function runEngineSandboxed(
       if (confinementProfile.networkEgress && (engineKey === 'claude' || engineKey === 'claude-cli')) {
         return refuse('engine-unsupported', 'claude producers are not run under a standing policy until the 3.11 credential proxy (the claude-a token only reaches restricted, tool-less judge / Leader calls)');
       }
-      // 3.15: autonomy runs the Devin CLI on a FREE SWE-2 model only. A billed
-      // Devin model's spend cannot be read back (the CLI prints no usage), so
-      // no budget gate could meter it — the run is refused, not unmetered.
-      if (engineKey === DEVIN_CLI_ENGINE_ID && !isDevinCliFreeModel(model)) {
-        return refuse('engine-unsupported', `devin-cli model "${model ?? ''}" is billed by Devin; autonomous runs use a free SWE-2 model only (${DEVIN_CLI_FREE_MODELS.join(', ')})`);
+      // Autonomous Devin needs current native principal/executable/catalog evidence.
+      // Source model IDs or old promotion observations cannot authorize billing.
+      if (engineKey === DEVIN_CLI_ENGINE_ID) {
+        try {
+          selectedDevinBinding = opts.selectedDevinAdmission
+            ? opts.selectedDevinAdmission(model ?? '')
+            : await refreshDevinCliExecutionBinding(model ?? '', { signal:opts.signal,
+              admitted:() => !runCancelled() && selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission) });
+        } catch { selectedDevinBinding = null; }
+        if (!selectedDevinCurrent()) return refuse('engine-unsupported', 'the selected Devin native principal, executable or current free-model pricing is unconfirmed; no paid fallback is allowed');
+        cmd = { ...cmd, bin:selectedDevinBinding!.executable };
       }
       let seatId: string | null = opts.seatId ?? null;
       let nativeStatePath: string | null = null;
@@ -2382,6 +2404,7 @@ export async function runEngineSandboxed(
           bin: cmd.bin,
           seatId,
           ...(nativeStatePath ? { nativeStatePath } : {}),
+          ...(selectedDevinBinding ? { devinExecutionBinding:selectedDevinBinding } : {}),
           // The pre-push blocker must stay readable, or git would skip the hook.
           extraReadOnly: [hooksDir],
           profile: confinementProfile,
@@ -2390,6 +2413,7 @@ export async function runEngineSandboxed(
         return refuse('sandbox-unavailable', `autonomous confinement unavailable: ${err instanceof Error ? err.message : String(err)}`);
       }
       if (selectedGrokCommand) selectedGrokIdentityStillCurrent = captureAutonomousVendorIdentityCheck(autonomousSpawn.overlay);
+      if (selectedDevinBinding && !selectedDevinCurrent()) return refuse('engine-unsupported', 'the selected Devin native identity changed during sandbox setup');
       cmd = { ...cmd, bin: autonomousSpawn.bin };
       spawnEnv = autonomousSpawn.env;
       launcher = autonomousSpawn.launcher;
@@ -2465,6 +2489,10 @@ export async function runEngineSandboxed(
         res = { ok: false, output: '', error: 'run cancelled', terminationReason: 'cancelled' };
         break;
       }
+      if (selectedDevinBinding && !selectedDevinCurrent()) {
+        res = { ok:false, output:'', error:'selected Devin native identity or free-pricing evidence changed before execution', terminationReason:'error-exit' };
+        break;
+      }
       if (selectedGrokCommand) {
         const admitted = selectedAdmissionCurrent();
         const fresh = admitted ? grokCliDirectCommand(selectedGrokCommand.launcher, cfg, opts.seatId) : null;
@@ -2479,7 +2507,8 @@ export async function runEngineSandboxed(
       incrementRunActionCount(actionCounts, 'spawnAttempts');
       const _spawnStart = Date.now();
       res = await spawnEngine(cmd, spawnCfg, {
-        ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
+        ...(selectedDevinBinding ? { selectedOutcomeAdmission:() => selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission) && selectedDevinCurrent() }
+          : opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
         env: spawnEnv,
         timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         launcher: launcher ?? undefined,
@@ -2491,7 +2520,8 @@ export async function runEngineSandboxed(
           if (described) emitSinkEvent(streamSink, described);
         },
       });
-      if (engineKey === DEVIN_CLI_ENGINE_ID && res.usage && isDevinCliFreeModel(model)) {
+      terminationDiagnostics = res.terminationDiagnostics;
+      if ((selectedDevinBinding || (!autonomousRun && engineKey === DEVIN_CLI_ENGINE_ID && isDevinCliFreeModel(model))) && res.usage) {
         // 3.15: the Devin CLI reports no token usage; a usage-shaped line in
         // its output is the model's own prose, and pricing it would invent
         // spend for a FREE model. Runs and minutes are still counted. (A
@@ -2860,6 +2890,21 @@ export async function runEngineSandboxed(
                   });
                   if (!builtRepairCmd) return null;
                   let repairSpawn: AutonomousSpawn | null = null;
+                  if (selectedDevinBinding) {
+                    if (!selectedDevinCurrent()) return null;
+                    try {
+                      repairSpawn = prepareAutonomousSpawn({ engine, worktree:sb.worktreePath, baseEnv:env,
+                        bin:selectedDevinBinding.executable, devinExecutionBinding:selectedDevinBinding,
+                        extraReadOnly:[hooksDir], profile:confinementProfile });
+                    } catch { return null; }
+                    if (!selectedDevinCurrent()) {
+                      const finished = finishAutonomousSpawn(repairSpawn, { output:'' });
+                      if (finished.violations.length) await recordAutonomousViolations({ engine, sourceRepo:opts.sourceRepo, runId:id, operations:finished.violations });
+                      if (finished.violationsKnown !== true) await recordSandboxEvidenceUnknown({ engine, sourceRepo:opts.sourceRepo, runId:id, evidence:finished.kernelEvidence });
+                      return null;
+                    }
+                    builtRepairCmd = { ...builtRepairCmd, bin:repairSpawn.bin };
+                  }
                   if (selectedGrokCommand) {
                     const admitted = selectedAdmissionCurrent();
                     const fresh = admitted ? grokCliDirectCommand(builtRepairCmd, cfg, opts.seatId) : null;
@@ -2898,7 +2943,9 @@ export async function runEngineSandboxed(
                   let r: SpawnEngineResult | null = null;
                   try {
                     r = await spawnEngine(repairCmd, cfg, {
-                      ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
+                      ...(selectedDevinBinding ? { selectedOutcomeAdmission:() => selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission) && selectedDevinCurrent() &&
+                        (!repairSpawn || autonomousDevinIdentityCurrent(repairSpawn.overlay)) }
+                        : opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
                       env:repairSpawn?.env ?? env,
                       timeoutMs:_v2g.perRunTimeoutMs ?? 180_000,
                       launcher:repairSpawn?.launcher ?? launcher ?? undefined,
@@ -2914,6 +2961,8 @@ export async function runEngineSandboxed(
                     }
                   }
                   if (!r) return null;
+                  terminationDiagnostics = r.terminationDiagnostics;
+                  if (selectedDevinBinding && r.usage) r = { ...r, usage:{ tokensIn:0, tokensOut:0 } };
                   if (selectedGrokCommand) {
                     const reported = grokStreamUsage(r.output);
                     if (reported) r = {...r,usage:reported};

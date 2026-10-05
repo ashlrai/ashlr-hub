@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildEngineCommand, spawnEngine } from '../src/core/run/engines.js';
 import { applyAutonomousEnvOverlay, buildAutonomousEnvOverlay } from '../src/core/sandbox/autonomous-env.js';
@@ -48,6 +48,10 @@ describe.runIf(posix)('runEngineSandboxed with a fake `devin` on PATH', () => {
   let stubDir: string;
 
   beforeEach(() => {
+    // Exercise the historical promotional manual route before the host expiry.
+    // Retain real elapsed time for the backstop/process-group timing assertions.
+    const elapsedStart = performance.now();
+    vi.spyOn(Date,'now').mockImplementation(() => Date.parse('2026-10-05T17:00:00Z') + performance.now() - elapsedStart);
     prevPath = process.env.PATH;
     prevAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
     prevAshlrHome = process.env.ASHLR_HOME;
@@ -78,6 +82,7 @@ describe.runIf(posix)('runEngineSandboxed with a fake `devin` on PATH', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     process.env.PATH = prevPath;
     if (prevAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
     else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllowAnyRepo;
@@ -149,6 +154,16 @@ describe.runIf(posix)('runEngineSandboxed with a fake `devin` on PATH', () => {
     expect(spawnedArgv().slice(1, 3)).toEqual(['--model', 'swe-2-medium']);
     expect(override.state.engineModel).toBe('devin-cli:swe-2-medium');
   }, 60_000);
+
+  it('refuses a selected automatic native account with no issued evidence before contacting the fake CLI', async () => {
+    const { runEngineSandboxed } = await freshSandboxedEngine();
+    const conf = cfg();
+    conf.foundry!.confinement = {'devin-cli':autonomousConfinementProfile('devin-cli')};
+    const result = await runEngineSandboxed('devin-cli','must not contact',conf,{sourceRepo:sourceRepo(),selectedDevinAdmission:() => null});
+    expect(result.state.status).toBe('failed');
+    expect(result.proposalOutcome?.reason).toContain('unconfirmed');
+    expect(existsSync(join(stubDir,'argv'))).toBe(false);
+  },60_000);
 
   it('a hung CLI is killed at the backstop with its whole process group, and the run still returns', async () => {
     const pidFile = join(stubDir, 'grandchild.pid');

@@ -714,6 +714,23 @@ describe('M333 — candidate specs', () => {
     expect(JSON.stringify(result)).not.toContain('selectedGrokAdmission');
   });
 
+  it('forwards host-only native Devin admission only to actual Devin candidates', async () => {
+    const cli = makeSandboxMock(0, 'selected-devin');
+    const h = await harness({cli:cli.fn,api:cli.fn});
+    const cfg = makeConfig();cfg.foundry!.allowedBackends=['devin-cli','claude'];
+    const admission = vi.fn(() => null);
+    const result = await h.runBestOfN(makeItem(),cfg,{n:2,engine:'devin-cli',selectedDevinAdmission:admission,
+      candidates:[{engine:'devin-cli',model:'swe-2-high'},{engine:'claude'}]});
+    expect(result.candidates).toHaveLength(2);
+    expect(cli.calls.map(c=>c.engine).sort()).toEqual(['claude','devin-cli']);
+    for (let i=0;i<cli.calls.length;i++) {
+      if (cli.calls[i]!.engine==='devin-cli') expect(cli.options[i]).toMatchObject({selectedDevinAdmission:admission,model:'swe-2-high'});
+      else expect(cli.options[i]).not.toHaveProperty('selectedDevinAdmission');
+    }
+    expect(admission).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain('selectedDevinAdmission');
+  });
+
   it('routes each candidate to its OWN engine + model with the right runner kind', async () => {
     const cli = makeSandboxMock(1.0, 'cli'); // claude → cli-agent runner
     const api = makeSandboxMock(0.0, 'api'); // local-coder → api-model runner
