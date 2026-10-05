@@ -204,7 +204,7 @@ describe('custody source checkout', () => {
   function nativeInstall(complete = true) {
     const sent: { id: string; op: string; checkout?: string }[] = [];
     (window as unknown as Record<string, unknown>).__ASHLR_DESKTOP__ = {
-      fleet: { version: 1, ops: ['custody-install'], send: (message: typeof sent[number]) => {
+      fleet: { version: 1, ops: ['custody-install', 'resident-restart'], send: (message: typeof sent[number]) => {
         sent.push(message);
         if (complete) setTimeout(() => finish(message), 0);
         return true;
@@ -289,6 +289,23 @@ describe('custody source checkout', () => {
     expect(sent).toHaveLength(1);
     act(() => { finish(sent[0]!); });
     await waitFor(() => expect(within(region).getByRole('button', { name: 'Reinstall / upgrade' })).toBeEnabled());
+  });
+
+  it('leaves resident menu requests to their existing native handling during custody confirmation', async () => {
+    const { sent, finish } = nativeInstall(false);
+    stubSurfaceFetch({ kind: 'live' });
+    render(<FleetSection />);
+    await control();
+    act(() => {
+      executeCatalogCommand('fleet.install-custody', { via: 'palette' });
+      executeCatalogCommand('fleet.restart-daemon', { via: 'palette' });
+    });
+    expect(sent.map(({ op }) => op)).toEqual(['custody-install', 'resident-restart']);
+    act(() => { finish(sent[1]!); });
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Fleet control' })).toHaveTextContent('Nothing was changed.'));
+    act(() => { executeCatalogCommand('fleet.install-custody', { via: 'palette' }); });
+    expect(sent).toHaveLength(2);
+    act(() => { finish(sent[0]!); });
   });
 });
 

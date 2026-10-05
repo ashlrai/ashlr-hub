@@ -130,8 +130,8 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
   }
 
   function runNative(op: NativeFleetOp, checkout?: string): void {
-    if (nativePending.current || (op === 'custody-install' && busy) || !nativeFleetAvailable(op)) return;
-    nativePending.current = true;
+    if ((op === 'custody-install' && (busy || nativePending.current)) || !nativeFleetAvailable(op)) return;
+    if (op === 'custody-install') nativePending.current = true;
     setProgress({ op, event: null });
     const track = (event: NativeFleetEvent) => setProgress((prev) => ({ op, event, ...(event.command ?? prev?.command ? { command: event.command ?? prev?.command } : {}) }));
     void runNativeFleetOp(op, { ...(checkout ? { checkout } : {}), onProgress: track })
@@ -140,7 +140,7 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
         if (event.phase === 'done') setNeeds(null);
       })
       .catch((error: unknown) => setProgress({ op, event: { id: '', op, phase: 'failed', message: error instanceof Error ? error.message : String(error) } }))
-      .finally(() => { nativePending.current = false; refetch(); });
+      .finally(() => { if (op === 'custody-install') nativePending.current = false; refetch(); });
   }
 
   function installCustody(detected = state?.custody.hubCheckout): void {
