@@ -17,6 +17,7 @@ import {
   handleBudgetApi,
   routeSeatShadow,
   setBudgetCapacitySourceForTest,
+  setBudgetResetAuthoritySourceForTest,
   setCapacityPublishGateForTest,
   setReadinessSourceForTest,
   startBudgetCapacityPublisher,
@@ -102,10 +103,12 @@ beforeEach(() => {
   // A live collector owns the snapshot (see the publish-gate block below for
   // what happens when it does not).
   setCapacityPublishGateForTest(() => true);
+  setBudgetResetAuthoritySourceForTest(() => ({ standing: null, authorityState: 'unknown' }));
 });
 
 afterEach(() => {
   setBudgetCapacitySourceForTest();
+  setBudgetResetAuthoritySourceForTest(null);
   setCapacityPublishGateForTest();
   process.env['HOME'] = savedHome;
   fs.rmSync(home, { recursive: true, force: true });
@@ -124,6 +127,74 @@ async function post<T>(body: unknown, headers: Record<string, string> = {}): Pro
   });
   return { status: res.status, body: (await res.json()) as T };
 }
+
+describe('allowance before resets settings', () => {
+  it('keeps legacy priority distinct from enrollment, then confirms explicit ON and OFF from GET', async () => {
+    expect((await get<BudgetView>('/api/verse/budget')).body.resetSpendingStatus?.mode).toBe('legacy-priority');
+    for (const enabled of [true, false]) {
+      const written = await post<BudgetView>({ resetSpending: { enabled } });
+      expect(written.status).toBe(200);
+      const read = (await get<BudgetView>('/api/verse/budget')).body;
+      expect(read.resetSpending).toEqual({ enabled });
+      expect(read.resetSpendingStatus?.mode).toBe(enabled ? 'enabled' : 'disabled');
+      expect(read.effective.claude?.reservePercent).toBe(40);
+      expect(read.resetSpendingStatus?.accounts.claude?.effectiveReservePercent).toBeNull();
+    }
+  });
+
+  it('saves a per-account exclusion and restores inheritance without enabling global OFF', async () => {
+    await post({ resetSpending: { enabled: false } });
+    await post({ seatId: 'claude', policy: { resetSpending: true } });
+    let read = (await get<BudgetView>('/api/verse/budget')).body;
+    expect(read.resetSpendingStatus?.accounts.claude).toMatchObject({ mode: 'enabled', enabled: false, state: 'disabled' });
+    await post({ seatId: 'claude', policy: { resetSpending: false } });
+    expect((await get<BudgetView>('/api/verse/budget')).body.seats.claude?.resetSpending).toBe(false);
+    await post({ seatId: 'claude', policy: { resetSpending: null } });
+    read = (await get<BudgetView>('/api/verse/budget')).body;
+    expect(read.seats.claude?.resetSpending).toBeUndefined();
+    expect(read.resetSpendingStatus?.accounts.claude).toMatchObject({ mode: 'inherit', enabled: false });
+  });
+
+  it('shows verified historical floors while paused without claiming task-derived reserve or authority', async () => {
+    setBudgetResetAuthoritySourceForTest(() => ({ authorityState: 'paused', standing: { spend: {
+      maxMode: 'balanced', meteredUsdPerDay: 0, seats: { claude: { seatId: 'claude', enabled: true,
+        reserveFloorPercent: 40, maxSessionWindowPercent: 70, roles: ['judge', 'leader'] } },
+    } } }));
+    const read = (await post<BudgetView>({ resetSpending: { enabled: true } })).body;
+    expect(read.resetSpendingStatus).toMatchObject({ mode: 'enabled', authorityState: 'paused', accounts: {
+      claude: { savedReservePercent: 40, signedFloorPercent: 40, effectiveReservePercent: null, state: 'authority-paused', subscriptionOnly: 'unknown' },
+    } });
+    expect(read.resetSpendingStatus?.accounts.claude?.constraints).toContain('This account has no signed coding-producer role.');
+    expect(read.resetSpendingStatus?.accounts.claude?.constraints).toContain('Short-window usage ceiling is 70%.');
+  });
+
+  it('does not turn a historical scheduling forecast into a current task admission', async () => {
+    const forecast = forecastWork('historical', { engine: 'claude', model: 'fable', taskKind: 'todo', seatId: 'claude' }, []);
+    await writeRecordedScheduling(buildSchedulingView(reading.seats,defaultBudgetPolicy(),Date.now(),{claude:forecast}));
+    const read = (await post<BudgetView>({ resetSpending: { enabled: true } })).body;
+    expect(read.resetSpendingStatus?.accounts.claude?.forecastBasis).toBeNull();
+    expect(read.resetSpendingStatus?.accounts.claude?.effectiveReservePercent).toBeNull();
+  });
+
+  it('qualifies authority reader failure as unknown, retaining actual saved state', async () => {
+    setBudgetResetAuthoritySourceForTest(() => { throw new Error('private path'); });
+    const read = (await post<BudgetView>({ resetSpending: { enabled: true } })).body;
+    expect(read.resetSpendingStatus?.authorityState).toBe('unknown');
+    expect(JSON.stringify(read)).not.toContain('private path');
+  });
+
+  it.each([{ resetSpending: { enabled: 'true' } }, { resetSpending: { enabled: true, reservePercent: 0 } },
+    { mode: 'all-in', resetSpending: { enabled: true } }, { resetSpending: null }])('refuses invalid global shape %j before collecting or writing', async body => {
+    expect((await post(body)).status).toBe(400);
+    expect(sourceCalls).toBe(0);
+    expect(fs.existsSync(path.join(home, '.ashlr', 'budget.json'))).toBe(false);
+  });
+
+  it('requires the existing guarded mutation token for reset settings', async () => {
+    expect((await post({ resetSpending: { enabled: true } }, { 'x-ashlr-token': 'wrong' })).status).toBe(401);
+    expect(sourceCalls).toBe(0);
+  });
+});
 
 describe('GET /api/verse/budget', () => {
   it('serves the default balanced policy, effective per-seat policies and live headroom', async () => {

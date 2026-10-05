@@ -32,6 +32,9 @@ import type { ResourceFactsView } from './resources-model.js';
 import { SchedulingEvidence } from './SchedulingEvidence.js';
 import type { SchedulingEvidenceView } from './scheduling-model.js';
 import styles from './ResourcesDrawer.module.css';
+import { lazy, Suspense } from 'react';
+import type { BudgetView } from '../../../../core/routing/policy.js';
+const ResetSpendingAccountControl = lazy(() => import('../budget/ResetSpendingControl.js').then(module => ({ default: module.ResetSpendingAccountControl })));
 
 /** Above this share of a window the meter turns amber (the capacity strip's own line). */
 const TIGHT_AT = 90;
@@ -113,9 +116,12 @@ export interface ResourceCardProps {
   /** 3.15: tier · cost basis · models — the facts row every card carries. */
   facts?: ResourceFactsView | null;
   scheduling?: SchedulingEvidenceView;
+  resetBudget?: BudgetView | null;
+  resetNowMs?: number;
+  onReviewGrant?: () => void;
 }
 
-export function ResourceCard({ row, status, settled, mode, busy, onAction, readiness = null, facts = null, scheduling }: ResourceCardProps) {
+export function ResourceCard({ row, status, settled, mode, busy, onAction, readiness = null, facts = null, scheduling, resetBudget = null, resetNowMs = Date.now(), onReviewGrant }: ResourceCardProps) {
   // Budget editing lives in Apps & Accounts; the drawer offers what the seat needs now.
   const actions = accountActions(row, settled).filter((a) => a.kind !== 'edit-budget');
   const reserve = row.reserve;
@@ -173,6 +179,9 @@ export function ResourceCard({ row, status, settled, mode, busy, onAction, readi
         </div>
       </details>
       <ReadinessLines row={readiness} />
+      {resetBudget?.resetSpendingStatus ? <Suspense fallback={null}>
+        <ResetSpendingAccountControl view={resetBudget} nowMs={resetNowMs} seatId={row.seatId} label={row.label} onReviewGrant={onReviewGrant} />
+      </Suspense> : null}
       {actions.length > 0 ? (
         <div className={styles.cardActions}>
           {actions.map((action) => (

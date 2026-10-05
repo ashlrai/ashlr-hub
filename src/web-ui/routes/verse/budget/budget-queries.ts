@@ -45,10 +45,12 @@ export interface BudgetSeatPatchWire {
   reservePercent?: number;
   maxSessionWindowPercent?: number | null;
   dailyUsdCap?: number | null;
+  resetSpending?: boolean | null;
 }
 
 /** `BudgetUpdateRequest`, widened only by the `null`-clears rule above. */
 export type BudgetUpdateWire = Extract<BudgetUpdateRequest, { mode: unknown }>
+  | { resetSpending: { enabled: boolean } }
   | { seatId: string; policy: BudgetSeatPatchWire };
 
 export async function updateBudget(update: BudgetUpdateWire): Promise<BudgetView> {
