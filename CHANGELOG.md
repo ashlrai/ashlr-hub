@@ -27,8 +27,12 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   authority checks remain separate from this read-only display.
 - Let pending Fleet status requests finish before the next automatic poll,
   so slow responses can update the desktop instead of being superseded forever.
-- Forward the routed Claude account into autonomous native dispatch so its
-  account-bound admission can be checked.
+- Check the selected Claude account throughout autonomous native dispatch,
+  retaining fresh account, grant, role and window checks without allowing an
+  unrelated held account to block it.
+- Keep separately dated Codex credit history in the resource sidebar when a
+  fresh balance is not reported. Current subscription usage remains separate,
+  current zero replaces history, and historical balances never admit spending.
 - Update the example website's Oxfmt worker dependency to Tinypool 2.1.2.
 
 ## [3.24.2] — 2026-10-05
