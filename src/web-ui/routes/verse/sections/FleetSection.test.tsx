@@ -31,6 +31,8 @@ afterEach(() => {
 
 describe('FleetSection — live', () => {
   it('shows the outcome editor in Fleet without creating work on mount', async () => {
+    // Qualify the editor after its real lazy module is ready, not Vite's cold transform time.
+    await import('../fleet/OutcomesPanel.js');
     const { posted } = stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/outcomes': {
       v: 1, sourceState: 'missing', outcomes: [], enrollment: { sourceState: 'healthy', repos: [] },
     } } });
