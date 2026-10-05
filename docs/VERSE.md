@@ -884,7 +884,9 @@ routing weights) are tested as paired experiments with a confidence interval
 against held-out tasks, adopted only through the gate, and rolled back
 automatically if a 48-hour canary falls below baseline.
 
-### Adoption: fixed public project metadata
+<a id="adoption-fixed-public-project-metadata"></a>
+
+### Adoption: fixed public project metadata (3.24)
 
 Growth's Adoption panel reads only `ashlrai/ashlr-hub` and `@ashlr/hub`, including
 when the Fleet is off. Stars and forks are current repository stocks. npm

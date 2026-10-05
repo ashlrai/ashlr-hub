@@ -111,8 +111,9 @@ identity matches before and after the report. The optional report, account and
 usage reading must remain fresh at every new contact. This billing report is
 not an execution binding: the actual producer must use the same independently
 verified account and credential profile. Current standing Claude producers
-remain blocked by the existing credential jail until an account-bound credential
-proxy is implemented; a native profile alone does not remove that guard. The
+remain blocked by the existing credential jail. An account-bound native CLI
+broker with an isolated tool executor is the next integration boundary to verify;
+it is not implemented here, and a native profile alone does not remove the guard. The
 source reports this as `execution-unbound` and retains the saved reserve. Missing, malformed, enabled
 or account-swapped data restores the saved reserve. Codex, Grok and Devin have no
 verified no-spillover boundary in this source and remain held for reserve

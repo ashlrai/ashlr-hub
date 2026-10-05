@@ -1,6 +1,6 @@
 # Releasing @ashlr/hub
 
-> **Current release process — rechecked 2026-10-02 UTC:** use
+> **Current release process — rechecked 2026-10-05 UTC:** use
 > [Releasing locally](RELEASING-LOCALLY.md) for the current manual release lane.
 > Run the complete local prepublish suite on the final clean source revision,
 > inspect hosted pull-request checks for that exact revision, and independently
@@ -9,7 +9,7 @@
 > disabled during the Linux dependency quarantine. npm publication uses the
 > maintainer's interactive web 2FA and does not carry CI provenance.
 >
-> The source candidate is `@ashlr/hub@3.23.0`; it remains a candidate until
+> The source candidate is `@ashlr/hub@3.24.0`; it remains a candidate until
 > its own checks and registry publication succeed. Check the registry for
 > current versions and dist-tags. The frozen `release.yml` and `promote.yml`
 > procedures below describe the historical 3.3.2 lane, not a publishing path

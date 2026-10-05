@@ -9,6 +9,42 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.24.0] — 2026-10-05
+
+### Added
+
+- Desktop Automatic awake requests follow observed local chats and resident
+  Fleet work. Power source, system idle-sleep settings, current request and
+  freshness remain separate; cloud-only sessions do not hold the host awake.
+- Devin organization consumption reports fractional daily ACUs and product
+  breakdowns, independently of tracked budgets or session readiness. Idle
+  startup collection and a shared refresh retain dated readings and permission
+  failures without inventing remaining quota, credit balances or dollar spend.
+- Growth shows source-qualified npm retrievals, GitHub stars and forks,
+  rolling traffic and latest-release asset downloads. Missing coverage stays
+  unknown; incomparable windows never become a single user or adoption total.
+- Global and per-account allowance-before-reset controls support saved-state
+  readback. Explicit Off disables reset priority and reserve taper; enabling
+  cannot widen signed authority or authorize purchased-credit spending.
+
+### Fixed
+
+- Fence Devin consumption against account/key transitions, including uncertain
+  writes and restarts; retain provider retry deadlines and separate permission
+  failures from session health.
+- Preserve GitHub secondary-rate-limit backoff without anonymous retries after
+  ambiguous permission failures. Collector shutdown does not delay chat reset.
+
+### Changed
+
+- Task-scoped reset reserves preserve signed floors, actual usage ceilings and
+  current account/model evidence at each contact. Reserve release remains held
+  when the actual producer account is unbound. Current Claude producers need a
+  separately qualified native CLI broker with isolated tools; no such producer
+  or live allowance taper is enabled by this release.
+- Existing abortable parked sleep can wake at a qualified task-derived reset
+  boundary. Unknown, disabled or expired boundaries retain normal backoff.
+
 ## [3.23.0] — 2026-10-02
 
 ### Added
