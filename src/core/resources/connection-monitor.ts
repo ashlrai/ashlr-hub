@@ -332,8 +332,8 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
       return { sampledAt: new Date(nowMs).toISOString(), refreshing: refreshing || inFlight.size > 0,
         accounts: structuredClone(rows.map((row, index) => {
           const current = expireConnectionRow(row, nowMs);
-          const historical = current.observedAt === null ? options.readingCache?.lastKnown(config.accounts[index]!) : null;
-          return historical ? { ...current, lastKnownUsage: historical } : current;
+          const historical = options.readingCache?.lastKnown(config.accounts[index]!);
+          return historical && (current.observedAt === null || historical.creditHistory) ? { ...current, lastKnownUsage: historical } : current;
         })) };
     },
     async close() { closing = true; stopped(); signal?.removeEventListener('abort', stopped); await pending; await Promise.allSettled([...inFlight.values()]);
