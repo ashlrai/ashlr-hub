@@ -7093,7 +7093,7 @@ export async function tick(
         }
       }
       // The routed account is forwarded to the producer. Grok command/profile
-      // resolution binds this exact roster ID; Codex retains its engine-ID guard.
+      // resolution binds this exact roster ID; Claude and Codex retain engine-ID guards.
       // Absent bindings retain the legacy engine-specific admission behavior.
       const standingSeatId: string | undefined = (() => {
         if (!standingTick) return undefined;
@@ -7101,6 +7101,7 @@ export async function tick(
         const seatId = standingRoute?.seatDecision?.seatId;
         if (typeof seatId !== 'string' || seatId.length === 0) return undefined;
         if (lane === 'grok-cli') return seatId;
+        if (lane === 'claude-cli' && engineOfSeatId(seatId) === 'claude') return seatId;
         return lane === 'codex' && engineOfSeatId(seatId) === 'codex' ? seatId : undefined;
       })();
       // Every new provider contact keeps the same task scope and rechecks current allowance policy.
