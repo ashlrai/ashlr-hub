@@ -99,7 +99,7 @@ import {
   clearDaemonSpendGuard,
   DAEMON_SPEND_GUARD_ITEM_CAPACITY,
   daemonStatePath,
-  heartbeatDaemonLock,
+  heartbeatDaemonLockOutcome,
   loadDaemonState,
   loadDaemonStateStrict,
   readDaemonLockOwner,
@@ -174,7 +174,7 @@ import {
   writeDaemonActivity,
   type DaemonActivityPhase,
 } from './activity.js';
-import { beginTickProgress, noteTickPhase } from './tick-progress.js';
+import { beginTickProgress, noteTickPhase, readTickProgress } from './tick-progress.js';
 import { boundedBeforeTick } from './tick-deadline.js';
 import {
   consumeDaemonActivationPermit,
@@ -1637,11 +1637,9 @@ function configuredModelForBackend(backend: EngineId, cfg: AshlrConfig): string 
  * was never called from the resident loop at all, leaving it frozen at
  * acquiredAt forever (M303/guard-health).
  *
- * Fail-closed: heartbeatDaemonLock() re-derives ownership itself (exact pid
- * + token match) before writing, and returns false on ANY failure — lost
- * ownership or a write I/O error alike. Either failure routes to
- * onOwnershipLost() rather than being swallowed, matching the pre-existing
- * fail-closed contract of this interval.
+ * Fail-closed for changed/unknown ownership and I/O failures. Verified
+ * contention defers the write without renewing liveness or cancelling this
+ * owner: maintenance can hold the mutation fence across an awaited pass.
  */
 function startDaemonLockHeartbeat(
   lock: DaemonLock,
@@ -1649,8 +1647,9 @@ function startDaemonLockHeartbeat(
   onOwnershipLost?: () => void,
 ): () => void {
   const interval = setInterval(() => {
-    if (heartbeatDaemonLock(lock)) afterHeartbeat?.();
-    else onOwnershipLost?.();
+    const outcome = heartbeatDaemonLockOutcome(lock);
+    if (outcome === 'updated') afterHeartbeat?.();
+    else if (outcome === 'lost') onOwnershipLost?.();
   }, 30_000);
   (interval as { unref?: () => void }).unref?.();
   return () => clearInterval(interval);
@@ -4122,8 +4121,12 @@ export async function tick(
     ) return null;
     const fence = ownershipAlreadyFenced ? undefined : acquireTickMutationFence();
     if (!ownershipAlreadyFenced && opts.ownerLock && !fence) return null;
+    let previousProgress: ReturnType<typeof readTickProgress> = null;
+    const maintenancePhase = 'verification and proposal maintenance';
     try {
       if (!stillOwnsTick()) return null;
+      previousProgress = readTickProgress({ expectPid: process.pid });
+      noteTickPhase(maintenancePhase);
       // V3.10 (U3): the pass needs the tick's capability kind — a
       // `resident-standing` tick takes ONLY the standing gates and never falls
       // back to the legacy path (fail closed when the policy is unreadable).
@@ -4137,6 +4140,15 @@ export async function tick(
       return null;
     } finally {
       releaseLocalStoreLock(fence);
+      // This is observational only: never overwrite a newer tick/phase or
+      // advertise resumed selection after Stop or loss of resident ownership.
+      const currentProgress = readTickProgress({ expectPid: process.pid });
+      if (previousProgress && currentProgress
+        && currentProgress.progress.tickStartedAt === previousProgress.progress.tickStartedAt
+        && currentProgress.progress.phase === maintenancePhase
+        && !stopRequested()) {
+        noteTickPhase(previousProgress.progress.phase, previousProgress.progress.detail);
+      }
     }
   };
   let preDispatchAutoMergePassResult: AutoMergePassResult | null = null;

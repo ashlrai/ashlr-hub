@@ -15,7 +15,9 @@ import { FleetPanel } from './FleetPanel.js';
 import { LocalOnlyPanel } from './LocalOnlyPanel.js';
 import { LocalRuntimePanel } from './LocalRuntimePanel.js';
 import { GoalsBacklogPanel } from './GoalsBacklogPanel.js';
-import { evictAll, runQuery } from '../../../data/cache.js';
+import { evictAll, getQuerySnapshot, runQuery } from '../../../data/cache.js';
+import { useFleetPolling } from './fleet-queries.js';
+import { SectionVisibilityProvider } from '../shell/section-visibility.js';
 import type { GoalSummary } from '../../../data/queries.js';
 import type { VerseBacklogSummary } from './control-queries.js';
 import type {
@@ -62,6 +64,38 @@ function runtime(over: Partial<ServingRuntimeSnapshot> = {}): ServingRuntimeSnap
     ...over,
   };
 }
+
+describe('Advanced live polling', () => {
+  beforeEach(() => { evictAll(); vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); evictAll(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  function Poller() { useFleetPolling(); return null; }
+
+  it('refreshes the daemon control alongside existing fleet/runtime reads only while visible', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((path: string) => {
+      calls.push(path);
+      return Promise.resolve(new Response(JSON.stringify({ pid: 35431 }), { status: 200 }));
+    }));
+    await runQuery('verse-control', async () => ({ pid: 56295 }));
+    const { rerender, unmount } = render(<SectionVisibilityProvider visible><Poller /></SectionVisibilityProvider>);
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+    expect(calls.sort()).toEqual(['/api/verse/control', '/api/verse/fleet', '/api/verse/runtime']);
+    expect(getQuerySnapshot<{ pid: number }>('verse-control').data?.pid).toBe(35431);
+    rerender(<SectionVisibilityProvider visible={false}><Poller /></SectionVisibilityProvider>);
+    calls.length = 0;
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(calls).toEqual([]);
+    rerender(<SectionVisibilityProvider visible><Poller /></SectionVisibilityProvider>);
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(calls.sort()).toEqual(['/api/verse/control', '/api/verse/fleet', '/api/verse/runtime']);
+    unmount();
+    calls.length = 0;
+    await act(async () => { await vi.advanceTimersByTimeAsync(8_000); });
+    expect(calls).toEqual([]);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Serving runtime

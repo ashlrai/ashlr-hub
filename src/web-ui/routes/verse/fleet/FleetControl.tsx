@@ -33,7 +33,7 @@ import { detectKeyPlatform, formatChord } from '../shell/command-catalog.js';
 import { commandChord } from '../shell/command-keys.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { darkSinceLabel } from './dark-since.js';
-import { fleetControlQuery, postFleetControl } from './fleet-control-queries.js';
+import { fleetControlQuery, postFleetControl, refreshFleetControlReads } from './fleet-control-queries.js';
 import { nativeFleetAvailable, runNativeFleetOp, type NativeFleetEvent, type NativeFleetOp } from './native-fleet.js';
 import styles from './fleet-control.module.css';
 
@@ -140,7 +140,12 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
         if (event.phase === 'done') setNeeds(null);
       })
       .catch((error: unknown) => setProgress({ op, event: { id: '', op, phase: 'failed', message: error instanceof Error ? error.message : String(error) } }))
-      .finally(() => { if (op === 'custody-install') nativePending.current = false; refetch(); });
+      .finally(() => {
+        if (op === 'custody-install') nativePending.current = false;
+        // A failed/cancelled native operation can also have changed disk state;
+        // read the shared projections rather than assuming its final state.
+        refreshFleetControlReads();
+      });
   }
 
   function installCustody(detected = state?.custody.hubCheckout): void {
