@@ -9,6 +9,21 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.24.1] — 2026-10-05
+
+### Fixed
+
+- Keep the resident fleet alive while proposal maintenance holds its own
+  mutation fence. Verified contention defers the heartbeat without recording
+  a renewal; missing, replaced or corrupt ownership and write failures still
+  stop the daemon.
+- Show verification and proposal maintenance while that pass is running,
+  then restore the current tick phase without overwriting Stop or a newer tick.
+- Refresh resident fleet controls and status through shared queries so saved
+  changes and current progress appear together.
+- Wait for asynchronous merge-decision captions and the real outcome module
+  in UI tests before asserting loaded content.
+
 ## [3.24.0] — 2026-10-05
 
 ### Added

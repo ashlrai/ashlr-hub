@@ -9,9 +9,10 @@
 > disabled during the Linux dependency quarantine. npm publication uses the
 > maintainer's interactive web 2FA and does not carry CI provenance.
 >
-> The source candidate is `@ashlr/hub@3.24.0`; it remains a candidate until
-> its own checks and registry publication succeed. Check the registry for
-> current versions and dist-tags. The frozen `release.yml` and `promote.yml`
+> The source version is `@ashlr/hub@3.24.1`. Verify its exact-source checks,
+> registry version and dist-tags, GitHub release assets and installed runtime
+> independently before reporting those delivery layers as complete. The frozen
+> `release.yml` and `promote.yml`
 > procedures below describe the historical 3.3.2 lane, not a publishing path
 > for later versions. Keep source versions strictly above `3.3.2`. Publication
 > does not install the desktop or activate provider credentials, spending
