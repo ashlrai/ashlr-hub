@@ -23,6 +23,7 @@ import { Input } from '../../../components/primitives/Input.js';
 import { Meter } from '../../../components/primitives/Meter.js';
 import { IconLock, IconPause, IconPlay, IconRefresh, IconStop } from '../../../components/primitives/icons.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
+import { runQuery } from '../../../data/cache.js';
 import { CopyCommand } from '../autonomy/AutonomyOffState.js';
 import { formatRelative } from '../autonomy/format.js';
 import { stopConfirm, type GrantFlow } from '../command/AutonomyBar.js';
@@ -111,7 +112,11 @@ export interface FleetControlProps {
 export function FleetControl({ actions, grantFlow, darkSince = null, setupShownBelow = false }: FleetControlProps) {
   const read = useQuery(fleetControlQuery, { freshMs: 4_000 });
   const refetch = useRefetch(fleetControlQuery);
-  usePollWhileVisible(refetch, FLEET_CONTROL_POLL_MS);
+  // A slow/queued read must finish before the next automatic poll replaces it.
+  // Native completion still forces a newer read through refreshFleetControlReads.
+  usePollWhileVisible(() => {
+    void runQuery(fleetControlQuery.key, () => fleetControlQuery.fetch());
+  }, FLEET_CONTROL_POLL_MS);
   const [did, setDid] = useState<string[]>([]);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [needs, setNeeds] = useState<FleetNextAction | null>(null);
