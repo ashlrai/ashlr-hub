@@ -1,4 +1,4 @@
-/* global process, Buffer, console, URL, setTimeout, clearTimeout, Response, AbortController */
+/* global process, Buffer, URL, setTimeout, clearTimeout, Response, AbortController */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
