@@ -9,6 +9,42 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.24.2] — 2026-10-05
+
+### Added
+
+- Read one selected account again from Resources without waiting for a full
+  account sweep. Cached readings, refresh holds and next-check times stay
+  explicit, and confirmed readback updates the shared resource view.
+- Run the official Claude CLI through a host-owned native adapter with
+  account-bound authentication and usage checks. Model-directed filesystem
+  tools execute in separate workers with no provider credentials.
+- Navigate those worktrees with paged reads and directory listings, bounded
+  literal search with content-bound continuation, exact-digest edits and
+  directory creation. Legacy reads and writes retain their existing behavior;
+  edits preserve executable permissions.
+- Show cached Devin API account type and observation time separately from
+  organization consumption and tracked budgets, without exposing private
+  identifiers or treating the observation as Max subscription funding proof.
+
+### Fixed
+
+- Fence Devin CLI model selection to the same native account and current
+  catalog. Automatic selection uses a verified Free model only while its
+  pricing evidence and promotional window remain current.
+- Reflect suspended and paused Devin sessions without adopting a completed
+  answer, and recheck current authority, account and limits before each new
+  session request or retry. Unresolved ACU exposure remains held.
+- Preserve unknown organization consumption when no reporting buckets exist,
+  rather than displaying an invented zero reading.
+
+### Changed
+
+- Enable existing long-running acceptance phase output by default while
+  preserving explicit caller choices, shard membership and watchdog limits.
+- Keep narrow fixture copies and set executable test-fixture permissions
+  explicitly so private-log umasks do not change their intended behavior.
+
 ## [3.24.1] — 2026-10-05
 
 ### Fixed

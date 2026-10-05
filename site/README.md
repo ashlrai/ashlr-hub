@@ -45,9 +45,9 @@ keyboard-operated date slider, and the repository links. If JavaScript is
 unavailable, the project descriptions and links remain readable; if the data
 is missing or invalid, the page must show an error instead of a false zero.
 
-## Release 3.24.1 copy
+## Release 3.24.2 copy
 
-The current software metadata and install targets name 3.24.1. Its GitHub
+The current software metadata and install targets name 3.24.2. Its GitHub
 release and downloads must exist and pass release checks before publishing this
 page. A source link or prepared download target is not publication evidence.
 
@@ -64,8 +64,10 @@ The 3.24 copy distinguishes native idle-sleep requests from cloud execution,
 reported Devin consumption from tracked budgets, and source-specific Growth
 measurements from user counts. Global and account reset controls do not imply
 live reserve taper: a verified billing boundary must also match the actual
-producer launch. Current execution binding remains held pending a separately
-qualified native CLI broker and isolated tools. Purchased balances are excluded.
+producer launch. This source adds the account-bound native Claude CLI adapter
+and isolated filesystem tools; deployment and live account acceptance remain
+separate. Aggressive reset-time reserve shrinking still requires a verified
+subscription-only execution boundary. Purchased balances are excluded.
 
 Keep the existing 3.22 images and captions labeled as browser demos. They do not
 show the new 3.24 controls or prove current provider activity.
