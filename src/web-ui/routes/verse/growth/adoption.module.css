@@ -1,0 +1,11 @@
+.panel { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+.metrics { display: flex; gap: var(--space-5); margin: 0; }
+.metrics dt { color: var(--text-secondary); font-size: var(--text-xs-size); }
+.metrics dd { margin: 0; font-size: var(--text-xl-size); font-weight: var(--font-weight-semibold); font-variant-numeric: tabular-nums; }
+.tableWrap { overflow: auto; }
+.tableWrap table { border-collapse: collapse; width: 100%; font-size: var(--text-xs-size); }
+.tableWrap th, .tableWrap td { text-align: left; padding: var(--space-2); border-bottom: 1px solid var(--border-subtle); overflow-wrap: anywhere; }
+.tableWrap td { font-variant-numeric: tabular-nums; }
+.visuallyHidden { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (max-width: 720px) { .grid { grid-template-columns: minmax(0, 1fr); } }

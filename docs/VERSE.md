@@ -884,6 +884,33 @@ routing weights) are tested as paired experiments with a confidence interval
 against held-out tasks, adopted only through the gate, and rolled back
 automatically if a 48-hour canary falls below baseline.
 
+### Adoption: fixed public project metadata
+
+Growth's Adoption panel reads only `ashlrai/ashlr-hub` and `@ashlr/hub`, including
+when the Fleet is off. Stars and forks are current repository stocks. npm
+package retrievals cover the source's last 30 available UTC days, which can lag
+today; missing bins remain unknown. GitHub views and clones are separate rolling
+14-day aggregates. Traffic permission failures do not prevent public repository
+or npm readings. Latest release asset downloads are cumulative per uploaded
+asset ID for the latest published release only, including verification downloads.
+These measurements are not unique installations, active engineers, or a combined
+adoption score.
+
+`GET /api/verse/adoption` is an authenticated cache-only metadata port for the
+workbench and agents. An owned collector starts after the local listener is ready
+and is cancelled and drained on shutdown; `ASHLR_ADOPTION_AUTO=0` disables it.
+Successful GitHub readings refresh every 15 minutes and npm every six hours.
+The guarded, empty-body `POST /api/verse/adoption/refresh` requests a refresh
+without overriding provider retry deadlines. Failed refreshes retain previous
+readings with their original observation times and an explicit stale label.
+Public repository/release reads can use credential-free GitHub HTTPS when `gh`
+is absent or unauthenticated; traffic requires the existing GitHub connection's
+[documented permission](https://docs.github.com/en/rest/metrics/traffic).
+The panel does not collect personal identities, scan enrolled private repos,
+provision telemetry, or execute agents. Source semantics are documented by
+[npm](https://raw.githubusercontent.com/npm/registry/main/docs/download-counts.md)
+and [GitHub release assets](https://docs.github.com/en/rest/releases/assets).
+
 ### Lessons: retros and approved knowledge (3.15)
 
 Every way a task ends now produces a short **retro**: a merge, a gate refusal,

@@ -244,6 +244,21 @@ export async function startServer(
 
   const url = `http://127.0.0.1:${port}`;
 
+  // Deferred beyond successful listener/handle creation: no network or heavy
+  // collector module evaluation on the request or initial-paint stack.
+  let adoptionClosed = false;
+  let stopAdoption: (() => Promise<void>) | null = null;
+  let adoptionStart: Promise<void> | null = null;
+  const adoptionEnabled = process.env['ASHLR_ADOPTION_AUTO'] !== '0'
+    && process.env['NODE_ENV'] !== 'test' && !process.env['VITEST'];
+  const adoptionTimer = adoptionEnabled ? setTimeout(() => {
+    adoptionStart = import('../verse/adoption-cache.js').then(async (mod) => {
+      if (adoptionClosed) return;
+      stopAdoption = mod.startOwnedAdoptionCollector();
+    }).catch(() => undefined);
+  }, 1_000) : null;
+  adoptionTimer?.unref();
+
   // ── Handle object ────────────────────────────────────────────────────────
   const handle: WebServerHandle = {
     port,
@@ -251,6 +266,9 @@ export async function startServer(
     token,
     url,
     async close(): Promise<void> {
+      adoptionClosed = true;
+      if (adoptionTimer) clearTimeout(adoptionTimer);
+      const closeAdoption = (async () => { await adoptionStart; await stopAdoption?.(); })();
       // Settle the Verse engine first: SIGKILL every running turn's process
       // group and finalize each (cancelled + turn-done, record saved) so no
       // agent child outlives the server and no session is left `running` on
@@ -271,7 +289,7 @@ export async function startServer(
       const closeRetroSweep = import('../learn/retro/sweep-timer.js')
         .then((mod) => mod.stopRetroSweepSchedule())
         .catch(() => undefined);
-      await Promise.all([readProjections?.close(), closeFleetHistory, closeRetroSweep, new Promise<void>((resolve) => {
+      await Promise.all([closeAdoption, readProjections?.close(), closeFleetHistory, closeRetroSweep, new Promise<void>((resolve) => {
         // Drain all open SSE response streams registered by handleApi, then
         // close the HTTP server (stops accepting new connections).
         drainSseConnections();

@@ -46,7 +46,8 @@ import { HARNESS_ADOPTION_GATE } from '../../../../core/learn/harness-types.js';
 
 export const GROWTH_POLL_MS = 300_000;
 
-/** Lessons (3.15) is a separate chunk: loaded the first time Growth renders, never on app start. */
+/** Both secondary panels load only when Growth renders, never on app start. */
+const AdoptionPanel = lazy(() => import('../growth/AdoptionPanel.js').then((m) => ({ default: m.AdoptionPanel })));
 const LessonsPanel = lazy(() => import('../growth/LessonsPanel.js').then((m) => ({ default: m.LessonsPanel })));
 
 const models30 = modelsQuery('30d');
@@ -121,6 +122,7 @@ export function GrowthSection() {
           <AutonomyOffState state={off} here="growth" title={onlyState ? 'Growth starts with the first fleet run.' : undefined} />
         </Cell>
       ) : null}
+      <Cell span={12}><Suspense fallback={null}><AdoptionPanel /></Suspense></Cell>
       {dormant ? null : (
         <Cell span={8}>
           {/* Columns, not an area: each week is a separate count, and a

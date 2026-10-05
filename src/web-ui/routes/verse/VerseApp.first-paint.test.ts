@@ -68,6 +68,10 @@ const DYNAMIC = [
 ];
 
 const LAZY_ONLY = [
+  // Growth adoption is a secondary metadata surface, outside the cold chat closure.
+  './growth/AdoptionPanel.js',
+  './growth/adoption-data.js',
+  './growth/adoption-model.js',
   ...DYNAMIC,
   './shell/palette-model.js',
   // The palette's half of the catalog; first paint matches keys with command-keys.ts.
