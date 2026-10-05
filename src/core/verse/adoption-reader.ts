@@ -97,7 +97,9 @@ function retryDeadline(headers: Record<string, string>, now: number): number | n
 function failure(response: AdoptionHttp, now: number): AdoptionResult<never> | null {
   if (response.status === 200) return null;
   const retryAt = retryDeadline(response.headers, now);
-  return { ok: false, reason: response.status === 429 || (response.status === 403 && retryAt !== null) ? 'rate-limited' : response.status === 403 ? 'permission' : response.status === 401 ? 'authentication' : response.status === 404 ? 'not-found' : 'unavailable', retryAt };
+  const payload = response.status === 403 ? json(response.body) : null;
+  const rateMessage = record(payload) && typeof payload['message'] === 'string' && payload['message'].length <= 1024 && /rate limit/i.test(payload['message']);
+  return { ok: false, reason: response.status === 429 || (response.status === 403 && (retryAt !== null || rateMessage)) ? 'rate-limited' : response.status === 403 ? 'permission' : response.status === 401 ? 'authentication' : response.status === 404 ? 'not-found' : 'unavailable', retryAt };
 }
 function json(body: string): unknown { try { return JSON.parse(body); } catch { return null; } }
 
@@ -154,8 +156,9 @@ export async function readAdoptionSource<K extends AdoptionSourceId>(id: K, tran
     let response: AdoptionHttp; let usedPublic = false;
     try { response = await transport.github(path, combined); }
     catch { if (!allowPublic || combined.aborted) throw new Error('unavailable'); usedPublic = true; response = await transport.public(`https://api.github.com${path}`, combined); }
-    // Public stocks/assets remain readable without gh; never bypass a provider rate limit.
-    if (allowPublic && !usedPublic && [401, 403].includes(response.status) && retryDeadline(response.headers, now()) === null) response = await transport.public(`https://api.github.com${path}`, combined);
+    // A headerless 403 can be a secondary rate limit. Only missing authentication
+    // permits public fallback; ambiguous/permission 403s retain the original evidence.
+    if (allowPublic && !usedPublic && response.status === 401 && retryDeadline(response.headers, now()) === null) response = await transport.public(`https://api.github.com${path}`, combined);
     bytes += Buffer.byteLength(response.body);
     if (bytes > MAX_BYTES || combined.aborted) throw new Error('bounded read ended');
     return response;

@@ -76,6 +76,23 @@ describe('fixed source reader', () => {
     expect(await readAdoptionSource('views', t, signal(), now)).toEqual({ ok: false, reason: 'permission', retryAt: null });
     expect(t.public).not.toHaveBeenCalled();
   });
+  it('public stocks retain anonymous fallback for missing authentication only', async () => {
+    const t = fakeTransport(); t.github = vi.fn(async () => response({}, 401));
+    expect(await readAdoptionSource('repository', t, signal(), now)).toMatchObject({ ok: true, value: { stars: 0 } });
+    expect(t.public).toHaveBeenCalledTimes(1);
+    t.public = vi.fn(async () => response(repo()));
+    t.github = vi.fn(async () => response({}, 403));
+    expect(await readAdoptionSource('repository', t, signal(), now)).toEqual({ ok: false, reason: 'permission', retryAt: null });
+    expect(t.public).not.toHaveBeenCalled();
+  });
+  it('a deferred headerless secondary-limit 403 never falls back anonymously', async () => {
+    let settle!: (response: AdoptionHttp) => void;
+    const t = fakeTransport(); t.github = vi.fn(() => new Promise((resolve) => { settle = resolve; }));
+    const pending = readAdoptionSource('repository', t, signal(), now);
+    settle(response({ message: 'You have exceeded a secondary rate limit.' }, 403));
+    expect(await pending).toEqual({ ok: false, reason: 'rate-limited', retryAt: null });
+    expect(t.public).not.toHaveBeenCalled();
+  });
   it.each(['7200', 'Mon, 05 Oct 2026 14:00:00 GMT'])('preserves long Retry-After %s and does not bypass to anonymous API', async (header) => {
     const t = fakeTransport(); t.github = vi.fn(async () => response({}, 429, { 'retry-after': header }));
     expect(await readAdoptionSource('repository', t, signal(), now)).toEqual({ ok: false, reason: 'rate-limited', retryAt: now + 7_200_000 });
@@ -133,6 +150,17 @@ describe('cache and admission', () => {
     await cache.refresh(); const calls = vi.mocked(t.github).mock.calls.length;
     clock += 3600_000; await cache.refresh(true); expect(t.github).toHaveBeenCalledTimes(calls);
     clock += 3600_001; await cache.refresh(true); expect(vi.mocked(t.github).mock.calls.length).toBeGreaterThan(calls);
+  });
+  it('headerless secondary limits retain old timestamps and forced refresh backoff', async () => {
+    let clock = now; const t = fakeTransport(), cache = createAdoptionCache({ transport: t, now: () => clock });
+    await cache.refresh(); const previous = cache.peek().sources.repository;
+    clock += 1000; t.github = vi.fn(async () => response({ message: 'You have exceeded a secondary rate limit.' }, 403));
+    await cache.refresh(true);
+    expect(cache.peek().sources.repository).toMatchObject({ value: previous.value, observedAt: previous.observedAt, stale: true, reason: 'rate-limited' });
+    expect(vi.mocked(t.public).mock.calls.every(([url]) => url.startsWith('https://api.npmjs.org/'))).toBe(true);
+    const calls = vi.mocked(t.github).mock.calls.length;
+    clock += 60_001; await cache.refresh(true); expect(t.github).toHaveBeenCalledTimes(calls);
+    clock += 240_000; await cache.refresh(true); expect(vi.mocked(t.github).mock.calls.length).toBeGreaterThan(calls);
   });
   it('a transient failure retries when its backoff expires instead of waiting a successful-reading TTL', async () => {
     let clock = now; const t = fakeTransport(); t.github = vi.fn(async () => response({}, 503));
