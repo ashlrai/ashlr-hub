@@ -698,6 +698,8 @@
 /test/red-team-routing-310.test.ts @masonwyatt23
 /test/repo-holds-310b.test.ts @masonwyatt23
 /test/reset-aware-scheduling.test.ts @masonwyatt23
+/test/reset-spending-park-delay.test.ts @masonwyatt23
+/test/reset-spending.test.ts @masonwyatt23
 /test/resource-account-identity-witness.test.ts @masonwyatt23
 /test/resource-allocation-policy.test.ts @masonwyatt23
 /test/resource-console-engineering-acceptance.test.ts @masonwyatt23
