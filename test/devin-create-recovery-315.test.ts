@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { devinTaskAcuUsed } from '../src/core/devin/budget.js';
 import { sendDevinChatMessage, terminateDevinChat } from '../src/core/devin/chat.js';
-import type { DevinSession, DevinSessionPage } from '../src/core/devin/client.js';
+import { DevinClient, type DevinSession, type DevinSessionPage } from '../src/core/devin/client.js';
 import { previewDevinCreateRecovery } from '../src/core/devin/create-recovery.js';
 import { storeDevinKey } from '../src/core/devin/secret.js';
 import { devinSessionTaskTag, messageDevinTask } from '../src/core/devin/service.js';
@@ -40,6 +40,29 @@ function api(pages: DevinSessionPage[], exact: DevinSession = session()) {
 }
 
 describe('read-only ID-less create recovery preview', () => {
+  it.each([undefined, orgId])('parses and previews current bare-hex suspended sessions without settling %j launch context', async launchOrgId => {
+    const id = '0123456789abcdef0123456789abcdef';
+    const provider = fakeDevin({ orgId });
+    provider.sessions.set(id, { session_id:id, url:`https://app.devin.ai/sessions/${id}`, status:'suspended',
+      status_detail:'waiting_for_user', org_id:orgId, acus_consumed:1.25, pull_requests:[],
+      tags:['ashlr-verse',devinSessionTaskTag(task().id)] });
+    const row = task({ launchOrgId });
+    writeDevinTask(row);
+    const before = readDevinTask(row.id);
+    const client = new DevinClient({ apiKey:provider.key, fetch:provider.fetch, sleep:async () => undefined, retries:0 });
+    const preview = await previewDevinCreateRecovery(row, { client, orgId });
+    expect(preview).toMatchObject({ kind:'match', pages:1, launchAccountBound:launchOrgId === orgId,
+      session:{ sessionId:id, status:'suspended', acusConsumed:1.25 } });
+    expect(provider.requests.map(r => [r.method,r.path])).toEqual([
+      ['GET',`/v3/organizations/${orgId}/sessions?first=200`],
+      ['GET',`/v3/organizations/${orgId}/sessions/${id}`],
+    ]);
+    expect(readDevinTask(row.id)).toEqual(before);
+    expect(await refreshDevinTasks({ client:{ client,orgId }, now:() => now })).toEqual({ checked:launchOrgId ? 1 : 0, updated:0 });
+    expect(readDevinTask(row.id)).toEqual(before);
+    expect(devinTaskAcuUsed(readDevinTask(row.id)!)).toBe(10);
+  });
+
   it('shares account-qualified observation eligibility across scheduler and tracker', () => {
     expect(devinTaskNeedsObservation(task())).toBe(true);
     expect(devinTaskNeedsObservation(task({ launchOrgId: undefined }))).toBe(false);
@@ -130,7 +153,7 @@ describe('supported refresh settles only org-pinned terminal observed usage', ()
     expect(after.session?.readAt).toBe(now.toISOString());
     expect(after.state).toBe(status === 'exit' ? 'expired' : 'failed');
     expect(after.stateReason).toBe(status === 'exit'
-      ? `Devin finished without a pull request on ${task().branch}. The session link still works.`
+      ? `Devin finished; no pull request on ${task().branch} has been verified yet. The session link still works.`
       : 'The Devin session ended in an error.');
     expect(after).not.toHaveProperty('reason');
     expect(devinTaskAcuUsed(after)).toBe(3);

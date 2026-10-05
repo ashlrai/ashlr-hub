@@ -9,7 +9,7 @@
  */
 import { readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { devinBudgetView, devinTaskAcuUsed } from '../src/core/devin/budget.js';
 import { buildDevinPrompt, DEVIN_REPORT_SCHEMA, parseDevinReport } from '../src/core/devin/delivery-contract.js';
@@ -26,15 +26,19 @@ import {
 } from '../src/core/devin/service.js';
 import {
   devinHome,
+  isDevinTask,
   listDevinTasks,
+  readDevinBudget,
   readDevinConnection,
   readDevinTask,
   updateDevinBudget,
   writeDevinConnection,
+  writeDevinConsumptionConnectionState,
   writeDevinTask,
 } from '../src/core/devin/store.js';
 import { refreshDevinTasks, resetDevinTrackerCursorForTest, stateFromSession } from '../src/core/devin/tracker.js';
 import { DEFAULT_DEVIN_BUDGET, type DevinBudgetV1, type DevinTaskV1 } from '../src/core/devin/types.js';
+import { updateBudgetPolicy } from '../src/core/routing/budget-store.js';
 import { scrubSecrets } from '../src/core/util/scrub.js';
 import type { CloudPrPreview } from '../src/core/cloud/pr-preview.js';
 import { CloudInputError } from '../src/core/cloud/cloud-api.js';
@@ -129,6 +133,24 @@ function task(patch: Partial<DevinTaskV1> = {}): DevinTaskV1 {
 
 // ---------------------------------------------------------------------------
 
+describe('persisted provider session identity', () => {
+  it.each(['0123456789abcdef0123456789abcdef', 'devin-legacy_ABC-123', null])('roundtrips supported nullable identity %j', sessionId => {
+    const row = task({ sessionId, sessionUrl:sessionId ? `https://app.devin.ai/sessions/${sessionId}` : null });
+    writeDevinTask(row);
+    expect(readDevinTask(row.id)).toMatchObject({ sessionId });
+    expect(listDevinTasks().map(t => t.sessionId)).toEqual([sessionId]);
+  });
+
+  it.each(['a'.repeat(31), 'a'.repeat(33), 'A'.repeat(32), '../sessions', 'devin-../x', 'devin-ok/messages', 'devin-ok%2fmessages'])('refuses malformed persisted identity %j without overwriting a valid legacy row', sessionId => {
+    const row = task();
+    writeDevinTask(row);
+    const before = readDevinTask(row.id);
+    expect(isDevinTask({ ...row, sessionId })).toBe(false);
+    expect(() => writeDevinTask({ ...row, sessionId })).toThrow(/malformed task/);
+    expect(readDevinTask(row.id)).toEqual(before);
+  });
+});
+
 describe('key custody: the macOS Keychain, stdin only', () => {
   it('stores the key via `security -i` on stdin — never in argv — and reads it back', async () => {
     await storeDevinKey(FAKE_KEY, { run: keychain.run, platform: 'darwin' });
@@ -193,6 +215,24 @@ describe('status and readiness lines', () => {
     expect(ready.fleet).toMatchObject({ ready: false, word: 'Off', fix: { command: 'ashlr devin fleet on' } });
   });
 
+  it('distinguishes missing, held, and unknown authority without changing exposure or contacting Devin', async () => {
+    const gate = { ok: true, reason: null };
+    const input = { enabled: true, connected: true, optIn: true, policy: null, fleetGate: gate };
+    expect(devinFleetVerdict({ ...input, authority: { grantState: 'none', reason: 'No grant' } }))
+      .toMatchObject({ ready: false, word: 'Waiting', detail: 'No standing grant is installed.' });
+    expect(devinFleetVerdict({ ...input, authority: { grantState: 'active', reason: 'The autonomy switch is Off.' } }))
+      .toMatchObject({ ready: false, word: 'Waiting', detail: 'The effective standing policy is held: The autonomy switch is Off.' });
+    expect(devinFleetVerdict(input)).toMatchObject({ ready: false, detail: 'The effective standing policy is unavailable; grant readiness is unconfirmed.' });
+    await connect(); resetDevinStatusCacheForTest();
+    const status = await devinStatus(deps({ config: () => ({ enabled: true, fleet: true }),
+      policyReadiness: () => ({ grantState: 'paused', reason: 'The authority code changed.' }) }));
+    expect(status.fleet).toMatchObject({ ready: false, detail: 'The effective standing policy is held: The authority code changed.' });
+    const unknown = await devinStatus(deps({ config: () => ({ enabled: true, fleet: true }),
+      policy: () => { throw new Error('unavailable'); }, policyReadiness: () => { throw new Error('unavailable'); } }));
+    expect(unknown.fleet).toMatchObject({ ready: false, detail: 'The effective standing policy is unavailable; grant readiness is unconfirmed.' });
+    expect(api.requests).toEqual([]);
+  });
+
   it('fleet verdict: opt-in, then a grant that names Devin, then the reserve; ready names the two-judge rule', () => {
     const gate = { ok: true, reason: null };
     const withoutDevin = standingPolicy([repoPolicy(REPO)]);
@@ -209,6 +249,90 @@ describe('status and readiness lines', () => {
 });
 
 describe('launch', () => {
+  const initialStates = [
+    ['new', null, 'running', /starting up/, null],
+    ['claimed', null, 'running', /starting up/, null],
+    ['resuming', null, 'running', /starting up/, null],
+    ['running', 'working', 'running', /working/, null],
+    ['running', 'waiting_for_user', 'blocked', /waiting for your reply/, null],
+    ['running', 'waiting_for_approval', 'blocked', /waiting for an approval/, null],
+    ['suspended', 'out_of_credits', 'blocked', /out of credits/, null],
+    ['suspended', 'out_of_quota', 'blocked', /quota is used up/, null],
+    ['suspended', 'provider_new_pause_detail', 'blocked', /paused the session/, null],
+    ['suspended', 'constructor', 'blocked', /paused the session/, null],
+    ['suspended', 'toString', 'blocked', /paused the session/, null],
+    ['suspended', '__proto__', 'blocked', /paused the session/, null],
+    ['running', 'finished', 'expired', /no pull request.*verified yet/, null],
+    ['exit', null, 'expired', /no pull request.*verified yet/, null],
+    ['error', null, 'failed', /ended in an error/, 'session-error'],
+  ] as const;
+
+  function answerWithStatus(status: string, detail: string | null, loseAnswer: boolean): void {
+    const fetch = api.fetch;
+    api.fetch = async (url, init) => {
+      const response = await fetch(url, init);
+      if (init.method !== 'POST') return response;
+      const body = JSON.parse(await response.text()) as { session_id: string };
+      const session = api.sessions.get(body.session_id)!;
+      api.sessions.delete(body.session_id);
+      Object.assign(session, { session_id: '0123456789abcdef0123456789abcdef',
+        url: 'https://app.devin.ai/sessions/0123456789abcdef0123456789abcdef',
+        status, status_detail: detail, acus_consumed: 0 });
+      api.sessions.set(session.session_id, session);
+      if (loseAnswer) throw new Error('socket hang up after create');
+      return { ...response, text: async () => JSON.stringify(session) };
+    };
+  }
+
+  it.each(initialStates)('immediately records provider %s/%s as %s without an eager tracker read', async (status, detail, state, reason, failure) => {
+    await connect();
+    answerWithStatus(status, detail, false);
+    const result = await launchDevinTask({ repo: REPO, prompt: 'x', origin: 'operator' }, deps());
+    expect(result).toMatchObject({ ok: true, error: null, failure: null,
+      task: { state, stateReason: expect.stringMatching(reason), failure,
+        sessionId: '0123456789abcdef0123456789abcdef',
+        session: { status, statusDetail: detail, acusConsumed: 0 } } });
+    expect(readDevinTask(result.task!.id)).toEqual(result.task);
+    expect(api.requests.filter((request) => request.method === 'POST')).toHaveLength(1);
+    expect(api.requests.filter((request) => request.method === 'GET' && request.path.includes('/sessions'))).toEqual([]);
+    if (state === 'blocked') expect(devinNeedsYouItems([result.task!], new Date())[0]?.detail).toMatch(reason);
+  });
+
+  it.each(initialStates)('lost-answer adoption records provider %s/%s as %s with exactly one POST', async (status, detail, state, reason, failure) => {
+    await connect();
+    answerWithStatus(status, detail, true);
+    const result = await launchDevinTask({ repo: REPO, prompt: 'x', origin: 'operator' }, deps());
+    expect(result).toMatchObject({ ok: true, error: null, failure: null,
+      task: { state, stateReason: expect.stringMatching(reason), failure, session: { status, statusDetail: detail } } });
+    expect(readDevinTask(result.task!.id)).toEqual(result.task);
+    expect(api.requests.filter((request) => request.method === 'POST')).toHaveLength(1);
+    const reads = api.requests.filter((request) => request.method === 'GET' && request.path.includes('/sessions'));
+    expect(reads).toHaveLength(1);
+    expect(reads[0]!.path).toMatch(/\/sessions\?first=/);
+  });
+
+  it.each([0, 0.25, null])('a suspended initial session keeps its full exposure bound for usage %s', async (usage) => {
+    await connect();
+    answerWithStatus('suspended', 'out_of_quota', false);
+    const fetch = api.fetch;
+    api.fetch = async (url, init) => {
+      const response = await fetch(url, init);
+      if (init.method !== 'POST') return response;
+      const session = JSON.parse(await response.text()) as Record<string, unknown>;
+      if (usage === null) delete session['acus_consumed'];
+      else session['acus_consumed'] = usage;
+      return { ...response, text: async () => JSON.stringify(session) };
+    };
+    const result = await launchDevinTask({ repo: REPO, prompt: 'x', origin: 'operator' }, deps());
+    const saved = result.task!;
+    const view = devinBudgetView([saved], readDevinBudget(), new Date());
+    expect(view.running).toBe(0);
+    expect(view.reportedAcuUsed).toBe(usage ?? 0);
+    expect(view.reportedAcuUsed! + view.unconfirmedAcuExposure!).toBe(saved.maxAcu);
+    const previouslyMislabelled = devinBudgetView([{ ...saved, state: 'running' }], readDevinBudget(), new Date());
+    expect(view.acuUsed + view.acuInFlight).toBe(previouslyMislabelled.acuUsed + previouslyMislabelled.acuInFlight);
+    expect(view.acuToday).toBe(previouslyMislabelled.acuToday);
+  });
   it('refuses when the lane is off or not connected, before any API call', async () => {
     expect(await launchDevinTask({ repo: REPO, prompt: 'x', origin: 'operator' }, deps({ config: () => ({ enabled: false }) }))).toMatchObject({ ok: false, failure: 'not-enabled' });
     expect(await launchDevinTask({ repo: REPO, prompt: 'x', origin: 'operator' }, deps())).toMatchObject({ ok: false, failure: 'not-connected' });
@@ -300,6 +424,124 @@ describe('launch', () => {
     const inGrant = devinPolicy([repoPolicy(REPO)]);
     expect(await launchDevinTask(fleet, deps({ config: () => ({ enabled: true, fleet: true }), policy: () => inGrant }))).toMatchObject({ ok: false, failure: 'budget', error: expect.stringMatching(/kept for you/) });
     expect(api.requests.filter((r) => r.method === 'POST')).toEqual([]);
+  });
+});
+
+describe('create admission after asynchronous preparation', () => {
+  type Phase = 'key' | 'branch' | '429';
+  type Change = 'stop' | 'grant' | 'repo' | 'producer' | 'opt-out' | 'lane-off' | 'connection' | 'pending-connection' | 'routing-off' | 'session-cap' | 'daily-cap' | 'other-hold';
+  async function pendingLaunch(phase: Phase, origin: 'fleet' | 'operator' = 'fleet') {
+    await connect();
+    updateDevinBudget({ acuBudgetTotal:100, reserveAcu:0, pauseAtFraction:1, maxAcuPerSession:10, maxAcuPerDay:100 });
+    updateBudgetPolicy({ mode:'balanced' });
+    updateBudgetPolicy({ seatId:'devin', policy:{ enabled:true } });
+    let section = { enabled:true, fleet:true };
+    let policy: ReturnType<typeof devinPolicy> | null = devinPolicy([repoPolicy(REPO)]);
+    let stop = false;
+    let entered!: () => void;
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { entered=resolve; });
+    const paused = new Promise<void>(resolve => { release=resolve; });
+    const wait = async () => { entered(); await paused; };
+    if (phase === '429') api.forced.push({ status:429 });
+    const request = { repo:REPO, prompt:'Synthetic admission work', origin };
+    const launch = launchDevinTask(request, deps({
+      config:() => section,
+      policy:() => policy,
+      killActive:() => stop,
+      keyStore:{ platform:'darwin', run:async (args, stdin) => {
+        if (phase === 'key' && args[0] === 'find-generic-password' && args.includes('-w')) await wait();
+        return keychain.run(args, stdin);
+      } },
+      gh:async () => { if (phase === 'branch') await wait(); return { ok:true, stdout:'main\n', stderr:'' }; },
+      sleep:async () => { if (phase === '429') await wait(); },
+    }));
+    await waiting;
+    const mutate = (change: Change) => {
+      switch (change) {
+        case 'stop': stop=true; break;
+        case 'grant': policy=null; break;
+        case 'repo': policy=devinPolicy([repoPolicy('ashlrai/replaced')]); break;
+        case 'producer': policy=devinPolicy([repoPolicy(REPO)], ['judge']); break;
+        case 'opt-out': section={ enabled:true, fleet:false }; break;
+        case 'lane-off': section={ enabled:false, fleet:true }; break;
+        case 'connection': writeDevinConnection({ ...readDevinConnection()!, orgId:'org-replaced' }); break;
+        case 'pending-connection': writeDevinConsumptionConnectionState('pending'); break;
+        case 'routing-off': updateBudgetPolicy({ seatId:'devin', policy:{ enabled:false } }); break;
+        case 'session-cap': updateDevinBudget({ maxAcuPerSession:1 }); break;
+        case 'daily-cap': updateDevinBudget({ maxAcuPerDay:0 }); break;
+        case 'other-hold': writeDevinTask(task({ state:'failed', sessionId:null, sessionUrl:null, session:null, failure:'network', maxAcu:100 })); break;
+      }
+    };
+    return { launch, mutate, release, request };
+  }
+
+  const changes: Change[] = ['stop','grant','repo','producer','opt-out','lane-off','connection','pending-connection','routing-off','session-cap','daily-cap','other-hold'];
+  for (const phase of ['key','branch','429'] as const) {
+    it.each(changes.filter(change => phase === '429' || change !== 'session-cap'))(`refuses %s changed during ${phase} without a new POST or ambiguous exposure`, async change => {
+      const pending = await pendingLaunch(phase);
+      pending.mutate(change);
+      pending.release();
+      const result = await pending.launch;
+      expect(result.ok).toBe(false);
+      expect(api.requests.filter(r => r.method === 'POST')).toHaveLength(phase === '429' ? 1 : 0);
+      expect(api.sessions.size).toBe(0);
+      if (result.task) {
+        expect(result.task).toMatchObject({ state:'failed', sessionId:null });
+        expect(result.failure).not.toBe('network');
+        expect(result.failure).not.toBe('unparsed');
+        expect(devinTaskAcuUsed(result.task)).toBe(0);
+      }
+      if (change === 'other-hold') expect(listDevinTasks().find(row => row.maxAcu === 100)?.failure).toBe('network');
+    });
+  }
+
+  it.each(['key','branch'] as const)('uses a smaller current cap chosen after %s preparation', async phase => {
+    const pending = await pendingLaunch(phase);
+    pending.mutate('session-cap');
+    pending.release();
+    expect(await pending.launch).toMatchObject({ ok:true, task:{ maxAcu:1 } });
+    expect(api.requests.filter(r => r.method === 'POST')).toMatchObject([{ body:{ max_acu_limit:1 } }]);
+  });
+
+  it('preserves an independently closed own row when a stale retry is refused', async () => {
+    const pending = await pendingLaunch('429');
+    const row = listDevinTasks()[0]!;
+    writeDevinTask({ ...row, state:'closed', stateReason:'Closed by another actor.' });
+    const before = readDevinTask(row.id);
+    pending.release();
+    expect(await pending.launch).toMatchObject({ ok:false, task:{ state:'closed' }, failure:'not-enabled' });
+    expect(readDevinTask(row.id)).toEqual(before);
+    expect(api.requests.filter(r => r.method === 'POST')).toHaveLength(1);
+    expect(api.sessions.size).toBe(0);
+  });
+
+  it('does not let a caller change a reserved fleet launch into operator authority during backoff', async () => {
+    const pending = await pendingLaunch('429');
+    pending.request.origin='operator';
+    pending.mutate('grant');
+    pending.release();
+    expect(await pending.launch).toMatchObject({ ok:false, task:{ origin:'fleet', requestedBy:'fleet' }, failure:'not-enabled' });
+    expect(api.requests.filter(r => r.method === 'POST')).toHaveLength(1);
+    expect(api.sessions.size).toBe(0);
+  });
+
+  it('excludes only its unchanged reservation when one fleet session exactly fits current limits', async () => {
+    const pending = await pendingLaunch('429');
+    updateDevinBudget({ acuBudgetTotal:10, maxAcuPerDay:10, maxConcurrent:1, maxSessionsPerDay:1,
+      fleetMaxConcurrent:1, fleetMaxSessionsPerDay:1 });
+    pending.release();
+    expect(await pending.launch).toMatchObject({ ok:true, task:{ state:'running', maxAcu:10 } });
+    expect(api.requests.filter(r => r.method === 'POST')).toHaveLength(2);
+    expect(api.sessions.size).toBe(1);
+  });
+
+  it('keeps explicit operator use available without a grant or fleet Stop permission', async () => {
+    const pending = await pendingLaunch('branch', 'operator');
+    pending.mutate('stop'); pending.mutate('grant'); pending.mutate('opt-out'); pending.mutate('routing-off');
+    pending.release();
+    expect(await pending.launch).toMatchObject({ ok:true, task:{ requestedBy:'mason', origin:'operator' } });
+    expect(api.sessions.size).toBe(1);
   });
 });
 
@@ -489,4 +731,21 @@ describe('delivery contract and secret hygiene', () => {
     expect(scrubSecrets('legacy apk_user_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123')).toBe('legacy [REDACTED]');
     expect(scrubSecrets('const apk_version_code_for_android = 1')).toContain('apk_version_code_for_android');
   });
+});
+
+it('the shared mapper imports no service, tracker, client runtime or store', async () => {
+  const paths = ['../src/core/devin/service.js', '../src/core/devin/tracker.js',
+    '../src/core/devin/client.js', '../src/core/devin/store.js'];
+  const forbidden = vi.fn(() => { throw new Error('effectful dependency imported by pure mapper'); });
+  vi.resetModules();
+  for (const path of paths) vi.doMock(path, forbidden);
+  try {
+    const { stateFromSession: pureMapper } = await import('../src/core/devin/session-state.js');
+    expect(pureMapper(task(), { status: 'suspended', statusDetail: 'out_of_quota' } as Parameters<typeof pureMapper>[1]))
+      .toMatchObject({ state: 'blocked', reason: expect.stringMatching(/quota is used up/) });
+    expect(forbidden).not.toHaveBeenCalled();
+  } finally {
+    for (const path of paths) vi.doUnmock(path);
+    vi.resetModules();
+  }
 });

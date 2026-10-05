@@ -36,7 +36,11 @@ import { hasAmbiguousDevinCreate, previewDevinCreateRecovery } from './create-re
 import { devinReportFromStructuredOutput, parseDevinReport } from './delivery-contract.js';
 import { connectedClient, recordDevinApiOutcome, snapshotOf, type DevinServiceDeps } from './service.js';
 import { listDevinTasks, readDevinTask, writeDevinTask } from './store.js';
-import { DEVIN_TASK_EXPIRY_MS, type DevinTaskState, type DevinTaskV1 } from './types.js';
+import { DEVIN_TASK_EXPIRY_MS, type DevinTaskV1 } from './types.js';
+import { stateFromSession } from './session-state.js';
+
+// Preserve the existing tracker API while keeping the shared mapper inert.
+export { stateFromSession } from './session-state.js';
 
 export interface DevinTrackerDeps extends DevinServiceDeps {
   /** A ready client (tests); default: the stored key + org. */
@@ -49,22 +53,6 @@ export const DEVIN_EXPIRED_WATCH_MS = 48 * HOUR;
 /** queued / launching this long means the launch was interrupted by a restart. */
 export const DEVIN_STALE_LAUNCH_MS = 10 * 60 * 1000;
 const MAX_CHECKS_PER_REFRESH = 30;
-
-const WAITING_DETAILS = new Set(['waiting_for_user', 'waiting_for_approval']);
-const SUSPEND_REASONS: Readonly<Record<string, string>> = {
-  inactivity: 'Devin went to sleep after a quiet spell. Reply to wake it.',
-  user_request: 'The session was paused from Devin. Reply to resume it.',
-  usage_limit_exceeded: 'Devin stopped: a usage limit was reached.',
-  out_of_credits: 'Devin stopped: the account is out of credits.',
-  out_of_quota: 'Devin stopped: the plan quota is used up.',
-  no_quota_allocation: 'Devin stopped: this user has no quota allocation.',
-  payment_declined: 'Devin stopped: a payment was declined.',
-  org_usage_limit_exceeded: "Devin stopped: the organization's usage limit was reached.",
-  user_usage_limit_exceeded: "Devin stopped: this user's usage limit was reached.",
-  total_session_limit_exceeded: 'Devin stopped: the session hit its ACU cap.',
-  contract_expired: 'Devin stopped: the contract has expired.',
-  error: 'Devin suspended the session after an error.',
-};
 
 const watched = (task: DevinTaskV1, nowMs: number): boolean =>
   task.state === 'running' || task.state === 'blocked' || task.state === 'pr-open'
@@ -92,37 +80,6 @@ function commit(before: DevinTaskV1, next: DevinTaskV1): boolean {
 }
 
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
-
-/** Session facts → the state the task would have with no PR. Null: leave the state alone. */
-export function stateFromSession(task: DevinTaskV1, session: DevinSession): { state: DevinTaskState; reason: string; failure: DevinTaskV1['failure'] } | null {
-  const detail = session.statusDetail ?? '';
-  switch (session.status) {
-    case 'new':
-    case 'claimed':
-    case 'resuming':
-      return { state: 'running', reason: 'Devin is starting up.', failure: null };
-    case 'running':
-      if (WAITING_DETAILS.has(detail)) {
-        return {
-          state: 'blocked',
-          reason: detail === 'waiting_for_approval' ? 'Devin is waiting for an approval in the session.' : 'Devin is waiting for your reply.',
-          failure: null,
-        };
-      }
-      if (detail === 'finished') {
-        return { state: 'expired', reason: `Devin finished without a pull request on ${task.branch}. The session link still works.`, failure: null };
-      }
-      return { state: 'running', reason: 'Devin is working. Its pull request will appear here.', failure: null };
-    case 'suspended':
-      return { state: 'blocked', reason: SUSPEND_REASONS[detail] ?? 'Devin paused the session.', failure: null };
-    case 'exit':
-      return { state: 'expired', reason: `Devin finished without a pull request on ${task.branch}. The session link still works.`, failure: null };
-    case 'error':
-      return { state: 'failed', reason: 'The Devin session ended in an error.', failure: 'session-error' };
-    default:
-      return null;
-  }
-}
 
 /** A PR Devin reports that is NOT the task's delivery (another branch, repo or a fork). */
 function strayPrHint(task: DevinTaskV1, session: DevinSession | null): string | null {

@@ -73,8 +73,8 @@ export const DEVIN_PROMPT_MAX_CHARS = 20_000;
 
 /** Task ids look like `dv_20260927T0412_k3f9q2` (sortable, branch-safe, never a `ct_` cloud id). */
 export const DEVIN_TASK_ID_PATTERN = /^dv_\d{8}T\d{4}_[a-z0-9]{6}$/;
-/** Devin session ids (docs: "Devin session ID (prefix: devin-)"). Tolerant of the body, strict on the charset. */
-export const DEVIN_SESSION_ID_PATTERN = /^devin-[A-Za-z0-9_-]{1,120}$/;
+/** v3 returns bare 32-character lowercase hex IDs; retain the documented legacy prefix. Both are path-safe. */
+export const DEVIN_SESSION_ID_PATTERN = /^(?:devin-[A-Za-z0-9_-]{1,120}|[a-f0-9]{32})$/;
 /** Organization ids (docs: "Organization ID (prefix: org-)"). */
 export const DEVIN_ORG_ID_PATTERN = /^org-[A-Za-z0-9_-]{1,120}$/;
 /** v3 credentials: "All API credentials use the `cog_` prefix format." */

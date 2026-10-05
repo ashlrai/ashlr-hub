@@ -406,7 +406,7 @@ export class DevinClient {
     return `DevinClient(${this.baseUrl})`;
   }
 
-  private async request(method: 'GET' | 'POST' | 'DELETE', path: string, body: unknown, policy: RetryPolicy, beforeRead?: () => boolean, consumptionRetry = false): Promise<unknown> {
+  private async request(method: 'GET' | 'POST' | 'DELETE', path: string, body: unknown, policy: RetryPolicy, beforeRead?: () => boolean, consumptionRetry = false, beforeContact?: () => void): Promise<unknown> {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = { Authorization: `Bearer ${this.apiKey}`, Accept: 'application/json' };
     let payload: string | undefined;
@@ -419,6 +419,9 @@ export class DevinClient {
       if (attempt > 0) await this.sleep(Math.min(MAX_BACKOFF_MS, 500 * 2 ** (attempt - 1)));
       // Consumption reads re-admit every retry after asynchronous backoff.
       if (beforeRead && !beforeRead()) throw new DevinApiError('not-connected', STATUS_SENTENCES['not-connected']);
+      // A local refusal occurs before contact, not inside the network-error catch.
+      // Creates can retry an explicit 429; every such attempt needs fresh admission.
+      beforeContact?.();
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeoutMs);
       timer.unref?.();
@@ -475,7 +478,7 @@ export class DevinClient {
   }
 
   /** POST /v3/organizations/{org_id}/sessions — https://docs.devin.ai/api-reference/v3/sessions/post-organizations-sessions */
-  async createSession(orgId: string, input: DevinCreateSessionInput): Promise<DevinSession> {
+  async createSession(orgId: string, input: DevinCreateSessionInput, beforeContact?: () => void): Promise<DevinSession> {
     const org = checkOrg(orgId);
     if (typeof input?.prompt !== 'string' || input.prompt.trim() === '' || input.prompt.length > MAX_PROMPT_CHARS) {
       throw new DevinApiError('invalid-request', 'The Devin prompt is empty or too long.');
@@ -496,7 +499,7 @@ export class DevinClient {
       body['structured_output_schema'] = input.structuredOutputSchema;
       body['structured_output_required'] = input.structuredOutputRequired ?? false;
     }
-    const parsed = parseDevinSession(await this.request('POST', `/organizations/${encodeURIComponent(org)}/sessions`, body, 'create'));
+    const parsed = parseDevinSession(await this.request('POST', `/organizations/${encodeURIComponent(org)}/sessions`, body, 'create', undefined, false, beforeContact));
     if (!parsed) throw new DevinApiError('unparsed', 'Devin did not return a recognisable session. Check app.devin.ai before launching again.');
     return parsed;
   }

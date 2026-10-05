@@ -714,6 +714,80 @@ describe('M333 — candidate specs', () => {
     expect(JSON.stringify(result)).not.toContain('selectedGrokAdmission');
   });
 
+  it('forwards host-only native Devin admission only to actual Devin candidates', async () => {
+    const cli = makeSandboxMock(0, 'selected-devin');
+    const h = await harness({cli:cli.fn,api:cli.fn});
+    const cfg = makeConfig();cfg.foundry!.allowedBackends=['devin-cli','claude'];
+    const admission = vi.fn(() => null);
+    const result = await h.runBestOfN(makeItem(),cfg,{n:2,engine:'devin-cli',selectedDevinAdmission:admission,
+      candidates:[{engine:'devin-cli',model:'swe-2-high'},{engine:'claude'}]});
+    expect(result.candidates).toHaveLength(2);
+    expect(cli.calls.map(c=>c.engine).sort()).toEqual(['claude','devin-cli']);
+    for (let i=0;i<cli.calls.length;i++) {
+      if (cli.calls[i]!.engine==='devin-cli') expect(cli.options[i]).toMatchObject({selectedDevinAdmission:admission,model:'swe-2-high'});
+      else expect(cli.options[i]).not.toHaveProperty('selectedDevinAdmission');
+    }
+    expect(admission).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain('selectedDevinAdmission');
+  });
+
+  it('forwards the selected Claude seat and live admission callback only to routed Claude candidates', async () => {
+    const cli = makeSandboxMock(0.1,'selected-claude');
+    const h = await harness({cli:cli.fn,api:cli.fn});
+    const cfg = makeConfig();cfg.foundry!.allowedBackends=['claude','grok-cli'];
+    const admission = vi.fn(() => true);
+    const result = await h.runBestOfN(makeItem(),cfg,{n:2,engine:'claude',seatId:'claude-b',selectedClaudeAdmission:admission,
+      candidates:[{engine:'claude'},{engine:'grok-cli'}]});
+    expect(result.candidates).toHaveLength(2);
+    expect(cli.calls.map(c=>c.engine).sort()).toEqual(['claude','grok-cli']);
+    for (let i=0;i<cli.calls.length;i++) {
+      if (cli.calls[i]!.engine==='claude') {
+        expect(cli.options[i]).toMatchObject({seatId:'claude-b',selectedClaudeAdmission:admission});
+      } else {
+        expect(cli.options[i]).not.toHaveProperty('seatId');
+        expect(cli.options[i]).not.toHaveProperty('selectedClaudeAdmission');
+      }
+    }
+    // The fake runner does not spawn: the callback is an internal transport,
+    // not serialized candidate/result data or invoked as an invented call.
+    expect(admission).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain('selectedClaudeAdmission');
+  });
+
+  it('keeps Claude and Devin admissions separate in one mixed candidate group', async () => {
+    const cli = makeSandboxMock(0, 'mixed-native');
+    const h = await harness({ cli: cli.fn, api: cli.fn });
+    const cfg = makeConfig();
+    cfg.foundry!.allowedBackends = ['claude', 'devin-cli', 'grok-cli'];
+    const claudeAdmission = vi.fn(() => true);
+    const devinAdmission = vi.fn(() => null);
+    const result = await h.runBestOfN(makeItem(), cfg, {
+      n: 3, engine: 'claude', seatId: 'claude-b',
+      selectedClaudeAdmission: claudeAdmission, selectedDevinAdmission: devinAdmission,
+      candidates: [{ engine: 'claude' }, { engine: 'devin-cli', model: 'swe-2-high' }, { engine: 'grok-cli' }],
+    });
+    expect(result.candidates).toHaveLength(3);
+    expect(cli.calls.map(call => call.engine).sort()).toEqual(['claude', 'devin-cli', 'grok-cli']);
+    for (let i = 0; i < cli.calls.length; i += 1) {
+      const options = cli.options[i];
+      if (cli.calls[i]!.engine === 'claude') {
+        expect(options).toMatchObject({ seatId: 'claude-b', selectedClaudeAdmission: claudeAdmission });
+        expect(options).not.toHaveProperty('selectedDevinAdmission');
+      } else if (cli.calls[i]!.engine === 'devin-cli') {
+        expect(options).toMatchObject({ model: 'swe-2-high', selectedDevinAdmission: devinAdmission });
+        expect(options).not.toHaveProperty('seatId');
+        expect(options).not.toHaveProperty('selectedClaudeAdmission');
+      } else {
+        expect(options).not.toHaveProperty('seatId');
+        expect(options).not.toHaveProperty('selectedClaudeAdmission');
+        expect(options).not.toHaveProperty('selectedDevinAdmission');
+      }
+    }
+    expect(claudeAdmission).not.toHaveBeenCalled();
+    expect(devinAdmission).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toMatch(/selected(?:Claude|Devin)Admission/);
+  });
+
   it('routes each candidate to its OWN engine + model with the right runner kind', async () => {
     const cli = makeSandboxMock(1.0, 'cli'); // claude → cli-agent runner
     const api = makeSandboxMock(0.0, 'api'); // local-coder → api-model runner

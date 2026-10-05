@@ -23,7 +23,7 @@ import { devinBudgetView } from './budget.js';
 import { DevinApiError, devinFailureSentence, type DevinSession } from './client.js';
 import { connectedClient, recordDevinApiOutcome, snapshotOf, type DevinServiceDeps } from './service.js';
 import { devinHome, ensureDevinDirectory, listDevinTasks, readDevinBudget, readDevinTask, writeDevinTask } from './store.js';
-import { stateFromSession } from './tracker.js';
+import { stateFromSession } from './session-state.js';
 import { DEVIN_TASK_ID_PATTERN, type DevinFailureCode, type DevinGate, type DevinTaskV1 } from './types.js';
 import { readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
 

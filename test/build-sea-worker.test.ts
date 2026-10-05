@@ -2,6 +2,7 @@ import { mkdtempSync, mkdirSync, rmSync, unlinkSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runInNewContext } from 'node:vm';
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   createSeaCompileArgs,
@@ -10,9 +11,45 @@ import {
   createSeaEngineeringReadWorkerShim,
   createSeaFleetHistoryWorkerShim,
   createSeaOutcomesWorkerShim,
-  createSeaShim, collectVerifySafetySources, VERIFY_SAFETY_SOURCE_KEYS,
+  createSeaShim, collectVerifySafetySources, collectClaudeToolWorkerSource, VERIFY_SAFETY_SOURCE_KEYS,
 } from '../scripts/build-sea.mjs';
 import { embeddedSafetySourceReader, VERIFY_SAFETY_SOURCE_KEYS as runtimeKeys } from '../src/cli/verify-safety-sources.js';
+import { embeddedClaudeToolWorkerDigest } from '../src/core/sandbox/claude-broker-tool-invocation.js';
+
+describe('fixed Claude tool worker native source closure', () => {
+  it('embeds only the exact compiled worker bytes with the CLI artifact identity before boot', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-sea-tool-'));
+    const identity = JSON.stringify({ schemaVersion: 1, packageVersion: '3.24.1', revision: 'f'.repeat(40), dirty: false, provenance: 'git' });
+    const text = 'export const literal = "<script>π\\u2028";\n';
+    try {
+      mkdirSync(join(root, 'sandbox'));
+      const path = join(root, 'sandbox', 'claude-broker-tool-worker.js');
+      writeFileSync(path, text);
+      writeFileSync(join(root, 'sandbox', 'unrelated.js'), 'not a tool worker');
+      const raw = collectClaudeToolWorkerSource({ coreRoot: root, buildIdentityJson: identity });
+      const sha256 = createHash('sha256').update(text).digest('hex');
+      expect(JSON.parse(raw)).toEqual({ schemaVersion: 1, buildIdentityJson: identity, text, sha256 });
+      const shim = createSeaShim({ pkgVersion: '3.24.1', buildIdentityJson: identity, claudeToolWorkerSourceJson: raw });
+      expect(shim).not.toContain('<script>');
+      const context = { process: { argv: ['node', 'ashlr'], env: {}, execPath: '/owned/ashlr' }, Symbol, booted: false, dirname };
+      runInNewContext(shim.replace("import { dirname } from 'node:path';", '')
+        .replace("await import('../scripts/scorecard-history-worker.mjs');", "throw new Error('unexpected helper');")
+        .replace("await import('../dist/cli/index.js');", 'booted = true;'), context);
+      expect(context.booted).toBe(true);
+      const embedded = runInNewContext("globalThis[Symbol.for('ashlr.claude-tool-worker-source.v1')]", context);
+      const embeddedIdentity = runInNewContext("globalThis[Symbol.for('ashlr.build-identity.v1')]", context);
+      expect(embedded).toBe(raw);
+      expect(embeddedClaudeToolWorkerDigest(embedded, embeddedIdentity)).toBe(sha256);
+      expect(() => embeddedClaudeToolWorkerDigest(embedded, identity.replace('f'.repeat(40), 'e'.repeat(40)))).toThrow();
+      writeFileSync(path, '');
+      expect(() => collectClaudeToolWorkerSource({ coreRoot: root, buildIdentityJson: identity })).toThrow();
+      writeFileSync(path, 'x'.repeat(128 * 1024 + 1));
+      expect(() => collectClaudeToolWorkerSource({ coreRoot: root, buildIdentityJson: identity })).toThrow();
+      unlinkSync(path);
+      expect(() => collectClaudeToolWorkerSource({ coreRoot: root, buildIdentityJson: identity })).toThrow();
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
 
 describe('native safety source packaging', () => {
   it('roundtrips exactly the five build texts and binds them before the CLI boots', () => {

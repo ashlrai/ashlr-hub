@@ -22,6 +22,9 @@ import {
 import { FAKE_KEY, FAKE_ORG, fakeDevin } from './helpers/fake-devin.js';
 
 const noSleep = async (): Promise<void> => undefined;
+const BARE_ID = '0123456789abcdef0123456789abcdef';
+const INVALID_IDS = ['a'.repeat(31), 'a'.repeat(33), 'A'.repeat(32), '01234567-89ab-cdef-0123-456789abcdef',
+  '../sessions', `${BARE_ID}/messages`, `${BARE_ID}?x=1`, `${BARE_ID}%2fmessages`, `${BARE_ID}\n`, '', 'devin-', 'devin-../x'];
 const client = (f: ReturnType<typeof fakeDevin>, key = f.key, retries = 2): DevinClient =>
   new DevinClient({ apiKey: key, fetch: f.fetch, sleep: noSleep, retries, baseUrl: 'https://api.devin.ai/v3' });
 
@@ -42,6 +45,21 @@ describe('parsers (docs.devin.ai v3 schemas)', () => {
     expect(full).toMatchObject({ sessionId: 'devin-abc123', status: 'running', statusDetail: 'waiting_for_user', acusConsumed: 3.5, pullRequests: [{ url: 'https://github.com/o/r/pull/7', state: 'open' }] });
     const short = parseDevinSession({ session_id: 'devin-abc123', url: 'https://app.devin.ai/sessions/devin-abc123', status: 'running' });
     expect(short).toMatchObject({ acusConsumed: null, pullRequests: [], tags: [] });
+  });
+
+  it('reads complete current v3 bare-hex suspended pages without inferring terminal state', () => {
+    const items = [BARE_ID, '1'.repeat(32), '2'.repeat(32), '3'.repeat(32)].map(id => ({
+      session_id:id, url:`https://app.devin.ai/sessions/${id}`, status:'suspended', status_detail:'waiting_for_user',
+      org_id:FAKE_ORG, acus_consumed:0.25, pull_requests:[], tags:['ashlr-verse', `ashlr-task-${id}`],
+    }));
+    const page = parseDevinSessionPage({ items, end_cursor:null, has_next_page:false, total:4 });
+    expect(page).toMatchObject({ complete:true, hasNextPage:false, endCursor:null });
+    expect(page?.items).toHaveLength(4);
+    expect(page?.items.map(s => [s.sessionId,s.status,s.acusConsumed])).toEqual(items.map(s => [s.session_id,'suspended',0.25]));
+  });
+
+  it.each(INVALID_IDS)('rejects malformed or path-bearing session ID %j in provider responses', id => {
+    expect(parseDevinSession({ session_id:id, url:'https://app.devin.ai/sessions/unknown', status:'suspended' })).toBeNull();
   });
 
   it('fails closed on an unknown status, a non-https URL, a bad id or a wrong-typed ACU count', () => {
@@ -82,6 +100,37 @@ describe('parsers (docs.devin.ai v3 schemas)', () => {
 });
 
 describe('requests', () => {
+  it('uses a current bare-hex ID across create, GET, list, message and terminate endpoints', async () => {
+    const f = fakeDevin();
+    const wire = { session_id:BARE_ID, url:`https://app.devin.ai/sessions/${BARE_ID}`, status:'suspended',
+      org_id:FAKE_ORG, acus_consumed:1.25, pull_requests:[], tags:['ashlr-verse'] };
+    f.forced.push({ status:200, body:wire });
+    f.sessions.set(BARE_ID, wire);
+    const c = client(f);
+    expect(await c.createSession(FAKE_ORG, { prompt:'Synthetic fixture' })).toMatchObject({ sessionId:BARE_ID, status:'suspended' });
+    expect(await c.getSession(FAKE_ORG, BARE_ID)).toMatchObject({ sessionId:BARE_ID, status:'suspended' });
+    expect(await c.listSessions(FAKE_ORG)).toMatchObject({ complete:true, items:[{ sessionId:BARE_ID }] });
+    await c.sendMessage(FAKE_ORG, BARE_ID, 'Synthetic follow-up');
+    expect(await c.listMessages(FAKE_ORG, BARE_ID)).toMatchObject({ hasNextPage:false, items:[{ source:'user' }] });
+    expect(await c.terminateSession(FAKE_ORG, BARE_ID)).toMatchObject({ sessionId:BARE_ID, status:'exit', acusConsumed:1.25 });
+    expect(f.requests.map(r => [r.method,r.path])).toEqual([
+      ['POST',`/v3/organizations/${FAKE_ORG}/sessions`],
+      ['GET',`/v3/organizations/${FAKE_ORG}/sessions/${BARE_ID}`],
+      ['GET',`/v3/organizations/${FAKE_ORG}/sessions?first=25`],
+      ['POST',`/v3/organizations/${FAKE_ORG}/sessions/${BARE_ID}/messages`],
+      ['GET',`/v3/organizations/${FAKE_ORG}/sessions/${BARE_ID}/messages?first=100`],
+      ['DELETE',`/v3/organizations/${FAKE_ORG}/sessions/${BARE_ID}`],
+    ]);
+  });
+
+  it.each(INVALID_IDS)('refuses malformed session ID %j before all ID-scoped requests', async id => {
+    const f = fakeDevin(); const c = client(f);
+    for (const request of [() => c.getSession(FAKE_ORG,id), () => c.sendMessage(FAKE_ORG,id,'x'),
+      () => c.listMessages(FAKE_ORG,id), () => c.terminateSession(FAKE_ORG,id)]) {
+      await expect(request()).rejects.toMatchObject({ code:'invalid-request' });
+    }
+    expect(f.requests).toEqual([]);
+  });
   it('GET /v3/self and org-scoped session routes with Bearer auth', async () => {
     const f = fakeDevin();
     const c = client(f);
@@ -144,6 +193,26 @@ describe('requests', () => {
 });
 
 describe('retries and failures', () => {
+  it('preserves a local pre-contact refusal without contacting or retrying the provider', async () => {
+    const f = fakeDevin();
+    await expect(client(f).createSession(FAKE_ORG, { prompt:'x' }, () => {
+      throw new DevinApiError('budget', 'Current local budget refused.');
+    })).rejects.toMatchObject({ code:'budget', message:'Current local budget refused.' });
+    expect(f.requests).toEqual([]);
+  });
+
+  it('re-admits after a create 429 wait and preserves the refusal rather than reporting network ambiguity', async () => {
+    const f = fakeDevin();
+    f.forced.push({ status:429 });
+    let admitted = true;
+    const c = new DevinClient({ apiKey:f.key, fetch:f.fetch, sleep:async () => { admitted=false; } });
+    await expect(c.createSession(FAKE_ORG, { prompt:'x' }, () => {
+      if (!admitted) throw new DevinApiError('not-enabled', 'Stop changed during backoff.');
+    })).rejects.toMatchObject({ code:'not-enabled' });
+    expect(f.requests).toHaveLength(1);
+    expect(f.sessions.size).toBe(0);
+  });
+
   it('retries a read on 429 (honouring a sane Retry-After) and on 5xx, then succeeds', async () => {
     const f = fakeDevin();
     const slept: number[] = [];

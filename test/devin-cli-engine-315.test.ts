@@ -19,10 +19,11 @@
  * Hermetic: no Devin call, no network. HOME is isolated by test/setup/home.ts;
  * every path here is a temp dir.
  */
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { refreshDevinCliExecutionBinding, resetDevinCliAdmissionForTest } from '../src/core/devin/cli-admission.js';
 
 import {
   DEVIN_CLI_CONTEXT_TOKENS,
@@ -79,6 +80,21 @@ const REPO = 'ashlrai/binshield';
 const REPO_PATH = '/tmp/mirrors/ashlrai__binshield';
 const CFG = { foundry: {} } as unknown as AshlrConfig;
 const OPTED_IN: NonNullable<AshlrConfig['devin']> = { enabled: true, fleet: true };
+const admissionRoots: string[] = [];
+beforeEach(() => { vi.spyOn(Date,'now').mockReturnValue(NOW); });
+afterEach(() => { vi.restoreAllMocks(); resetDevinCliAdmissionForTest(); for (const root of admissionRoots.splice(0)) rmSync(root,{recursive:true,force:true}); });
+async function nativeBinding(model: string) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(),'devin-native-evidence-'))); admissionRoots.push(root);
+  const executable = join(root,'devin'); writeFileSync(executable,'#!/bin/sh\nexit 0\n',{mode:0o755});
+  mkdirSync(join(root,'data','devin'),{recursive:true,mode:0o700});
+  const credentialsPath = join(root,'data','devin','credentials.toml'); writeFileSync(credentialsPath,'fixture-not-login',{mode:0o600});
+  return refreshDevinCliExecutionBinding(model,{cliPath:executable,credentialsPath,
+    runMetadata:async (_bin,args) => args[0] === 'auth'
+      ? 'Logged in\nUser ID: fixture-user\nTeam ID: fixture-team\nAPI server: https://server.codeium.com\nDevin API: https://api.devin.ai\n'
+      : `Available models (1 family)\nFixture (fixture)\n  ${model}  Fixture Model  [262K context, ${model === 'swe-2-high' ? 'Free' : '$4 / 1M Input · $20 / 1M Output'}]\n`,
+  });
+}
+
 
 // ---------------------------------------------------------------------------
 // Registry argv
@@ -181,16 +197,17 @@ function verdictInput(over: Partial<DevinCliLaneInput> = {}): DevinCliLaneInput 
     budgetMode: 'balanced',
     probe: { state: 'ready', reason: null },
     model: 'swe-2-high',
+    nativeFreeModelVerified: true,
     ...over,
   };
 }
 
 describe('devinCliLaneVerdict — every check, first failure wins', () => {
   it('opens only when opt-in, grant, budget mode, free model and CLI all pass', () => {
-    expect(devinCliLaneVerdict(verdictInput())).toMatchObject({ ok: true });
+    expect(devinCliLaneVerdict(verdictInput())).toMatchObject({ ok:process.platform !== 'win32' });
   });
 
-  it('refuses in order: enabled, fleet opt-in, grant, budget, model, probe', () => {
+  it('refuses in order: enabled, fleet opt-in, grant, budget, probe, qualified pricing', () => {
     const closedAll = verdictInput({
       section: {}, grant: { ok: false, reason: 'no grant' }, budgetAllowsDevin: false,
       model: 'claude-opus-5-5-high', probe: { state: 'missing', reason: 'not installed' },
@@ -201,9 +218,14 @@ describe('devinCliLaneVerdict — every check, first failure wins', () => {
     expect(devinCliLaneVerdict({ ...closedAll, section: OPTED_IN, grant: { ok: true, reason: '' } }).reason)
       .toBe('The balanced budget mode keeps the Devin seat off for autonomy.');
     expect(devinCliLaneVerdict({ ...closedAll, section: OPTED_IN, grant: { ok: true, reason: '' }, budgetAllowsDevin: true }).reason)
-      .toMatch(/claude-opus-5-5-high" is billed by Devin/);
+      .toBe('not installed');
     expect(devinCliLaneVerdict({ ...closedAll, section: OPTED_IN, grant: { ok: true, reason: '' }, budgetAllowsDevin: true, model: 'swe-2-high' }).reason)
       .toBe('not installed');
+  });
+
+  it('source model IDs alone never authorize free pricing', () => {
+    expect(devinCliLaneVerdict(verdictInput({ nativeFreeModelVerified:undefined })).ok).toBe(false);
+    expect(devinCliLaneVerdict(verdictInput({ model:'claude-opus-5-5-high',nativeFreeModelVerified:false }))).toMatchObject({ok:false,reason:expect.stringMatching(/unconfirmed/)});
   });
 
   it('an unreadable budget or an unprobed CLI fails closed', () => {
@@ -418,17 +440,22 @@ describe('routeWorkItem — the Devin CLI as overflow', () => {
 describe('devinCliReadiness (tick-hooks-live)', () => {
   const budget: BudgetPolicy = defaultBudgetPolicy();
 
-  it('never probes the CLI unless the opt-in, grant, budget mode and model already allow the lane', async () => {
+  it('reads native pricing only after opt-in, grant and budget; IDs alone cannot open the lane', async () => {
     const probe = vi.fn(async () => ({ state: 'ready' as const, cliPath: '/fake/devin', reason: null, checkedAt: NOW }));
     const off = await devinCliReadiness({ devin: { enabled: true } } as AshlrConfig, policy() as EffectivePolicy, budget, { probeDevinCli: probe });
     expect(off.ok).toBe(false);
-    const paid = await devinCliReadiness({ devin: { ...OPTED_IN, fleetModel: 'claude-opus-5-5-high' } } as AshlrConfig, policy() as EffectivePolicy, budget, { probeDevinCli: probe });
-    expect(paid.ok).toBe(false);
     expect(probe).not.toHaveBeenCalled();
-    const ready = await devinCliReadiness({ devin: OPTED_IN } as AshlrConfig, policy() as EffectivePolicy, budget, { probeDevinCli: probe });
+    const evidence = vi.fn(nativeBinding);
+    const paid = await devinCliReadiness({ devin: { ...OPTED_IN, fleetModel: 'claude-opus-5-5-high' } } as AshlrConfig, policy() as EffectivePolicy, budget, { probeDevinCli: probe,devinCliExecutionBinding:evidence });
+    expect(paid.ok).toBe(false);
     expect(probe).toHaveBeenCalledTimes(1);
+    expect(evidence).toHaveBeenCalledWith('claude-opus-5-5-high','/fake/devin');
+    const ready = await devinCliReadiness({ devin: OPTED_IN } as AshlrConfig, policy() as EffectivePolicy, budget, { probeDevinCli: probe,devinCliExecutionBinding:evidence });
+    expect(probe).toHaveBeenCalledTimes(2);
     // balanced mode (the default) lets autonomy use the Devin seat.
-    expect(ready).toMatchObject({ ok: true, reason: expect.stringMatching(/swe-2-high \(free\)/) });
+    expect(ready).toMatchObject(process.platform === 'win32'
+      ? {ok:false,reason:expect.stringMatching(/unconfirmed/)}
+      : { ok:true,reason:expect.stringMatching(/swe-2-high \(native-verified free\)/) });
   });
 
   it('the probe\'s refusal (with its fixing command) becomes the lane\'s reason; a throwing or absent probe is closed', async () => {
@@ -439,8 +466,8 @@ describe('devinCliReadiness (tick-hooks-live)', () => {
     expect((await devinCliReadiness({ devin: OPTED_IN } as AshlrConfig, policy() as EffectivePolicy, allowAll, { probeDevinCli: async () => { throw new Error('x'); } })).ok).toBe(false);
     expect((await devinCliReadiness({ devin: OPTED_IN } as AshlrConfig, policy() as EffectivePolicy, allowAll, {})).ok).toBe(false);
     const ready = async () => ({ state: 'ready' as const, cliPath: '/fake/devin', reason: null, checkedAt: NOW });
-    expect(await devinCliReadiness({ devin: OPTED_IN } as AshlrConfig, policy() as EffectivePolicy, allowAll, { probeDevinCli: ready }))
-      .toMatchObject({ ok: true });
+    expect(await devinCliReadiness({ devin: OPTED_IN } as AshlrConfig, policy() as EffectivePolicy, allowAll, { probeDevinCli: ready,devinCliExecutionBinding:nativeBinding }))
+      .toMatchObject({ ok:process.platform !== 'win32' });
   });
 
   it('reserve mode keeps the lane off (A9: Devin disabled in reserve)', async () => {

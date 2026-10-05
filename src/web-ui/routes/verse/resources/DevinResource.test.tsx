@@ -146,12 +146,29 @@ describe('DevinResource', () => {
     expect(isGuardOpen()).toBe(true); expect(posts).toHaveLength(0);
   });
 
+  it('labels an empty organization report without claiming measured zero consumption', async () => {
+    overview = { ...(overview as Record<string, unknown>), consumption: consumption({ report: { totalAcus: 0, days: [] } }) };
+    mount();
+    const section = await screen.findByRole('region', { name: 'Devin organization consumption' });
+    expect(within(section).getByText('No consumption reported')).toBeInTheDocument();
+    expect(within(section).queryByText('0 ACUs consumed')).toBeNull();
+    expect(within(section).getByText('Daily consumption (0 reporting buckets)')).toBeInTheDocument();
+    expect(within(section).getByText(/Balance, subscription limits and resets are not reported/)).toBeInTheDocument();
+  });
+
   it('rejects unknown or malformed usage and preserves a measured zero independently of capacity', () => {
     expect(devinConsumptionEvidence(undefined)).toBeNull();
     expect(devinConsumptionEvidence(consumption({ report: { totalAcus: -1, days: [] } }))).toBeNull();
     expect(devinConsumptionEvidence(consumption({ report: { totalAcus: '0', days: [] } }))).toBeNull();
     expect(devinConsumptionEvidence(consumption({ fetchedAt: new Date(Date.now() + 60_000).toISOString() }))).toBeNull();
-    expect(devinConsumptionEvidence(consumption({ report: { totalAcus: 0, days: [] } }))?.value).toBe('0 ACUs consumed');
+    const empty = devinConsumptionEvidence(consumption({ report: { totalAcus: 0, days: [] } }));
+    expect(empty?.value).toBe('No consumption reported');
+    expect(empty?.report).toEqual({ totalAcus: 0, days: [] });
+    expect(empty?.lines).toContain('0 daily reporting buckets; dates retained as provider values.');
+    const measuredZero = consumption({ report: { totalAcus: 0, days: [{ date: 123, acus: 0,
+      products: { devin: 0, cascade: 0, terminal: 0, automation: null, review: null } }] } });
+    expect(devinConsumptionEvidence(measuredZero)?.value).toBe('0 ACUs consumed');
+    expect(devinConsumptionEvidence(consumption({ report: { totalAcus: 3.125, days: [] } }))?.value).toBe('No consumption reported');
   });
 
   it('retains a permission-qualified last reading without representing current capacity', async () => {

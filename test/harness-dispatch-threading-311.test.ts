@@ -106,6 +106,16 @@ describe('runGoal forwards RunOptions.harness to the sandboxed producers', () =>
     expect(engineMock.mock.calls[0]?.[3]).toMatchObject({ harness: H, propose: true });
   });
 
+  it.each([false,true])('forwards the selected native Claude account and host callback through shared-sandbox fallback=%s',async fallback=>{
+    if(fallback)createSandboxMock.mockImplementationOnce(()=>{throw new Error('no shared sandbox');});
+    engineMock.mockResolvedValue({state:runState(fallback?'failed':'done')});
+    const admission=vi.fn(()=>true);
+    await (await runGoal())('fix a bug',CFG_SANDBOX,{engine:'claude',model:'claude-sonnet-4-5',sandboxEngine:true,tools:false,
+      seatId:'claude-a',selectedClaudeAdmission:admission,budget:{maxTokens:1_000_000,maxSteps:100}});
+    expect(engineMock.mock.calls[0]?.[3]).toMatchObject({seatId:'claude-a',selectedClaudeAdmission:admission,propose:fallback});
+    expect(admission).not.toHaveBeenCalled();
+  });
+
   it('api-model attempt carries the harness', async () => {
     engineMock.mockResolvedValue({ state: { ...runState('done'), engine: 'local-coder' } });
     await (await runGoal())('fix a bug', CFG_SANDBOX, {

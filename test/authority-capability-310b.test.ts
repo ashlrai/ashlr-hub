@@ -47,6 +47,7 @@ import { closeStandingSession, mintStandingTickCapability, openStandingSession }
 import { clearStop, revokeStanding, stopAutonomy } from '../src/core/authority/clamp.js';
 import {
   currentStandingPolicy,
+  currentStandingPolicyReadiness,
   evaluateStandingAuthority,
   invalidateStandingPolicyCache,
   requestAutonomySwitch,
@@ -91,18 +92,29 @@ describe('installing and using a grant', () => {
   it('is dark with no grant, and the switch cannot be raised past it', () => {
     expect(evaluateStandingAuthority({ mode: 'fresh', surface: 'running' }).grantState).toBe('none');
     expect(currentStandingPolicy()).toBeNull();
+    expect(currentStandingPolicyReadiness()).toMatchObject({ policy: null, grantState: 'none', reason: expect.stringMatching(/No standing grant/) });
     const raised = requestAutonomySwitch('propose', 'mason', 'test');
     expect(raised).toMatchObject({ ok: false, code: 'grant-required' });
     expect(openStandingSession(cfg).ok).toBe(false);
     expect(liveConductorActivationAuthorized()).toBe(false);
   });
 
+  it('does not reuse a cached missing-grant explanation after a policy read fails', () => {
+    expect(currentStandingPolicyReadiness().grantState).toBe('none');
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => { throw new Error('clock unavailable'); });
+    try {
+      expect(currentStandingPolicyReadiness()).toEqual({ policy: null, grantState: null, reason: null });
+      expect(currentStandingPolicy()).toBeNull();
+    } finally { clock.mockRestore(); }
+  });
+
   it('a verified grant + the switch yield a policy, a session and single-use capabilities', async () => {
     const installed = install();
     expect(installed).toMatchObject({ ok: true, recovered: false });
     expect(readFileSync(installedGrantPath(), 'utf8').endsWith('\n')).toBe(true);
-    // Installed but the switch is Off: still dark.
+    // Installed but the switch is Off: still dark, with a present grant.
     expect(currentStandingPolicy()).toBeNull();
+    expect(currentStandingPolicyReadiness()).toMatchObject({ policy: null, grantState: 'active', reason: 'The autonomy switch is Off.' });
     expect(openStandingSession(cfg)).toMatchObject({ ok: false });
     goAutonomous();
     const policy = currentStandingPolicy();
@@ -186,6 +198,7 @@ describe('lowering is instant and needs no auth', () => {
     expect(currentStandingPolicy()).not.toBeNull();
     expect(stopAutonomy({ actor: 'mason', reason: 'test', waitMs: 0 }).armed).toBe(true);
     expect(currentStandingPolicy()).toBeNull();
+    expect(currentStandingPolicyReadiness()).toMatchObject({ policy: null, grantState: 'active', reason: expect.stringMatching(/Stop is engaged/) });
     if (minted.ok) expect(isDaemonActivationCapability(minted.capability)).toBe(false);
     expect(mintStandingTickCapability(session).ok).toBe(false);
     expect(clearStop({ actor: 'mason', reason: 'test', waitMs: 2_000 }).ok).toBe(true);
@@ -244,6 +257,7 @@ describe('lowering is instant and needs no auth', () => {
     const opened = openStandingSession(cfg);
     if (!opened.ok) throw new Error(opened.reason);
     await new Promise((r) => setTimeout(r, 1600));
+    expect(currentStandingPolicyReadiness()).toMatchObject({ policy: null, grantState: 'expired', reason: expect.stringMatching(/expired/) });
     expect(currentStandingPolicy()).toBeNull();
     expect(mintStandingTickCapability(opened.session).ok).toBe(false);
     expect(mintStandingTickCapability(opened.session).ok).toBe(false);

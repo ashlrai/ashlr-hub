@@ -35,6 +35,7 @@
 import { accessSync, closeSync, constants as fsConstants, existsSync, mkdtempSync, openSync, readSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, relative, sep } from 'node:path';
+import type { DevinCliExecutionBinding } from '../devin/cli-admission.js';
 
 import {
   applyAutonomousEnvOverlay,
@@ -246,6 +247,7 @@ export interface AutonomousSpawnInput {
   seatId?: string | null;
   /** grok-cli / codex: the seat's pinned vendor home (native profile `nativeStatePath`). */
   nativeStatePath?: string | null;
+  devinExecutionBinding?: DevinCliExecutionBinding;
   /** More read-only paths (e.g. the pre-push hooks dir, a mirror's node_modules). */
   extraReadOnly?: readonly string[];
   /** Default: autonomousConfinementProfile(engine). */
@@ -297,6 +299,7 @@ export function prepareAutonomousSpawn(input: AutonomousSpawnInput): AutonomousS
       home,
       seatId: input.seatId ?? null,
       ...(input.nativeStatePath !== undefined ? { nativeStatePath: input.nativeStatePath } : {}),
+      ...(input.devinExecutionBinding ? { devinExecutionBinding: input.devinExecutionBinding } : {}),
       executables: readOnly,
       path: originalPath,
     });
