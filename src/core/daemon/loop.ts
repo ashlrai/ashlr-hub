@@ -7425,6 +7425,10 @@ export async function tick(
         });
         if (stopRequested()) return stopRequestedOutcome(item, attemptId);
 
+        // Awaited strategy preparation cannot reuse a now-stale native price seal.
+        const preparedDollarRefusal = dollarAdmissionRefusal();
+        if (preparedDollarRefusal) return preparedDollarRefusal;
+
         // M170: best-of-N dispatch — when cfg.foundry.bestOfN > 1, generate N
         // candidates and let the critic pick the winner. Flag-off: bestOfN absent
         // or 1 → single runGoal call, byte-identical to pre-M170 behavior.
@@ -7559,6 +7563,15 @@ export async function tick(
           : undefined;
         const selectedDevinBinding = fleetLaneOf(backend, routingCfg) === 'devin-cli'
           ? peekDevinCliExecutionBinding(selectedModel ?? resolveDevinCliFleetModel(routingCfg.devin)) : null;
+        let qualifiedDevinSpawns = 0;
+        const onSelectedDevinSpawn: import('../types.js').RunOptions['onSelectedDevinSpawn'] = selectedDevinBinding
+          ? (model, binding) => {
+            // The native runner notifies only after its existing current seal,
+            // private-copy and Stop checks admitted an actual owned child. Keep
+            // that launch fact beyond the TTL; it never admits another contact.
+            if ((backend as string | undefined) === 'devin-cli' && model === selectedModel && binding === selectedDevinBinding
+              && !Object.prototype.hasOwnProperty.call(routingCfg.foundry?.engines ?? {}, 'devin-cli')) qualifiedDevinSpawns++;
+          } : undefined;
         const selectedDevinAdmission = fleetLaneOf(backend, routingCfg) === 'devin-cli'
           ? (model: string) => {
             if (!stillOwnsTick() || stopRequested() || dispatchSignal.aborted || !devinCliBindingCurrent(selectedDevinBinding, model)) return null;
@@ -7741,6 +7754,7 @@ export async function tick(
               ...(standingSeatId ? { seatId: standingSeatId } : {}),
               ...(selectedGrokAdmission ? { selectedGrokAdmission } : {}),
               ...(selectedDevinAdmission ? { selectedDevinAdmission } : {}),
+              ...(onSelectedDevinSpawn ? { onSelectedDevinSpawn } : {}),
               ...(selectedClaudeAdmission ? { selectedClaudeAdmission } : {}),
               ...(outcomeDispatch || selectedTaskAdmission ? { selectedOutcomeAdmission: selectedDispatchAdmission } : {}),
               ...(dispatchHarness ? { harness: dispatchHarness } : {}),
@@ -7761,7 +7775,9 @@ export async function tick(
           // never a reported fallback whose economics or seat were not checked.
           const exactZeroProducer = runState.engine === backend
             && ((backend as string | undefined) !== 'devin-cli' || runState.engineModel === `${backend}:${selectedModel}`)
-            && zeroDollarProducer(backend, routingCfg, selectedModel);
+            && ((backend as string | undefined) === 'devin-cli'
+              ? qualifiedDevinSpawns > 0 && qualifiedDevinSpawns === runState.usage?.steps
+              : zeroDollarProducer(backend, routingCfg, selectedModel));
           if (zeroDollarOnlyTick && !exactZeroProducer) zeroCostProducerViolation = true;
           if (!stillOwnsTick()) {
             swarmSpent = exactZeroProducer ? 0 : (runState.usage?.estCostUsd ?? 0);
@@ -7909,7 +7925,9 @@ export async function tick(
         swarmSpent = bonBillable !== null
           ? bonBillable
           : runState.engine === backend && ((backend as string | undefined) !== 'devin-cli' || runState.engineModel === `${backend}:${selectedModel}`)
-            && zeroDollarProducer(backend, routingCfg, selectedModel)
+            && ((backend as string | undefined) === 'devin-cli'
+              ? qualifiedDevinSpawns > 0 && qualifiedDevinSpawns === runState.usage?.steps
+              : zeroDollarProducer(backend, routingCfg, selectedModel))
             ? 0
             : (runState.usage?.estCostUsd ?? 0);
         tickSpent += swarmSpent;
@@ -10553,12 +10571,14 @@ function msUntilUtcTimestamp(targetMs: number, nowMs = Date.now()): number {
  * builtin runs a model swarm, so its generic policy classification is insufficient.
  * Trust tier alone never makes a custom API or CLI a subscription seat.
  */
-export function zeroDollarProducer(engine: string | undefined, cfg: AshlrConfig, _model?: string | null): boolean {
+export function zeroDollarProducer(engine: string | undefined, cfg: AshlrConfig, model?: string | null): boolean {
   if (!engine || engine === 'builtin') return false;
-  // Historical SWE-2 ids do not prove current account pricing: the free offer
-  // is plan-dependent and expires. Without fresh account-bound price evidence,
-  // Devin CLI cannot bypass exhausted USD; its positive-headroom lane is unchanged.
-  if (engine === 'devin-cli') return false;
+  // Model IDs, config overrides and roster labels never establish free pricing.
+  // Only the existing host-issued current native seal admits a new contact.
+  if (engine === 'devin-cli') {
+    if (Object.prototype.hasOwnProperty.call(cfg.foundry?.engines ?? {}, engine)) return false;
+    return peekDevinCliExecutionBinding(resolveDevinCliFleetModel(cfg.devin, model ?? undefined)) !== null;
+  }
   const spec = resolveEngineSpec(engine, cfg);
   if (!spec) return false;
   if (spec.kind === 'api-model') return engineMeteredness(engine, cfg) === 'free';
