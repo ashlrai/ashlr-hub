@@ -305,7 +305,7 @@ step's command to copy.
     it refuses agents, a dirty build, Stop, the switch at Off and an inactive
     grant, shows the release, plist and daily budget, and asks you to confirm
     — in the app, in a native dialog no page script or agent can answer
-    ([desktop/README.md](../desktop/README.md), "Fleet operations"). Setup
+    ([desktop/README.md](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md), "Fleet operations"). Setup
     never does this step for you ([RESIDENT-RUNTIME.md](RESIDENT-RUNTIME.md)).
 
 Your recurring actions after setup are one Touch ID per 30-day grant, and one

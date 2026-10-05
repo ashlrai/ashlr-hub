@@ -6,7 +6,7 @@ It is not a commissioning certificate. No production authorization, account
 connection or running resident process was established by this source audit.
 
 The executable package plan lives in
-[`artifacts/control-graph.json`](../artifacts/control-graph.json). Planned `requires`
+[`artifacts/control-graph.json`](https://github.com/ashlrai/ashlr-hub/blob/master/artifacts/control-graph.json). Planned `requires`
 are not execution edges. A runtime edge exists only after its source artifact
 digest is committed into a dispatch intent. Package reports and unsigned trace
 stubs are review aids, not signed runtime evidence.
@@ -177,7 +177,7 @@ at dispatch/publication, and reconciles retained results rather than issuing new
 proposal identities. This source integration is not an installed resident service,
 an unlimited-history scheduler, or actual-account commissioning evidence.
 The generated command still needs actual account capacity and an appropriate
-fixed evaluator. The [graded Hub verification benchmark proposal](../artifacts/hub-verification-benchmark-plan.md#installed-builtin-measurement-route)
+fixed evaluator. The [graded Hub verification benchmark proposal](https://github.com/ashlrai/ashlr-hub/blob/master/artifacts/hub-verification-benchmark-plan.md#installed-builtin-measurement-route)
 now has a closed installed `preparation-measurement-v1` launch route on
 macOS/Node 24. Its trusted controller launches the candidate separately; ordinary
 command evaluators are unchanged, and their unsupported nested-sandbox route
@@ -316,7 +316,7 @@ transition automatically or establish live Spark entitlement.
 ## Evidence and limitations
 
 The detailed baseline call-site audit is
-[`artifacts/firm-gap-inventory.json`](../artifacts/firm-gap-inventory.json).
+[`artifacts/firm-gap-inventory.json`](https://github.com/ashlrai/ashlr-hub/blob/master/artifacts/firm-gap-inventory.json).
 That inventory deliberately records its earlier package-worktree revision;
 new package results are tracked separately rather than retroactively described as
 baseline behavior. Tests must run locally: GitHub Actions remain unused.

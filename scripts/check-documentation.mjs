@@ -10,6 +10,17 @@ import { marked } from 'marked';
 export const OPERATOR_DOCUMENTATION = Object.freeze([
   'README.md', 'docs/README.md', 'docs/QUICKSTART.md', 'docs/DEMO.md', 'docs/ARCHITECTURE.md',
   'docs/ASHLR-UNIVERSE.md', 'docs/RESOURCE-POOLS.md', 'docs/NORTH-STAR.md', 'docs/MISSION-OS.md',
+  'docs/VERSE.md', 'docs/AUTONOMY-SETUP.md', 'docs/AUTOMATIC-OUTCOMES.md',
+  'docs/RESIDENT-RUNTIME.md',
+  'docs/AUTHORITY.md',
+  'docs/STANDING-AUTHORITY.md',
+  'docs/CLOUD.md',
+  'docs/LEADER.md',
+  'docs/DEVIN.md',
+  'docs/VERSE-CONTEXT.md',
+  'docs/VERSE-BROWSER.md',
+  'docs/JEV-INTEGRATION.md',
+  'docs/AUTONOMY-GAP.md', 'docs/FIRM-DEMO.md',
 ]);
 const SOURCE_PREFIX = 'https://github.com/ashlrai/ashlr-hub/blob/master/';
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;

@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -113,7 +113,46 @@ describe('operator documentation navigation', () => {
     }
     expect(manifest.files).not.toContain('docs');
     expect(manifest.files).not.toContain('src');
-    expect(OPERATOR_DOCUMENTATION).toHaveLength(9);
+    expect(OPERATOR_DOCUMENTATION).toHaveLength(23);
+    expect(OPERATOR_DOCUMENTATION).toEqual(expect.arrayContaining([
+      'docs/VERSE.md', 'docs/AUTONOMY-SETUP.md', 'docs/RESIDENT-RUNTIME.md', 'docs/DEVIN.md',
+    ]));
+  });
+
+  function packagedDocumentation(): string {
+    const source = process.cwd();
+    const manifest = JSON.parse(readFileSync(join(source, 'package.json'), 'utf8')) as { files: string[] };
+    // Simulate only the actual declared Markdown/schema payload, without npm
+    // lifecycle scripts, a build, or copying source-only development references.
+    const files: Record<string, string> = { 'README.md': readFileSync(join(source, 'README.md'), 'utf8'),
+      LICENSE: readFileSync(join(source, 'LICENSE'), 'utf8') };
+    for (const path of manifest.files.filter(path => path.endsWith('.md'))) {
+      files[path] = readFileSync(join(source, path), 'utf8');
+    }
+    const root = fixture(files);
+    expect(manifest.files).toContain('schema');
+    cpSync(join(source, 'schema'), join(root, 'schema'), { recursive: true });
+    return root;
+  }
+
+  it('keeps operator navigation complete in the exact curated package documentation payload', () => {
+    const root = packagedDocumentation();
+    const result = checkDocumentation({ root, mode: 'package' });
+    expect(result).toMatchObject({ ok: true, errors: [], externalRequests: 0 });
+    expect(result.sourceLinks).toBeGreaterThan(0);
+    for (const excluded of ['src', 'artifacts', 'desktop', 'docs/VERSE-CONTRACT-V1.md', 'docs/HUB-REFERENCE.md']) {
+      expect(existsSync(join(root, excluded))).toBe(false);
+    }
+  });
+
+  it.each(['RESIDENT-RUNTIME', 'DEVIN'])('refuses an omitted %s operator guide in the package', (guide) => {
+    const root = packagedDocumentation();
+    rmSync(join(root, 'docs', `${guide}.md`));
+    const result = checkDocumentation({ root, mode: 'package' });
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ file: 'docs/AUTONOMY-SETUP.md', href: expect.stringContaining(`${guide}.md`) }),
+    ]));
   });
 
   it('keeps checked source entrypoints and their heading targets navigable', () => {

@@ -1495,7 +1495,7 @@ The Tauri app in `desktop/` is a native window around Verse plus a menu-bar
 item. It is locally buildable and installable; there is no notarized public
 installer (see
 `DESKTOP.md`). Full detail, including the native↔web shell contract, is in
-[`desktop/README.md`](../desktop/README.md).
+[`desktop/README.md`](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md).
 
 What it does on launch:
 
@@ -1537,7 +1537,7 @@ chats, new Needs-you items and seat-health changes (notifications are on by
 default; Settings ▸ Desktop). The Dock badge counts Needs-you items. Unsigned
 builds deliver banners through `osascript`, so they appear as Script Editor. The
 tray and the Dock badge are the reliable signals there. Details:
-[`desktop/README.md`](../desktop/README.md).
+[`desktop/README.md`](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md).
 
 ### Install it on this Mac
 
