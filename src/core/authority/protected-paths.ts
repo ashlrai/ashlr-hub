@@ -88,6 +88,8 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/daemon/outcome-*.ts',
   'src/core/daemon/post-merge-halt.ts',
   'src/core/daemon/liveness.ts',
+  // Provider facts determine local Devin activity bookkeeping and exposure admission.
+  'src/core/devin/session-state.ts',
   // Resident service (docs/RESIDENT-RUNTIME.md): the only launchd mutation
   // path (installResidentService claims authority/resident.ts's capability),
   // the legacy deny-only boundary, and the config → plist mapping (budget,

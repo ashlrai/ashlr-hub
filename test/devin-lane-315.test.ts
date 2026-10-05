@@ -9,7 +9,7 @@
  */
 import { readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { devinBudgetView, devinTaskAcuUsed } from '../src/core/devin/budget.js';
 import { buildDevinPrompt, DEVIN_REPORT_SCHEMA, parseDevinReport } from '../src/core/devin/delivery-contract.js';
@@ -28,6 +28,7 @@ import {
   devinHome,
   isDevinTask,
   listDevinTasks,
+  readDevinBudget,
   readDevinConnection,
   readDevinTask,
   updateDevinBudget,
@@ -246,6 +247,90 @@ describe('status and readiness lines', () => {
 });
 
 describe('launch', () => {
+  const initialStates = [
+    ['new', null, 'running', /starting up/, null],
+    ['claimed', null, 'running', /starting up/, null],
+    ['resuming', null, 'running', /starting up/, null],
+    ['running', 'working', 'running', /working/, null],
+    ['running', 'waiting_for_user', 'blocked', /waiting for your reply/, null],
+    ['running', 'waiting_for_approval', 'blocked', /waiting for an approval/, null],
+    ['suspended', 'out_of_credits', 'blocked', /out of credits/, null],
+    ['suspended', 'out_of_quota', 'blocked', /quota is used up/, null],
+    ['suspended', 'provider_new_pause_detail', 'blocked', /paused the session/, null],
+    ['suspended', 'constructor', 'blocked', /paused the session/, null],
+    ['suspended', 'toString', 'blocked', /paused the session/, null],
+    ['suspended', '__proto__', 'blocked', /paused the session/, null],
+    ['running', 'finished', 'expired', /no pull request.*verified yet/, null],
+    ['exit', null, 'expired', /no pull request.*verified yet/, null],
+    ['error', null, 'failed', /ended in an error/, 'session-error'],
+  ] as const;
+
+  function answerWithStatus(status: string, detail: string | null, loseAnswer: boolean): void {
+    const fetch = api.fetch;
+    api.fetch = async (url, init) => {
+      const response = await fetch(url, init);
+      if (init.method !== 'POST') return response;
+      const body = JSON.parse(await response.text()) as { session_id: string };
+      const session = api.sessions.get(body.session_id)!;
+      api.sessions.delete(body.session_id);
+      Object.assign(session, { session_id: '0123456789abcdef0123456789abcdef',
+        url: 'https://app.devin.ai/sessions/0123456789abcdef0123456789abcdef',
+        status, status_detail: detail, acus_consumed: 0 });
+      api.sessions.set(session.session_id, session);
+      if (loseAnswer) throw new Error('socket hang up after create');
+      return { ...response, text: async () => JSON.stringify(session) };
+    };
+  }
+
+  it.each(initialStates)('immediately records provider %s/%s as %s without an eager tracker read', async (status, detail, state, reason, failure) => {
+    await connect();
+    answerWithStatus(status, detail, false);
+    const result = await launchDevinTask({ repo: REPO, prompt: 'x', origin: 'operator' }, deps());
+    expect(result).toMatchObject({ ok: true, error: null, failure: null,
+      task: { state, stateReason: expect.stringMatching(reason), failure,
+        sessionId: '0123456789abcdef0123456789abcdef',
+        session: { status, statusDetail: detail, acusConsumed: 0 } } });
+    expect(readDevinTask(result.task!.id)).toEqual(result.task);
+    expect(api.requests.filter((request) => request.method === 'POST')).toHaveLength(1);
+    expect(api.requests.filter((request) => request.method === 'GET' && request.path.includes('/sessions'))).toEqual([]);
+    if (state === 'blocked') expect(devinNeedsYouItems([result.task!], new Date())[0]?.detail).toMatch(reason);
+  });
+
+  it.each(initialStates)('lost-answer adoption records provider %s/%s as %s with exactly one POST', async (status, detail, state, reason, failure) => {
+    await connect();
+    answerWithStatus(status, detail, true);
+    const result = await launchDevinTask({ repo: REPO, prompt: 'x', origin: 'operator' }, deps());
+    expect(result).toMatchObject({ ok: true, error: null, failure: null,
+      task: { state, stateReason: expect.stringMatching(reason), failure, session: { status, statusDetail: detail } } });
+    expect(readDevinTask(result.task!.id)).toEqual(result.task);
+    expect(api.requests.filter((request) => request.method === 'POST')).toHaveLength(1);
+    const reads = api.requests.filter((request) => request.method === 'GET' && request.path.includes('/sessions'));
+    expect(reads).toHaveLength(1);
+    expect(reads[0]!.path).toMatch(/\/sessions\?first=/);
+  });
+
+  it.each([0, 0.25, null])('a suspended initial session keeps its full exposure bound for usage %s', async (usage) => {
+    await connect();
+    answerWithStatus('suspended', 'out_of_quota', false);
+    const fetch = api.fetch;
+    api.fetch = async (url, init) => {
+      const response = await fetch(url, init);
+      if (init.method !== 'POST') return response;
+      const session = JSON.parse(await response.text()) as Record<string, unknown>;
+      if (usage === null) delete session['acus_consumed'];
+      else session['acus_consumed'] = usage;
+      return { ...response, text: async () => JSON.stringify(session) };
+    };
+    const result = await launchDevinTask({ repo: REPO, prompt: 'x', origin: 'operator' }, deps());
+    const saved = result.task!;
+    const view = devinBudgetView([saved], readDevinBudget(), new Date());
+    expect(view.running).toBe(0);
+    expect(view.reportedAcuUsed).toBe(usage ?? 0);
+    expect(view.reportedAcuUsed! + view.unconfirmedAcuExposure!).toBe(saved.maxAcu);
+    const previouslyMislabelled = devinBudgetView([{ ...saved, state: 'running' }], readDevinBudget(), new Date());
+    expect(view.acuUsed + view.acuInFlight).toBe(previouslyMislabelled.acuUsed + previouslyMislabelled.acuInFlight);
+    expect(view.acuToday).toBe(previouslyMislabelled.acuToday);
+  });
   it('refuses when the lane is off or not connected, before any API call', async () => {
     expect(await launchDevinTask({ repo: REPO, prompt: 'x', origin: 'operator' }, deps({ config: () => ({ enabled: false }) }))).toMatchObject({ ok: false, failure: 'not-enabled' });
     expect(await launchDevinTask({ repo: REPO, prompt: 'x', origin: 'operator' }, deps())).toMatchObject({ ok: false, failure: 'not-connected' });
@@ -526,4 +611,21 @@ describe('delivery contract and secret hygiene', () => {
     expect(scrubSecrets('legacy apk_user_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123')).toBe('legacy [REDACTED]');
     expect(scrubSecrets('const apk_version_code_for_android = 1')).toContain('apk_version_code_for_android');
   });
+});
+
+it('the shared mapper imports no service, tracker, client runtime or store', async () => {
+  const paths = ['../src/core/devin/service.js', '../src/core/devin/tracker.js',
+    '../src/core/devin/client.js', '../src/core/devin/store.js'];
+  const forbidden = vi.fn(() => { throw new Error('effectful dependency imported by pure mapper'); });
+  vi.resetModules();
+  for (const path of paths) vi.doMock(path, forbidden);
+  try {
+    const { stateFromSession: pureMapper } = await import('../src/core/devin/session-state.js');
+    expect(pureMapper(task(), { status: 'suspended', statusDetail: 'out_of_quota' } as Parameters<typeof pureMapper>[1]))
+      .toMatchObject({ state: 'blocked', reason: expect.stringMatching(/quota is used up/) });
+    expect(forbidden).not.toHaveBeenCalled();
+  } finally {
+    for (const path of paths) vi.doUnmock(path);
+    vi.resetModules();
+  }
 });

@@ -133,6 +133,7 @@
 /src/core/daemon/outcome-*.ts @masonwyatt23
 /src/core/daemon/post-merge-halt.ts @masonwyatt23
 /src/core/daemon/liveness.ts @masonwyatt23
+/src/core/devin/session-state.ts @masonwyatt23
 /src/core/daemon/service.ts @masonwyatt23
 /src/core/daemon/service-install-authority.ts @masonwyatt23
 /src/core/daemon/service-config.ts @masonwyatt23
@@ -238,6 +239,7 @@
 /test/devin-engine-identity-315.test.ts @masonwyatt23
 /test/devin-fleet-launcher-315.test.ts @masonwyatt23
 /test/devin-intake-315.test.ts @masonwyatt23
+/test/devin-lane-315.test.ts @masonwyatt23
 /test/dispatch-router-310b.test.ts @masonwyatt23
 /test/elite-self-land-315.test.ts @masonwyatt23
 /test/engines-judges-310b.test.ts @masonwyatt23

@@ -29,6 +29,7 @@ import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-sto
 import { join } from 'node:path';
 import { scrubSecrets } from '../util/scrub.js';
 import { devinBudgetView } from './budget.js';
+import { stateFromSession } from './session-state.js';
 import { DevinApiError, DevinClient, devinFailureSentence, type DevinFetch, type DevinSession } from './client.js';
 import { buildDevinPrompt, DEVIN_REPORT_SCHEMA } from './delivery-contract.js';
 import { playbookForLaunch } from '../playbooks/lanes.js';
@@ -552,14 +553,15 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
     return { ok: false, task, error: reason, failure };
   };
   const adopt = (session: DevinSession): DevinLaunchResponse => {
+    const mapped = stateFromSession(task, session);
     Object.assign(task, {
-      state: 'running',
+      state: mapped?.state ?? task.state,
       sessionId: session.sessionId,
       sessionUrl: session.url,
       launchedAt: clock().toISOString(),
       session: snapshotOf(session, clock()),
-      stateReason: 'Devin is working. Its pull request will appear here.',
-      failure: null,
+      stateReason: mapped?.reason ?? 'Devin created the session; its work state is unconfirmed.',
+      failure: mapped?.failure ?? null,
     });
     writeDevinTask(task);
     return { ok: true, task, error: null, failure: null };

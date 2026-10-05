@@ -153,7 +153,7 @@ describe('supported refresh settles only org-pinned terminal observed usage', ()
     expect(after.session?.readAt).toBe(now.toISOString());
     expect(after.state).toBe(status === 'exit' ? 'expired' : 'failed');
     expect(after.stateReason).toBe(status === 'exit'
-      ? `Devin finished without a pull request on ${task().branch}. The session link still works.`
+      ? `Devin finished; no pull request on ${task().branch} has been verified yet. The session link still works.`
       : 'The Devin session ended in an error.');
     expect(after).not.toHaveProperty('reason');
     expect(devinTaskAcuUsed(after)).toBe(3);
