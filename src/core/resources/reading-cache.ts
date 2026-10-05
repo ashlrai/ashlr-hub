@@ -58,7 +58,7 @@ function windows(value: unknown): ResourceConnectionQuotaWindow[] {
       typeof v.nativeReport.source !== 'string' || !['claude-usage', 'claude-usage-structured'].includes(v.nativeReport.source) ||
       !(v.nativeReport.resetDescription === null || text(v.nativeReport.resetDescription, 512)))) throw new Error();
     if (Object.hasOwn(v, 'resetProvenance') && (!record(v.resetProvenance) ||
-      !exact(v.resetProvenance, ['kind', 'at', 'description', 'source'], ['plan', 'startsAt']) || !validResetProvenance(v.resetProvenance) ||
+      !exact(v.resetProvenance, ['kind', 'at', 'description', 'source'], ['plan', 'startsAt', 'windowDurationMins']) || !validResetProvenance(v.resetProvenance) ||
       !(v.resetProvenance.description === null || text(v.resetProvenance.description, 512)) ||
       !(v.resetProvenance.source === null || text(v.resetProvenance.source, 120)))) throw new Error();
     ids.add(v.id);

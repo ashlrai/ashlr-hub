@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { canonical } from '../universe/artifacts.js';
 import { readCodexNativeCredits } from './codex-credits.js';
-import { normalizeCodexResourceObservation } from './provider-observations.js';
+import { normalizeCodexResourceObservation, qualifyCodexWeeklyDeadlines } from './provider-observations.js';
 import type { CodexProbeProcessInput, CodexProbeProcessOutput } from './codex-account-probe.js';
 
 // Installed codex-cli 0.136.0 generated schema and official App Server protocol:
@@ -161,6 +161,7 @@ function start(input: CodexProbeProcessInput): void {
         { nowMs: Date.parse(input.startedAt), ttlMs: 60_000, bucketIds: input.bucketIds });
       if (!observation) { fail('probe-quota-invalid'); return; }
       output = { ...output, status: 'observed', reason: 'probe-observed', observation,
+        resetDeadlines: qualifyCodexWeeklyDeadlines(input.workerId, quota, { nowMs: Date.parse(input.startedAt), ttlMs: 60_000, bucketIds: input.bucketIds }, after.planType),
         credits: input.bucketIds.length === 1 ? readCodexNativeCredits(quota, input.bucketIds[0]!) : null };
       pending = 5;
       endNative(false);

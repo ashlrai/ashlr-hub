@@ -275,6 +275,10 @@ export type VerseSeatEvidenceSource = 'collector' | 'shared-evidence' | 'baselin
 
 /** Everything the seat list needs to draw a capacity meter honestly. */
 export interface VerseSeatCapacity {
+  /** Opaque current native account proof; missing legacy evidence remains unknown. */
+  accountHint?: string | null;
+  subscriptionOnlyBoundary?: import('../routing/reset-spending-types.js').SubscriptionOnlyBoundary | null;
+  onDemandEnabled?: boolean | null;
   /** e.g. "max", "pro", "SuperGrok". Null when the provider gave none. */
   planType: string | null;
   /**

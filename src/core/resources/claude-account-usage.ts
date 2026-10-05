@@ -13,6 +13,8 @@ export interface ClaudeAccountUsageResult extends ClaudeAccountStatusResult {
   windows: ResourceConnectionQuotaWindow[];
   /** Complete current structured endpoint reply, after same-account/plan checks. */
   quotaFresh?: boolean;
+  /** Current endpoint billing control; absent or malformed is not disabled. */
+  extraUsageEnabled?: boolean | null;
 }
 const MAX_OUTPUT = 32 * 1024;
 const INTRO = 'You are currently using your subscription to power your Claude Code usage';
@@ -79,7 +81,7 @@ function nativeResetInstant(value: unknown): string | null {
  * the fallback prose or status-line callbacks. No native IDs/content escape.
  */
 export function parseClaudeNativeUsageStream(raw: string, observedAt: string): {
-  windows: ResourceConnectionQuotaWindow[]; quotaFresh: boolean;
+  windows: ResourceConnectionQuotaWindow[]; quotaFresh: boolean; extraUsageEnabled?: boolean | null;
 } | null {
   if (Buffer.byteLength(raw) > MAX_OUTPUT) return null;
   let frames: Record<string, unknown>[];
@@ -154,7 +156,9 @@ export function parseClaudeNativeUsageStream(raw: string, observedAt: string): {
       } } : {}),
     });
   }
-  return ids.has('five_hour') && ids.has('seven_day') ? { windows, quotaFresh: true } : null;
+  const extra = report.rate_limits.extra_usage;
+  const extraUsageEnabled = record(extra) && typeof extra.is_enabled === 'boolean' ? extra.is_enabled : null;
+  return ids.has('five_hour') && ids.has('seven_day') ? { windows, quotaFresh: true, extraUsageEnabled } : null;
 }
 
 /**
@@ -245,7 +249,7 @@ export async function probeClaudeAccountUsage(options: ClaudeAccountStatusOption
       };
     }
     return { ...report(parsed?.quotaFresh ? 'usage-native-current' : 'usage-native-reported', windows),
-      ...(parsed?.quotaFresh ? { quotaFresh: true } : {}) };
+      ...(parsed?.quotaFresh ? { quotaFresh: true, extraUsageEnabled: parsed.extraUsageEnabled ?? null } : {}) };
   } catch (error) {
     if (record(error) && error.scope === 'claude-native-auth-status' && Array.isArray(error.windows)) return error as unknown as ClaudeAccountUsageResult;
     return failed(cleanupConfirmed ? 'failed' : 'uncertain', cleanupConfirmed ? 'usage-process-failed' : 'status-termination-uncertain');

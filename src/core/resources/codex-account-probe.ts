@@ -1,4 +1,7 @@
 /** Explicit native metadata sampling, not login, account attestation or a model request. */
+import { validResetProvenance } from '../routing/reset-pressure.js';
+import type { ResetProvenance } from '../routing/scheduling-types.js';
+
 import { lstatSync, mkdtempSync, realpathSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, parse, resolve } from 'node:path';
@@ -23,6 +26,7 @@ export interface CodexResourceProbeOptions {
   /** In-process ownership evidence only; never forwarded to the native protocol. */
   processGroupLifecycle?: VerifyProcessGroupLifecycle;
 }
+export interface CodexResetDeadline { windowId: string; resetProvenance: ResetProvenance }
 export interface CodexResourceProbeResult {
   schemaVersion: 1;
   scope: 'codex-native-metadata';
@@ -37,6 +41,7 @@ export interface CodexResourceProbeResult {
   planType: string | null;
   observation: ResourceObservation | null;
   credits?: CodexCredits | null;
+  resetDeadlines?: CodexResetDeadline[];
   /** Sanitized subprocess evidence only; never usable as quota or admission evidence. */
   cleanupDiagnostics?: CodexProbeCleanupDiagnostics;
 }
@@ -82,6 +87,7 @@ export interface CodexProbeProcessOutput {
   planType: string | null;
   observation: ResourceObservation | null;
   credits?: CodexCredits | null;
+  resetDeadlines?: CodexResetDeadline[];
 }
 
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -145,7 +151,7 @@ function checkedOutput(output: string, pool: ResourcePool, workerId: string, sta
   expectedAccountHint: string | null): CodexProbeProcessOutput | null {
   try {
     const value: unknown = JSON.parse(output);
-    if (!record(value) || !exact(value, ['schemaVersion', 'status', 'reason', 'accountHint', 'planType', 'observation'], ['credits']) ||
+    if (!record(value) || !exact(value, ['schemaVersion', 'status', 'reason', 'accountHint', 'planType', 'observation'], ['credits', 'resetDeadlines']) ||
       value.schemaVersion !== 1 || !['observed', 'failed'].includes(String(value.status)) ||
       typeof value.reason !== 'string' || !PROCESS_REASONS.has(value.reason) ||
       (value.accountHint !== null && (typeof value.accountHint !== 'string' || !HASH.test(value.accountHint))) ||
@@ -161,6 +167,18 @@ function checkedOutput(output: string, pool: ResourcePool, workerId: string, sta
         observation.expiresAt !== new Date(Date.parse(startedAt) + 60_000).toISOString() ||
         observation.health !== 'ready' || observation.retryAfter !== null) return null;
       value.observation = observation;
+    }
+    const rawDeadlines = value.resetDeadlines;
+    value.resetDeadlines = [];
+    if (value.status === 'observed' && Array.isArray(rawDeadlines) && rawDeadlines.length <= 1) {
+      const observation = value.observation as ResourceObservation;
+      for (const raw of rawDeadlines) {
+        if (record(raw) && exact(raw, ['windowId', 'resetProvenance']) && raw.windowId === 'codex_codex_secondary' &&
+          validResetProvenance(raw.resetProvenance) && raw.resetProvenance.source === 'codex-native-rate-limits' &&
+          raw.resetProvenance.plan === value.planType && observation.windows.some(w => w.id === raw.windowId && w.resetsAt === (raw.resetProvenance as ResetProvenance).at)) {
+          (value.resetDeadlines as CodexResetDeadline[]).push({ windowId: raw.windowId, resetProvenance: raw.resetProvenance });
+        }
+      }
     }
     value.credits = value.status === 'observed' ? normalizeCodexCredits(value.credits) : null;
     return value as unknown as CodexProbeProcessOutput;
@@ -179,11 +197,12 @@ export async function probeCodexResourceAccount(options: CodexResourceProbeOptio
   const started = performance.now(); const startedAt = new Date().toISOString();
   let cleanupDiagnostics: CodexProbeCleanupDiagnostics | undefined;
   const result = (status: CodexResourceProbeResult['status'], reason: string,
-    metadata?: Pick<CodexProbeProcessOutput, 'accountHint' | 'planType' | 'observation' | 'credits'>): CodexResourceProbeResult => ({
+    metadata?: Pick<CodexProbeProcessOutput, 'accountHint' | 'planType' | 'observation' | 'credits' | 'resetDeadlines'>): CodexResourceProbeResult => ({
     schemaVersion: 1, scope: 'codex-native-metadata', workerId: pinned.workerId, poolDigest: pinned.poolDigest,
     status, reason, startedAt, finishedAt: new Date().toISOString(),
     accountHint: metadata?.accountHint ?? null, planType: metadata?.planType ?? null, observation: metadata?.observation ?? null,
     credits: status === 'observed' ? metadata?.credits ?? null : null,
+    resetDeadlines: status === 'observed' ? metadata?.resetDeadlines ?? [] : [],
     ...(cleanupDiagnostics ? { cleanupDiagnostics } : {}),
   });
   if (pinned.signal?.aborted) return result('cancelled', 'probe-cancelled');

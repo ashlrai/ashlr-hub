@@ -554,6 +554,9 @@ function telemetryOf(record: VerseAccountRecord, evidenceSource: VerseSeatEviden
     },
     capacity: {
       planType: record.planType,
+      accountHint: record.accountHint ?? null,
+      subscriptionOnlyBoundary: record.subscriptionOnlyBoundary ?? null,
+      onDemandEnabled: record.onDemandEnabled,
       binding,
       windows,
       // Structurally identical to `VerseCodexCredits`; this assignment is the

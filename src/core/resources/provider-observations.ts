@@ -210,3 +210,22 @@ export function mergeClaudeResourceObservation(
     return result;
   } catch { return null; }
 }
+
+/** Native advisory sidecar; canonical resource observations and quota admission remain unchanged. */
+export function qualifyCodexWeeklyDeadlines(workerId: string, payload: unknown,
+  options: CodexResourceObservationOptions, matchedPlan: string): import('./codex-account-probe.js').CodexResetDeadline[] {
+  if (!['plus', 'pro'].includes(matchedPlan) || options.bucketIds.length !== 1 || options.bucketIds[0] !== 'codex' || !record(payload)) return [];
+  const normalized = normalizeCodexResourceObservation(workerId, payload, options);
+  if (!normalized) return [];
+  const bucket = Object.hasOwn(payload, 'rateLimitsByLimitId')
+    ? record(payload.rateLimitsByLimitId) ? payload.rateLimitsByLimitId.codex : null : payload.rateLimits;
+  if (!record(bucket) || bucket.limitId !== undefined && bucket.limitId !== 'codex' ||
+    bucket.planType !== undefined && bucket.planType !== matchedPlan || !record(bucket.secondary)) return [];
+  const raw = bucket.secondary;
+  const window = normalized.windows.find(w => w.id === 'codex_codex_secondary');
+  if (!window || raw.windowDurationMins !== 10080 || typeof raw.usedPercent !== 'number' || !Number.isFinite(raw.usedPercent) ||
+    raw.usedPercent < 0 || raw.usedPercent > 100 || !window.resetsAt || Date.parse(window.resetsAt) <= options.nowMs) return [];
+  return [{ windowId: window.id, resetProvenance: { kind: 'weekly-deadline', at: window.resetsAt,
+    source: 'codex-native-rate-limits', plan: matchedPlan as 'plus' | 'pro', windowDurationMins: 10080,
+    description: 'Current native weekly allowance deadline on a matched Plus/Pro account; no start inferred.' } }];
+}
