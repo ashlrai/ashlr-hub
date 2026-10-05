@@ -13,7 +13,9 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { SpawnSyncReturns } from 'node:child_process';
-import { win32 } from 'node:path';
+import { join, win32 } from 'node:path';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 // ---------------------------------------------------------------------------
 // Mock child_process BEFORE importing the module under test.
@@ -37,14 +39,34 @@ const origSystemRoot = process.env.SystemRoot;
 
 // Set of paths that existsSync should report as present.
 let _existingPaths: Set<string> = new Set();
+let _mockFiles: Map<string, string | Error> = new Map();
+let _mockRealPaths: Map<string, string> = new Map();
+let _readPaths: string[] = [];
+const scratch: string[] = [];
 
 vi.mock('node:fs', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs')>();
   return {
     ...original,
     existsSync: (p: unknown): boolean => _existingPaths.has(String(p)),
-    // readFileSync is used by ashlrHubVersionFromPackageJson — keep original
-    readFileSync: original.readFileSync,
+    readFileSync: (path: unknown, ...args: unknown[]) => {
+      _readPaths.push(String(path));
+      if (_mockFiles.has(String(path))) {
+        const value = _mockFiles.get(String(path))!;
+        if (value instanceof Error) throw value;
+        return value;
+      }
+      return Reflect.apply(original.readFileSync, original, [path, ...args]);
+    },
+    statSync: (path: unknown, ...args: unknown[]) => {
+      if (_mockFiles.has(String(path))) {
+        const value = _mockFiles.get(String(path))!;
+        return { isFile: () => true, size: value instanceof Error ? 1 : Buffer.byteLength(value) };
+      }
+      return Reflect.apply(original.statSync, original, [path, ...args]);
+    },
+    realpathSync: Object.assign((path: unknown, ...args: unknown[]) => _mockRealPaths.get(String(path)) ??
+      Reflect.apply(original.realpathSync, original, [path, ...args]), { native: original.realpathSync.native }),
   };
 });
 
@@ -130,10 +152,14 @@ beforeEach(() => {
   _execFileOptions = [];
   // Reset app-path presence — no apps present by default.
   _existingPaths = new Set();
+  _mockFiles = new Map();
+  _mockRealPaths = new Map();
+  _readPaths = [];
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+  for (const path of scratch.splice(0)) rmSync(path, { recursive: true, force: true });
   if (origSystemRoot === undefined) delete process.env.SystemRoot;
   else process.env.SystemRoot = origSystemRoot;
 });
@@ -384,6 +410,134 @@ describe('getToolsRegistry — ashlr-hub entry', () => {
     const t = reg.tools.find(t => t.id === 'ashlr-hub');
     expect(t?.name.length).toBeGreaterThan(0);
   });
+});
+
+describe.each(['linux', 'darwin', 'win32'] as const)('Plugin identity on %s', (platform) => {
+  const paths = platform === 'win32' ? win32 : { join };
+  const prefix = platform === 'win32' ? 'C:\\Tools' : '/tools';
+  const binPath = (name: string) => paths.join(prefix, name);
+  const packageRoot = (name: string) => paths.join(prefix, 'node_modules', name);
+  const plugin = () => getToolsRegistry().tools.find(tool => tool.id === 'ashlr-plugin');
+  const declare = (path: string, name: string, command: string, version: unknown = '1.36.4') => {
+    const root = packageRoot(name);
+    const target = paths.join(root, 'scripts', command === 'ashlr-mcp' ? 'ashlr-mcp.ts' : 'cli.ts');
+    _mockRealPaths.set(path, target);
+    _mockRealPaths.set(target, target);
+    _mockFiles.set(paths.join(root, 'package.json'), JSON.stringify({ name, version,
+      bin: { [command]: command === 'ashlr-mcp' ? 'scripts/ashlr-mcp.ts' : 'scripts/cli.ts' } }));
+    return paths.join(root, 'package.json');
+  };
+  beforeEach(() => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue(platform);
+    if (platform === 'win32') process.env.SystemRoot = 'C:\\Windows';
+  });
+
+  it('does not count a Hub-only installation as Plugin', () => {
+    const hub = binPath('ashlr');
+    mockInstalled('ashlr', '3.24.0', hub);
+    declare(hub, '@ashlr/hub', 'ashlr', '3.24.0');
+    const registry = getToolsRegistry();
+    expect(registry.tools.find(tool => tool.id === 'ashlr-hub')).toMatchObject({ installed: true, version: '3.24.0' });
+    expect(registry.tools.find(tool => tool.id === 'ashlr-plugin')).toMatchObject({ installed: false, path: null, version: null });
+    expect(registry.installedCount).toBe(1);
+  });
+
+  it('prefers dedicated Plugin beside Hub and never starts its MCP version probe', () => {
+    const hub = binPath('ashlr');
+    const mcp = binPath('ashlr-mcp');
+    mockInstalled('ashlr', '3.24.0', hub);
+    mockInstalled('ashlr-mcp', 'wrong version output 9.9.9', mcp);
+    declare(mcp, 'ashlr-plugin', 'ashlr-mcp');
+    const registry = getToolsRegistry();
+    expect(registry.tools.find(tool => tool.id === 'ashlr-plugin')).toMatchObject({ installed: true, version: '1.36.4', path: mcp });
+    expect(registry.installedCount).toBe(2);
+    expect(_execFileCalls.filter(call => call.endsWith('--version'))).toEqual([`${hub} --version`]);
+  });
+
+  it('reports a dedicated launcher with unknown metadata without executing it', () => {
+    const mcp = binPath('ashlr-mcp');
+    mockInstalled('ashlr-mcp', 'usage unknown 3.24.0', mcp);
+    expect(plugin()).toMatchObject({ installed: true, path: mcp, version: null });
+    expect(_execFileCalls).not.toContain(`${mcp} --version`);
+  });
+
+  it.each(['ashlr-plugin', 'ashlr'])('recognizes the owned %s alias from its actual declared target', (alias) => {
+    const path = binPath(alias);
+    mockInstalled(alias, 'unknown output', path);
+    declare(path, 'ashlr-plugin', alias);
+    expect(plugin()).toMatchObject({ installed: true, path, version: '1.36.4' });
+    // Hub's separate self probe may invoke the shared legacy `ashlr` alias once.
+    expect(_execFileCalls.filter(call => call === `${path} --version`)).toHaveLength(alias === 'ashlr' ? 1 : 0);
+  });
+
+  it('does not infer alias ownership from a bare semver or nearby unrelated package', () => {
+    const alias = binPath('ashlr-plugin');
+    mockInstalled('ashlr-plugin', '1.36.4', alias);
+    declare(alias, 'unrelated-tool', 'ashlr-plugin');
+    expect(plugin()).toMatchObject({ installed: false, path: null, version: null });
+    expect(_execFileCalls).not.toContain(`${alias} --version`);
+  });
+
+  it('requires the package bin declaration to match the real alias target', () => {
+    const alias = binPath('ashlr-plugin');
+    mockInstalled('ashlr-plugin', '1.36.4', alias);
+    const manifest = declare(alias, 'ashlr-plugin', 'ashlr-plugin');
+    _mockFiles.set(manifest, JSON.stringify({ name: 'ashlr-plugin', version: '1.36.4', bin: { 'ashlr-plugin': 'unrelated.ts' } }));
+    expect(plugin()).toMatchObject({ installed: false, path: null, version: null });
+  });
+
+  it.each(['not JSON', '[]', new Error('unreadable')])('holds an alias with invalid/unreadable package metadata %s', (value) => {
+    const alias = binPath('ashlr-plugin');
+    mockInstalled('ashlr-plugin', '1.36.4', alias);
+    const manifest = declare(alias, 'ashlr-plugin', 'ashlr-plugin');
+    _mockFiles.set(manifest, value);
+    expect(plugin()).toMatchObject({ installed: false, path: null, version: null });
+  });
+
+  it('does not read an oversized package manifest for alias ownership', () => {
+    const alias = binPath('ashlr-plugin');
+    mockInstalled('ashlr-plugin', '1.36.4', alias);
+    const manifest = declare(alias, 'ashlr-plugin', 'ashlr-plugin');
+    _mockFiles.set(manifest, ' '.repeat(256 * 1024 + 1));
+    expect(plugin()).toMatchObject({ installed: false, path: null, version: null });
+    expect(_readPaths).not.toContain(manifest);
+  });
+
+  it('retains availability but does not invent a version for an owned alias', () => {
+    const alias = binPath('ashlr-plugin');
+    mockInstalled('ashlr-plugin', '3.24.0', alias);
+    declare(alias, 'ashlr-plugin', 'ashlr-plugin', 'not a version');
+    expect(plugin()).toMatchObject({ installed: true, path: alias, version: null });
+  });
+
+  it('refuses a dedicated name whose package proves it is Hub, then tries the owned alias', () => {
+    const mcp = binPath('ashlr-mcp');
+    const alias = binPath('ashlr-plugin');
+    mockInstalled('ashlr-mcp', '3.24.0', mcp);
+    declare(mcp, '@ashlr/hub', 'ashlr', '3.24.0');
+    mockInstalled('ashlr-plugin', '1.36.4', alias);
+    declare(alias, 'ashlr-plugin', 'ashlr-plugin');
+    expect(plugin()).toMatchObject({ installed: true, path: alias, version: '1.36.4' });
+  });
+});
+
+it('uses an actual local package/bin identity and observes a later wrong-owner replacement', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ashlr-plugin-catalog-'));
+  scratch.push(root);
+  const scripts = join(root, 'scripts');
+  mkdirSync(scripts);
+  const path = join(scripts, 'cli.ts');
+  const manifest = join(root, 'package.json');
+  writeFileSync(path, '// Metadata-only fixture; never executed.\n');
+  const metadata = { name: 'ashlr-plugin', version: '1.36.4', bin: { 'ashlr-plugin': 'scripts/cli.ts' } };
+  writeFileSync(manifest, JSON.stringify(metadata));
+  mockInstalled('ashlr-plugin', 'wrong output', path);
+  expect(getToolsRegistry().tools.find(tool => tool.id === 'ashlr-plugin'))
+    .toMatchObject({ installed: true, version: '1.36.4', path });
+  writeFileSync(manifest, JSON.stringify({ ...metadata, name: '@ashlr/hub', version: '3.24.0' }));
+  expect(getToolsRegistry().tools.find(tool => tool.id === 'ashlr-plugin'))
+    .toMatchObject({ installed: false, version: null, path: null });
+  expect(_execFileCalls).not.toContain(`${path} --version`);
 });
 
 // ---------------------------------------------------------------------------

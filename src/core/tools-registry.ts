@@ -1,14 +1,14 @@
 /**
  * core/tools-registry.ts — Detect installed ashlr ecosystem tools + versions.
  *
- * Probes each known tool via the platform PATH locator + a `--version` invocation
- * (version string). Fast, synchronous, and NEVER throws — a missing or broken
- * tool yields { installed: false, version: null, path: null }.
+ * Probes known tools via the platform PATH locator and status-only versions.
+ * Plugin detection uses package identity without starting its MCP launcher.
+ * Never throws: missing tools are absent; unavailable versions remain null.
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { join, win32 } from 'node:path';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
 import type { ToolInfo, ToolsRegistry } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -182,6 +182,68 @@ function ashlrHubVersionFromPackageJson(resolvedPath: string | null): string | n
   return null;
 }
 
+/** Read-only ownership proof for shared/legacy aliases; never start the MCP server. */
+function pluginPackageIdentity(binaryPath: string): { owner: 'plugin' | 'other' | 'unknown'; version: string | null } {
+  const unknown = { owner: 'unknown' as const, version: null };
+  try {
+    const paths = process.platform === 'win32' ? win32 : { dirname, isAbsolute, join, relative, resolve, sep };
+    const target = realpathSync(binaryPath);
+    let directory = paths.dirname(target);
+    for (let index = 0; index < 5; index += 1) {
+      const manifest = paths.join(directory, 'package.json');
+      let present = false;
+      try {
+        const stat = statSync(manifest);
+        present = true;
+        if (!stat.isFile() || !Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > 256 * 1024) return unknown;
+        const pkg: unknown = JSON.parse(readFileSync(manifest, 'utf8'));
+        if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) return unknown;
+        const record = pkg as Record<string, unknown>;
+        if (!Object.hasOwn(record, 'name') || record['name'] !== 'ashlr-plugin') return { owner: 'other', version: null };
+        const bin = Object.hasOwn(record, 'bin') ? record['bin'] : null;
+        const declarations = typeof bin === 'string' ? [bin]
+          : bin && typeof bin === 'object' && !Array.isArray(bin)
+            ? ['ashlr-mcp', 'ashlr-plugin', 'ashlr'].flatMap(key =>
+              Object.hasOwn(bin, key) ? [(bin as Record<string, unknown>)[key]] : []) : [];
+        const owned = declarations.some(value => {
+          if (typeof value !== 'string' || !value || value.includes('\0') || paths.isAbsolute(value)) return false;
+          const declared = paths.resolve(directory, value);
+          const within = paths.relative(directory, declared);
+          if (within === '..' || within.startsWith(`..${paths.sep}`) || paths.isAbsolute(within)) return false;
+          try { return realpathSync(declared) === target; } catch { return false; }
+        });
+        if (!owned) return { owner: 'other', version: null };
+        const version = Object.hasOwn(record, 'version') ? record['version'] : null;
+        return { owner: 'plugin', version: typeof version === 'string' && version.length <= 80 &&
+          /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version) ? version : null };
+      } catch {
+        // An existing unreadable/malformed manifest cannot prove alias ownership.
+        if (present) return unknown;
+      }
+      const parent = paths.dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  } catch { /* A dedicated launcher may have no readable package metadata. */ }
+  return unknown;
+}
+
+function probePlugin(spec: ToolSpec): ToolInfo {
+  const absolute = process.platform === 'win32' ? win32.isAbsolute : isAbsolute;
+  for (const binary of spec.binaries) {
+    const path = findBinary(binary);
+    if (!path || !absolute(path) || path.includes('\0')) continue;
+    const identity = pluginPackageIdentity(path);
+    // The dedicated published launcher identifies the MCP installation even
+    // when its version is unknown. Shared aliases require exact package/bin
+    // ownership, so Hub's `ashlr` and arbitrary semver output cannot impersonate it.
+    if (identity.owner === 'plugin' || (binary === 'ashlr-mcp' && identity.owner === 'unknown')) {
+      return { id: spec.id, name: spec.name, installed: true, version: identity.version, path };
+    }
+  }
+  return { id: spec.id, name: spec.name, installed: false, version: null, path: null };
+}
+
 // ---------------------------------------------------------------------------
 // Tool catalogue
 // ---------------------------------------------------------------------------
@@ -227,8 +289,10 @@ const TOOL_SPECS: ToolSpec[] = [
   {
     id: 'ashlr-plugin',
     name: 'ashlr-plugin (Claude Code MCP)',
-    binaries: ['ashlr', 'ashlr-plugin'],
-    parseVersion: extractSemver,
+    binaries: ['ashlr-mcp', 'ashlr-plugin', 'ashlr'],
+    // `ashlr-mcp --version` starts the MCP bootstrap/router. Use package
+    // metadata rather than executing any Plugin launcher during discovery.
+    versionArgs: null,
   },
 
   // ── aw / ashlr-workbench ──────────────────────────────────────────────────
@@ -299,6 +363,7 @@ const TOOL_SPECS: ToolSpec[] = [
  * Never throws.
  */
 function probeTool(spec: ToolSpec): ToolInfo {
+  if (spec.id === 'ashlr-plugin') return probePlugin(spec);
   // App-type tools (e.g. Tauri desktop apps) are detected by filesystem path,
   // not by a CLI binary in PATH. Short-circuit before the locator probe.
   if (spec.appPaths && spec.appPaths.length > 0) {
@@ -338,9 +403,8 @@ function probeTool(spec: ToolSpec): ToolInfo {
       version = spec.parseVersion ? spec.parseVersion(raw) : extractSemver(raw);
     }
 
-    // Special case: ashlr-hub / ashlr-plugin share the `ashlr` binary, whose
-    // `--version` may be unsupported; fall back to a nearby package.json.
-    if (!version && (spec.id === 'ashlr-hub' || spec.id === 'ashlr-plugin')) {
+    // Hub's `--version` may be unsupported; this fallback is never Plugin evidence.
+    if (!version && spec.id === 'ashlr-hub') {
       version = ashlrHubVersionFromPackageJson(resolvedPath);
     }
   }
@@ -365,7 +429,7 @@ function probeTool(spec: ToolSpec): ToolInfo {
  * Detect installed ecosystem tools + versions via PATH lookup + --version or
  * filesystem presence for desktop app tools (e.g. ashlr-md .app bundle).
  * Fast and NEVER throws — a missing tool yields { installed:false, version:null,
- * path:null }. Detects: phantom, locus, ashlr/ashlr-plugin, stack, pulse/pulse-agent,
+ * path:null }. Detects: phantom, locus, ashlr-mcp/owned Plugin aliases, stack, pulse/pulse-agent,
  * ashlrcode, aw (ashlr-workbench), morphkit, binshield, ashlr-md (app), ashlr-hub.
  */
 export function getToolsRegistry(): ToolsRegistry {

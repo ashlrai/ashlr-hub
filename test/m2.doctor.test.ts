@@ -712,6 +712,8 @@ describe('runDoctor — fix hints', () => {
     // At least one problematic phantom check should have a fix suggestion.
     const hasFix = failing.some(c => typeof c.fix === 'string' && c.fix.length > 0);
     expect(hasFix).toBe(true);
+    expect(report.checks.find(c => c.id === 'phantom')?.fix)
+      .toBe('Install: brew install ashlrai/tap/phantom  or  https://phm.dev');
   });
 });
 
