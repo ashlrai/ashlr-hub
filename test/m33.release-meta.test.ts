@@ -258,6 +258,26 @@ describe('release workflow', () => {
       .toBe(`matrix.label == '${sharedChecksLabel}'`);
     expect(ciSteps.find((step) => step.name === 'Build')?.run).toBe('npm run build');
     expect(ciSteps.find((step) => step.name === 'Build')?.if).toBeUndefined();
+    const snapshot = ciSteps.find((step) => step.name === 'Capture pack smoke build snapshot');
+    const packSmoke = ciSteps.find((step) => step.name === 'Pack smoke (exports map)');
+    expect(snapshot?.if).toBe("matrix.label == 'ubuntu, authority 1/3'");
+    expect(ciSteps.indexOf(snapshot!)).toBe(ciSteps.findIndex((step) => step.name === 'Build') + 1);
+    expect(ciSteps.indexOf(snapshot!)).toBeLessThan(ciSteps.findIndex((step) => step.name === 'Test (hermetic)'));
+    expect(snapshot?.run).toContain('node --test .github/tests/ci-pack-smoke.test.mjs');
+    expect(snapshot?.run).toContain('node .github/scripts/ci-pack-smoke.mjs capture "$RUNNER_TEMP"');
+    expect(packSmoke?.if).toBe("matrix.label == 'ubuntu, authority 1/3'");
+    expect(packSmoke?.run).toContain('RUNNER_TEMP="$SMOKE_DIR" node .github/scripts/ci-pack-smoke.mjs pack "$ASHLR_PACK_SMOKE_SNAPSHOT"');
+    expect(packSmoke?.run).not.toMatch(/(?:^|\n)\s*npm pack\b/);
+    expect(packSmoke?.run).not.toContain('ashlr-hub-*.tgz');
+    expect(packSmoke?.run).toContain('npm install "$TARBALL" > /dev/null');
+    expect(packSmoke?.run).toContain('./node_modules/.bin/ashlr help > /dev/null');
+    expect(packSmoke?.run).toContain("import('@ashlr/hub/types')");
+    expect(packSmoke?.run).toContain("import('@ashlr/hub/core')");
+    expect(packSmoke?.run).toContain("typeof m.loadConfig !== 'function'");
+    expect(packSmoke?.run).toContain('trap cleanup EXIT');
+    expect(packSmoke?.run).toContain('node .github/scripts/ci-pack-smoke.mjs verify "$ASHLR_PACK_SMOKE_SNAPSHOT"');
+    expect(packSmoke?.run?.indexOf('verify "$ASHLR_PACK_SMOKE_SNAPSHOT"'))
+      .toBeGreaterThan(packSmoke?.run?.indexOf("import('@ashlr/hub/core')") ?? -1);
     expect(ciSteps.find((step) => step.name === 'Test (hermetic)')?.run)
       .toBe('npm run test:ci -- ${{ matrix.test_args }}');
     expect(ciSteps.find((step) => step.name === 'Test (hermetic)')?.if).toBeUndefined();
