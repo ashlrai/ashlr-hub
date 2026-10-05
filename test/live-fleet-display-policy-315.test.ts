@@ -35,7 +35,7 @@ vi.mock('../src/core/sandbox/policy.js', () => ({
   killSwitchOn: () => state.kill,
 }));
 
-const { displayStandingPolicy, resetDisplayStandingPolicyForTest } = await import('../src/core/verse/display-standing-policy.js');
+const { displayStandingPolicy, displayStandingPolicyReadiness, resetDisplayStandingPolicyForTest } = await import('../src/core/verse/display-standing-policy.js');
 
 const NOW = Date.parse('2026-09-27T21:20:00.000Z');
 const POLICY = { v: 1, grantId: 'e0c98949af418041dd06fa68b22df66b', switch: 'autonomous', repos: [] };
@@ -63,6 +63,30 @@ afterEach(() => {
 });
 
 describe('displayStandingPolicy', () => {
+  it('retains display-target diagnostics for paused, off, missing and expired grants', () => {
+    for (const [grantState, reason] of [
+      ['paused', 'The authority code changed.'],
+      ['active', 'The autonomy switch is Off.'],
+      ['none', 'No standing grant is installed.'],
+    ]) {
+      resetDisplayStandingPolicyForTest();
+      state.evaluation = evaluation({ grantState, policy: null, inactiveReason: reason });
+      expect(displayStandingPolicyReadiness(NOW)).toEqual({ policy: null, grantState, reason });
+    }
+    resetDisplayStandingPolicyForTest();
+    state.evaluation = evaluation();
+    displayStandingPolicyReadiness(NOW);
+    expect(displayStandingPolicyReadiness(Date.parse('2026-10-28T00:00:00.000Z')))
+      .toEqual({ policy: null, grantState: 'expired', reason: 'The standing grant has expired.' });
+  });
+
+  it('reports Stop immediately after a cached active display reading', () => {
+    expect(displayStandingPolicyReadiness(NOW).policy).toBe(POLICY);
+    state.kill = true;
+    expect(displayStandingPolicyReadiness(NOW + 1)).toEqual({ policy: null, grantState: null, reason: 'Stop is on.' });
+    expect(state.calls).toHaveLength(1);
+  });
+
   it('evaluates the display surface (the installed release in the sidecar), not `running`', () => {
     expect(displayStandingPolicy(NOW)).toBe(POLICY);
     expect(state.calls).toEqual([{ surface: 'installed' }]);

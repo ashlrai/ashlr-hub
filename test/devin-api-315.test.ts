@@ -9,17 +9,19 @@ import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { handleDevinApi, setDevinApiDepsForTest, startDevinScheduler, stopDevinScheduler } from '../src/core/devin/devin-api.js';
 import { storeDevinKey } from '../src/core/devin/secret.js';
-import { resetDevinStatusCacheForTest, refreshDevinConsumption, peekDevinConsumption, resetDevinConsumptionForTest, connectDevin, disconnectDevin, type DevinServiceDeps } from '../src/core/devin/service.js';
+import { resetDevinStatusCacheForTest, refreshDevinConsumption, peekDevinConsumption, resetDevinConsumptionForTest, connectDevin, disconnectDevin, launchDevinTask, type DevinServiceDeps } from '../src/core/devin/service.js';
 import { devinHome, writeDevinConnection, devinConsumptionConnectionPath } from '../src/core/devin/store.js';
 import { findGithubPrUrls, readDismissedDevinCliPrs, recordDevinCliPrs } from '../src/core/devin/cli-prs.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import type { VerseApiContext } from '../src/core/verse/verse-api.js';
 import { FAKE_KEY, FAKE_ORG, fakeDevin, type FakeDevin } from './helpers/fake-devin.js';
 import { fakeKeychain, type FakeKeychain } from './helpers/fake-keychain.js';
+import { repoPolicy, standingPolicy } from './helpers/fleet-github-310b.js';
+import * as displayPolicy from '../src/core/verse/display-standing-policy.js';
 
 const TOKEN = 'devin-test-mutation-token-0123456789';
 const REPO = 'ashlrai/devin-canary';
@@ -61,6 +63,8 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
+afterEach(() => vi.restoreAllMocks());
+
 beforeEach(async () => {
   rmSync(devinHome(), { recursive: true, force: true });
   api = fakeDevin();
@@ -87,6 +91,52 @@ async function post(p: string, body: unknown, headers: Record<string, string> = 
 }
 
 describe('/api/verse/devin', () => {
+  it('describes the installed grant from a desktop sidecar without authorizing a fleet launch', async () => {
+    const basePolicy = standingPolicy([repoPolicy(REPO)]);
+    const policy = standingPolicy(basePolicy.repos, {
+      engines: [...basePolicy.engines, 'devin'],
+      spend: { ...basePolicy.spend, seats: { ...basePolicy.spend.seats,
+        devin: { seatId: 'devin', enabled: true, reserveFloorPercent: 0, maxSessionWindowPercent: null, roles: ['producer'] },
+      } },
+    });
+    const display = vi.spyOn(displayPolicy, 'displayStandingPolicy').mockReturnValue(policy);
+    const deps = serviceDeps();
+    delete deps.policy;
+    deps.config = () => ({ enabled: true, fleet: true });
+    setDevinApiDepsForTest({ service: deps });
+    const response = await get('/api/verse/devin');
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.text).status.fleet).toMatchObject({ ready: true, word: 'Ready' });
+    expect(display).toHaveBeenCalledTimes(1);
+    expect(api.requests).toHaveLength(0);
+
+    // A read-only display policy must never flow into the action's defaults.
+    const launch = await launchDevinTask({ origin: 'fleet', repo: REPO, prompt: 'Do not run.' }, deps);
+    expect(launch).toMatchObject({ ok: false, error: expect.stringContaining('No standing grant') });
+    expect(display).toHaveBeenCalledTimes(1);
+    expect(api.requests).toHaveLength(0);
+  });
+
+  it('preserves an explicitly injected missing policy instead of substituting display authority', async () => {
+    const display = vi.spyOn(displayPolicy, 'displayStandingPolicy');
+    setDevinApiDepsForTest({ service: { ...serviceDeps(), config: () => ({ enabled: true, fleet: true }) } });
+    const response = await get('/api/verse/devin');
+    expect(JSON.parse(response.text).status.fleet.ready).toBe(false);
+    expect(display).not.toHaveBeenCalled();
+    expect(api.requests).toHaveLength(0);
+  });
+
+  it('retains the installed display reason when the fleet is held', async () => {
+    vi.spyOn(displayPolicy, 'displayStandingPolicy').mockReturnValue(null);
+    vi.spyOn(displayPolicy, 'displayStandingPolicyReadiness').mockReturnValue({ policy: null, grantState: 'paused', reason: 'The authority code changed.' });
+    const deps = serviceDeps(); delete deps.policy;
+    deps.config = () => ({ enabled: true, fleet: true });
+    setDevinApiDepsForTest({ service: deps });
+    expect(JSON.parse((await get('/api/verse/devin')).text).status.fleet)
+      .toMatchObject({ ready: false, detail: 'The effective standing policy is held: The authority code changed.' });
+    expect(api.requests).toHaveLength(0);
+  });
+
   it('GET answers the overview (status with Chat/Fleet verdicts, ACU budget) and never the key', async () => {
     const { status, text } = await get('/api/verse/devin');
     expect(status).toBe(200);

@@ -81,6 +81,7 @@ import {
   type DevinTaskV1,
 } from './types.js';
 import { loadConfigReadOnly } from '../config.js';
+import { displayStandingPolicy, displayStandingPolicyReadiness } from '../verse/display-standing-policy.js';
 
 export const VERSE_DEVIN_PREVIEWS_PATH = '/api/verse/devin/previews' as const;
 export const VERSE_DEVIN_CONSUMPTION_REFRESH_PATH = '/api/verse/devin/consumption/refresh' as const;
@@ -486,7 +487,14 @@ export const handleDevinApi: ApiModule = async (ctx, req: IncomingMessage, res: 
       }
       if (rejectQuery(req, res)) return true;
       if (path === VERSE_DEVIN_PATH) {
-        sendJson(res, 200, await devinOverview(serviceDeps));
+        // The desktop's single-file sidecar cannot attest its own authority
+        // code. This GET describes the installed resident release instead,
+        // like the Fleet header. Never reuse these display deps for a launch.
+        sendJson(res, 200, await devinOverview({
+          ...serviceDeps,
+          policy: serviceDeps.policy ?? displayStandingPolicy,
+          policyReadiness: serviceDeps.policyReadiness ?? (serviceDeps.policy ? undefined : displayStandingPolicyReadiness),
+        }));
       } else {
         const body: CloudPrPreviewsResponse = { generatedAt: new Date().toISOString(), previews: [...cachedCloudPrPreviews(previewCache).values()] };
         sendJson(res, 200, body);
