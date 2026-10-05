@@ -4,7 +4,7 @@ import type { ResetSpendingAccountStatus, ResetSpendingStatus } from '../../../.
 
 const MODES = ['legacy-priority', 'enabled', 'disabled'];
 const STATES = ['disabled', 'legacy-priority', 'authority-paused', 'account-disabled', 'producer-not-granted',
-  'signed-floor', 'unqualified', 'overage-unverified', 'waiting-for-estimate', 'cannot-fit', 'held', 'ordinary', 'ready'];
+  'signed-floor', 'unqualified', 'overage-unverified', 'execution-unbound', 'waiting-for-estimate', 'cannot-fit', 'held', 'ordinary', 'ready'];
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const percent = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100;
 
@@ -61,6 +61,6 @@ export const RESET_STATE_LABELS: Readonly<Record<ResetSpendingAccountStatus['sta
   disabled: 'Off', 'legacy-priority': 'Routing preference only', 'authority-paused': 'Authority paused',
   'account-disabled': 'Account disabled', 'producer-not-granted': 'Producer role not granted',
   'signed-floor': 'Reserve held by grant', unqualified: 'Reset unconfirmed',
-  'overage-unverified': 'Credit protection unconfirmed', 'waiting-for-estimate': 'Waiting for task fit',
+  'overage-unverified': 'Credit protection unconfirmed', 'execution-unbound': 'Execution account unconfirmed', 'waiting-for-estimate': 'Waiting for task fit',
   'cannot-fit': 'Work exceeds remaining time', held: 'Usage constraint holds', ordinary: 'Saved reserve applies', ready: 'Task reserve released',
 };

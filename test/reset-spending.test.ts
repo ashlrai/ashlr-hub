@@ -81,6 +81,17 @@ describe('reset spending enrollment and current task admission',()=>{
     const credits=seat();credits.costBasis='credits';expect(project(credits).state).toBe('unqualified');
     const noRole=standing();noRole.spend.seats.claude!.roles=['judge'];expect(project(seat(),policy(),noRole).state).toBe('producer-not-granted');
   });
+  it('keeps a positive signed floor under synthetic known binding and OFF restores the saved reserve',()=>{
+    const options = { executionAccountMatches: () => true };
+    const before = policy();
+    const active = taskResetBudget(before,[seat()],standing(10),now,{claude:forecast()},options);
+    expect(active.status.accounts.claude).toMatchObject({state:'ready',savedReservePercent:40,signedFloorPercent:10,effectiveReservePercent:25});
+    expect(active.budget.seats.claude?.reservePercent).toBe(25);
+    const off = taskResetBudget({...before,resetSpending:{enabled:false}},[seat()],standing(10),now,{claude:forecast()},options);
+    expect(off.status.accounts.claude).toMatchObject({state:'disabled',effectiveReservePercent:null,signedFloorPercent:10});
+    expect(off.budget.seats.claude?.reservePercent).toBe(40);
+    expect(before.seats.claude?.reservePercent).toBe(40);
+  });
   it('holds an unbound producer even when its collector has a valid credits-disabled reading',()=>{
     const source=projectResetSpendingStatus(policy(),[seat()],standing(),now,{claude:forecast()});
     expect(source.accounts.claude).toMatchObject({state:'execution-unbound',effectiveReservePercent:null,subscriptionOnly:'verified'});

@@ -34,6 +34,21 @@ function deferred<T>() {
 }
 
 describe('allowance setting: persisted readback', () => {
+  it('retains a held execution-account reading without claiming reserve release', async () => {
+    const row = account({ enabled: true, state: 'execution-unbound', subscriptionOnly: 'verified',
+      reason: 'Reserve shrinking is held until the native producer has a verified account-bound launch.' });
+    const reading = view('enabled', row);
+    expect(readResetSpendingAccount(readResetSpendingStatus(reading), 'claude')).toEqual(row);
+    render(<ResetSpendingAccountControl view={reading} nowMs={NOW} seatId="claude" label="Demo Claude" />);
+    const summary = screen.getByText('Execution account unconfirmed');
+    expect(summary.tagName).toBe('SUMMARY');
+    await userEvent.setup().click(summary);
+    expect(summary.parentElement).toHaveAttribute('open');
+    expect(screen.getByText(row.reason)).toBeVisible();
+    expect(screen.getByText('No current task reserve applied.')).toBeVisible();
+    expect(screen.queryByText('Task reserve released')).not.toBeInTheDocument();
+  });
+
   it('token loss during POST refuses late confirmation and never begins the fresh GET', async () => {
     setMutationToken(TEST_TOKEN);
     const reply = deferred<Response>();
