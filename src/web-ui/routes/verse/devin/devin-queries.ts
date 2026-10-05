@@ -33,6 +33,7 @@ import { narrowDevinOverview } from './devin-model.js';
 export const DEVIN_KEY = 'verse-devin';
 export const DEVIN_POLL_MS = 60_000;
 export const DEVIN_NOT_IN_BUILD = 'The Devin lane is not in this build yet.';
+export const DEVIN_CONSUMPTION_REFRESH_PATH = '/api/verse/devin/consumption/refresh';
 
 export class DevinLockedError extends Error {
   constructor() {
@@ -87,6 +88,12 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 function settled(): void {
   invalidate(DEVIN_KEY);
   void refreshActivity();
+}
+
+/** Metadata only; the shared guarded POST still requires the operator's mutation token. */
+export async function refreshDevinConsumption(): Promise<void> {
+  try { await post(DEVIN_CONSUMPTION_REFRESH_PATH, {}); }
+  finally { invalidate(DEVIN_KEY); }
 }
 
 /** Launch one Devin session; resolves only on `ok: true` with a task. */

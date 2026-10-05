@@ -15,6 +15,7 @@
  * its cap, messages Verse sent, and its PR onward once there is one.
  */
 import { lazy, Suspense, useState } from 'react';
+import type { DevinDailyConsumption } from '../../../../core/devin/client.js';
 import type { DevinTaskV1 } from '../../../../core/devin/types.js';
 import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
 import { Button } from '../../../components/primitives/Button.js';
@@ -24,8 +25,9 @@ import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { MonogramTile } from '../apps/MonogramTile.js';
 import { describeContextError, useTokenGate } from '../context/use-token-gate.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
-import { acuLevel, devinHeadline, devinModelsLines, devinReadinessRow, devinUsageEvidence, DEVIN_USAGE_LINK, formatAcu, safeDevinHref, waitingTasks } from '../devin/devin-model.js';
-import { DEVIN_POLL_MS, devinQuery, messageDevinTask } from '../devin/devin-queries.js';
+import { acuLevel, devinConsumptionEvidence, devinHeadline, devinModelsLines, devinReadinessRow, devinUsageEvidence, DEVIN_USAGE_LINK, formatAcu, formatConsumptionAcu, safeDevinHref, waitingTasks } from '../devin/devin-model.js';
+import { DEVIN_POLL_MS, devinQuery, messageDevinTask, refreshDevinConsumption } from '../devin/devin-queries.js';
+import { requestGuarded } from '../shell/guarded-action.js';
 import { ReadinessLines } from './ReadinessLines.js';
 import { ResourceFacts } from './ResourceFacts.js';
 import type { ResourceFactsView } from './resources-model.js';
@@ -99,7 +101,32 @@ export interface DevinResourceProps {
   bases?: readonly CostBasis[];
 }
 
+/** Explicit pagination keeps the full available history reachable without a large initial render. */
+function ConsumptionHistory({ days }: { days: DevinDailyConsumption['days'] }) {
+  const [open, setOpen] = useState(false);
+  const [page, setPage] = useState(0);
+  const pages = Math.max(1, Math.ceil(days.length / 20));
+  const current = Math.min(page, pages - 1);
+  return <details onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary>Daily consumption ({days.length} reporting buckets)</summary>
+    {open ? <>
+      <ul aria-label="Devin daily consumption">
+        {days.slice(current * 20, (current + 1) * 20).map(day => <li key={day.date}>
+          <p className={styles.fine}>Provider date {day.date} · {formatConsumptionAcu(day.acus)}</p>
+          <p className={styles.fine}>{Object.entries(day.products).map(([product, acus]) => `${product}: ${acus === null ? 'not reported' : formatConsumptionAcu(acus)}`).join(' · ')}</p>
+        </li>)}
+      </ul>
+      {pages > 1 ? <div aria-label="Consumption history pages">
+        <Button size="sm" variant="ghost" disabled={current === 0} onClick={() => setPage(current - 1)}>Previous</Button>
+        <span className={styles.fine}>Page {current + 1} of {pages}</span>
+        <Button size="sm" variant="ghost" disabled={current + 1 === pages} onClick={() => setPage(current + 1)}>Next</Button>
+      </div> : null}
+    </> : null}
+  </details>;
+}
+
 export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) {
+  const [consumptionError, setConsumptionError] = useState<string | null>(null);
   const read = useQuery(devinQuery);
   const refetch = useRefetch(devinQuery);
   usePollWhileVisible(refetch, DEVIN_POLL_MS);
@@ -120,6 +147,7 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
     );
   }
   const { status, budget } = overview;
+  const consumption = devinConsumptionEvidence(overview.consumption);
   const head = devinHeadline(status);
   const live = status.enabled && status.connected;
   const usage = devinUsageEvidence(budget);
@@ -148,6 +176,18 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
         <span className={styles.statusLabel}>{head.word}</span>
       </p>
       <p className={styles.subtle}>{status.reason}</p>
+      {status.connected ? <section aria-label="Devin organization consumption">
+        <p className={styles.creditsHead}><span className={styles.creditsAmount}>{consumption?.value ?? 'Consumption not reported by this server'}</span>
+          <span className={styles.pill} data-tone="neutral">organization API</span></p>
+        {consumption?.lines.map((line, index) => <p className={styles.fine} key={index}>{line}</p>)}
+        {consumption?.report ? <ConsumptionHistory key={overview.consumption?.fetchedAt} days={consumption.report.days} /> : null}
+        {consumptionError ? <p role="alert" className={styles.fine}>{consumptionError}</p> : null}
+        <Button size="sm" variant="ghost" onClick={() => requestGuarded({
+          title: 'Read Devin organization consumption?', body: '', confirmLabel: 'Read consumption', destructive: false,
+          skipConfirm: true, token: true, tokenReason: 'Read organization ACU consumption only — no session is started.',
+          run: refreshDevinConsumption, onDone: () => setConsumptionError(null), onError: setConsumptionError,
+        })}>Read consumption</Button>
+      </section> : null}
       {live ? (
         <>
           <p className={styles.creditsHead}>

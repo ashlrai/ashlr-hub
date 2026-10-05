@@ -29,7 +29,7 @@ import { bindingLeftPercent } from '../usage/binding-left.js';
 import { accountStatus, buildCapacityRows, type AccountStatus, type CapacityRow } from '../usage/capacity-strip-model.js';
 import { formatUsd } from './resources-model.js';
 import { cloudCreditsQuery } from './resources-queries.js';
-import { devinUsageEvidence, formatAcu } from '../devin/devin-model.js';
+import { devinConsumptionEvidence, devinUsageEvidence, formatAcu } from '../devin/devin-model.js';
 import { devinQuery } from '../devin/devin-queries.js';
 import { openResources } from './resources-store.js';
 import styles from './ResourcesBar.module.css';
@@ -43,7 +43,7 @@ export interface BarRow {
   /** 0–100 left in the binding window; null when there is no reading. */
   leftPercent: number | null;
   level: Level;
-  /** Subscription usage beside the battery; never a credit balance. */
+  /** Subscription usage or qualified organization consumption; never a credit balance. */
   value: string;
   /** Independent Codex credit reading, including unknown/unconfirmed states. */
   creditLabel?: string;
@@ -64,9 +64,17 @@ const LEVEL_OF_STATUS: Readonly<Record<AccountStatus['kind'], Level>> = {
 };
 
 /** Pure: capacity rows → bar rows (exported for tests). */
-export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolean; now: number; pendingSeatIds?: readonly string[] }): BarRow[] {
+export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolean; now: number; pendingSeatIds?: readonly string[]; devinConsumption?: unknown }): BarRow[] {
   const out: BarRow[] = [];
   for (const row of rows) {
+    if (row.engine === 'devin' && row.seatId === 'devin') {
+      const consumption = devinConsumptionEvidence(opts.devinConsumption, opts.now);
+      out.push({ key: row.seatId, engine: 'devin', name: row.label, leftPercent: null, level: 'unknown',
+        value: consumption?.value ?? 'consumption not reported',
+        summary: `${row.label}: ${consumption?.value ?? 'consumption not reported'} · remaining quota unknown`,
+        detail: consumption?.lines ?? ['Organization consumption is not reported by this server. Balance, subscription limits and resets are unknown.'] });
+      continue;
+    }
     if (row.kind === 'local') {
       out.push({
         key: 'local',
@@ -188,19 +196,19 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   // window readings arrive through it, so without it the batteries read empty.
   const data = useCapacityData();
   const cloudRead = useQuery(cloudCreditsQuery);
+  const devinRead = useQuery(devinQuery);
+  const devin = devinRead.data?.value ?? null;
   const [now, setNow] = useState(() => Date.now());
   // One shared local clock expires display metadata; it makes no provider request.
   usePollWhileVisible(() => setNow(Date.now()), ACCOUNT_CLOCK_MS);
   const rows = useMemo(
-    () => (data.loading ? [] : barRows(buildCapacityRows(data.seats, { health: data.health, budget: data.budget, local: 'collapse', now }), { healthRead: data.health !== null, now, pendingSeatIds: data.pendingSeatIds })),
-    [data.loading, data.seats, data.health, data.budget, data.pendingSeatIds, now],
+    () => (data.loading ? [] : barRows(buildCapacityRows(data.seats, { health: data.health, budget: data.budget, local: 'collapse', now }), { healthRead: data.health !== null, now, pendingSeatIds: data.pendingSeatIds, devinConsumption: devin?.consumption })),
+    [data.loading, data.seats, data.health, data.budget, data.pendingSeatIds, now, devin?.consumption],
   );
   const cloud = cloudRead.data?.credits ?? null;
   const cloudLeft = cloud && cloud.totalUsd > 0 ? (cloud.remainingUsd / cloud.totalUsd) * 100 : null;
   const cloudLevel: Level = !cloud ? 'unknown' : cloud.remainingUsd <= 0 ? 'out' : (cloudLeft ?? 0) < 20 ? 'low' : 'ok';
   // 3.15: Devin joins the bar only once it is connected and turned on.
-  const devinRead = useQuery(devinQuery);
-  const devin = devinRead.data?.value ?? null;
   const devinShown = devin !== null && devin.status.enabled && devin.status.connected;
   const devinUsage = devin ? devinUsageEvidence(devin.budget) : null;
   const devinAvailable = devinUsage?.free ?? (devin ? Math.max(0, devin.budget.acuRemaining - Math.max(0, devin.budget.acuInFlight)) : 0);

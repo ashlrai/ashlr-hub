@@ -88,6 +88,20 @@ describe('barRows', () => {
     expect(barRows([noQuota], { healthRead: false, now: NOW, pendingSeatIds: ['grok-a'] })[0]!.value).toBe('reading…');
   });
 
+  it('projects connected cloud organization consumption without a capacity battery or CLI attribution', () => {
+    const consumption = { source: 'devin-v3-organization-daily', scope: 'organization', period: 'all-available-reporting-dates', dateUnit: 'provider-unspecified',
+      dayBoundaryUtc: '08:00', state: 'ready', fetchedAt: new Date(NOW - 1000).toISOString(), expiresAt: new Date(NOW + 300_000).toISOString(),
+      stale: false, error: null, report: { totalAcus: 3.125, days: [] } };
+    const cloud = row({ seatId: 'devin', engine: 'devin', label: 'Devin (cloud)', windows: [] });
+    const cli = row({ seatId: 'devin-cli', engine: 'devin', label: 'Devin (CLI)', windows: [] });
+    const projected = barRows([cloud, cli], { healthRead: true, now: NOW, devinConsumption: consumption });
+    expect(projected[0]).toMatchObject({ value: '3.125 ACUs consumed', leftPercent: null, level: 'unknown' });
+    expect(projected[0]!.detail).toContain('Balance, subscription limits and resets are not reported. No personal CLI allocation is inferred.');
+    expect(projected[1]!.value).not.toContain('consumed');
+    expect(barRows([cloud], { healthRead: true, now: NOW })[0]!.value).toBe('consumption not reported');
+    expect(barRows([cloud], { healthRead: true, now: NOW + 400_000, devinConsumption: consumption })[0]!.value).toBe('3.125 ACUs consumed · last');
+  });
+
   it('gives local models a full idle battery and no percentage', () => {
     const local = row({ seatId: 'local', label: 'Local', engine: 'local', kind: 'local', localCount: 3, windows: [], summary: 'ready' });
     const [l] = barRows([local], { healthRead: true, now: NOW });

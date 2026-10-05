@@ -66,7 +66,7 @@ import {
 } from '../verse/workbench-types.js';
 import { devinBudgetView, devinTaskActive } from './budget.js';
 import { DEVIN_CLI_PR_WINDOW_MS, devinCliPrKey, dismissDevinCliPr, listDevinCliPrs, readDismissedDevinCliPrs, type DevinCliChatPrs } from './cli-prs.js';
-import { devinOverview, launchDevinTask, messageDevinTask, devinEnabled, type DevinServiceDeps } from './service.js';
+import { devinOverview, launchDevinTask, messageDevinTask, devinEnabled, refreshDevinConsumption, resetDevinConsumptionForTest, type DevinServiceDeps } from './service.js';
 import { listDevinTasks, readDevinTask, updateDevinBudget, writeDevinTask } from './store.js';
 import { devinTaskNeedsObservation, refreshDevinTasks } from './tracker.js';
 import {
@@ -83,6 +83,7 @@ import {
 import { loadConfigReadOnly } from '../config.js';
 
 export const VERSE_DEVIN_PREVIEWS_PATH = '/api/verse/devin/previews' as const;
+export const VERSE_DEVIN_CONSUMPTION_REFRESH_PATH = '/api/verse/devin/consumption/refresh' as const;
 
 const LAUNCH_BODY_MAX_BYTES = 128 * 1024;
 const SMALL_BODY_MAX_BYTES = 4 * 1024;
@@ -188,6 +189,7 @@ export function setDevinApiDepsForTest(deps: { pr?: Omit<CloudPrActionDeps<Devin
   previewCache.diffChecksBySha.clear();
   needsYouCache = null;
   needsYouPending = false;
+  resetDevinConsumptionForTest();
 }
 
 /** Land and Update branch; close carries Mason's optional reason and is dispatched on its own (cloud-api.ts parseCloudPrCloseBody). */
@@ -415,8 +417,12 @@ let lastIdleRefreshAt = 0;
 export function startDevinScheduler(env: NodeJS.ProcessEnv = process.env): boolean {
   if (scheduler) return true;
   if (devinSchedulerRefusal(env) !== null) return false;
+  // A connected organization's metadata is useful even with no active
+  // sessions and regardless of Fleet/lane enablement. GETs remain cache-only.
+  void refreshDevinConsumption(serviceDeps).catch(() => undefined);
   let lastError: string | null = null;
   scheduler = setInterval(() => {
+    void refreshDevinConsumption(serviceDeps).catch(() => undefined);
     let enabled = false;
     try {
       enabled = devinEnabled(loadConfigReadOnly().devin);
@@ -512,6 +518,13 @@ export const handleDevinApi: ApiModule = async (ctx, req: IncomingMessage, res: 
       if (!body) return true;
       rejectUnknownKeys(body, new Set());
       sendJson(res, 200, await refreshDevinTasksGuarded());
+      return true;
+    }
+    if (path === VERSE_DEVIN_CONSUMPTION_REFRESH_PATH) {
+      const body = await readMutationBody(ctx, req, res, SMALL_BODY_MAX_BYTES);
+      if (!body) return true;
+      rejectUnknownKeys(body, new Set());
+      sendJson(res, 200, { consumption: await refreshDevinConsumption(serviceDeps, true) });
       return true;
     }
 

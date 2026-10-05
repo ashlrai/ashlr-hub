@@ -34,6 +34,7 @@ import { probeDevinCli, type DevinCliProbe } from './cli-probe.js';
 import { buildDevinChatPrompt } from './chat-contract.js';
 import { getDevinModelCatalog, summarizeDevinModels, type DevinModelCatalog } from './models.js';
 import { hasDevinKey, readDevinKey, removeDevinKey, storeDevinKey, type DevinKeyStoreDeps } from './secret.js';
+import { DevinConsumptionCache, type DevinConsumptionSnapshot } from './consumption.js';
 import {
   clearDevinConnection,
   listDevinTasks,
@@ -303,6 +304,7 @@ export async function connectDevin(input: { key: string; orgId?: string | null }
   await storeDevinKey(key, deps.keyStore);
   const now = (deps.now ?? (() => new Date()))().toISOString();
   writeDevinConnection({ orgId, principal: self.principal, principalName: self.name, keyStore: 'keychain', connectedAt: now });
+  consumptionCache.reset();
   keyPresence = null;
   noteApiSuccess();
   return { orgId, principal: self.principal, principalName: self.name };
@@ -311,6 +313,7 @@ export async function connectDevin(input: { key: string; orgId?: string | null }
 export async function disconnectDevin(deps: DevinServiceDeps = {}): Promise<{ removedKey: boolean }> {
   const removedKey = await removeDevinKey(deps.keyStore);
   clearDevinConnection();
+  consumptionCache.reset();
   keyPresence = null;
   lastAuthFailure = null;
   return { removedKey };
@@ -331,6 +334,33 @@ export async function connectedClient(deps: DevinServiceDeps = {}): Promise<{ cl
   const key = await readDevinKey(deps.keyStore);
   if (!key) return { error: 'The Devin key is missing from the Keychain. Run `ashlr devin connect` again.', failure: 'not-connected' };
   return { client: new DevinClient({ apiKey: key, ...clientOptions(deps) }), orgId: connection.orgId };
+}
+
+const consumptionCache = new DevinConsumptionCache();
+
+function consumptionIdentity(): string | null {
+  const connection = readDevinConnection();
+  return connection ? JSON.stringify([connection.orgId, connection.principal, connection.principalName, connection.connectedAt]) : null;
+}
+
+/** Cache-only: neither provider nor Keychain reads occur on this projection. */
+export function peekDevinConsumption(now: Date = new Date()): DevinConsumptionSnapshot {
+  return consumptionCache.peek(consumptionIdentity(), now);
+}
+
+export function resetDevinConsumptionForTest(): void { consumptionCache.reset(); }
+
+/** A metadata read, separately permission-qualified; failures never change session readiness. */
+export function refreshDevinConsumption(deps: DevinServiceDeps = {}, force = false): Promise<DevinConsumptionSnapshot> {
+  return consumptionCache.refresh({
+    identity: consumptionIdentity, now: deps.now, force,
+    read: async (stillCurrent) => {
+      const connected = await connectedClient(deps);
+      if (!stillCurrent()) throw new DevinApiError('not-connected', 'The cloud connection changed before the metadata read.');
+      if ('error' in connected) throw new DevinApiError(connected.failure, connected.error);
+      return connected.client.getDailyConsumption(connected.orgId, stillCurrent);
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +570,7 @@ export async function devinOverview(deps: DevinServiceDeps = {}): Promise<DevinO
   }
   return {
     generatedAt: now.toISOString(),
+    consumption: peekDevinConsumption(now),
     status: await devinStatus(deps, tasks),
     budget: devinBudgetView(tasks, readDevinBudget(), now),
     tasks: tasks.slice(0, OVERVIEW_TASK_LIMIT),

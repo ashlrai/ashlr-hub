@@ -65,6 +65,7 @@ import { cloudCreditsQuery, resourceReadinessQuery, RESOURCES_POLL_MS } from './
 import { costBases, groupByTier, mergedFacts, readinessStatusRank, seatFacts, type ResourceFactsView, type TierEntry } from './resources-model.js';
 import { closeResources, setResourcesBar, setResourcesPinned, useResourcesUi } from './resources-store.js';
 import styles from './ResourcesDrawer.module.css';
+import { refreshDevinConsumption } from '../devin/devin-queries.js';
 
 export const RESOURCES_EMPTY_TEXT =
   'No accounts connected yet. Sign in to Claude Code, Codex, Devin or Grok in a terminal — they show up here within a minute.';
@@ -219,7 +220,10 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
         setBusy({ seatId: row.seatId, kind: action.kind });
         try {
           if (reconnect) await reconnectSeat(row.seatId);
-          else await refreshSeatHealth();
+          else if (row.engine === 'devin') {
+            if (row.seatId !== 'devin') throw new Error('Devin CLI usage is not reported. Organization API consumption belongs to the connected cloud account.');
+            await refreshDevinConsumption();
+          } else await refreshSeatHealth();
         } finally {
           setBusy(null);
         }
@@ -230,7 +234,7 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
           tone: 'neutral',
           text: reconnect
             ? `Opened the sign-in for ${row.label} in Terminal. Finish it there; this drawer picks it up.`
-            : `Checked ${row.label} again.`,
+            : row.engine === 'devin' ? 'Updated the Devin organization consumption status.' : `Checked ${row.label} again.`,
         });
       },
       onError: (message) => setNote({ tone: 'danger', text: message }),
