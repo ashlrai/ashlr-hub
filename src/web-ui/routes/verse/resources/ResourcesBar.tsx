@@ -198,9 +198,11 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   const cloudRead = useQuery(cloudCreditsQuery);
   const devinRead = useQuery(devinQuery);
   const devin = devinRead.data?.value ?? null;
-  const [now, setNow] = useState(() => Date.now());
-  // One shared local clock expires display metadata; it makes no provider request.
-  usePollWhileVisible(() => setNow(Date.now()), ACCOUNT_CLOCK_MS);
+  const [, setClock] = useState(() => Date.now());
+  // The poll triggers expiry renders; query arrivals use the actual render time,
+  // so a freshly retrieved reading is not rejected by an older clock tick.
+  usePollWhileVisible(() => setClock(Date.now()), ACCOUNT_CLOCK_MS);
+  const now = Date.now();
   const rows = useMemo(
     () => (data.loading ? [] : barRows(buildCapacityRows(data.seats, { health: data.health, budget: data.budget, local: 'collapse', now }), { healthRead: data.health !== null, now, pendingSeatIds: data.pendingSeatIds, devinConsumption: devin?.consumption })),
     [data.loading, data.seats, data.health, data.budget, data.pendingSeatIds, now, devin?.consumption],
@@ -214,6 +216,9 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   const devinAvailable = devinUsage?.free ?? (devin ? Math.max(0, devin.budget.acuRemaining - Math.max(0, devin.budget.acuInFlight)) : 0);
   const devinLeft = devin && devin.budget.acuBudgetTotal > 0 ? (devinAvailable / devin.budget.acuBudgetTotal) * 100 : null;
   const devinLevel: Level = !devin ? 'unknown' : devin.budget.paused || devinAvailable <= 0 ? 'out' : (devinLeft ?? 0) < 20 ? 'low' : 'ok';
+  // Admission is separate from tracked capacity and from provider quota readings.
+  const devinNewChatPause = devin?.budget.canLaunch?.ok === false
+    ? devin.budget.canLaunch.reason ?? 'The Devin budget refused another session.' : null;
 
   if (rows.length === 0 && !cloud && !devinShown) return null;
   return (
@@ -298,6 +303,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
               <div className={styles.tipSummary}>{formatAcu(devinAvailable)} of {formatAcu(devin.budget.acuBudgetTotal)} {devinUsage ? 'available' : 'left'} · tracked budget{devin.budget.paused ? ' · paused' : ''}</div>
               {devinUsage ? <div className={styles.tipLine}>{formatAcu(devinUsage.reported)} reported usage + adjustment · {formatAcu(devinUsage.held)} held exposure</div> : null}
               <div className={styles.tipLine}>{devin.budget.running} running · {devin.budget.sessionsToday} today</div>
+              {devinNewChatPause ? <div className={styles.tipLine}>New chats paused: {devinNewChatPause}</div> : null}
               <div className={styles.tipHint}>Click for Resources · ⌘.</div>
             </div>
           }
@@ -308,7 +314,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
             className={styles.row}
             data-level={devinLevel}
             data-resource="devin"
-            aria-label={`Devin tracked budget: ${formatAcu(devinAvailable)} of ${formatAcu(devin.budget.acuBudgetTotal)} ${devinUsage ? 'available' : 'left'}${devinUsage ? `, ${formatAcu(devinUsage.held)} held exposure` : ''}. Open Resources`}
+            aria-label={`Devin tracked budget: ${formatAcu(devinAvailable)} of ${formatAcu(devin.budget.acuBudgetTotal)} ${devinUsage ? 'available' : 'left'}${devinUsage ? `, ${formatAcu(devinUsage.held)} held exposure` : ''}${devinNewChatPause ? `. New chats paused: ${devinNewChatPause}` : ''}. Open Resources`}
             onClick={() => openResources()}
           >
             {expanded ? (
@@ -321,6 +327,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
                   <Battery left={devinLeft} level={devinLevel} vertical={false} />
                   <span className={styles.value}>{formatAcu(devinAvailable)} budget</span>
                 </span>
+                {devinNewChatPause ? <span className={styles.line}><span className={styles.value}>New chats paused</span></span> : null}
               </>
             ) : (
               <>

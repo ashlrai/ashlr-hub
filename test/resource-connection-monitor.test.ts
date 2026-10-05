@@ -470,3 +470,101 @@ describe('pure account publication revision', () => {
     expect(handle.snapshot().accounts.map(row => row.state)).toEqual(['observed', 'unavailable']);
   });
 });
+
+describe('selected account reading refresh', () => {
+  it('joins one scheduled target while an unrelated provider remains pending, and publishes it immediately', async () => {
+    let release!: (value: ReturnType<typeof codex>) => void;
+    let slow!: (value: ReturnType<typeof claude>) => void;
+    probes.claude.mockImplementation(() => new Promise(resolve => { slow = resolve; }));
+    probes.codex.mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    const handle = start({ config: config(['claude', 'codex']) });
+    await settle();
+    const a = handle.refreshAccount!('codex-1'); const b = handle.refreshAccount!('codex-1');
+    release(codex());
+    const result = await a; await b;
+    expect(result).toMatchObject({ state: 'completed', reading: 'current', joined: true, observedAt: NOW });
+    expect(handle.readingRevision!()).toBe(1);
+    expect(handle.snapshot().refreshing).toBe(true);
+    expect(probes.codex).toHaveBeenCalledTimes(1);
+    slow(claude()); await settle();
+  });
+
+  it('uses the existing cadence after success or failure, never turning repeated clicks into extra probes', async () => {
+    const handle = start({ config: config(['codex']) }); await settle();
+    expect(await handle.refreshAccount!('codex-0')).toMatchObject({ state: 'cached', reading: 'current', nextCheckAt: '2026-09-08T12:00:30.000Z' });
+    expect(probes.codex).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(Date.parse(NOW) + 30_000);
+    probes.codex.mockResolvedValue({ status: 'failed', reason: 'probe-timed-out' });
+    expect(await handle.refreshAccount!('codex-0')).toMatchObject({ state: 'completed', reading: 'unknown' });
+    expect(await handle.refreshAccount!('codex-0')).toMatchObject({ state: 'cached', reading: 'unknown' });
+    expect(probes.codex).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the two-client bound for manual checks without an externally supplied coordinator', async () => {
+    const releases: Array<() => void> = []; let active = 0; let peak = 0;
+    probes.codex.mockImplementation(() => { active++; peak = Math.max(peak, active); return new Promise(resolve => {
+      releases.push(() => { active--; resolve(codex()); });
+    }); });
+    const handle = start({ config: config(['codex', 'codex', 'codex']) }); await settle();
+    const third = handle.refreshAccount!('codex-2');
+    await settle(); expect(probes.codex).toHaveBeenCalledTimes(2);
+    releases.shift()!(); await settle(); expect(probes.codex).toHaveBeenCalledTimes(3);
+    while (releases.length) releases.shift()!();
+    await third; await settle(); expect(peak).toBe(2);
+  });
+
+  it('rechecks a queued target profile before native contact and refuses publication after a profile change', async () => {
+    let valid = true; const releases: Array<() => void> = [];
+    probes.codex.mockImplementation(() => new Promise(resolve => { releases.push(() => resolve(codex())); }));
+    const handle = start({ config: config(['codex', 'codex', 'codex']),
+      accountCurrent: account => account.id !== 'codex-2' || valid });
+    await settle();
+    const target = handle.refreshAccount!('codex-2'); await settle(); valid = false;
+    releases.shift()!(); await settle();
+    expect(await target).toMatchObject({ state: 'held', reading: 'unknown', reason: 'connection-account-changed' });
+    expect(probes.codex).toHaveBeenCalledTimes(2);
+    releases.shift()!(); await settle();
+    expect(handle.snapshot().accounts[2]).toMatchObject({ observedAt: null, windows: [], reason: 'connection-account-changed' });
+  });
+
+  it('does not mask uncertain cleanup when the account changes while its native process is settling', async () => {
+    let valid = true; let release!: (value: unknown) => void;
+    probes.codex.mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    const settled = vi.fn();
+    const coordinator = createNativeMetadataCoordinator({ beginNativeActivity: () => ({ settle: settled }) });
+    const handle = start({ config: config(['codex']), accountCurrent: () => valid, coordinator }); await settle();
+    const target = handle.refreshAccount!('codex-0'); valid = false;
+    release({ status: 'uncertain', reason: 'probe-termination-uncertain' });
+    expect(await target).toMatchObject({ state: 'held', reading: 'unknown' });
+    await expect(handle.close()).rejects.toThrow('cleanup uncertain');
+    expect(settled).not.toHaveBeenCalled(); expect(coordinator.signal.aborted).toBe(true); coordinator.dispose();
+    expect(probes.codex).toHaveBeenCalledTimes(1);
+  });
+
+  it('close waits for manual work outside the regular cycle and never confirms stopped work', async () => {
+    const handle = start({ config: config(['codex']) }); await settle();
+    vi.setSystemTime(Date.parse(NOW) + 30_000);
+    let release!: (value: ReturnType<typeof codex>) => void;
+    probes.codex.mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    const target = handle.refreshAccount!('codex-0'); await settle();
+    let closed = false; const close = handle.close().then(() => { closed = true; });
+    await Promise.resolve(); await Promise.resolve(); expect(closed).toBe(false);
+    release(codex()); await close;
+    expect(await target).toMatchObject({ state: 'held', reading: 'unknown', reason: 'connection-monitor-stopped' });
+    expect(handle.readingRevision!()).toBe(1);
+  });
+
+  it('refuses a throwing host guard without contacting native metadata', async () => {
+    const handle = start({ config: config(['codex']), accountCurrent: () => { throw new Error('private profile'); } }); await settle();
+    expect(await handle.refreshAccount!('codex-0')).toMatchObject({ state: 'held', reading: 'unknown' });
+    expect(probes.codex).not.toHaveBeenCalled();
+    expect(JSON.stringify(handle.snapshot())).not.toContain('private profile');
+  });
+
+  it.each([false, undefined, null])('refuses a malformed/false host account guard (%s) before contact', async value => {
+    const handle = start({ config: config(['codex']), accountCurrent: () => value as boolean }); await settle();
+    expect(await handle.refreshAccount!('codex-0')).toMatchObject({ state: 'held', reading: 'unknown' });
+    expect(probes.codex).not.toHaveBeenCalled();
+    expect(await handle.refreshAccount!('unknown')).toMatchObject({ state: 'held', reason: 'connection-account-not-configured' });
+  });
+});

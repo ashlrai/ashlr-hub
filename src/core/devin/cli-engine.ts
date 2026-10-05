@@ -6,9 +6,9 @@
  * --respect-workspace-trust false -- <goal>` runs inside the run's sandbox
  * worktree (run/engine-registry.ts owns the argv; run/sandboxed-engine.ts
  * captures the diff as a PENDING proposal, exactly like every other CLI
- * engine). The default model is SWE-2, which is FREE on the Devin plan
- * (`devin models list`: swe-2-high / swe-2-medium / swe-2-max, 262K context)
- * — high-quality autonomous capacity that costs $0 next to the local models.
+ * engine). The default model is SWE-2. Current source-qualified native pricing is
+ * required before autonomous execution; a historical promotional model ID
+ * never proves that the selected account still has a free route.
  *
  * WHAT IT IS NOT. It is not the Devin cloud launcher (devin/fleet-launcher.ts,
  * hosted sessions metered in ACUs). The two share ONE authorization: the
@@ -43,10 +43,9 @@
  * same trust every other CLI engine extends to the repos Mason enrolled, and
  * bounded by the same confinement.
  *
- * SPEND. SWE-2 is free: runs and minutes are counted like any run, cost $0.
- * Any OTHER model (`devin.fleetModel`) is billed by Devin per token, and this
- * build cannot read that spend back (the CLI prints no usage) — so the lane
- * HOLDS for a non-free model instead of pretending a budget gate metered it.
+ * SPEND. Native account/executable-qualified current pricing is required.
+ * Unknown or billed models are held; model IDs and source fallbacks never
+ * prove free billing, remaining subscription quota or purchased credit safety.
  * A paid Devin CLI model is for Mason's own runs until spend is observable.
  *
  * PURE: no I/O here. The readiness probe (cli-probe.ts) is awaited by the
@@ -73,6 +72,8 @@ export const DEVIN_CLI_FLEET_DEFAULT_MODEL = 'swe-2-high';
  * the model that actually ran.
  */
 export const DEVIN_CLI_FREE_MODELS: readonly string[] = Object.freeze(['swe-2-high', 'swe-2-medium', 'swe-2-max']);
+/** Conservative HOST evidence boundary; not a vendor expiry timezone or reset. */
+export const DEVIN_CLI_PROMOTION_EVIDENCE_BOUNDARY = Date.parse('2026-10-16T00:00:00.000Z');
 
 /** `--permission-mode` for every fleet run (see the header). */
 export const DEVIN_CLI_PERMISSION_MODE = 'smart';
@@ -96,9 +97,9 @@ export const DEVIN_CLI_STALL_IDLE_MS = 30 * 60_000;
 
 const MODEL_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
-/** Is `model` one of the free SWE-2 models (exact id)? */
-export function isDevinCliFreeModel(model: unknown): boolean {
-  return typeof model === 'string' && DEVIN_CLI_FREE_MODELS.includes(model);
+/** Legacy promotional-ID hint only; actual execution additionally requires current native evidence. */
+export function isDevinCliFreeModel(model: unknown, nowMs = Date.now()): boolean {
+  return Number.isFinite(nowMs) && nowMs < DEVIN_CLI_PROMOTION_EVIDENCE_BOUNDARY && typeof model === 'string' && DEVIN_CLI_FREE_MODELS.includes(model);
 }
 
 /**
@@ -133,6 +134,8 @@ export interface DevinCliLaneInput {
   probe: { state: DevinCliProbeState; reason: string | null } | null;
   /** The model the lane would run (resolveDevinCliFleetModel). */
   model: string;
+  /** Host-verified current native free-route evidence; absent is unknown, never a free fallback. */
+  nativeFreeModelVerified?: boolean;
 }
 
 export interface DevinCliLaneVerdict {
@@ -150,10 +153,24 @@ export interface DevinCliLaneVerdict {
  *   2. the grant: its current stage names `devin` and the Devin seat is an
  *      enabled producer (never judge, never Leader);
  *   3. the budget mode lets autonomy use the Devin seat (reserve mode does not);
- *   4. the model is a free SWE-2 model (a billed model's spend is unreadable);
- *   5. the CLI is installed and logged in.
+ *   4. the CLI is installed and logged in;
+ *   5. fresh same-account native metadata verifies the exact model is Free.
  */
 export function devinCliLaneVerdict(input: DevinCliLaneInput): DevinCliLaneVerdict {
+  const policy = devinCliPolicyVerdict(input);
+  if (!policy.ok) return policy;
+  if (!input.probe) return { ok: false, reason: 'The Devin CLI has not been checked yet.' };
+  if (input.probe.state !== 'ready') {
+    return { ok: false, reason: input.probe.reason ?? 'The Devin CLI is not ready.' };
+  }
+  if (input.nativeFreeModelVerified !== true) {
+    return { ok: false, reason: `The Devin CLI's current account, executable and free pricing for "${input.model}" are unconfirmed; autonomy holds it without a paid fallback.` };
+  }
+  return { ok: true, reason: `The Devin CLI runs ${input.model} (native-verified free) as a producer under the grant's Devin authorization.` };
+}
+
+/** Policy-only preflight permits a metadata read, not a producer contact. */
+export function devinCliPolicyVerdict(input: DevinCliLaneInput): DevinCliLaneVerdict {
   if (input.section?.enabled !== true) {
     return { ok: false, reason: 'The Devin lane is turned off (`ashlr devin enable`).' };
   }
@@ -169,15 +186,5 @@ export function devinCliLaneVerdict(input: DevinCliLaneInput): DevinCliLaneVerdi
         : `The ${input.budgetMode ?? 'current'} budget mode keeps the Devin seat off for autonomy.`,
     };
   }
-  if (!isDevinCliFreeModel(input.model)) {
-    return {
-      ok: false,
-      reason: `devin.fleetModel "${input.model}" is billed by Devin and its spend cannot be read back, so autonomy holds it — use a free SWE-2 model (${DEVIN_CLI_FREE_MODELS.join(', ')}).`,
-    };
-  }
-  if (!input.probe) return { ok: false, reason: 'The Devin CLI has not been checked yet.' };
-  if (input.probe.state !== 'ready') {
-    return { ok: false, reason: input.probe.reason ?? 'The Devin CLI is not ready.' };
-  }
-  return { ok: true, reason: `The Devin CLI runs ${input.model} (free) as a producer under the grant's Devin authorization.` };
+  return { ok: true, reason: 'The Devin policy permits a native metadata check.' };
 }

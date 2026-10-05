@@ -6,7 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within, waitFor } from '@testing-library/react';
 import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useCapacityData } from '../usage/CapacityStrip.js';
@@ -91,7 +91,7 @@ describe('barRows', () => {
   it('projects connected cloud organization consumption without a capacity battery or CLI attribution', () => {
     const consumption = { source: 'devin-v3-organization-daily', scope: 'organization', period: 'all-available-reporting-dates', dateUnit: 'provider-unspecified',
       dayBoundaryUtc: '08:00', state: 'ready', fetchedAt: new Date(NOW - 1000).toISOString(), expiresAt: new Date(NOW + 300_000).toISOString(),
-      stale: false, error: null, report: { totalAcus: 3.125, days: [] } };
+      stale: false, error: null, report: { totalAcus: 3.125, days: [{ date: 123, acus: 3.125, products: { devin: 3.125, cascade: null, terminal: 0, automation: null, review: null } }] } };
     const cloud = row({ seatId: 'devin', engine: 'devin', label: 'Devin (cloud)', windows: [] });
     const cli = row({ seatId: 'devin-cli', engine: 'devin', label: 'Devin (CLI)', windows: [] });
     const projected = barRows([cloud, cli], { healthRead: true, now: NOW, devinConsumption: consumption });
@@ -158,6 +158,42 @@ describe('Devin provider identity', () => {
   });
 });
 
+describe('fresh Devin sidebar readbacks', () => {
+  afterEach(() => { vi.mocked(useQuery).mockReset(); vi.mocked(useQuery).mockReturnValue({ data: undefined } as never); vi.restoreAllMocks(); });
+
+  it('accepts a deferred current read immediately, rejects genuine future readings, and expires history', async () => {
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(NOW);
+    vi.mocked(useCapacityData).mockReturnValue({ seats: [nativeSeat(capacity(), { id: 'devin', engine: 'devin', label: 'Devin (cloud)' })],
+      health: null, budget: null, loading: false, refreshing: false, readFailed: false, rosterUnavailable: false, pendingSeatIds: [] });
+    let consumption: unknown;
+    vi.mocked(useQuery).mockImplementation((query) => ({ data: query.key === 'verse-devin' ? { value: {
+      status: { enabled: true, connected: true }, budget: { acuBudgetTotal: 50, acuRemaining: 50, acuUsed: 0, acuInFlight: 40,
+        reportedAcuUsed: 0, unconfirmedAcuExposure: 40, paused: false, running: 0, sessionsToday: 0 }, consumption,
+    } } : undefined } as never));
+    const view = render(<ResourcesBar expanded />);
+    expect(screen.getByRole('button', { name: 'Devin (cloud): consumption not reported · remaining quota unknown. Open Resources' })).toBeInTheDocument();
+    let complete!: (value: unknown) => void;
+    const deferred = new Promise<unknown>((resolve) => { complete = resolve; });
+    const arrival = deferred.then((value) => { consumption = value; view.rerender(<ResourcesBar expanded />); });
+    clock.mockReturnValue(NOW + 5000);
+    const reading = { source: 'devin-v3-organization-daily', scope: 'organization', period: 'all-available-reporting-dates', dateUnit: 'provider-unspecified',
+      dayBoundaryUtc: '08:00', state: 'ready', fetchedAt: new Date(NOW + 5000).toISOString(), expiresAt: new Date(NOW + 305_000).toISOString(),
+      stale: false, error: null, report: { totalAcus: 0, days: [{ date: 123, acus: 0, products: { devin: 0, cascade: 0, terminal: 0, automation: null, review: null } }] } };
+    complete(reading); await arrival;
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Devin (cloud): 0 ACUs consumed · remaining quota unknown. Open Resources' })).toBeInTheDocument());
+    // No local poll was invoked: the arrival itself must use actual time.
+    consumption = { ...reading, fetchedAt: new Date(NOW + 60_000).toISOString() };
+    view.rerender(<ResourcesBar expanded />);
+    expect(screen.getByRole('button', { name: 'Devin (cloud): consumption not reported · remaining quota unknown. Open Resources' })).toBeInTheDocument();
+    consumption = { ...reading, report: { totalAcus: 0, days: [] } };
+    view.rerender(<ResourcesBar expanded />);
+    expect(screen.getByRole('button', { name: 'Devin (cloud): No consumption reported · remaining quota unknown. Open Resources' })).toBeInTheDocument();
+    consumption = reading; clock.mockReturnValue(NOW + 400_000); view.rerender(<ResourcesBar expanded />);
+    expect(screen.getByRole('button', { name: 'Devin (cloud): 0 ACUs consumed · last · remaining quota unknown. Open Resources' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /40 ACUs held exposure/ })).toBeInTheDocument();
+  });
+});
+
 describe('Devin tracked exposure in the bar', () => {
   afterEach(() => { vi.mocked(useQuery).mockReset(); vi.mocked(useQuery).mockReturnValue({ data: undefined } as never); });
 
@@ -174,6 +210,27 @@ describe('Devin tracked exposure in the bar', () => {
     fireEvent.focus(devin);
     expect(screen.getByRole('tooltip')).toHaveTextContent('2 ACUs reported usage + adjustment · 18 ACUs held exposure');
     expect(devin.querySelector('[aria-hidden="true"][data-level] > [style]')).toHaveStyle({ '--fill': '60%' });
+  });
+
+  it('shows a new-chat admission pause without turning held exposure into spent usage or a provider quota', () => {
+    const reason = 'Another session could take today past the 30 ACUs daily cap (40 ACUs used or held).';
+    vi.mocked(useCapacityData).mockReturnValue({ seats: [], health: null, budget: null, loading: false, refreshing: false, readFailed: false, rosterUnavailable: false, pendingSeatIds: [] });
+    vi.mocked(useQuery).mockImplementation((query) => ({ data: query.key === 'verse-devin' ? { value: {
+      status: { enabled: true, connected: true },
+      budget: { acuBudgetTotal: 50, acuRemaining: 10, acuUsed: 40, acuInFlight: 0,
+        reportedAcuUsed: 0, unconfirmedAcuExposure: 40, paused: false, running: 0, sessionsToday: 0,
+        canLaunch: { ok: false, reason } },
+    } } : undefined } as never));
+    render(<ResourcesBar expanded />);
+    const devin = screen.getByRole('button', { name: `Devin tracked budget: 10 ACUs of 50 ACUs available, 40 ACUs held exposure. New chats paused: ${reason}. Open Resources` });
+    expect(within(devin).getByText('10 ACUs budget')).toBeInTheDocument();
+    expect(within(devin).getByText('New chats paused')).toBeInTheDocument();
+    expect(devin).toHaveAttribute('data-level', 'ok');
+    expect(devin.querySelector('[aria-hidden="true"][data-level] > [style]')).toHaveStyle({ '--fill': '20%' });
+    fireEvent.focus(devin);
+    expect(screen.getByRole('tooltip')).toHaveTextContent(`New chats paused: ${reason}`);
+    expect(screen.getByRole('tooltip')).toHaveTextContent('0 ACUs reported usage + adjustment · 40 ACUs held exposure');
+    expect(within(devin).queryByText(/spent|% left/i)).not.toBeInTheDocument();
   });
 });
 

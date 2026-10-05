@@ -16,15 +16,15 @@
 
 ## Install
 
-Verse 3.24.0 release target (publication pending):
+Verse 3.24.2 (after release publication):
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.0/ashlr-hub-3.24.0.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.2/ashlr-hub-3.24.2.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
 ashlr verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 On an Apple silicon Mac, download the
-[v3.24.0 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.0/Ashlr_3.24.0_aarch64_locally-signed.dmg).
+[v3.24.2 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.2/Ashlr_3.24.2_aarch64_locally-signed.dmg).
 It is locally signed, not Apple notarized; macOS may require **Open Anyway** on
 first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
@@ -80,9 +80,11 @@ own source windows, with stale and unavailable readings explicit.
 **Use allowance before resets** has a global setting and per-account overrides.
 Off disables reset priority and reserve shrinking. On remains subject to signed
 reserve floors, current task fit and verified billing and execution-account
-boundaries. Current Claude producers remain held until an account-bound native
-CLI broker with an isolated tool executor is qualified; Codex, Grok and Devin
-have no verified no-spillover boundary here. Purchased credits are excluded.
+boundaries. This source includes an account-bound native Claude CLI adapter
+with isolated filesystem tools; installation and live account acceptance are
+separate. Aggressive reset-time reserve shrinking remains held until its
+subscription-only execution boundary is verified. Codex, Grok and Devin have
+no verified no-spillover boundary here. Purchased credits are excluded.
 See [reset controls](docs/RESET-AWARE-SCHEDULING.md),
 [desktop power](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md#automatic-awake-during-local-work) and
 [Growth measurements](docs/VERSE.md#adoption-fixed-public-project-metadata).
@@ -201,8 +203,8 @@ separate Node.js install to run.
 
 ### Install
 
-The [v3.24.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.24.0)
-includes an arm64 DMG. It is locally signed, not Apple Developer ID notarized,
+Use the [v3.24.2 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.24.2)
+for the versioned arm64 DMG. It is locally signed, not Apple Developer ID notarized,
 so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
 "Ashlr Local" code-signing identity. The prerequisites, exact build order and
@@ -289,7 +291,7 @@ The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.0/ashlr-hub-3.24.0.tgz
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.2/ashlr-hub-3.24.2.tgz
 ashlr --version
 ashlr verse                 # start the server and open http://127.0.0.1:7777/verse/
 ```

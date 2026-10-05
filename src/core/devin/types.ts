@@ -73,8 +73,8 @@ export const DEVIN_PROMPT_MAX_CHARS = 20_000;
 
 /** Task ids look like `dv_20260927T0412_k3f9q2` (sortable, branch-safe, never a `ct_` cloud id). */
 export const DEVIN_TASK_ID_PATTERN = /^dv_\d{8}T\d{4}_[a-z0-9]{6}$/;
-/** Devin session ids (docs: "Devin session ID (prefix: devin-)"). Tolerant of the body, strict on the charset. */
-export const DEVIN_SESSION_ID_PATTERN = /^devin-[A-Za-z0-9_-]{1,120}$/;
+/** v3 returns bare 32-character lowercase hex IDs; retain the documented legacy prefix. Both are path-safe. */
+export const DEVIN_SESSION_ID_PATTERN = /^(?:devin-[A-Za-z0-9_-]{1,120}|[a-f0-9]{32})$/;
 /** Organization ids (docs: "Organization ID (prefix: org-)"). */
 export const DEVIN_ORG_ID_PATTERN = /^org-[A-Za-z0-9_-]{1,120}$/;
 /** v3 credentials: "All API credentials use the `cog_` prefix format." */
@@ -260,6 +260,47 @@ export interface DevinBudgetView {
   budget: DevinBudgetV1;
 }
 
+/** Cached /v3/self identifiers are observations, never payer/permission/allowance proof. */
+export interface DevinSelfIdentity {
+  principal: 'service_user' | 'pat_user';
+  serviceUserId: string | null;
+  userId: string | null;
+  apiKeyId: string | null;
+  orgId: string | null;
+  devinSessionsOrgId: string | null;
+}
+export interface DevinConnectionSelfIdentity extends DevinSelfIdentity {
+  source: 'devin-v3-self';
+  observedAt: string;
+}
+/** Cached field presence, not key existence, permission, membership or billing proof. No identifiers in default status. */
+export interface DevinSelfIdentitySummary {
+  source: 'devin-v3-self';
+  observedAt: string;
+  principal: DevinSelfIdentity['principal'];
+  hasServiceUserId: boolean;
+  hasUserId: boolean;
+  hasApiKeyId: boolean;
+  hasOrgId: boolean;
+  hasDevinSessionsOrgId: boolean;
+}
+
+/** Defensive private storage bound; the provider documents string, not an ID prefix. */
+export function isDevinOpaqueSelfId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256 &&
+    !/[\\/\s\p{Cc}]/u.test(value) && !value.includes('..') &&
+    !/%(?:2f|5c)/i.test(value) && !/^(?:cog_|apk_|sk[-_]|gh[pousr]_|github_pat_|Bearer|eyJ)/i.test(value);
+}
+export function isDevinSelfIdentity(value: unknown): value is DevinSelfIdentity {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  const org = (id: unknown) => id === null || typeof id === 'string' && DEVIN_ORG_ID_PATTERN.test(id);
+  if (!org(row['orgId']) || !org(row['devinSessionsOrgId'])) return false;
+  return row['principal'] === 'service_user'
+    ? isDevinOpaqueSelfId(row['serviceUserId']) && row['userId'] === null && row['apiKeyId'] === null && row['devinSessionsOrgId'] === null
+    : row['principal'] === 'pat_user' && row['serviceUserId'] === null && isDevinOpaqueSelfId(row['userId']) && isDevinOpaqueSelfId(row['apiKeyId']);
+}
+
 /** Non-secret connection facts (`<ashlr home>/devin/connection.json`). The key never lives here. */
 export interface DevinConnectionV1 {
   v: typeof DEVIN_CONNECTION_SCHEMA_VERSION;
@@ -271,6 +312,8 @@ export interface DevinConnectionV1 {
   keyStore: 'custody' | 'keychain';
   connectedAt: string;
   updatedAt: string;
+  /** Optional source observation; legacy V1 connections retain unknown identity. */
+  selfIdentity?: DevinConnectionSelfIdentity;
 }
 
 export type DevinConnectionState = 'disabled' | 'not-connected' | 'ready' | 'unreachable';
@@ -285,6 +328,7 @@ export interface DevinStatus {
   principal: DevinConnectionV1['principal'] | null;
   principalName: string | null;
   keyStore: DevinConnectionV1['keyStore'] | null;
+  selfIdentity?: DevinSelfIdentitySummary;
   /** "Chat: ready — …" when the Devin chat seat can be used (3.15), else "Chat: off — why". */
   chatLine: string;
   /** "Fleet: ready" or "Fleet: … — why". */

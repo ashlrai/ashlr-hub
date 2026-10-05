@@ -953,3 +953,67 @@ describe('account completion digest and stream', () => {
     expect(engine.sessions.size).toBe(0);
   });
 });
+
+
+describe('POST selected account reading refresh', () => {
+  let contacts: string[];
+  function install(otherRoot = false) {
+    contacts = [];
+    const configuredRoot = fs.realpathSync(path.join(tmpHome, '.ashlr/account-connections'));
+    cfg.verse!.accountsRoot = configuredRoot;
+    fs.chmodSync(configuredRoot, 0o700); fs.chmodSync(path.join(configuredRoot, 'connections.json'), 0o600);
+    const value: VerseAccountCollector = {
+      accountsRoot: otherRoot ? path.join(tmpHome, 'other-root') : configuredRoot,
+      status: () => ({ mode: 'owned', state: 'running', owner: 'this-server', reasonCode: null,
+        pollIntervalMs: 30_000, idleSuspendMs: 300_000, lastPolledAt: null, lastRequestAt: null, note: '' }),
+      touch: () => { contacts.push('touch'); }, connections: () => null,
+      observations: () => [], unavailableWorkerIds: () => [], credits: () => null, close: async () => {},
+      refreshAccount: async id => { contacts.push(id); return { seatId: id, state: 'completed', reading: 'unknown',
+        reason: 'usage-not-reported', observedAt: null, expiresAt: null, nextCheckAt: null, joined: false }; },
+    };
+    setVerseAccountCollector(value);
+    return value;
+  }
+  it('refreshes only the configured target and GET never initiates a check', async () => {
+    install(); const { port, mutate, read } = await boot();
+    expect(await request(port, 'GET', '/api/verse/seats', read)).toMatchObject({ status: 200 });
+    expect(contacts.filter(x => x !== 'touch')).toEqual([]); contacts.length = 0;
+    const result = await request(port, 'POST', '/api/verse/seats/refresh', mutate, '{"seatId":"claude"}');
+    expect(result).toMatchObject({ status: 200, json: { seatId: 'claude', state: 'completed', reading: 'unknown' } });
+    expect(contacts).toEqual(['claude']);
+  });
+  it('does not admit a late receipt after the registered collector is replaced', async () => {
+    const initial = install(); let release!: (value: import('../src/core/verse/types.js').VerseAccountReadingRefresh) => void;
+    let started!: () => void; const begun = new Promise<void>(resolve => { started = resolve; });
+    initial.refreshAccount = async () => { started(); return new Promise(resolve => { release = resolve; }); };
+    const { port, mutate } = await boot();
+    const pending = request(port, 'POST', '/api/verse/seats/refresh', mutate, '{"seatId":"claude"}'); await begun;
+    setVerseAccountCollector(null);
+    release({ seatId: 'claude', state: 'completed', reading: 'current', reason: 'probe-observed', observedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(), nextCheckAt: null, joined: false });
+    expect(await pending).toMatchObject({ status: 200, json: { state: 'held', reading: 'unknown', reason: 'connection-collector-changed' } });
+  });
+
+  it('refuses token, content type, exact-body and unknown-id violations before contacting a collector', async () => {
+    install(); const { port, mutate, read } = await boot();
+    for (const [headers, body, status] of [
+      [{ 'content-type': 'application/json' }, '{"seatId":"claude"}', 401],
+      [{ ...read, 'content-type': 'application/json' }, '{"seatId":"claude"}', 401],
+      [{ 'x-ashlr-token': mutate['x-ashlr-token'] }, '{"seatId":"claude"}', 415],
+      [{ ...mutate, 'x-ashlr-token': 'invalid-control-token' }, '{"seatId":"claude"}', 401],
+      [mutate, '{"seatId":"claude","force":true}', 400],
+      [mutate, '{"seatId":"unknown"}', 400],
+      [mutate, '{"seatId":"../claude"}', 400],
+    ] as Array<[Record<string, string>, string, number]>) {
+      expect(await request(port, 'POST', '/api/verse/seats/refresh', headers, body)).toMatchObject({ status });
+    }
+    expect(contacts).toEqual([]);
+  });
+  it('refuses dispatch-off and foreign-root collection without touching either', async () => {
+    install(true); const { port, mutate } = await boot();
+    expect(await request(port, 'POST', '/api/verse/seats/refresh', mutate, '{"seatId":"claude"}')).toMatchObject({ status: 503 });
+    const disabled = await boot({ allowDispatch: false });
+    expect(await request(disabled.port, 'POST', '/api/verse/seats/refresh', disabled.mutate, '{"seatId":"claude"}')).toMatchObject({ status: 404 });
+    expect(contacts).toEqual([]);
+  });
+});

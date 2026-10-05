@@ -624,7 +624,7 @@ describe.runIf(DARWIN && SUPPORTS_PROFILES)('runEngineSandboxed: autonomous grok
     },
   );
 
-  it('refuses a claude producer under a standing policy (3.11 credential proxy)', async () => {
+  it('refuses a Claude producer without selected native-profile proof under a standing policy', async () => {
     await withTmpHome(async (fx) => {
       const previousAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
       process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
@@ -634,7 +634,7 @@ describe.runIf(DARWIN && SUPPORTS_PROFILES)('runEngineSandboxed: autonomous grok
         hoisted.standing = { grantId: 'grant-int4' };
         const result = await runEngineSandboxed('claude', 'edit a file', makeCfg({ models: { providerChain: [] }, foundry: { fleetMcp: false, completenessGate: false } } as unknown as Partial<AshlrConfig>), { sourceRepo: repo.dir, propose: true });
         expect(result.proposalOutcome).toMatchObject({ kind: 'engine-unsupported' });
-        expect(result.proposalOutcome?.reason).toMatch(/3\.11 credential proxy/);
+        expect(result.proposalOutcome?.reason).toBe('Claude producers require a selected native profile, current host authority and fresh native account/credit-protection proof');
         expect(listSandboxes()).toEqual([]);
       } finally {
         hoisted.standing = null;hoisted.repairChecks = null;

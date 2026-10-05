@@ -12,6 +12,7 @@ import {
   type DevinBudgetView,
   type DevinOverviewResponse,
   type DevinStatus,
+  type DevinSelfIdentitySummary,
   type DevinTaskV1,
 } from '../../../../core/devin/types.js';
 import type { ResourceReadinessRow } from '../../../../core/routing/readiness-types.js';
@@ -39,6 +40,23 @@ export function narrowDevinOverview(raw: unknown): DevinOverviewResponse | null 
   }
   if (!Array.isArray(tasks) || !tasks.every((t) => isRecord(t) && typeof t['id'] === 'string' && typeof t['state'] === 'string')) return null;
   return raw as unknown as DevinOverviewResponse;
+}
+
+/** Captured /self metadata only: no current principal, permission or funding claim. */
+export function devinSelfIdentityEvidence(raw: unknown, now = Date.now()): DevinSelfIdentitySummary | null {
+  if (!isRecord(raw) || raw['source'] !== 'devin-v3-self'
+    || raw['principal'] !== 'service_user' && raw['principal'] !== 'pat_user') return null;
+  const flags = ['hasServiceUserId', 'hasUserId', 'hasApiKeyId', 'hasOrgId', 'hasDevinSessionsOrgId'] as const;
+  const keys = ['source', 'observedAt', 'principal', ...flags];
+  if (Object.keys(raw).length !== keys.length || Object.keys(raw).some(key => !keys.includes(key))
+    || flags.some(key => typeof raw[key] !== 'boolean')) return null;
+  const at = typeof raw['observedAt'] === 'string' ? Date.parse(raw['observedAt']) : NaN;
+  if (!Number.isFinite(now) || !Number.isFinite(at) || at > now
+    || new Date(at).toISOString() !== raw['observedAt']) return null;
+  if (raw['principal'] === 'service_user'
+    ? raw['hasServiceUserId'] !== true || raw['hasUserId'] !== false || raw['hasApiKeyId'] !== false || raw['hasDevinSessionsOrgId'] !== false
+    : raw['hasServiceUserId'] !== false || raw['hasUserId'] !== true || raw['hasApiKeyId'] !== true) return null;
+  return raw as unknown as DevinSelfIdentitySummary;
 }
 
 /** Older servers combine unknown reservations with usage: never infer readings from that total. */
@@ -77,7 +95,7 @@ export function devinConsumptionEvidence(raw: unknown, now = Date.now()): { valu
   const stale = snapshot.state !== 'ready' || snapshot.stale === true || expires <= now;
   lines.push(`Retrieved ${new Date(fetched).toLocaleString()}${stale ? ' · last reading, current consumption unconfirmed' : ' · retrieval is current; provider publication delay is unknown'}.`);
   lines.push(`${report.days.length} daily reporting bucket${report.days.length === 1 ? '' : 's'}; dates retained as provider values.`);
-  return { value: `${formatConsumptionAcu(report.totalAcus)} consumed${stale ? ' · last' : ''}`, lines, stale, report };
+  return { value: report.days.length === 0 ? 'No consumption reported' : `${formatConsumptionAcu(report.totalAcus)} consumed${stale ? ' · last' : ''}`, lines, stale, report };
 }
 
 /** Provider consumption retains fractional ACUs separately from rounded tracked budgets. */

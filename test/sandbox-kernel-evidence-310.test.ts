@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 /**
  * Review finding d0 (3.10): sandbox-violation evidence must not come solely
  * from agent-controlled output. The kernel's own log of each TAGGED protected
@@ -110,6 +111,14 @@ describe('startSandboxDenialWatch with injected process pieces (d0)', () => {
     expect(evidence.denials.map((x) => x.target)).toEqual(['/usr/bin/security']);
     expect(d.killed).toBe(1);
     expect(watch.finish()).toBe(evidence); // idempotent
+  });
+
+  it.each(['exit', 'error', 'close'])('readiness drops if a started stream emits %s before completion', eventName => {
+    const d=deps({});const original=d.startStream;const child=new EventEmitter();
+    d.startStream=(predicate,fd)=>{const inert=original(predicate,fd);return Object.assign(child,{kill:inert.kill.bind(inert)});};
+    const watch=startSandboxDenialWatch(newViolationTag(),{deps:d});expect(watch.ready).toBe(true);
+    child.emit(eventName,...(eventName==='error'?[new Error('fixture stream failed')]:[]));
+    expect(watch.ready).toBe(false);watch.abort();expect(watch.ready).toBe(false);
   });
 
   it('a stream that never becomes ready ⇒ unavailable (violations unknown, never "zero")', () => {

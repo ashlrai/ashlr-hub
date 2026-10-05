@@ -16,10 +16,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render } from '@testing-library/react';
 import { MockEventSource } from './fixtures.test-support.js';
 import { openVerseListChannel, resetVerseListChannelCapabilities } from './verse-events.js';
-import { markCheckComplete } from '../../data/auth-store.js';
+import { markCheckComplete, setMutationToken, clearMutationToken } from '../../data/auth-store.js';
 import { evictAll, getQuerySnapshot, invalidate, runQuery } from '../../data/cache.js';
 import type { VerseBootstrap } from '../../data/api-types.js';
-import { mergeSeatsIntoBootstrap, refreshSeats, SEATS_POLL_MS, SEATS_STARTUP_POLL_MS, SEATS_STARTUP_WINDOW_MS, useSeatsRefresh } from './useSeatsRefresh.js';
+import { mergeSeatsIntoBootstrap, refreshAccountReading, refreshSeats, SEATS_POLL_MS, SEATS_STARTUP_POLL_MS, SEATS_STARTUP_WINDOW_MS, useSeatsRefresh } from './useSeatsRefresh.js';
 import { VERSE_BOOTSTRAP_KEY, verseBootstrapQuery } from './verse-queries.js';
 
 function Probe({ active = true }: { active?: boolean }) {
@@ -279,5 +279,115 @@ describe('published readings after startup', () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(0); });
       expect(seatsCalls()).toBe(2);
     } finally { dispose(); }
+  });
+});
+
+
+describe('selected account reading confirmation', () => {
+  const token = 'b'.repeat(64);
+  const instant = '2026-09-23T20:00:00.000Z';
+  const receipt = { seatId: 'target', state: 'completed', reading: 'current', reason: 'probe-observed',
+    observedAt: instant, expiresAt: '2026-09-23T20:01:00.000Z', nextCheckAt: '2026-09-23T20:00:30.000Z', joined: false };
+  const target = { id: 'target', health: { state: 'ready' }, capacity: { evidenceSource: 'collector', observedAt: instant,
+    windows: [{ usedPercent: 0 }], credits: null } };
+  async function seed() {
+    vi.setSystemTime(instant); setMutationToken(token);
+    await runQuery(VERSE_BOOTSTRAP_KEY, () => Promise.resolve(BOOTSTRAP));
+  }
+  afterEach(() => clearMutationToken());
+
+  it('refuses same-token re-hold while the selected mutation chunk loads, before any POST', async () => {
+    await seed();
+    const fetch = vi.fn(async () => json(receipt)); vi.stubGlobal('fetch', fetch);
+    const check = refreshAccountReading('target');
+    clearMutationToken(); setMutationToken(token);
+    await expect(check).rejects.toThrow('interrupted');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('sends only the selected id and confirms actual zero usage from a fresh target read', async () => {
+    await seed();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = String(input); requests.push({ url, init });
+      return json(init?.method === 'POST' ? receipt : { ...LIVE_SEATS, seats: [target] });
+    }));
+    expect(await refreshAccountReading('target')).toEqual(receipt);
+    expect(requests.map(r => [r.url, r.init?.method ?? 'GET'])).toEqual([
+      ['/api/verse/seats/refresh', 'POST'], ['/api/verse/seats', 'GET']]);
+    expect(JSON.parse(String(requests[0].init?.body))).toEqual({ seatId: 'target' });
+    expect(getQuerySnapshot<VerseBootstrap>(VERSE_BOOTSTRAP_KEY).data?.seats).toEqual([target]);
+  });
+
+  it('accepts a newer current collector observation that wins the selected readback race', async () => {
+    await seed(); vi.setSystemTime('2026-09-23T20:00:02.000Z');
+    const newer = { ...target, capacity: { ...target.capacity, observedAt: '2026-09-23T20:00:01.000Z' } };
+    vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: RequestInit) => json(init?.method === 'POST'
+      ? receipt : { ...LIVE_SEATS, seats: [newer] })));
+    expect(await refreshAccountReading('target')).toEqual(receipt);
+    expect(getQuerySnapshot<VerseBootstrap>(VERSE_BOOTSTRAP_KEY).data?.seats).toEqual([newer]);
+  });
+
+  it.each(['old', 'historical', 'auth-only', 'missing'])('refuses %s readback rather than claiming fresh quota', async shape => {
+    await seed();
+    const seat = shape === 'old' ? { ...target, capacity: { ...target.capacity, observedAt: '2026-09-23T19:59:00.000Z' } }
+      : shape === 'historical' ? { ...target, capacity: { ...target.capacity, evidenceSource: 'baseline' } }
+        : shape === 'auth-only' ? { ...target, capacity: { ...target.capacity, windows: [] } } : null;
+    vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: RequestInit) => json(init?.method === 'POST'
+      ? receipt : { ...LIVE_SEATS, seats: seat ? [seat] : [] })));
+    await expect(refreshAccountReading('target')).rejects.toThrow('does not confirm');
+    expect(getQuerySnapshot<VerseBootstrap>(VERSE_BOOTSTRAP_KEY).data).toEqual(BOOTSTRAP);
+  });
+
+  it.each(['malformed-credit', 'expired-credit', 'future', 'malformed-next-check'])('refuses %s current evidence', async shape => {
+    await seed();
+    const credits = { hasCredits: true, unlimited: false, balance: shape === 'malformed-credit' ? 'Infinity' : '0.5' };
+    const seat = { ...target, capacity: { ...target.capacity, windows: [], credits,
+      observedAt: shape === 'future' ? '2026-09-23T20:00:01.000Z' : instant,
+      creditsExpiresAt: shape === 'expired-credit' ? '2026-09-23T19:59:00.000Z' : receipt.expiresAt } };
+    vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: RequestInit) => json(init?.method === 'POST'
+      ? { ...receipt, nextCheckAt: shape === 'malformed-next-check' ? 'unknown' : receipt.nextCheckAt } : { ...LIVE_SEATS, seats: [seat] })));
+    await expect(refreshAccountReading('target')).rejects.toThrow(/could not be confirmed|does not confirm/);
+    expect(getQuerySnapshot<VerseBootstrap>(VERSE_BOOTSTRAP_KEY).data).toEqual(BOOTSTRAP);
+  });
+
+  it('refuses token loss and re-hold even when the same token returns before POST completes', async () => {
+    await seed(); let release!: (value: Response) => void;
+    let started!: () => void; const contacted = new Promise<void>(resolve => { started = resolve; });
+    const fetch = vi.fn(() => new Promise<Response>(resolve => { release = resolve; started(); })); vi.stubGlobal('fetch', fetch);
+    const check = refreshAccountReading('target');
+    await contacted;
+    clearMutationToken(); setMutationToken(token); release(json(receipt));
+    await expect(check).rejects.toThrow('interrupted'); expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not admit a late GET after caller disposal or restore bootstrap after eviction', async () => {
+    await seed(); let release!: (value: Response) => void; let live = true;
+    let started!: () => void; const reading = new Promise<void>(resolve => { started = resolve; });
+    vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: RequestInit) => init?.method === 'POST'
+      ? json(receipt) : new Promise<Response>(resolve => { release = resolve; started(); })));
+    const check = refreshAccountReading('target', () => live);
+    await reading;
+    live = false; evictAll(); release(json({ ...LIVE_SEATS, seats: [target] }));
+    await expect(check).rejects.toThrow('interrupted');
+    expect(getQuerySnapshot(VERSE_BOOTSTRAP_KEY).data).toBeUndefined();
+  });
+
+  it('does not confirm when the cache swallows a merge failure after bootstrap eviction', async () => {
+    await seed(); evictAll();
+    vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: RequestInit) => json(init?.method === 'POST'
+      ? receipt : { ...LIVE_SEATS, seats: [target] })));
+    await expect(refreshAccountReading('target')).rejects.toThrow('interrupted');
+    expect(getQuerySnapshot(VERSE_BOOTSTRAP_KEY).data).toBeUndefined();
+    expect(getQuerySnapshot(VERSE_BOOTSTRAP_KEY).status).toBe('error');
+  });
+
+  it('reports a held unknown check without inventing usage or a new provider reading', async () => {
+    await seed(); const held = { ...receipt, state: 'held', reading: 'unknown', observedAt: null, expiresAt: null,
+      reason: 'connection-collector-held' };
+    vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init?: RequestInit) => json(init?.method === 'POST'
+      ? held : { ...LIVE_SEATS, seats: [] })));
+    expect(await refreshAccountReading('target')).toEqual(held);
+    expect(getQuerySnapshot<VerseBootstrap>(VERSE_BOOTSTRAP_KEY).data?.seats).toEqual([]);
   });
 });

@@ -21,9 +21,14 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildEngineCommand, spawnEngine } from '../src/core/run/engines.js';
+import * as engines from '../src/core/run/engines.js';
+import * as autonomousRun from '../src/core/sandbox/autonomous-run.js';
+import * as confinement from '../src/core/sandbox/confine.js';
+import * as completeness from '../src/core/run/completeness-gate.js';
+import { refreshDevinCliExecutionBinding, resetDevinCliAdmissionForTest } from '../src/core/devin/cli-admission.js';
 import { applyAutonomousEnvOverlay, buildAutonomousEnvOverlay } from '../src/core/sandbox/autonomous-env.js';
 import { autonomousConfinementProfile, buildSandboxLauncher } from '../src/core/sandbox/confine.js';
 import type { AshlrConfig, EngineId } from '../src/core/types.js';
@@ -48,6 +53,10 @@ describe.runIf(posix)('runEngineSandboxed with a fake `devin` on PATH', () => {
   let stubDir: string;
 
   beforeEach(() => {
+    // Exercise the historical promotional manual route before the host expiry.
+    // Retain real elapsed time for the backstop/process-group timing assertions.
+    const elapsedStart = performance.now();
+    vi.spyOn(Date,'now').mockImplementation(() => Date.parse('2026-10-05T17:00:00Z') + performance.now() - elapsedStart);
     prevPath = process.env.PATH;
     prevAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
     prevAshlrHome = process.env.ASHLR_HOME;
@@ -78,6 +87,7 @@ describe.runIf(posix)('runEngineSandboxed with a fake `devin` on PATH', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     process.env.PATH = prevPath;
     if (prevAllowAnyRepo === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO;
     else process.env.ASHLR_TEST_ALLOW_ANY_REPO = prevAllowAnyRepo;
@@ -149,6 +159,75 @@ describe.runIf(posix)('runEngineSandboxed with a fake `devin` on PATH', () => {
     expect(spawnedArgv().slice(1, 3)).toEqual(['--model', 'swe-2-medium']);
     expect(override.state.engineModel).toBe('devin-cli:swe-2-medium');
   }, 60_000);
+
+  it('refuses a selected automatic native account with no issued evidence before contacting the fake CLI', async () => {
+    const { runEngineSandboxed } = await freshSandboxedEngine();
+    const conf = cfg();
+    conf.foundry!.confinement = {'devin-cli':autonomousConfinementProfile('devin-cli')};
+    const result = await runEngineSandboxed('devin-cli','must not contact',conf,{sourceRepo:sourceRepo(),selectedDevinAdmission:() => null});
+    expect(result.state.status).toBe('failed');
+    expect(result.proposalOutcome?.reason).toContain('unconfirmed');
+    expect(existsSync(join(stubDir,'argv'))).toBe(false);
+  },60_000);
+
+  it.each(['unchanged', 'host changed', 'repair copy changed'] as const)('verify-to-green uses a fresh Devin copy after initial cleanup: %s', async changed => {
+    resetDevinCliAdmissionForTest();
+    mkdirSync(join(stubDir,'data','devin'),{recursive:true,mode:0o700});
+    writeFileSync(join(stubDir,'data','devin','credentials.toml'), 'fixture-only-login', {mode:0o600});
+    const credentials = realpathSync(join(stubDir,'data','devin','credentials.toml'));
+    const binding = await refreshDevinCliExecutionBinding('swe-2-high', {
+      cliPath:join(stubDir,'devin'), credentialsPath:credentials,
+      runMetadata:async (_bin,args) => args[0] === 'auth'
+        ? 'Logged in\n  Email: fixture@example.invalid\n  API server: https://server.codeium.com\n  Devin API: https://api.devin.ai\n'
+        : 'Available models (1 family)\nSWE-2 (swe-2)\n  swe-2-high  Fixture  [262K context, Free]\n',
+    });
+    expect(binding).not.toBeNull();
+    // Only the launcher/agent/verification transports are fake. Preparation,
+    // credential-copy epochs, disposal, worktree capture and filing are real.
+    vi.spyOn(confinement,'buildSandboxLauncher').mockReturnValue({bin:'/usr/bin/env',prefixArgs:[]});
+    const prepared: autonomousRun.AutonomousSpawn[] = [];
+    const prepare = autonomousRun.prepareAutonomousSpawn;
+    vi.spyOn(autonomousRun,'prepareAutonomousSpawn').mockImplementation(input => {
+      const spawn = prepare(input); prepared.push(spawn); return spawn;
+    });
+    let contacts = 0;
+    const transport = vi.spyOn(engines,'spawnEngine').mockImplementation(async (cmd,_cfg,opts) => {
+      if (prepared.length === 2 && changed === 'repair copy changed') {
+        writeFileSync(join(prepared[1]!.overlay.set['XDG_DATA_HOME']!,'devin','credentials.toml'),'different-copy');
+      }
+      if (opts?.selectedOutcomeAdmission?.() === false) return {ok:false,output:'',terminationReason:'cancelled'};
+      contacts++;
+      expect(existsSync(prepared.at(-1)!.runDir)).toBe(true);
+      writeFileSync(join(cmd.cwd!, 'fixed.ts'), `export const fixed = ${contacts};\n`);
+      return {ok:true,output:'fixture complete'};
+    });
+    let gates = 0;
+    vi.spyOn(completeness,'runCompletenessGate').mockImplementation(async () => {
+      expect(existsSync(prepared[0]!.runDir)).toBe(false);
+      if (++gates === 1) {
+        if (changed === 'host changed') writeFileSync(credentials,'different-host-login');
+        return {pass:false,reason:'fixture repair required'};
+      }
+      return {pass:true};
+    });
+    const conf = cfg();
+    conf.foundry!.confinement = {'devin-cli':autonomousConfinementProfile('devin-cli')};
+    conf.foundry!.verifyToGreen = {enabled:true,maxIterations:1};
+    try {
+      const {runEngineSandboxed} = await freshSandboxedEngine();
+      const result = await runEngineSandboxed('devin-cli','fix fixture',conf,{
+        sourceRepo:sourceRepo(),propose:true,model:'swe-2-high',signal:new AbortController().signal,
+        selectedDevinAdmission:() => binding,
+      });
+      expect(gates).toBe(changed === 'unchanged' ? 2 : 1);
+      expect(contacts).toBe(changed === 'unchanged' ? 2 : 1);
+      expect(transport).toHaveBeenCalledTimes(changed === 'host changed' ? 1 : 2);
+      expect(prepared).toHaveLength(changed === 'host changed' ? 1 : 2);
+      expect(prepared.every(spawn => !existsSync(spawn.runDir))).toBe(true);
+      if (changed === 'unchanged') expect(result.proposalId).toBeDefined();
+      else expect(result.proposalId).toBeUndefined();
+    } finally { resetDevinCliAdmissionForTest(); }
+  },60_000);
 
   it('a hung CLI is killed at the backstop with its whole process group, and the run still returns', async () => {
     const pidFile = join(stubDir, 'grandchild.pid');

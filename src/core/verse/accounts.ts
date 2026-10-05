@@ -48,6 +48,7 @@
  *    connections.json row.
  */
 
+import type { VerseAccountReadingRefresh } from './types.js';
 import { canonical } from '../universe/artifacts.js';
 import { normalizeCodexCredits } from '../resources/codex-credits.js';
 import { dirname, join } from 'node:path';
@@ -1054,6 +1055,7 @@ export interface VerseAccountCollector {
   status(): VerseAccountsCollectorStatus;
   /** Record client interest; resumes a suspended collector. */
   touch(): void;
+  refreshAccount?(id: string): Promise<VerseAccountReadingRefresh>;
   /** Live per-account connection snapshot, or null when this server is read-only. */
   connections(): ResourceConnectionsSnapshot | null;
   /** Pure owned-generation/publication identity; no snapshot enrichment or IO. */
@@ -1149,6 +1151,8 @@ export async function startVerseAccountCollector(
   const idleCheckMs = Math.max(10, options.idleCheckMs ?? IDLE_CHECK_MS);
   /** Latest verified observation instant per account this server saw (display history only). */
   const lastReadings = new Map<string, string>();
+  const snapshotRejectedAccounts = new Set<string>();
+  const configuredAccounts = new Map(config?.connections?.accounts.map(account => [account.id, canonical(account)]) ?? []);
   let readingCache: ResourceReadingCache | null = null;
   if (config?.connections) {
     try { readingCache = createResourceReadingCache({ root: config.ledgerRoot, accountsRoot,
@@ -1206,6 +1210,38 @@ export async function startVerseAccountCollector(
     if (refresher) lastObservations = refresher.readObservations([]);
   }
 
+  function accountCurrent(account: ResourceConnectionConfig['accounts'][number], ownedGeneration: number): boolean {
+    if (closing || closed || mode !== 'owned' || !lease || generation !== ownedGeneration) return false;
+    try {
+      lease.assertOwnership();
+      const current = validateResourceConnectionConfig(readResourceJson(join(accountsRoot, 'connections.json'), 1024 * 1024))
+        .accounts.find(row => row.id === account.id);
+      return current !== undefined && canonical(current) === canonical(account);
+    } catch { return false; }
+  }
+  /** A snapshot is cached data, but cannot attest a replacement roster/profile. */
+  function currentRosterSnapshot(snapshot: ResourceConnectionsSnapshot): ResourceConnectionsSnapshot {
+    const ownedGeneration = generation;
+    let current = new Map<string, string>();
+    try {
+      // One protected read for the entire roster, never one full read per row.
+      if (monitor) { if (closing || closed || mode !== 'owned' || !lease) throw new Error(); lease.assertOwnership(); }
+      const roster = validateResourceConnectionConfig(readResourceJson(join(accountsRoot, 'connections.json'), MAX_BASELINE_BYTES));
+      current = new Map(roster.accounts.map(account => [account.id, canonical(account)]));
+      if (generation !== ownedGeneration) throw new Error();
+      if (monitor) lease!.assertOwnership();
+    } catch { current.clear(); }
+    snapshotRejectedAccounts.clear();
+    return { ...snapshot, accounts: snapshot.accounts.map(row => {
+      if (current.get(row.id) !== undefined && current.get(row.id) === configuredAccounts.get(row.id)) return row;
+      snapshotRejectedAccounts.add(row.id);
+      const discarded = { ...row, state: 'unavailable' as const, authentication: 'unknown' as const, health: 'unknown' as const,
+        observedAt: null, expiresAt: null, windows: [], codexCredits: null, accountHint: null, subscriptionOnlyBoundary: undefined,
+        planType: null, onDemandEnabled: null, reason: 'connection-account-changed' };
+      delete discarded.lastKnownUsage;
+      return discarded;
+    }) };
+  }
   /** Spin the collectors up. Requires a held lease. */
   function resume(): void {
     if (closed || mode !== 'owned' || !lease || !config) return;
@@ -1234,12 +1270,14 @@ export async function startVerseAccountCollector(
         }
       }
       if (config.connections) {
+        const ownedGeneration = generation;
         monitor = createResourceConnectionMonitor({
           config: config.connections,
           cwd: config.ledgerRoot,
           ...(options.signal ? { signal: options.signal } : {}),
           assertOwnership: lease.assertOwnership,
           coordinator,
+          accountCurrent: account => accountCurrent(account, ownedGeneration),
           ...(readingCache ? { readingCache } : {}),
         });
       }
@@ -1686,13 +1724,34 @@ export async function startVerseAccountCollector(
       if (collectionDegraded()) { requestRecovery(); return; }
       if (state === 'suspended') resume();
     },
+    refreshAccount: async (id) => {
+      const held = (reason: string): VerseAccountReadingRefresh => ({ seatId: id, state: 'held', reading: 'unknown', reason,
+        observedAt: null, expiresAt: null, nextCheckAt: null, joined: false });
+      const account = config?.connections?.accounts.find(row => row.id === id);
+      if (!account) return held('connection-account-not-configured');
+      if (closing || closed) return held('connection-monitor-stopped');
+      if (!accountCurrent(account, generation)) return held('connection-account-or-owner-changed');
+      // Only the existing safe idle-owned transition may resume. Read-only and
+      // recovery-held collectors cannot be activated by this mutation.
+      lastRequestAt = Date.now();
+      if (mode !== 'owned' || collectionDegraded() || recoveryHold !== null || recovering || suspending) {
+        return held(reasonCode ?? 'connection-collector-held');
+      }
+      if (state === 'suspended') resume();
+      const selected = monitor; const ownedGeneration = generation;
+      if (state !== 'running' || !selected?.refreshAccount) return held('connection-collector-unavailable');
+      const result = await selected.refreshAccount(id);
+      if (closing || closed || monitor !== selected || state !== 'running' || collectionDegraded() ||
+        !accountCurrent(account, ownedGeneration)) return held('connection-account-or-generation-changed');
+      return result;
+    },
     readingRevision: () => {
       if (closed || mode !== 'owned' || state !== 'running' || !monitor?.readingRevision || monitor.isStopped?.()) return null;
       return `${generation}:${monitor.readingRevision()}`;
     },
     connections: () => {
       if (monitor) {
-        lastConnections = monitor.snapshot();
+        lastConnections = currentRosterSnapshot(monitor.snapshot());
         lastPolledAt = lastConnections.sampledAt;
         rememberReadings(lastConnections);
         return lastConnections;
@@ -1705,10 +1764,11 @@ export async function startVerseAccountCollector(
       // and a row that lapsed because polling PAUSED says so.
       const nowMs = Date.now();
       const paused = state === 'suspended';
+      const retained = currentRosterSnapshot(lastConnections);
       return {
-        ...lastConnections,
+        ...retained,
         refreshing: false,
-        accounts: lastConnections.accounts.map((row) => {
+        accounts: retained.accounts.map((row) => {
           const next = expireConnectionRow(row, nowMs);
           return paused && next !== row && next.reason === 'connection-reading-expired'
             ? { ...next, reason: 'connection-polling-paused' }
@@ -1734,8 +1794,9 @@ export async function startVerseAccountCollector(
       creditsCache.set(accountId, found);
       return found;
     },
-    lastReadingAt: (accountId: string) => lastReadings.get(accountId) ?? null,
+    lastReadingAt: (accountId: string) => snapshotRejectedAccounts.has(accountId) ? null : lastReadings.get(accountId) ?? null,
     lastKnownUsage: (accountId: string) => {
+      if (snapshotRejectedAccounts.has(accountId)) return null;
       try {
         // Current roster/profile must still match; old config cannot name a replacement account.
         const current = validateResourceConnectionConfig(readResourceJson(join(accountsRoot, 'connections.json'))).accounts.find(a => a.id === accountId);

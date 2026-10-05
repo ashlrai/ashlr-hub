@@ -5,7 +5,7 @@ import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { prepareResourceNativeProfile, type ResourceNativeProfileOptions } from '../src/core/resources/native-profile.js';
+import { prepareResourceNativeProfile, resolveNativeSeatLaunch, type ResourceNativeProfileOptions } from '../src/core/resources/native-profile.js';
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -26,6 +26,18 @@ function tree(path: string): unknown {
 }
 
 describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'function')('native profile preparation', () => {
+  it.each(['codex','claude','grok'] as const)('retains exact previous/current %s templates but broker requires current safety',provider=>{
+    const profile=prepareResourceNativeProfile(options(provider));
+    const accountsRoot=join(base,'accounts');mkdirSync(accountsRoot,{mode:0o700});
+    writeFileSync(join(accountsRoot,'connections.json'),JSON.stringify({schemaVersion:1,accounts:[{id:provider,provider,command:profile.command}]}),{mode:0o600});
+    const resolve=()=>resolveNativeSeatLaunch({accountsRoot,provider,seatId:provider});
+    const safety=()=>resolveNativeSeatLaunch({accountsRoot,provider,seatId:provider,requireClaudeBrokerSafety:true});
+    expect(resolve().ok).toBe(true);expect(safety().ok).toBe(true);
+    const previous=readFileSync(profile.launcherPath,'utf8').split('\n').filter(line=>!line.includes('Fixed nonsecret native safety flags.')&&!line.includes("for(const key of ['CLAUDE_CODE_SUBPROCESS_ENV_SCRUB'")).join('\n');
+    writeFileSync(profile.launcherPath,previous);
+    expect(resolve().ok).toBe(true);expect(safety()).toMatchObject({ok:false,reason:'profile-invalid'});
+    writeFileSync(profile.launcherPath,previous+'\n// unrecognized mutation');expect(resolve()).toMatchObject({ok:false,reason:'profile-invalid'});
+  });
   it.each(['codex', 'claude', 'grok'] as const)('prepares %s private files and unauthenticated locators without invoking anything', (provider) => {
     const before = readFileSync(binary); const profile = prepareResourceNativeProfile(options(provider));
     expect(profile).toMatchObject({ schemaVersion: 1, scope: 'native-profile-preparation', status: 'prepared', authentication: 'not-checked', provider });

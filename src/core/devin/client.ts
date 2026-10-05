@@ -27,6 +27,8 @@ import { scrubSecrets } from '../util/scrub.js';
 import {
   DEVIN_API_BASE_URL,
   DEVIN_ORG_ID_PATTERN,
+  isDevinSelfIdentity,
+  type DevinSelfIdentity,
   DEVIN_SESSION_ID_PATTERN,
   type DevinFailureCode,
   type DevinSessionStatus,
@@ -73,6 +75,7 @@ export interface DevinSelf {
   name: string | null;
   /** null for org-scoped service users (docs: common-flows step 1) — the operator supplies it. */
   orgId: string | null;
+  identity?: DevinSelfIdentity;
 }
 
 /** Organization consumption, not subscription headroom or a credit balance. */
@@ -188,11 +191,15 @@ export function parseDevinSelf(raw: unknown): DevinSelf | null {
   if (!isRecord(raw) || typeof raw['principal_type'] !== 'string') return null;
   const type = raw['principal_type'];
   const orgId = typeof raw['org_id'] === 'string' && DEVIN_ORG_ID_PATTERN.test(raw['org_id']) ? raw['org_id'] : null;
-  if (type === 'service_user') {
-    return { principal: 'service_user', name: typeof raw['service_user_name'] === 'string' ? raw['service_user_name'].slice(0, 120) : null, orgId };
-  }
-  if (type === 'pat_user') {
-    return { principal: 'pat_user', name: typeof raw['user_name'] === 'string' ? raw['user_name'].slice(0, 120) : null, orgId };
+  if (type === 'service_user' || type === 'pat_user') {
+    const reportedOrg = raw['org_id'] === undefined || raw['org_id'] === null ? null : raw['org_id'];
+    const sessionOrg = raw['devin_sessions_org_id'] === undefined || raw['devin_sessions_org_id'] === null ? null : raw['devin_sessions_org_id'];
+    const identity = type === 'service_user'
+      ? { principal: type, serviceUserId: raw['service_user_id'], userId: null, apiKeyId: null, orgId: reportedOrg, devinSessionsOrgId: null }
+      : { principal: type, serviceUserId: null, userId: raw['user_id'], apiKeyId: raw['api_key_id'], orgId: reportedOrg, devinSessionsOrgId: sessionOrg };
+    const display = raw[type === 'service_user' ? 'service_user_name' : 'user_name'];
+    return { principal: type, name: typeof display === 'string' ? display.slice(0, 120) : null, orgId,
+      ...(isDevinSelfIdentity(identity) ? { identity } : {}) };
   }
   return { principal: 'other', name: null, orgId };
 }
@@ -406,7 +413,7 @@ export class DevinClient {
     return `DevinClient(${this.baseUrl})`;
   }
 
-  private async request(method: 'GET' | 'POST' | 'DELETE', path: string, body: unknown, policy: RetryPolicy, beforeRead?: () => boolean, consumptionRetry = false): Promise<unknown> {
+  private async request(method: 'GET' | 'POST' | 'DELETE', path: string, body: unknown, policy: RetryPolicy, beforeRead?: () => boolean, consumptionRetry = false, beforeContact?: () => void): Promise<unknown> {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = { Authorization: `Bearer ${this.apiKey}`, Accept: 'application/json' };
     let payload: string | undefined;
@@ -419,6 +426,9 @@ export class DevinClient {
       if (attempt > 0) await this.sleep(Math.min(MAX_BACKOFF_MS, 500 * 2 ** (attempt - 1)));
       // Consumption reads re-admit every retry after asynchronous backoff.
       if (beforeRead && !beforeRead()) throw new DevinApiError('not-connected', STATUS_SENTENCES['not-connected']);
+      // A local refusal occurs before contact, not inside the network-error catch.
+      // Creates can retry an explicit 429; every such attempt needs fresh admission.
+      beforeContact?.();
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeoutMs);
       timer.unref?.();
@@ -475,7 +485,7 @@ export class DevinClient {
   }
 
   /** POST /v3/organizations/{org_id}/sessions — https://docs.devin.ai/api-reference/v3/sessions/post-organizations-sessions */
-  async createSession(orgId: string, input: DevinCreateSessionInput): Promise<DevinSession> {
+  async createSession(orgId: string, input: DevinCreateSessionInput, beforeContact?: () => void): Promise<DevinSession> {
     const org = checkOrg(orgId);
     if (typeof input?.prompt !== 'string' || input.prompt.trim() === '' || input.prompt.length > MAX_PROMPT_CHARS) {
       throw new DevinApiError('invalid-request', 'The Devin prompt is empty or too long.');
@@ -496,7 +506,7 @@ export class DevinClient {
       body['structured_output_schema'] = input.structuredOutputSchema;
       body['structured_output_required'] = input.structuredOutputRequired ?? false;
     }
-    const parsed = parseDevinSession(await this.request('POST', `/organizations/${encodeURIComponent(org)}/sessions`, body, 'create'));
+    const parsed = parseDevinSession(await this.request('POST', `/organizations/${encodeURIComponent(org)}/sessions`, body, 'create', undefined, false, beforeContact));
     if (!parsed) throw new DevinApiError('unparsed', 'Devin did not return a recognisable session. Check app.devin.ai before launching again.');
     return parsed;
   }

@@ -88,6 +88,7 @@ const LAZY_ONLY = [
   './resources/resources-summary.js',
   './resources/resources-model.js',
   './resources/resources-queries.js',
+  './resources/account-reading-refresh.js',
   // Reached only through the computer-use chunk.
   './computer/computer-runner.js',
   './computer/native-computer.js',
@@ -208,6 +209,7 @@ const NEVER_FIRST_PAINT: Readonly<Record<string, string>> = {
   'web-ui/routes/verse/chat/ActionMenu.tsx': 'chat and Review menus, never shell first paint',
   'web-ui/routes/verse/shell/warmup.ts': 'VerseApp after-first-paint warm-up',
   'web-ui/routes/verse/resources/ResourcesChrome.tsx': 'VerseApp Resources chrome',
+  'web-ui/routes/verse/resources/account-reading-refresh.ts': 'selected-account mutation loads only on operator request',
   'web-ui/routes/verse/shell/command-catalog.ts': 'the palette loads it; keys and the menu bridge read command-keys.ts',
   'web-ui/routes/verse/onboarding/onboarding-store.ts': 'OnboardingGate (lazy) reads it',
   'web-ui/routes/verse/onboarding/OnboardingFlow.tsx': 'OnboardingGate loads it while the tour is open',

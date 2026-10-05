@@ -25,7 +25,7 @@ import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { MonogramTile } from '../apps/MonogramTile.js';
 import { describeContextError, useTokenGate } from '../context/use-token-gate.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
-import { acuLevel, devinConsumptionEvidence, devinHeadline, devinModelsLines, devinReadinessRow, devinUsageEvidence, DEVIN_USAGE_LINK, formatAcu, formatConsumptionAcu, safeDevinHref, waitingTasks } from '../devin/devin-model.js';
+import { acuLevel, devinConsumptionEvidence, devinHeadline, devinModelsLines, devinReadinessRow, devinSelfIdentityEvidence, devinUsageEvidence, DEVIN_USAGE_LINK, formatAcu, formatConsumptionAcu, safeDevinHref, waitingTasks } from '../devin/devin-model.js';
 import { DEVIN_POLL_MS, devinQuery, messageDevinTask, refreshDevinConsumption } from '../devin/devin-queries.js';
 import { requestGuarded } from '../shell/guarded-action.js';
 import { ReadinessLines } from './ReadinessLines.js';
@@ -147,6 +147,8 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
     );
   }
   const { status, budget } = overview;
+  const capturedIdentity = devinSelfIdentityEvidence(status.selfIdentity);
+  const identity = capturedIdentity?.principal === status.principal ? capturedIdentity : null;
   const consumption = devinConsumptionEvidence(overview.consumption);
   const head = devinHeadline(status);
   const live = status.enabled && status.connected;
@@ -176,6 +178,14 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
         <span className={styles.statusLabel}>{head.word}</span>
       </p>
       <p className={styles.subtle}>{status.reason}</p>
+      {status.connected ? <section aria-label="Devin cached account observation">
+        <p className={styles.fine}>
+          Cloud account: {identity ? <>{identity.principal === 'service_user' ? 'Service account' : 'Personal access token'} · captured <time dateTime={identity.observedAt}>{new Date(identity.observedAt).toLocaleString()}</time></> : 'not reported'}
+        </p>
+        <p className={styles.fine}>
+          {identity ? 'Cached Devin API /self observation. ' : ''}Max weekly allowance is not reported; subscription-only spending is unverified.
+        </p>
+      </section> : null}
       {status.connected ? <section aria-label="Devin organization consumption">
         <p className={styles.creditsHead}><span className={styles.creditsAmount}>{consumption?.value ?? 'Consumption not reported by this server'}</span>
           <span className={styles.pill} data-tone="neutral">organization API</span></p>

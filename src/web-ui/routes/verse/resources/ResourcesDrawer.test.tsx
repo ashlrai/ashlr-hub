@@ -163,6 +163,7 @@ function stubFetch() {
     const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as unknown) : null;
     calls.push({ method, url, body, token: new Headers(init?.headers).get('x-ashlr-token') });
     if (method === 'POST') {
+      if (url === '/api/verse/seats/refresh') return json({ seatId: (body as { seatId: string }).seatId, state: 'completed', reading: 'unknown', reason: 'usage-not-reported', observedAt: null, expiresAt: null, nextCheckAt: null, joined: false });
       if (url === '/api/verse/health/refresh') return json({ checkedAt: CHECKED, seats: HEALTH });
       if (url === '/api/verse/health/reconnect') return json({ ok: true, seatId: (body as { seatId: string }).seatId }, 202);
       if (url === '/api/verse/runtime') return json({ ok: true, action: 'started', note: 'Starting llama-server.', runtime: null });
@@ -369,12 +370,47 @@ describe('ResourcesDrawer — accounts', () => {
     expect(await screen.findByText(/Opened the sign-in for Grok in Terminal/)).toBeInTheDocument();
   });
 
-  it('Check again runs the zero-cost health sweep', async () => {
+  it('Check again refreshes only the selected usage reading and qualifies unknown usage', async () => {
     const user = userEvent.setup();
     render(<ResourcesDrawer mode="docked" now={NOW} />);
     await user.click(await screen.findByRole('button', { name: 'Check again: Personal Codex' }));
-    await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.url === '/api/verse/health/refresh')).toBe(true));
-    expect(await screen.findByText('Checked Personal Codex again.')).toBeInTheDocument();
+    await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.url === '/api/verse/seats/refresh')).toBe(true));
+    expect(await screen.findByText(/Check completed; no current usage reading was reported/)).toBeInTheDocument();
+    expect(calls.find(c => c.url === '/api/verse/seats/refresh')).toMatchObject({ body: { seatId: 'codex-personal' }, token: TOKEN });
+    expect(calls.some(c => c.method === 'POST' && c.url === '/api/verse/health/refresh')).toBe(false);
+  });
+
+  it('does not announce a late selected check after auth loss and re-hold', async () => {
+    const ordinary = globalThis.fetch;
+    let release!: (value: Response) => void;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/verse/seats/refresh') return new Promise<Response>(resolve => { release = resolve; });
+      return ordinary(input, init);
+    }));
+    const view = render(<ResourcesDrawer mode="docked" now={NOW} />);
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Check again: Personal Codex' }));
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    await act(async () => { clearMutationToken(); setMutationToken(TOKEN); release(json({ seatId: 'codex-personal',
+      state: 'completed', reading: 'unknown', reason: 'usage-not-reported', observedAt: null, expiresAt: null, nextCheckAt: null, joined: false })); });
+    expect(screen.queryByText(/Check completed; no current usage reading/)).toBeNull();
+    expect(screen.queryByText(/Confirmed Personal Codex/)).toBeNull();
+    view.unmount();
+  });
+
+  it('settles an unmounted selected request without starting a fresh seats read', async () => {
+    const ordinary = globalThis.fetch;
+    let release!: (value: Response) => void;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/verse/seats/refresh') return new Promise<Response>(resolve => { release = resolve; });
+      return ordinary(input, init);
+    }));
+    const view = render(<ResourcesDrawer mode="docked" now={NOW} />);
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Check again: Personal Codex' }));
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    view.unmount(); const reads = calls.filter(c => c.url === '/api/verse/seats').length;
+    await act(async () => { release(json({ seatId: 'codex-personal', state: 'completed', reading: 'unknown',
+      reason: 'usage-not-reported', observedAt: null, expiresAt: null, nextCheckAt: null, joined: false })); });
+    expect(calls.filter(c => c.url === '/api/verse/seats')).toHaveLength(reads);
   });
 
   it('says so when no account is connected', async () => {

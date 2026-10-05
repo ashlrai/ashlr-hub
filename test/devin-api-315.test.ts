@@ -8,6 +8,7 @@
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { join } from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { handleDevinApi, setDevinApiDepsForTest, startDevinScheduler, stopDevinScheduler } from '../src/core/devin/devin-api.js';
@@ -92,7 +93,31 @@ describe('/api/verse/devin', () => {
     const body = JSON.parse(text) as { status: Record<string, unknown>; budget: Record<string, unknown>; tasks: unknown[] };
     expect(body.status).toMatchObject({ state: 'ready', connected: true, orgId: FAKE_ORG, chat: { word: 'Ready' } }); // 3.15: Devin is a chat seat
     expect(body.budget).toMatchObject({ acuBudgetTotal: 50, canLaunch: { ok: true } });
+    expect(body.status.selfIdentity).toBeUndefined();
     expect(text).not.toContain(FAKE_KEY);
+  });
+
+  it('malformed optional stored observation leaves legacy readiness unchanged and unknown', async () => {
+    const legacy = writeDevinConnection({ orgId: FAKE_ORG, principal: 'service_user', principalName: 'Display', keyStore: 'keychain',
+      connectedAt: '2026-10-05T12:00:00.000Z' });
+    writeFileSync(join(devinHome(), 'connection.json'), JSON.stringify({ ...legacy, selfIdentity: { userId: 'cog_do_not_expose' } }), { mode: 0o600 });
+    const calls = api.requests.length;
+    const reply = await get('/api/verse/devin'); expect(reply.status).toBe(200);
+    const status = JSON.parse(reply.text).status;
+    expect(status).toMatchObject({ state: 'ready', connected: true }); expect(status.selfIdentity).toBeUndefined();
+    expect(reply.text).not.toContain('cog_do_not_expose'); expect(api.requests).toHaveLength(calls);
+  });
+
+  it('GET returns cached /self presence facts without IDs or another provider read', async () => {
+    writeDevinConnection({ orgId: FAKE_ORG, principal: 'pat_user', principalName: 'Display', keyStore: 'keychain',
+      connectedAt: '2026-10-05T12:00:00.000Z', selfIdentity: { source: 'devin-v3-self', observedAt: '2026-10-05T12:00:00.000Z',
+        principal: 'pat_user', serviceUserId: null, userId: 'user-private-1', apiKeyId: 'key-private-2', orgId: 'org-reported', devinSessionsOrgId: 'org-session' } });
+    const calls = api.requests.length;
+    const reply = await get('/api/verse/devin'); expect(reply.status).toBe(200);
+    expect(JSON.parse(reply.text).status).toMatchObject({ state: 'ready', selfIdentity: { source: 'devin-v3-self', principal: 'pat_user',
+      hasUserId: true, hasApiKeyId: true, hasDevinSessionsOrgId: true } });
+    for (const value of ['user-private-1', 'key-private-2', 'org-reported', 'org-session']) expect(reply.text).not.toContain(value);
+    expect(api.requests).toHaveLength(calls);
   });
 
   it('GET consumption is cache-only and the strict authenticated refresh reads only its connected organization', async () => {

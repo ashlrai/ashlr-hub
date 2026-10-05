@@ -133,6 +133,7 @@
 /src/core/daemon/outcome-*.ts @masonwyatt23
 /src/core/daemon/post-merge-halt.ts @masonwyatt23
 /src/core/daemon/liveness.ts @masonwyatt23
+/src/core/devin/session-state.ts @masonwyatt23
 /src/core/daemon/service.ts @masonwyatt23
 /src/core/daemon/service-install-authority.ts @masonwyatt23
 /src/core/daemon/service-config.ts @masonwyatt23
@@ -151,6 +152,7 @@
 /src/core/fleet/backpressure.ts @masonwyatt23
 /src/core/fleet/mirrors.ts @masonwyatt23
 /src/core/fleet/tick-hooks-live.ts @masonwyatt23
+/src/core/devin/cli-admission.ts @masonwyatt23
 /src/core/fleet/manager.ts @masonwyatt23
 /src/core/fleet/reviewer-independence.ts @masonwyatt23
 /src/core/fleet/subscription-usage.ts @masonwyatt23
@@ -192,6 +194,9 @@
 /test/authority-api-310b.test.ts @masonwyatt23
 /test/authority-capability-310b.test.ts @masonwyatt23
 /test/authority-clamp-310b.test.ts @masonwyatt23
+/test/authority-claude-native-adapter.test.ts @masonwyatt23
+/test/authority-claude-native-broker.test.ts @masonwyatt23
+/test/authority-claude-tool-worker.test.ts @masonwyatt23
 /test/authority-cli-310b.test.ts @masonwyatt23
 /test/authority-codeowners-310b.test.ts @masonwyatt23
 /test/authority-effective-policy-310b.test.ts @masonwyatt23
@@ -215,6 +220,7 @@
 /test/autonomous-env-310b.test.ts @masonwyatt23
 /test/autonomy-contracts-310b.test.ts @masonwyatt23
 /test/backpressure-310b.test.ts @masonwyatt23
+/test/build-sea-worker.test.ts @masonwyatt23
 /test/cloud-budget.test.ts @masonwyatt23
 /test/cloud-intake-313.test.ts @masonwyatt23
 /test/cloud-timeline.test.ts @masonwyatt23
@@ -233,11 +239,13 @@
 /test/decide-critics-315.test.ts @masonwyatt23
 /test/decide-judge-manager-315.test.ts @masonwyatt23
 /test/decide-resource-choice.test.ts @masonwyatt23
+/test/devin-cli-admission.test.ts @masonwyatt23
 /test/devin-cli-engine-315.test.ts @masonwyatt23
 /test/devin-cli-engine-realio-315.test.ts @masonwyatt23
 /test/devin-engine-identity-315.test.ts @masonwyatt23
 /test/devin-fleet-launcher-315.test.ts @masonwyatt23
 /test/devin-intake-315.test.ts @masonwyatt23
+/test/devin-lane-315.test.ts @masonwyatt23
 /test/dispatch-router-310b.test.ts @masonwyatt23
 /test/elite-self-land-315.test.ts @masonwyatt23
 /test/engines-judges-310b.test.ts @masonwyatt23

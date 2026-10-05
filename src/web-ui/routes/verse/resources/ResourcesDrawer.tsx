@@ -30,8 +30,9 @@
  *
  * Writes go through the shell's guard (confirm where the regular UI confirms,
  * then the mutation token): Reconnect opens the provider's own sign-in in
- * Terminal, Check again is the zero-cost health sweep.
+ * Terminal, Check again requests only this account’s native usage metadata.
  */
+import { getAuthSnapshot, getMutationToken, subscribeAuth } from '../../../data/auth-store.js';
 import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { IconButton } from '../../../components/primitives/Button.js';
@@ -42,14 +43,15 @@ import { useQuery, useRefetch, useRefresh } from '../../../data/hooks.js';
 import type { ReadinessFix, ResourceReadinessRow } from '../../../../core/routing/readiness-types.js';
 import type { AccountAction } from '../apps/apps-model.js';
 import { servingRuntimeQuery } from '../autonomy/fleet-queries.js';
-import { reconnectSeat, refreshSeatHealth, verseHealthQuery } from '../health/health-queries.js';
+import { reconnectSeat, verseHealthQuery } from '../health/health-queries.js';
+import { reasonSentence } from '../usage/accounts-model.js';
 import { findCommand, formatChord } from '../shell/command-catalog.js';
 import { isGuardOpen, requestGuarded } from '../shell/guarded-action.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { ACCOUNT_CLOCK_MS, useCapacityData } from '../usage/CapacityStrip.js';
 import { accountStatus, accountStatusRank, buildCapacityRows, capacityHeadline, type CapacityRow } from '../usage/capacity-strip-model.js';
 import { COST_BASIS_RANK, costBasisOf, engineTier, TIER_BLURBS, TIER_LABELS, type ResourceTier } from '../../../../core/routing/tiers.js';
-import { refreshSeats } from '../useSeatsRefresh.js';
+import { refreshAccountReading, refreshSeats } from '../useSeatsRefresh.js';
 import { budgetQuery } from '../budget/budget-queries.js';
 import { devinQuery } from '../devin/devin-queries.js';
 import { verseLocalModelsQuery } from '../usage/usage-queries.js';
@@ -109,6 +111,22 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
   const healthRead = data.health !== null;
   const [busy, setBusy] = useState<{ seatId: string; kind: AccountAction['kind'] } | null>(null);
   const [note, setNote] = useState<Note>(null);
+  const actionGeneration = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    const invalidateActions = () => { actionGeneration.current++; };
+    let token = getMutationToken(); let phase = getAuthSnapshot().phase;
+    const unsubscribe = subscribeAuth(() => {
+      const nextToken = getMutationToken(); const nextPhase = getAuthSnapshot().phase;
+      if (token !== nextToken || phase !== nextPhase) {
+        invalidateActions(); setNote(null); setBusy(null);
+      }
+      token = nextToken; phase = nextPhase;
+    });
+    return () => { mounted.current = false; invalidateActions(); unsubscribe(); };
+  }, []);
+
 
   const refetchHealth = useRefresh(verseHealthQuery);
   const refetchLocal = useRefresh(verseLocalModelsQuery);
@@ -206,6 +224,9 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
       go('apps', `seat:${row.seatId}`);
       return;
     }
+    const ownGeneration = ++actionGeneration.current;
+    const isCurrent = () => mounted.current && actionGeneration.current === ownGeneration;
+    let readingNote: string | null = null;
     const reconnect = action.kind === 'reconnect';
     requestGuarded({
       title: reconnect ? `Reconnect ${row.label}?` : `Check ${row.label} again?`,
@@ -224,21 +245,33 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
           else if (row.engine === 'devin') {
             if (row.seatId !== 'devin') throw new Error('Devin CLI usage is not reported. Organization API consumption belongs to the connected cloud account.');
             await refreshDevinConsumption();
-          } else await refreshSeatHealth();
+          } else {
+            const result = await refreshAccountReading(row.seatId, isCurrent);
+            const next = result.nextCheckAt === null ? NaN : Date.parse(result.nextCheckAt);
+            const nextCheck = Number.isFinite(next) && next > Date.now()
+              ? ` Next check after ${new Date(next).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.` : '';
+            readingNote = result.reading === 'current'
+              ? `${result.state === 'cached' ? 'Showing' : 'Confirmed'} ${row.label}’s current usage reading.`
+              : result.state === 'held'
+                ? `Usage check held. ${reasonSentence(result.reason, 'Refresh the account list before trying again.')}`
+                : `${result.state === 'cached' ? 'No current usage reading is available.' : 'Check completed; no current usage reading was reported.'} ${reasonSentence(result.reason, 'The provider did not report a usable reading.')}${nextCheck}`;
+            if (isCurrent()) refetchHealth();
+          }
         } finally {
-          setBusy(null);
+          if (isCurrent()) setBusy(null);
         }
       },
       onDone: () => {
+        if (!isCurrent()) return;
         refetchReadiness();
         setNote({
           tone: 'neutral',
           text: reconnect
             ? `Opened the sign-in for ${row.label} in Terminal. Finish it there; this drawer picks it up.`
-            : row.engine === 'devin' ? 'Updated the Devin organization consumption status.' : `Checked ${row.label} again.`,
+            : row.engine === 'devin' ? 'Updated the Devin organization consumption status.' : readingNote ?? 'No current usage reading was confirmed.',
         });
       },
-      onError: (message) => setNote({ tone: 'danger', text: message }),
+      onError: (message) => { if (isCurrent()) setNote({ tone: 'danger', text: message }); },
     });
   };
 

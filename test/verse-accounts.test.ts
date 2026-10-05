@@ -25,6 +25,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import * as poolRuntime from '../src/core/resources/pool-runtime.js';
 import * as connectionMonitor from '../src/core/resources/connection-monitor.js';
 import { capacityFromSeat } from '../src/core/routing/headroom.js';
 import { assessResetOpportunity } from '../src/core/routing/reset-pressure.js';
@@ -1440,5 +1441,87 @@ describe('fresh native credit projection wins over historical session signals', 
     { observedAt: '2026-09-19T12:00:31.000Z' }, { expiresAt: null },
   ])('withholds credit availability without fresh successful native account evidence', (patch) => {
     expect(deriveVerseAccountRecord(connection({ codexCredits: old, ...patch }), { nowMs }).credits).toBeNull();
+  });
+});
+
+
+describe('selected account collector refresh', () => {
+  it('rechecks the protected roster while queued and before admitting a late result', async () => {
+    fs.rmSync(path.join(root, 'quota-config.json'));
+    let captured!: Parameters<typeof connectionMonitor.createResourceConnectionMonitor>[0];
+    let release!: (value: import('../src/core/verse/types.js').VerseAccountReadingRefresh) => void;
+    const refresh = vi.fn(() => new Promise<import('../src/core/verse/types.js').VerseAccountReadingRefresh>(resolve => { release = resolve; }));
+    const factory = vi.spyOn(connectionMonitor, 'createResourceConnectionMonitor').mockImplementation(options => {
+      captured = options; return { snapshot: () => ({ sampledAt: new Date().toISOString(), refreshing: false, accounts: [] }),
+        isStopped: () => false, close: async () => {}, refreshAccount: refresh };
+    });
+    try {
+      collector = await startVerseAccountCollector({ accountsRoot: root });
+      expect(captured.accountCurrent!(captured.config.accounts[0]!)).toBe(true);
+      const pending = collector.refreshAccount!('codex-a');
+      writePrivate(path.join(root, 'connections.json'), { ...CONNECTIONS, accounts: CONNECTIONS.accounts.map(row =>
+        row.id === 'codex-a' ? { ...row, expectedAccountHint: 'b'.repeat(64) } : row) });
+      expect(captured.accountCurrent!(captured.config.accounts[0]!)).toBe(false);
+      release({ seatId: 'codex-a', state: 'completed', reading: 'current', reason: 'probe-observed',
+        observedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), nextCheckAt: null, joined: false });
+      expect(await pending).toMatchObject({ state: 'held', reading: 'unknown' });
+      expect(await collector.refreshAccount!('codex-a')).toMatchObject({ state: 'held' });
+      expect(refresh).toHaveBeenCalledOnce();
+    } finally { await collector?.close(); collector = null; factory.mockRestore(); }
+  });
+  it('discards a completed cached reading when its profile changes before the next snapshot', async () => {
+    fs.rmSync(path.join(root, 'quota-config.json'));
+    const observedAt = new Date().toISOString(); const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const row: ResourceAccountConnection = { ...connection({ id: 'codex-a', label: 'Personal Codex', observedAt, expiresAt }),
+      accountHint: ACCOUNT_HINT, codexCredits: { hasCredits: true, unlimited: false, balance: '12.5' } };
+    const refresh = vi.fn(async () => ({ seatId: 'codex-a', state: 'completed' as const, reading: 'current' as const,
+      reason: 'probe-observed', observedAt, expiresAt, nextCheckAt: null, joined: false }));
+    const factory = vi.spyOn(connectionMonitor, 'createResourceConnectionMonitor').mockReturnValue({
+      snapshot: () => ({ sampledAt: observedAt, refreshing: false, accounts: [row] }), isStopped: () => false,
+      close: async () => {}, refreshAccount: refresh });
+    try {
+      collector = await startVerseAccountCollector({ accountsRoot: root });
+      expect(await collector.refreshAccount!('codex-a')).toMatchObject({ reading: 'current' });
+      expect(collector.connections()!.accounts[0]).toMatchObject({ state: 'observed', codexCredits: { balance: '12.5' } });
+      writePrivate(path.join(root, 'connections.json'), { ...CONNECTIONS, accounts: CONNECTIONS.accounts.map(account =>
+        account.id === 'codex-a' ? { ...account, command: [FAKE_NODE, launcherFor('codex-b')] } : account) });
+      const read = vi.spyOn(poolRuntime, 'readResourceJson');
+      const changed = collector.connections()!.accounts[0];
+      expect(read.mock.calls.filter(([file]) => file === path.join(root, 'connections.json'))).toHaveLength(1); read.mockRestore();
+      expect(changed).toMatchObject({ state: 'unavailable', observedAt: null, expiresAt: null, windows: [], codexCredits: null,
+        reason: 'connection-account-changed' });
+      expect(collector.lastKnownUsage!('codex-a')).toBeNull(); expect(collector.lastReadingAt!('codex-a')).toBeNull();
+      const projected = buildVerseAccountsSnapshot({ accountsRoot: root, collector }).accounts.find(account => account.id === 'codex-a')!;
+      expect(projected).toMatchObject({ state: 'unavailable', observedAt: null, windows: [], credits: null });
+      expect(projected.lastKnownUsage).toBeUndefined(); expect(projected.lastReadingAt).toBeUndefined();
+      expect(refresh).toHaveBeenCalledOnce();
+    } finally { await collector?.close(); collector = null; factory.mockRestore(); }
+  });
+
+  it('holds unknown, read-only and closed collectors without activating a monitor', async () => {
+    fs.rmSync(path.join(root, 'quota-config.json'));
+    held = await acquireResourceQuotaRefreshLease(accountsLedgerRoot(root), { trackNativeActivity: true }); held.markPending();
+    const factory = vi.spyOn(connectionMonitor, 'createResourceConnectionMonitor');
+    try {
+      collector = await startVerseAccountCollector({ accountsRoot: root });
+      expect(await collector.refreshAccount!('unknown')).toMatchObject({ state: 'held', reason: 'connection-account-not-configured' });
+      expect(await collector.refreshAccount!('codex-a')).toMatchObject({ state: 'held', reading: 'unknown' });
+      await collector.close();
+      expect(await collector.refreshAccount!('codex-a')).toMatchObject({ state: 'held', reason: 'connection-monitor-stopped' });
+      expect(factory).not.toHaveBeenCalled();
+    } finally { factory.mockRestore(); }
+  });
+  it('holds a normally released idle lease rather than stealing it for a selected check', async () => {
+    fs.rmSync(path.join(root, 'quota-config.json')); vi.useFakeTimers();
+    const refresh = vi.fn(); const close = vi.fn(async () => {});
+    const factory = vi.spyOn(connectionMonitor, 'createResourceConnectionMonitor').mockReturnValue({
+      snapshot: () => ({ sampledAt: new Date().toISOString(), refreshing: false, accounts: [] }), isStopped: () => false, close, refreshAccount: refresh });
+    try {
+      collector = await startVerseAccountCollector({ accountsRoot: root, idleSuspendMs: 60_000, idleCheckMs: 1000 });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(close).toHaveBeenCalledOnce(); expect(collector.status().mode).toBe('read-only');
+      expect(await collector.refreshAccount!('codex-a')).toMatchObject({ state: 'held', reading: 'unknown' });
+      expect(factory).toHaveBeenCalledOnce(); expect(refresh).not.toHaveBeenCalled();
+    } finally { await collector?.close(); collector = null; factory.mockRestore(); vi.useRealTimers(); }
   });
 });

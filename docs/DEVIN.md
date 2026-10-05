@@ -1,4 +1,4 @@
-# Devin in Verse (3.15)
+# Devin in Verse
 
 Verse works with **Devin** (Cognition's hosted coding agent) in three places:
 
@@ -52,8 +52,8 @@ never asks for the key in the page, and no HTTP route accepts one.
    the whole organization. Sessions need it to push `ashlr-devin/*` branches
    and open PRs. The integration is Devin's, not the `ashlr-fleet` App.
 4. **API key.** On app.devin.ai go to Settings › Devin API and create one of:
-   - a **service user with the Member role** (recommended: it is not tied to a
-     person, and Member is enough to create and read sessions), or
+   - a **service user with the Member role** (a separate service identity;
+     check its session permissions and usage attribution), or
    - a **personal access token**.
 
    Organization consumption needs `ViewOrgConsumption` independently of session
@@ -61,7 +61,12 @@ never asks for the key in the page, and no HTTP route accepts one.
    does not grant it automatically.
 
    Both start with `cog_`. Legacy `apk_` keys are refused because they do not
-   work with the v3 API.
+   work with the v3 API. Cognition documents personal-token sessions as
+   attributed to that user; a service user can attribute sessions to a human
+   with `create_as_user_id` and `ImpersonateOrgSessions`. Verse does not send
+   `create_as_user_id`, so a connected service user or matching organization
+   does not establish access to a human's included quota
+   ([session attribution](https://docs.devin.ai/api-reference/overview#session-attribution)).
 5. **Connect.**
 
    ```sh
@@ -108,7 +113,23 @@ never asks for the key in the page, and no HTTP route accepts one.
    grant** and the fleet launches nothing.
 
 Check the result with `ashlr devin status`, or the Devin card in the Resources
-drawer (**⌘.**).
+drawer (**⌘.**). **Ready** means the configured lane and local gates permit a
+launch; it does not confirm remaining provider quota or subscription funding.
+
+### Why the fleet is waiting
+
+Read the reason on the Devin card before changing anything:
+
+- **Off:** connect or enable the lane, or opt into fleet use as appropriate.
+- **Not in the grant:** re-approve a grant that includes Devin and its repository.
+- **Waiting:** the effective standing policy is held or unconfirmed. This is
+  different from having no saved grant; follow the displayed authority reason.
+- **Paused:** a tracked ACU, reserve, daily, concurrency or session limit refuses
+  another launch. Unresolved creates retain their exposure until verified
+  settlement; a zero consumption report does not release those holds.
+- **Native CLI held:** its selected executable, login or current model pricing
+  could not be qualified. Manual chat choices remain separate from fleet
+  admission; there is no paid-model fallback for autonomous CLI work.
 
 ### Recovering an uncertain create
 
@@ -141,6 +162,14 @@ or subscription allowance. Devin's [self-serve plans](https://docs.devin.ai/admi
 include subscription quota and prepaid on-demand credits; purchased credits
 roll over and do not expire. A cloud service-user connection does not prove
 that a personal CLI subscription funds its sessions.
+
+Max has a weekly included allowance shared between Devin sessions, CLI and
+Desktop, with no daily cap. That allowance and purchased on-demand credits are
+separate from Verse's tracked ACU ledger and organization consumption report.
+Verse does not read Max's remaining weekly allowance or on-demand balance;
+check the account's Usage page on app.devin.ai. Enterprise ACU billing does not
+define a personal Max allowance
+([self-serve billing](https://docs.devin.ai/admin/billing/self-serve)).
 
 Reported usage combines actual session readings with your explicit adjustment.
 Held exposure is a bound on unresolved or possible remaining consumption,
@@ -175,12 +204,6 @@ has a minimum of one; daily session limits and both fleet limits accept zero
 to stop new launches. Raising counts preserves the ACU budget, reserve, daily
 spend gate, per-session `max_acu_limit`, and Devin's own account limits.
 
-Concurrency and daily session counts have no fixed product ceiling. They
-accept safe integers: overall concurrency is at least one, while daily and
-fleet counts may be zero to opt out. Defaults and explicit lower settings
-remain unchanged. Count capacity does not override the separate ACU controls
-or the provider's actual availability.
-
 A launch is refused, with the reason, when no budget is set, the budget is
 paused, the free ACUs do not cover one session's cap, or the daily ACU, session
 or concurrency cap is reached. A finished session whose usage was never read
@@ -190,8 +213,9 @@ Devin (cloud) chats are your own work: they count against the ACU budget, but
 never against the fleet caps or the reserve. A chat's first message is gated
 like any launch; follow-ups in an existing chat are not re-checked against
 the daily cap or the pause, because the session's own ACU cap bounds them.
-**Devin (CLI) chats are not counted at all**: the CLI reports no usage, and
-the Devin card says so.
+**Devin (CLI) chats are not counted in Verse's ACU ledger**: the CLI does not
+report usage to Verse. Your selected model and native account's billing still
+apply; missing usage is not evidence of free use.
 
 ---
 
@@ -215,8 +239,12 @@ Pick a Devin seat in **New chat**.
 - **Devin (CLI)** (seat id `devin-cli`) runs your local `devin` agent over the
   Agent Client Protocol (`devin acp`). It streams text, thinking and tool
   calls, resumes the CLI's own session, and answers the CLI's permission
-  requests by the chat's permission mode (Plan allows read-only tools). Models
-  offered: Devin's default, opus, sonnet, swe, codex and gemini. Before every
+  requests by the chat's permission mode (Plan allows read-only tools). The
+  picker uses the account's cached `devin models list` catalog, grouped by
+  family, with the configured `devin.defaultModel` first; Fusion is excluded.
+  A built-in SWE-2 fallback can appear before a listing is available. A picker
+  price label or fallback is not autonomous pricing admission. Manual chat
+  retains the available model choices, including paid models. Before every
   turn Verse checks that the binary is installed and that the CLI's
   credentials file exists (it never runs the CLI to check). If not, the turn
   is refused before anything starts:
@@ -226,9 +254,10 @@ Pick a Devin seat in **New chat**.
     --cask devin-cli`, run `devin auth login`, then send again."
 
 Both seats run through Verse's own turn process, and every line they print is
-scrubbed. The Auto seat line above the composer is hidden on Devin chats, and
-Auto never picks a Devin seat. A handoff note can start a Devin chat, and a
-Devin chat can be handed off like any other. A `!macro` typed in a Devin chat
+scrubbed. Auto is available on Devin chats and can choose an eligible Devin
+seat, subject to routing preferences and readiness. An Auto choice does not
+verify remaining subscription quota or funding. A handoff note can start a
+Devin chat, and a Devin chat can be handed off like any other. A `!macro` typed in a Devin chat
 runs its playbook ([Playbooks](VERSE.md#playbooks-315)); a playbook is never
 auto-matched to a chat.
 
@@ -289,7 +318,9 @@ personal CLI allocation. Provider date integers retain their original values;
 the documented day boundary is 08:00 UTC, while timestamp units and publication
 delay remain unspecified. Product zeros for Devin, Cascade and Terminal can be
 provider defaults when product data is unavailable; Automation and Review may
-be null. Neither missing buckets nor failed reads become measured zero.
+be null. An empty daily history says **No consumption reported**, even when
+the raw total is zero; an explicit zero-valued daily bucket can report zero
+consumed. Neither empty history nor failed reads prove unused quota.
 
 The owned listener schedules a connected organization's metadata read at
 startup, even without active sessions or Fleet enabled. Successful retrievals
@@ -346,15 +377,22 @@ no merging, but it may converse first. Each session is created with a hard
 single producer identity). A task with no PR after 12 hours becomes
 `expired`. A chat that ends without a PR is not a failed task end.
 
+A successful create response confirms a session was accepted, not that it is
+working. Initial and recovered session facts preserve suspended, quota or
+credit holds, waiting-for-user states and errors immediately. A finished
+session means no PR on the task branch has been verified yet, not that no PR
+exists. Follow the displayed reason and the session link before retrying;
+creating another session does not resolve the first one's exposure.
+
 **Tracking.** Status and ACUs come from Devin's API; delivery comes only from
 GitHub, read with `gh`. A PR that Devin reports on some other branch is never
 pinned. Verse refreshes every 60 seconds while a session is live and every 10
 minutes otherwise. `ASHLR_DEVIN_AUTO=0` in the server's environment stops that.
 
 **Devin's own engine identity.** In routing and in grants Devin is its own
-engine, `devin`. It has no dispatch lane of its own and no capacity row, and
-reserve budget mode keeps it off. A grant may name it only as a producer: a
-Devin seat can never judge or lead.
+engine, `devin`. The hosted cloud launcher is separate from the native
+`devin-cli` dispatch lane; reserve budget mode keeps autonomous Devin use off.
+A grant may name it only as a producer: a Devin seat can never judge or lead.
 
 **The fleet launcher.** Once per standing tick, after the cloud-PR intake and
 never on a dry run, the daemon may launch one Devin session. It checks, in
@@ -375,10 +413,9 @@ minutes. The Leader's `devin.launch` action and automations with the `devin`
 lane use the same fleet entry point and gates.
 
 **The Devin CLI as a fleet producer (`devin-cli`).** The fleet can also run
-the local Devin CLI on the compiled SWE-2 allowlist, originally listed as free
-on a Devin Max account with CLI 3000.11.3. That historical listing does not
-establish fresh account-specific pricing or perpetual free use. It works like
-the Codex and Claude Code CLI engines: each run gets a sandbox worktree, and
+the selected local Devin CLI when fresh native account metadata qualifies the
+exact model as Free. An old catalog or a model name alone cannot admit it.
+It works like the Codex and Claude Code CLI engines: each run gets a sandbox worktree, and
 its edit is captured as a pending proposal. The command is
 `devin -p --model <m> --permission-mode smart --respect-workspace-trust false -- <goal>`.
 
@@ -392,30 +429,34 @@ its edit is captured as a pending proposal. The command is
   naming `devin` with a producer Devin seat. The budget mode must also allow
   the Devin seat.
 - **Model.** Set it with `devin.fleetModel`; the default is `swe-2-high`.
-  Only the compiled models (`swe-2-high`, `swe-2-medium`, `swe-2-max`) run under
-  autonomy; other models hold because their billed spend cannot be read back.
-- **Readiness.** The probe checks executable access and credentials-file
-  presence, as it does for the CLI chat seat. A missing file closes the lane
-  with the fixing command. Presence does not validate the provider login,
-  account identity or pricing; qualify the current account, model and price
-  before autonomous activation.
+  Autonomous admission requires exactly one matching row in a complete native
+  catalog, marked Free with no contradictory nonzero price. Paid, ambiguous,
+  fallback or unknown evidence holds the lane without a paid fallback.
+- **Readiness.** Beyond binary and login-file presence, Verse runs supported
+  native `auth status`, `models list`, then `auth status` again on the exact
+  executable. It requires the same native principal, reported origins and
+  team, with unchanged executable and private credential-file metadata. The
+  short-lived evidence is checked again before initial and repair spawns;
+  each spawn also checks its own private login copy. Principal consistency
+  does not prove equality with a cloud organization or billing account.
 - **Routing.** The lane has one slot. It takes work that no other seat can
   take right now.
-- **Recording and cost.** Runs are recorded as `devin-cli:<model>` and cost
-  accounting retains the historical zero-charge classification. That is not
-  a current provider billing observation.
+- **Recording and cost.** Runs are recorded as `devin-cli:<model>` with their
+  elapsed time. Qualified native Free pricing is route evidence, not a token
+  usage report, subscription balance or successful provider completion.
 - **Login.** An autonomous run gets a private copy of the CLI's login.
   Nothing is written back to your real login.
 
-**Cash exhaustion and pricing qualification (3.18).** The Devin CLI does not
-qualify for the new exhausted-USD exception. Its existing positive-budget
-admission and the hosted lane's separate ACU policy remain unchanged. Before
-activating the CLI lane, qualify the actual account, exact model and current
-price; missing or historical evidence must not be presented as fresh zero-price
-proof. A future account-pricing admission contract must expire and recheck that
-evidence. The [official pricing page](https://devin.ai/pricing), reviewed on
-October 1, 2026, advertises eligible-plan free SWE-2 in Desktop and CLI through
-October 16, 2026; it does not promise indefinite free access.
+**Cash exhaustion and expiring pricing evidence.** The Devin CLI does not
+qualify for the exhausted-USD exception. Its positive-budget admission and the
+hosted lane's separate ACU policy remain unchanged. Native execution evidence
+lasts at most 60 seconds. For the three promotional SWE-2 model IDs, Verse also
+holds admission at or after its conservative October 16, 2026, 00:00 UTC
+boundary. This is a host safety boundary, not an inferred vendor reset or
+expiry timezone. The [official pricing page](https://devin.ai/pricing),
+reviewed October 5, 2026, advertises eligible-plan free SWE-2 in Desktop and CLI
+through October 16; it does not promise perpetual free use. Account/model
+changes require fresh evidence, and manual chat model selection is unaffected.
 
 **Intake into the standing gates.** When a standing grant is in force and the
 lane is on, each standing tick runs the same intake as cloud PRs
@@ -467,15 +508,16 @@ errors redact `cog_…` and `apk_…` keys.
   the PR waits for you.
 - **Fleet use needs a new custody helper and a new grant.** Helpers before
   1.1.0 cannot sign a grant that names Devin.
-- **CLI chats are unmetered and unverified.** The CLI reports no usage, so its
-  chats are not counted in the ACU budget, and its PRs get only Dismiss in
-  Needs you.
+- **CLI chat usage is not reported to Verse, and its PRs are unverified.**
+  Those chats are not counted in the ACU budget; native account billing still
+  applies. Their PRs get only Dismiss in Needs you.
 - **macOS only for the key.** Storing it needs the macOS Keychain.
 - **Spend is in ACUs; dollars are an estimate.** Only app.devin.ai knows the
   bill.
 - **Devin's side is Devin's.** Data controls, the GitHub integration's
   repository list and the service user's role are set on app.devin.ai. A 403
-  from Devin usually means the service user's role is wrong; a 401 means the
-  key was revoked or expired (`ashlr devin connect` again). A `!macro` also
+  means the requested endpoint's permission is refused; consumption permission
+  can be missing while session access works. A 401 means authentication was
+  refused; check the key before reconnecting. A `!macro` also
   stays in the text Devin receives, so a Devin-side playbook with the same
   macro would apply as well.

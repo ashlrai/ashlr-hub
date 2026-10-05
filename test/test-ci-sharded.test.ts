@@ -9,7 +9,10 @@ const sourceScripts = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'sc
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
-function runFixture(failure: 'none' | 'middle' | 'isolated') {
+function runFixture(
+  failure: 'none' | 'middle' | 'isolated',
+  phaseEnvironment: Record<string, string> = {},
+) {
   const root = mkdtempSync(join(tmpdir(), 'ashlr-test-ci-shards-')); roots.push(root);
   mkdirSync(join(root, 'scripts'));
   mkdirSync(join(root, 'node_modules', 'vitest'), { recursive: true });
@@ -18,7 +21,7 @@ function runFixture(failure: 'none' | 'middle' | 'isolated') {
   }
   writeFileSync(join(root, 'node_modules', 'vitest', 'vitest.mjs'), `
 const shard = process.argv.find((arg) => arg.startsWith('--shard='));
-console.log(JSON.stringify({ shard, file: process.argv.find((arg) => arg.endsWith('.test.ts') && !arg.startsWith('--exclude=')), filter: process.argv.includes('-t') ? process.argv[process.argv.indexOf('-t') + 1] : undefined, excludes: process.argv.filter((arg) => arg.startsWith('--exclude=')), workers: process.argv.find((arg) => arg.startsWith('--maxWorkers=')), parallelism: process.argv.filter((arg) => arg.startsWith('--fileParallelism=')), bail: process.argv.find((arg) => arg.startsWith('--bail=')), home: process.env.HOME, tmp: process.env.TMPDIR }));
+console.log(JSON.stringify({ shard, file: process.argv.find((arg) => arg.endsWith('.test.ts') && !arg.startsWith('--exclude=')), filter: process.argv.includes('-t') ? process.argv[process.argv.indexOf('-t') + 1] : undefined, excludes: process.argv.filter((arg) => arg.startsWith('--exclude=')), workers: process.argv.find((arg) => arg.startsWith('--maxWorkers=')), parallelism: process.argv.filter((arg) => arg.startsWith('--fileParallelism=')), bail: process.argv.find((arg) => arg.startsWith('--bail=')), home: process.env.HOME, tmp: process.env.TMPDIR, setupTiming: process.env.ASHLR_ENGINEERING_SETUP_PHASE_TIMING, successorTiming: process.env.ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING, hardTimeout: process.env.ASHLR_TEST_CI_TIMEOUT_MS, idleTimeout: process.env.ASHLR_TEST_CI_IDLE_TIMEOUT_MS }));
 if (process.env.ASHLR_FAKE_FAILURE === 'middle' && shard === '--shard=2/3') {
   setTimeout(() => { process.exitCode = 7; }, 100);
 } else if (process.env.ASHLR_FAKE_FAILURE === 'middle') {
@@ -27,9 +30,14 @@ if (process.env.ASHLR_FAKE_FAILURE === 'middle' && shard === '--shard=2/3') {
   process.exitCode = 9;
 }
 `, 'utf8');
+  // Baseline defaults must be independent of the outer release's timing flags.
+  // Clear only this fixture's copied environment, then apply caller overrides.
+  const environment = { ...process.env };
+  delete environment.ASHLR_ENGINEERING_SETUP_PHASE_TIMING;
+  delete environment.ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING;
   return spawnSync(process.execPath, [join(root, 'scripts', 'test-ci-sharded.mjs')], {
     cwd: root, encoding: 'utf8', timeout: 8_000,
-    env: { ...process.env, ASHLR_FAKE_FAILURE: failure,
+    env: { ...environment, ...phaseEnvironment, ASHLR_FAKE_FAILURE: failure,
       ASHLR_TEST_CI_TIMEOUT_MS: '4000', ASHLR_TEST_CI_IDLE_TIMEOUT_MS: '4000',
       ASHLR_TEST_CI_TERMINATION_GRACE_MS: '100' },
   });
@@ -40,13 +48,15 @@ describe('local exhaustive prepublish shards', () => {
     const result = runFixture('none');
     expect(result.error).toBeUndefined(); expect(result.status).toBe(0);
     const rows = result.stdout.trim().split('\n').map((line) => JSON.parse(line) as {
-      shard?: string; file?: string; filter?: string; excludes: string[]; workers: string; parallelism: string[]; bail: string; home: string; tmp: string;
+      shard?: string; file?: string; filter?: string; excludes: string[]; workers: string; parallelism: string[]; bail: string; home: string; tmp: string; setupTiming: string; successorTiming: string; hardTimeout: string; idleTimeout: string;
     });
     expect(rows.filter((row) => row.shard).map((row) => row.shard).sort()).toEqual(['--shard=1/3', '--shard=2/3', '--shard=3/3']);
     // Observe actual coordinator launches, independent of child log ordering.
     // All partitions still run once; the measured longest pair gets both slots.
     expect([...result.stderr.matchAll(/started (\d)\/3/g)].map(match => Number(match[1]))).toEqual([3, 2, 1]);
     expect(rows).toHaveLength(12);
+    expect(rows.every((row) => row.setupTiming === '1' && row.successorTiming === '1')).toBe(true);
+    expect(rows.every((row) => row.hardTimeout === '4000' && row.idleTimeout === '4000')).toBe(true);
     const isolatedFiles = [
       'test/m342.dispatch-production-ledger.test.ts',
       'test/m395.effect-terminal-retention.test.ts',
@@ -72,6 +82,24 @@ describe('local exhaustive prepublish shards', () => {
     expect(rows.every((row) => row.bail === '--bail=1')).toBe(true);
     expect(new Set(rows.map((row) => row.home)).size).toBe(12);
     expect(rows.every((row) => row.tmp === join(row.home, 'tmp'))).toBe(true);
+    expect(result.stderr).toContain('[test-ci:sharded] PASS');
+  });
+
+  it.each([
+    { setup: '0', successor: '0' },
+    { setup: '', successor: 'custom' },
+  ])('preserves explicit phase-output choices $setup/$successor for every child', ({ setup, successor }) => {
+    const result = runFixture('none', {
+      ASHLR_ENGINEERING_SETUP_PHASE_TIMING: setup,
+      ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING: successor,
+    });
+    expect(result.error).toBeUndefined(); expect(result.status).toBe(0);
+    const rows = result.stdout.trim().split('\n').map((line) => JSON.parse(line) as {
+      setupTiming: string; successorTiming: string; hardTimeout: string; idleTimeout: string;
+    });
+    expect(rows).toHaveLength(12);
+    expect(rows.every((row) => row.setupTiming === setup && row.successorTiming === successor)).toBe(true);
+    expect(rows.every((row) => row.hardTimeout === '4000' && row.idleTimeout === '4000')).toBe(true);
     expect(result.stderr).toContain('[test-ci:sharded] PASS');
   });
 
