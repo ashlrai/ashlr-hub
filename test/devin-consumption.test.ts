@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DevinApiError, DevinClient, parseDevinDailyConsumption } from '../src/core/devin/client.js';
+import { DevinApiError, DevinClient, parseDevinDailyConsumption, parseConsumptionRetryAfter } from '../src/core/devin/client.js';
 import { DevinConsumptionCache, DEVIN_CONSUMPTION_TTL_MS } from '../src/core/devin/consumption.js';
 import { FAKE_KEY, FAKE_ORG, fakeDevin } from './helpers/fake-devin.js';
 
@@ -46,6 +46,20 @@ describe('documented organization daily consumption', () => {
     const client = new DevinClient({ apiKey: FAKE_KEY, fetch: api.fetch, retries: 2, sleep: async () => { current = false; } });
     await expect(client.getDailyConsumption(FAKE_ORG, () => current)).rejects.toMatchObject({ code: 'not-connected' });
     expect(api.requests).toHaveLength(1);
+  });
+
+  it('keeps a long final Retry-After deadline without retrying early or sleeping a worker', async () => {
+    const api = fakeDevin(); api.forced.push({ status: 429, body: {}, headers: { 'retry-after': '1800' } });
+    let sleeps = 0;
+    const client = new DevinClient({ apiKey: FAKE_KEY, fetch: api.fetch, retries: 2, sleep: async () => { sleeps++; } });
+    const before = Date.now();
+    const error = await client.getDailyConsumption(FAKE_ORG).catch(error => error as DevinApiError);
+    expect(error).toMatchObject({ code: 'rate-limited' });
+    expect((error as DevinApiError).retryAfterAt).toBeGreaterThanOrEqual(before + 1_800_000);
+    expect(api.requests).toHaveLength(1); expect(sleeps).toBe(0);
+    expect(parseConsumptionRetryAfter(new Date(tick + 600_000).toUTCString(), tick)).toBe(tick + 600_000);
+    expect(parseConsumptionRetryAfter('Infinity', tick)).toBeNull();
+    expect(parseConsumptionRetryAfter('9'.repeat(80), tick)).toBeNull();
   });
 
   it.each([[403, 'forbidden'], [429, 'rate-limited']] as const)('keeps HTTP%s separate from quota exhaustion', async (status, code) => {
@@ -102,6 +116,16 @@ describe('identity-fenced metadata cache', () => {
     const pending = cache.refresh({ identity: () => identity, read: async () => { calls++; return report; } });
     identity = null; await pending;
     expect(calls).toBe(0); expect(cache.peek(null).report).toBeNull();
+  });
+
+  it('honors a provider retry deadline longer than the fallback even for explicit refreshes', async () => {
+    const cache = new DevinConsumptionCache(); let now = tick; let calls = 0;
+    const options = { identity: () => 'A', now: () => new Date(now), read: async () => { calls++; throw new DevinApiError('rate-limited', 'fixed', 429, tick + 1_800_000); } };
+    expect((await cache.refresh(options)).retryAt).toBe(new Date(tick + 1_800_000).toISOString());
+    now += 600_000; await cache.refresh({ ...options, force: true }); expect(calls).toBe(1);
+    now = tick + 1_800_000;
+    expect((await cache.refresh({ ...options, read: async () => { calls++; return report; } })).state).toBe('ready');
+    expect(calls).toBe(2);
   });
 
   it.each(['forbidden', 'rate-limited'] as const)('retains only stale historical readings on %s and never exposes raw errors', async code => {

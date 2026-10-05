@@ -5,15 +5,15 @@
  * are fakes injected through setDevinApiDepsForTest; files live in the
  * worker's isolated ASHLR_HOME.
  */
-import { rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { handleDevinApi, setDevinApiDepsForTest, startDevinScheduler, stopDevinScheduler } from '../src/core/devin/devin-api.js';
 import { storeDevinKey } from '../src/core/devin/secret.js';
-import { resetDevinStatusCacheForTest, refreshDevinConsumption, peekDevinConsumption, type DevinServiceDeps } from '../src/core/devin/service.js';
-import { devinHome, writeDevinConnection } from '../src/core/devin/store.js';
+import { resetDevinStatusCacheForTest, refreshDevinConsumption, peekDevinConsumption, resetDevinConsumptionForTest, connectDevin, disconnectDevin, type DevinServiceDeps } from '../src/core/devin/service.js';
+import { devinHome, writeDevinConnection, devinConsumptionConnectionPath } from '../src/core/devin/store.js';
 import { findGithubPrUrls, readDismissedDevinCliPrs, recordDevinCliPrs } from '../src/core/devin/cli-prs.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import type { VerseApiContext } from '../src/core/verse/verse-api.js';
@@ -144,6 +144,85 @@ describe('/api/verse/devin', () => {
     release(); await pending;
     expect(api.requests).toHaveLength(0);
     expect(peekDevinConsumption().report).toBeNull();
+  });
+
+  it.each(['connect', 'disconnect'] as const)('blocks consumption throughout an awaited %s Keychain mutation', async operation => {
+    let entered!: () => void; let release!: () => void;
+    const admitted = new Promise<void>(resolve => { entered = resolve; });
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    const deps = serviceDeps();
+    const replacementKey = 'cog_replacementKey_abcdefghijklmnopqrst';
+    const replacementOrg = 'org-replacement';
+    const replacement = fakeDevin({ key: replacementKey, orgId: replacementOrg });
+    if (operation === 'connect') deps.fetch = replacement.fetch;
+    deps.keyStore = { platform: 'darwin', run: async (args, stdin) => {
+      const result = await keychain.run(args, stdin); // the key changes before the awaited process returns
+      if (args[0] === (operation === 'connect' ? '-i' : 'delete-generic-password')) { entered(); await wait; }
+      return result;
+    } };
+    let oldEntered!: () => void; let oldRelease!: () => void;
+    const oldStarted = new Promise<void>(resolve => { oldEntered = resolve; });
+    const oldWait = new Promise<void>(resolve => { oldRelease = resolve; });
+    api.forced.push({ status: 200, body: { total_acus: 999, consumption_by_date: [] } });
+    const oldRead = refreshDevinConsumption({ ...serviceDeps(), fetch: async (url, init) => {
+      const response = await api.fetch(url, init); oldEntered(); await oldWait; return response;
+    } });
+    await oldStarted;
+    const transition = operation === 'connect'
+      ? connectDevin({ key: replacementKey, orgId: replacementOrg }, deps) : disconnectDevin(deps);
+    await admitted;
+    const conflicting = operation === 'connect' ? disconnectDevin(serviceDeps()) : connectDevin({ key: replacementKey, orgId: replacementOrg }, { ...serviceDeps(), fetch: replacement.fetch });
+    await expect(conflicting).rejects.toThrow(/connection change/);
+    expect((await refreshDevinConsumption(serviceDeps(), true)).report).toBeNull();
+    expect(api.requests).toHaveLength(1); // only the old read admitted before the transition
+    oldRelease(); await oldRead;
+    expect(peekDevinConsumption().report).toBeNull();
+    expect(replacement.requests.filter(r => r.path.includes('/consumption/'))).toHaveLength(0);
+    release(); await transition;
+    if (operation === 'connect') {
+      replacement.forced.push({ status: 200, body: { total_acus: 1.5, consumption_by_date: [] } });
+      expect((await refreshDevinConsumption(deps)).report?.totalAcus).toBe(1.5);
+      expect(replacement.requests.at(-1)?.path).toBe(`/v3/organizations/${replacementOrg}/consumption/daily`);
+    } else expect(peekDevinConsumption().report).toBeNull();
+  });
+
+  it('an ambiguous failed Keychain write stays held after the consumption reader restarts', async () => {
+    const replacementKey = 'cog_replacementKey_abcdefghijklmnopqrst';
+    const replacement = fakeDevin({ key: replacementKey, orgId: 'org-replacement' });
+    const deps = { ...serviceDeps(), fetch: replacement.fetch, keyStore: { platform: 'darwin' as const,
+      run: async (args: string[], stdin: string | null) => {
+        const result = await keychain.run(args, stdin);
+        return args[0] === '-i' ? { ...result, code: 1 } : result;
+      } } };
+    await expect(connectDevin({ key: replacementKey, orgId: 'org-replacement' }, deps)).rejects.toThrow();
+    expect(keychain.items.get('ai.ashlr.devin/api-key')).toBe(replacementKey);
+    resetDevinConsumptionForTest(); // simulate a newly created reader: no memory-only authority survives
+    expect((await refreshDevinConsumption(serviceDeps(), true))).toMatchObject({ state: 'unavailable', report: null, error: { code: 'not-connected' } });
+    expect(api.requests).toHaveLength(0);
+    expect(replacement.requests.filter(r => r.path.includes('/consumption/'))).toHaveLength(0);
+    await connectDevin({ key: replacementKey, orgId: 'org-replacement' }, { ...serviceDeps(), fetch: replacement.fetch });
+    replacement.forced.push({ status: 200, body: { total_acus: 1, consumption_by_date: [] } });
+    expect((await refreshDevinConsumption({ ...serviceDeps(), fetch: replacement.fetch })).report?.totalAcus).toBe(1);
+  });
+
+  it('never trusts a corrupt or publicly writable transition marker as confirmed', async () => {
+    writeFileSync(devinConsumptionConnectionPath(), 'unexpected\n', { mode: 0o600 });
+    expect(peekDevinConsumption().state).toBe('unavailable');
+    writeFileSync(devinConsumptionConnectionPath(), 'settled\n');
+    if (process.platform !== 'win32') {
+      chmodSync(devinConsumptionConnectionPath(), 0o644);
+      expect((await refreshDevinConsumption(serviceDeps(), true)).state).toBe('unavailable');
+      expect(api.requests).toHaveLength(0);
+    }
+  });
+
+  it('refuses Keychain mutation if the private transition marker cannot be published', async () => {
+    mkdirSync(devinConsumptionConnectionPath());
+    const before = keychain.calls.filter(call => call.args[0] === '-i').length;
+    await expect(connectDevin({ key: FAKE_KEY, orgId: FAKE_ORG }, serviceDeps())).rejects.toThrow();
+    expect(keychain.calls.filter(call => call.args[0] === '-i')).toHaveLength(before);
+    expect(peekDevinConsumption()).toMatchObject({ state: 'unavailable', report: null });
+    expect(api.requests.filter(r => r.path.includes('/consumption/'))).toHaveLength(0);
   });
 
   it('the owned scheduler reads connected metadata at startup without Fleet or active sessions', async () => {

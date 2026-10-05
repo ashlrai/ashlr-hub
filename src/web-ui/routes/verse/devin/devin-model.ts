@@ -58,6 +58,7 @@ export function devinConsumptionEvidence(raw: unknown, now = Date.now()): { valu
   const snapshot = raw as unknown as DevinConsumptionSnapshot;
   const lines = ['Organization API consumption · all available reporting dates · all products.',
     'Provider day boundary: 08:00 UTC; reporting date units are unspecified.',
+    'Devin, Cascade and Terminal can be zero defaults when product data is unavailable; Automation and Review can be unreported.',
     'Balance, subscription limits and resets are not reported. No personal CLI allocation is inferred.'];
   if (snapshot.error) {
     if (!isRecord(snapshot.error) || typeof snapshot.error.reason !== 'string' || snapshot.error.reason.length > 500) return null;

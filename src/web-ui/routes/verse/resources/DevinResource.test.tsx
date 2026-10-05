@@ -136,6 +136,7 @@ describe('DevinResource', () => {
     await userEvent.click(within(section).getByText('Daily consumption (1 reporting buckets)'));
     expect(await within(section).findByText('Provider date 123 · 3.125 ACUs')).toBeTruthy();
     expect(within(section).getByText(/cascade: not reported/)).toBeTruthy();
+    expect(within(section).getByText(/zero defaults when product data is unavailable/)).toBeTruthy();
   });
 
   it('does not read consumption until the existing mutation-token gate is unlocked', async () => {

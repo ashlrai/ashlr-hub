@@ -88,8 +88,12 @@ export class DevinConsumptionCache {
         if (!stillCurrent()) return this.peek(options.identity(), clock());
         const code = error instanceof DevinApiError ? error.code : 'unknown';
         const now = clock();
+        const providerRetryAt = error instanceof DevinApiError && code === 'rate-limited' ? error.retryAfterAt : null;
+        const fallbackRetryAt = now.getTime() + (code === 'rate-limited' ? RATE_LIMIT_RETRY_MS : ERROR_RETRY_MS);
+        const retryAt = providerRetryAt !== null && Number.isSafeInteger(providerRetryAt) && providerRetryAt > fallbackRetryAt
+          && providerRetryAt <= 8_640_000_000_000_000 ? providerRetryAt : fallbackRetryAt;
         this.value = { ...this.value, state: 'unavailable', checkedAt: now.toISOString(),
-          error: { code, reason: reason(code) }, retryAt: new Date(now.getTime() + (code === 'rate-limited' ? RATE_LIMIT_RETRY_MS : ERROR_RETRY_MS)).toISOString() };
+          error: { code, reason: reason(code) }, retryAt: new Date(retryAt).toISOString() };
       }
       return this.peek(options.identity(), clock());
     }).finally(() => {

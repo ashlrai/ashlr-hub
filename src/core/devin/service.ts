@@ -25,6 +25,8 @@ import { loadConfigReadOnly, saveConfig, loadConfig } from '../config.js';
 import { repoPolicyFor } from '../fleet/merge-gates.js';
 import type { FleetReadinessVerdict, ReadinessFix, ReadinessVerdict } from '../routing/readiness-types.js';
 import type { AshlrConfig } from '../types.js';
+import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+import { join } from 'node:path';
 import { scrubSecrets } from '../util/scrub.js';
 import { devinBudgetView } from './budget.js';
 import { DevinApiError, DevinClient, devinFailureSentence, type DevinFetch, type DevinSession } from './client.js';
@@ -37,6 +39,7 @@ import { hasDevinKey, readDevinKey, removeDevinKey, storeDevinKey, type DevinKey
 import { DevinConsumptionCache, type DevinConsumptionSnapshot } from './consumption.js';
 import {
   clearDevinConnection,
+  devinHome, ensureDevinDirectory, devinConsumptionConnectionUnconfirmed, writeDevinConsumptionConnectionState,
   listDevinTasks,
   newDevinTaskId,
   readDevinBudget,
@@ -301,22 +304,25 @@ export async function connectDevin(input: { key: string; orgId?: string | null }
   }
   // One read of an org-scoped route proves the key works in that org before anything is stored.
   await client.listSessions(orgId, { first: 1 });
-  await storeDevinKey(key, deps.keyStore);
-  const now = (deps.now ?? (() => new Date()))().toISOString();
-  writeDevinConnection({ orgId, principal: self.principal, principalName: self.name, keyStore: 'keychain', connectedAt: now });
-  consumptionCache.reset();
-  keyPresence = null;
-  noteApiSuccess();
-  return { orgId, principal: self.principal, principalName: self.name };
+  return consumptionConnectionTransition(async () => {
+    await storeDevinKey(key, deps.keyStore);
+    const now = (deps.now ?? (() => new Date()))().toISOString();
+    writeDevinConnection({ orgId, principal: self.principal, principalName: self.name, keyStore: 'keychain', connectedAt: now });
+    keyPresence = null;
+    noteApiSuccess();
+    return { orgId, principal: self.principal, principalName: self.name };
+  });
 }
 
 export async function disconnectDevin(deps: DevinServiceDeps = {}): Promise<{ removedKey: boolean }> {
-  const removedKey = await removeDevinKey(deps.keyStore);
-  clearDevinConnection();
-  consumptionCache.reset();
-  keyPresence = null;
-  lastAuthFailure = null;
-  return { removedKey };
+  return consumptionConnectionTransition(async () => {
+    const removedKey = await removeDevinKey(deps.keyStore);
+    clearDevinConnection();
+    if (readDevinConnection() !== null) throw new Error('The Devin connection removal could not be confirmed.');
+    keyPresence = null;
+    lastAuthFailure = null;
+    return { removedKey };
+  });
 }
 
 function clientOptions(deps: DevinServiceDeps): { fetch?: DevinFetch; baseUrl?: string; sleep?: (ms: number) => Promise<void> } {
@@ -337,21 +343,47 @@ export async function connectedClient(deps: DevinServiceDeps = {}): Promise<{ cl
 }
 
 const consumptionCache = new DevinConsumptionCache();
+let consumptionConnectionTransitions = 0;
+
+/** The old recorded organization must never be paired with a replacement Keychain key. */
+async function consumptionConnectionTransition<T>(run: () => Promise<T>): Promise<T> {
+  ensureDevinDirectory();
+  const lock = acquireLocalStoreLock(join(devinHome(), '.consumption-connection.lock'), 0);
+  if (!lock) throw new Error('A Devin connection change is already in progress or its private lock is unavailable.');
+  consumptionConnectionTransitions += 1;
+  consumptionCache.reset();
+  try {
+    writeDevinConsumptionConnectionState('pending');
+    const result = await run();
+    writeDevinConsumptionConnectionState('settled');
+    return result;
+  } finally {
+    // Failure leaves the durable pending marker intact, including after a reader restart.
+    consumptionConnectionTransitions -= 1;
+    consumptionCache.reset();
+    releaseLocalStoreLock(lock);
+  }
+}
 
 function consumptionIdentity(): string | null {
+  if (consumptionConnectionTransitions > 0 || devinConsumptionConnectionUnconfirmed()) return null;
   const connection = readDevinConnection();
   return connection ? JSON.stringify([connection.orgId, connection.principal, connection.principalName, connection.connectedAt]) : null;
 }
 
 /** Cache-only: neither provider nor Keychain reads occur on this projection. */
 export function peekDevinConsumption(now: Date = new Date()): DevinConsumptionSnapshot {
-  return consumptionCache.peek(consumptionIdentity(), now);
+  const snapshot = consumptionCache.peek(consumptionIdentity(), now);
+  return devinConsumptionConnectionUnconfirmed() ? { ...snapshot, state: 'unavailable', error: {
+    code: 'not-connected', reason: 'The cloud connection change is unconfirmed. Reconnect Devin before reading organization consumption.',
+  } } : snapshot;
 }
 
 export function resetDevinConsumptionForTest(): void { consumptionCache.reset(); }
 
 /** A metadata read, separately permission-qualified; failures never change session readiness. */
 export function refreshDevinConsumption(deps: DevinServiceDeps = {}, force = false): Promise<DevinConsumptionSnapshot> {
+  if (devinConsumptionConnectionUnconfirmed()) return Promise.resolve(peekDevinConsumption((deps.now ?? (() => new Date()))()));
   return consumptionCache.refresh({
     identity: consumptionIdentity, now: deps.now, force,
     read: async (stillCurrent) => {
