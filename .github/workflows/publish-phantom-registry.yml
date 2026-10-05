@@ -1,0 +1,63 @@
+name: Publish Phantom MCP Registry metadata
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published npm version (exact approved release)
+        required: true
+        default: '0.7.9'
+      source_sha:
+        description: Immutable Phantom source commit
+        required: true
+        default: '97b2e69be5973c72e3bd484971cdb541196856fc'
+      source_manifest_sha256:
+        description: SHA-256 of source mcp-registry/server.json
+        required: true
+        default: '0b247dde25443517bbd6c5e92c0a065d5ab7a6c70f87c8acec46ca15a8ccc527'
+      payload_sha256:
+        description: SHA-256 of reviewed supported-field Registry JSON
+        required: true
+        default: '821b2c8651de47b4638e3b6bb5760b5b38a3997f81117eece373cbd4711d50ee'
+      npm_integrity:
+        description: Exact accepted npm SHA-512 integrity
+        required: true
+        default: 'sha512-RQN1e5+NsBdUUTWf+3PENxsIg3BbPl2Yr+ibOK7bM0PFdXnyEkn3hbjat1CcXkY8Pw5LAuLYHzd02EzRNLpAwQ=='
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phantom-mcp-registry-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # Registry OIDC trusts owner, not branch/repository: these checks must precede token access.
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'ashlrai/ashlr-hub' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout dispatched trusted Hub source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Check publication refusals offline
+        run: node --test .github/tests/mcp-registry-publication.test.mjs
+      - name: Publish verified existing npm release metadata
+        # Untrusted input strings enter environment, never shell source or URLs.
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_SOURCE_SHA: ${{ inputs.source_sha }}
+          INPUT_SOURCE_MANIFEST_SHA256: ${{ inputs.source_manifest_sha256 }}
+          INPUT_PAYLOAD_SHA256: ${{ inputs.payload_sha256 }}
+          INPUT_NPM_INTEGRITY: ${{ inputs.npm_integrity }}
+        run: node .github/scripts/publish-phantom-registry.mjs
