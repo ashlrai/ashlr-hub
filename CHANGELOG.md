@@ -29,6 +29,11 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Fixed
 
+- Confirm saved executable work after automatic outcome planning. Omitted or
+  refused refinements retain recovery; repeated attempts honor backoff without
+  suppressing unrelated Leader triggers or daily and manual recovery.
+- Keep automatic planning events from contacting a provider when current
+  authority cannot apply the plan. Explicit advisory runs remain available.
 - Fence Devin consumption against account/key transitions, including uncertain
   writes and restarts; retain provider retry deadlines and separate permission
   failures from session health.
@@ -37,6 +42,11 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Changed
 
+- Run whole-project CI lint and type checks once at the minimum supported Node
+  version. Every platform retains its build and assigned tests.
+- Start measured longest local test partitions first to reduce the serial
+  tail. Exhaustive coverage, isolated test homes and failure cleanup remain
+  unchanged; full-suite timing is measured separately from this scheduling fix.
 - Task-scoped reset reserves preserve signed floors, actual usage ceilings and
   current account/model evidence at each contact. Reserve release remains held
   when the actual producer account is unbound. Current Claude producers need a

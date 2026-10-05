@@ -179,10 +179,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Whole-project static checks run once in the required minimum-Node job.
+      # Every platform still builds and runs its complete assigned tests.
       - name: Typecheck
+        if: matrix.label == 'ubuntu, authority 3/3'
         run: npm run typecheck
 
       - name: Lint
+        if: matrix.label == 'ubuntu, authority 3/3'
         run: npm run lint
 
       - name: Build

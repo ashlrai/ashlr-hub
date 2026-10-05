@@ -178,22 +178,39 @@ describe('resident idle observation', () => {
         session: { status: 'exit', statusDetail: null, acusConsumed: 3, prUrls: [], readAt: now.toISOString() } }));
     }
     const gh = vi.fn(async () => ({ ok: true as const, stdout: '[]', stderr: '' }));
-    setDevinApiDepsForTest({ service: { keyStore: { run: keys.run, platform: 'darwin' }, fetch: provider.fetch,
+    const consumptionPath = `/v3/organizations/${FAKE_ORG}/consumption/daily`;
+    // The owned metadata scheduler runs independently of session observation.
+    // Route its valid report separately so it cannot consume a session fixture.
+    const fetch: typeof provider.fetch = async (url, init) => {
+      if (new URL(url).pathname === consumptionPath) {
+        provider.forced.unshift({ status: 200, body: { total_acus: 0, consumption_by_date: [] } });
+      }
+      return provider.fetch(url, init);
+    };
+    setDevinApiDepsForTest({ service: { keyStore: { run: keys.run, platform: 'darwin' }, fetch,
       sleep: async () => undefined, now: () => new Date(), config: () => ({ enabled: true }), gh } });
     const observation = { session_id: 'devin-exposure', url: task().sessionUrl, status: 'suspended',
       status_detail: 'inactivity', acus_consumed: 2, pull_requests: [], tags: [] };
-    provider.forced.push({ status: 200, body: observation }, { status: 200, body: observation });
+    provider.sessions.set('devin-exposure', observation);
     expect(startDevinScheduler({})).toBe(true);
     await vi.advanceTimersByTimeAsync(DEVIN_REFRESH_EVERY_MS);
     expect(provider.requests.map(request => [request.method, request.path])).toEqual([
+      ['GET', consumptionPath],
       ['GET', `/v3/organizations/${FAKE_ORG}/sessions/devin-exposure`],
     ]);
     expect(readDevinTask(id)).toMatchObject({ state: 'closed', session: { status: 'suspended', acusConsumed: 2 } });
     expect(devinBudgetView([readDevinTask(id)!], budget(), new Date())).toMatchObject({ reportedAcuUsed: 2, unconfirmedAcuExposure: 8 });
     await vi.advanceTimersByTimeAsync(DEVIN_IDLE_REFRESH_EVERY_MS - DEVIN_REFRESH_EVERY_MS);
-    expect(provider.requests).toHaveLength(1);
+    expect(provider.requests.filter(request => request.path.includes('/sessions/'))).toHaveLength(1);
+    expect(provider.requests.filter(request => request.path === consumptionPath)).toHaveLength(3);
     await vi.advanceTimersByTimeAsync(DEVIN_REFRESH_EVERY_MS);
-    expect(provider.requests).toHaveLength(2);
+    expect(provider.requests.map(request => [request.method, request.path])).toEqual([
+      ['GET', consumptionPath],
+      ['GET', `/v3/organizations/${FAKE_ORG}/sessions/devin-exposure`],
+      ['GET', consumptionPath],
+      ['GET', consumptionPath],
+      ['GET', `/v3/organizations/${FAKE_ORG}/sessions/devin-exposure`],
+    ]);
     expect(provider.requests.every(request => request.method === 'GET')).toBe(true);
     expect(gh).not.toHaveBeenCalled();
   });

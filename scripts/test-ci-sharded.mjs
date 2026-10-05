@@ -72,7 +72,10 @@ function runShard(shard) { return new Promise((resolve) => {
   child.once('exit', (code, signal) => finish(code ?? 1, signal ? `exited via ${signal}` : `exited ${code}`));
 }); }
 
-const pending = [...shards];
+// The completed 3.23 release measured shard 3 at 2422s, 2 at 2142s and
+// 1 at 1828s. Start the longest partitions first to reduce the serial tail
+// while retaining the same exact membership and two single-worker homes.
+const pending = [...shards].reverse();
 const codes = [];
 async function runQueue() {
   while (pending.length && !failure) {

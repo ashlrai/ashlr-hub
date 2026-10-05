@@ -43,6 +43,9 @@ describe('local exhaustive prepublish shards', () => {
       shard?: string; file?: string; filter?: string; excludes: string[]; workers: string; parallelism: string[]; bail: string; home: string; tmp: string;
     });
     expect(rows.filter((row) => row.shard).map((row) => row.shard).sort()).toEqual(['--shard=1/3', '--shard=2/3', '--shard=3/3']);
+    // Observe actual coordinator launches, independent of child log ordering.
+    // All partitions still run once; the measured longest pair gets both slots.
+    expect([...result.stderr.matchAll(/started (\d)\/3/g)].map(match => Number(match[1]))).toEqual([3, 2, 1]);
     expect(rows).toHaveLength(12);
     const isolatedFiles = [
       'test/m342.dispatch-production-ledger.test.ts',

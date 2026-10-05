@@ -77,7 +77,7 @@ export interface LeaderOutcomeEvidence {
   limitExceeded: boolean;
   outcomes: Array<{ outcomeId: string; scopeRevision: number; scopeDigest: string; planRevision: number;
     graphDigest: string | null; paused: boolean; desiredOutcome: string; acceptance: string[];
-    targets: Array<{ alias: string; label: string }>; nodes: Array<{ key: string; kind: string; title: string;
+    targets: Array<{ alias: string; label: string }>; nodes: Array<{ nodeId?: string; key: string; kind: string; title: string;
       state: string; attemptId: string | null; terminalRunId: string | null; dependsOn: string[]; acceptance: string[] }> }>;
 }
 export function buildLeaderOutcomeEvidence(read: OutcomeInventoryRead): LeaderOutcomeEvidence {
@@ -89,11 +89,58 @@ export function buildLeaderOutcomeEvidence(read: OutcomeInventoryRead): LeaderOu
       desiredOutcome: cleanModelText(state.scope.desiredOutcome, Number.POSITIVE_INFINITY) ?? '',
       acceptance: state.scope.acceptance.map(text => cleanModelText(text, Number.POSITIVE_INFINITY) ?? ''),
       targets: state.scope.targetRepos.map((repo, index) => ({ alias: `target-${index + 1}`, label: cleanModelText(basename(repo), 200) ?? 'target' })),
-      nodes: state.activeNodeIds.map(id => { const node = state.nodes[id]!; return { key: node.basis.definition.key,
+      nodes: state.activeNodeIds.map(id => { const node = state.nodes[id]!; return { nodeId: node.id, key: node.basis.definition.key,
         kind: node.basis.definition.kind, title: cleanModelText(node.basis.definition.title, 200) ?? '',
         state: node.completion ? 'complete' : node.humanApproval ? 'approved' : node.attempts.at(-1)?.state ?? 'pending',
         attemptId: node.attempts.at(-1)?.id ?? null, terminalRunId: node.attempts.at(-1)?.terminalRunId ?? null,
         dependsOn: node.basis.definition.dependsOn, acceptance: node.basis.definition.acceptance.map(text => cleanModelText(text, 500) ?? '') }; }) })) };
+}
+/** Retry identity uses saved scope and immutable failed attempts, never plan timestamps/revision churn. */
+export function outcomePlanningBasis(evidence: LeaderOutcomeEvidence | undefined): string | null {
+  if (!evidence?.complete || !['healthy', 'missing'].includes(evidence.sourceState)) return null;
+  const pending = evidence.outcomes.filter(outcome => !outcome.paused && (outcome.graphDigest === null ||
+    outcome.nodes.some(node => node.state === 'failed' || node.state === 'aborted')));
+  if (pending.length === 0) return null;
+  return outcomeDigest(pending.map(outcome => ({ outcomeId: outcome.outcomeId, scopeRevision: outcome.scopeRevision,
+    scopeDigest: outcome.scopeDigest, unplanned: outcome.graphDigest === null,
+    failed: outcome.nodes.filter(node => node.state === 'failed' || node.state === 'aborted').map(node => ({
+      nodeId: node.nodeId ?? null, key: node.key, state: node.state, attemptId: node.attemptId, terminalRunId: node.terminalRunId,
+    })).sort((a, b) => a.key.localeCompare(b.key)) })).sort((a, b) => a.outcomeId.localeCompare(b.outcomeId)));
+}
+
+/** A memo/action label is not progress: re-read the owned graph and require new executable work. */
+export function outcomePlanningProgress(before: LeaderOutcomeEvidence | undefined, after: LeaderOutcomeEvidence | undefined):
+  'progress' | 'stale' | 'unknown' | 'unchanged' {
+  if (!before?.complete || !after?.complete || !['healthy', 'missing'].includes(before.sourceState) || !['healthy', 'missing'].includes(after.sourceState)) return 'unknown';
+  let currentNeeds = false;
+  for (const previous of before.outcomes) {
+    if (previous.paused || previous.graphDigest !== null && !previous.nodes.some(node => node.state === 'failed' || node.state === 'aborted')) continue;
+    const current = after.outcomes.find(outcome => outcome.outcomeId === previous.outcomeId);
+    if (!current || current.paused || current.scopeRevision !== previous.scopeRevision || current.scopeDigest !== previous.scopeDigest) continue;
+    currentNeeds = true;
+    const previousIds = new Set(previous.nodes.map(node => node.nodeId).filter((id): id is string => typeof id === 'string'));
+    if (previous.nodes.some(node => typeof node.nodeId !== 'string')) return 'unknown';
+    const feasibility = new Map<string, boolean>();
+    const feasible = (key: string, seen: Set<string>): boolean => {
+      if (seen.has(key)) return false;
+      const cached = feasibility.get(key);
+      if (cached !== undefined) return cached;
+      const node = current.nodes.find(item => item.key === key);
+      if (!node || ['failed', 'aborted'].includes(node.state)) { feasibility.set(key, false); return false; }
+      if (node.kind === 'human-gate') {
+        const approved = node.state === 'approved' || node.state === 'complete';
+        feasibility.set(key, approved); return approved;
+      }
+      const result = node.kind === 'work' && node.dependsOn.every(dependency => feasible(dependency, new Set([...seen, key])));
+      // Successful shared DAG paths are context-independent. A dependency
+      // failure may originate from this traversal's cycle guard: do not cache it.
+      if (result) feasibility.set(key, true);
+      return result;
+    };
+    if (current.graphDigest !== null && current.nodes.some(node => node.kind === 'work' && typeof node.nodeId === 'string' &&
+      !previousIds.has(node.nodeId) && ['pending', 'claimed', 'running', 'proposed'].includes(node.state) && feasible(node.key, new Set()))) return 'progress';
+  }
+  return currentNeeds ? 'unchanged' : 'stale';
 }
 export type LeaderOutcomeApplyResult = { ok: true; applied: LeaderOutcomePlanIdentity } | { ok: false; reason: string };
 export interface LeaderOutcomesPort {
