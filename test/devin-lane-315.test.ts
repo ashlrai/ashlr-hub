@@ -18,6 +18,7 @@ import { hasDevinKey, readDevinKey, removeDevinKey, storeDevinKey } from '../src
 import {
   connectDevin,
   devinFleetVerdict,
+  devinOverview,
   devinStatus,
   launchDevinTask,
   messageDevinTask,
@@ -274,6 +275,37 @@ describe('status and readiness lines', () => {
     expect(status).toMatchObject({ state: 'ready', connected: true, enabled: true,
       chat: { ready: false, tone: 'warn', word: 'New chats paused', detail: view.canLaunch.reason, fix: null } });
     expect(status.chatLine).toBe(`Chat: new sessions paused — ${view.canLaunch.reason}`);
+    expect(api.requests).toEqual([]);
+    expect(readDevinTask(unknown.id)).toEqual(unknown);
+  });
+
+  it.each([FAKE_ORG, 'org-previous'])('keeps older unresolved exposure in readiness beyond the newest 500 stored rows (%s)', async launchOrgId => {
+    await connect();
+    const now = new Date('2026-10-05T12:00:00Z');
+    const older = '2026-10-03T12:00:00.000Z';
+    const unknown = task({ state: 'failed', failure: 'network', sessionId: null, sessionUrl: null, session: null,
+      maxAcu: 40, createdAt: older, launchedAt: older, updatedAt: older, launchOrgId });
+    writeDevinTask(unknown);
+    for (let index = 0; index < 500; index++) {
+      const at = new Date(Date.parse('2026-10-04T12:00:00Z') + index * 1000).toISOString();
+      writeDevinTask(task({ state: 'expired', createdAt: at, launchedAt: at, updatedAt: at, launchOrgId: FAKE_ORG,
+        session: { status: 'exit', statusDetail: null, acusConsumed: 0, prUrls: [], readAt: at } }));
+    }
+    expect(listDevinTasks()).toHaveLength(500);
+    expect(listDevinTasks().some(row => row.id === unknown.id)).toBe(false);
+    const all = listDevinTasks(Number.MAX_SAFE_INTEGER);
+    expect(all).toHaveLength(501);
+    const expected = devinBudgetView(all, readDevinBudget(), now);
+    expect(expected).toMatchObject({ reportedAcuUsed: 0, unconfirmedAcuExposure: 40, acuToday: 40,
+      sessionsToday: 0, running: 0, canLaunch: { ok: false, reason: expect.stringMatching(/daily cap/) } });
+    const serviceDeps = deps({ now: () => now, cliProbe: async () => ({ state: 'missing' }) });
+    const status = await devinStatus(serviceDeps);
+    const overview = await devinOverview(serviceDeps);
+    expect(status).toMatchObject({ state: 'ready', connected: true,
+      chat: { ready: false, word: 'New chats paused', detail: expected.canLaunch.reason } });
+    expect(overview.status.chat).toEqual(status.chat);
+    expect(overview.budget).toEqual(expected);
+    expect(overview.tasks).toEqual(all.slice(0, 100));
     expect(api.requests).toEqual([]);
     expect(readDevinTask(unknown.id)).toEqual(unknown);
   });

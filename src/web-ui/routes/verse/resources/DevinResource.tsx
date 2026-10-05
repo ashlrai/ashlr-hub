@@ -183,8 +183,13 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
           Cloud account: {identity ? <>{identity.principal === 'service_user' ? 'Service account' : 'Personal access token'} · captured <time dateTime={identity.observedAt}>{new Date(identity.observedAt).toLocaleString()}</time></> : 'not reported'}
         </p>
         <p className={styles.fine}>
-          {identity ? 'Cached Devin API /self observation. ' : ''}Max weekly allowance is not reported; subscription-only spending is unverified.
+          {identity ? 'Cached Devin API /self observation.' : 'Current account identity is unconfirmed.'}
         </p>
+      </section> : null}
+      {status.connected ? <section aria-label="Devin subscription and purchased credits">
+        <p className={styles.creditsHead}><span>Weekly subscription allowance</span><span className={styles.pill} data-tone="neutral">not reported</span></p>
+        <p className={styles.creditsHead}><span>On-demand credits</span><span className={styles.pill} data-tone="neutral">not reported</span></p>
+        <p className={styles.fine}>Subscription-only spending is unverified. Check Devin for your allowance, reset and credit balance.</p>
       </section> : null}
       {status.connected ? <section aria-label="Devin organization consumption">
         <p className={styles.creditsHead}><span className={styles.creditsAmount}>{consumption?.value ?? 'Consumption not reported by this server'}</span>
@@ -247,11 +252,10 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
         </p>
       ) : null}
       {overview.cli && overview.cli.state !== 'missing' ? (
-        // The CLI reports no ACU / usage numbers, so its chats are not in the
-        // budget above — say that instead of implying they are counted.
+        // CLI session telemetry is not imported into this cloud-session budget.
         <p className={styles.fine} data-devin-cli={overview.cli.state}>
-          Devin (CLI){overview.cli.state === 'logged-out' ? <> — logged out; run <code>devin auth login</code></> : null}: usage not reported by the CLI,
-          so CLI chats are not counted here.
+          Devin (CLI){overview.cli.state === 'logged-out' ? <> — logged out; run <code>devin auth login</code></> : null}: Ashlr has not imported CLI session usage.
+          The tracked ACU budget covers cloud sessions.
         </p>
       ) : null}
       <ReadinessLines row={devinReadinessRow(status)} />

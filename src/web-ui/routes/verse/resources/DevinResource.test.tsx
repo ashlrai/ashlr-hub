@@ -132,7 +132,12 @@ describe('DevinResource', () => {
     mount();
     const section = await screen.findByRole('region', { name: 'Devin cached account observation' });
     expect(within(section).getByText('Cloud account: not reported')).toBeInTheDocument();
-    expect(within(section).getByText('Max weekly allowance is not reported; subscription-only spending is unverified.')).toBeInTheDocument();
+    const funding = screen.getByRole('region', { name: 'Devin subscription and purchased credits' });
+    expect(within(funding).getByText('Weekly subscription allowance')).toBeInTheDocument();
+    expect(within(funding).getByText('On-demand credits')).toBeInTheDocument();
+    expect(within(funding).getAllByText('not reported')).toHaveLength(2);
+    expect(funding.textContent).not.toMatch(/0%|\$0|ACUs|resets in/);
+    expect(within(funding).queryByRole('img')).toBeNull();
     expect(screen.getByText('Connected')).toBeInTheDocument();
     expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual(['/api/verse/devin']);
     expect(posts).toHaveLength(0);
@@ -148,7 +153,7 @@ describe('DevinResource', () => {
     expect(within(section).getByText(new RegExp(`Cloud account: ${label} · captured`))).toBeInTheDocument();
     expect(section.querySelector('time')?.getAttribute('datetime')).toBe('2026-01-01T00:00:00.000Z');
     expect(section.textContent).toContain('Cached Devin API /self observation.');
-    expect(section.textContent).toContain('Max weekly allowance is not reported; subscription-only spending is unverified.');
+    expect(screen.getByRole('region', { name: 'Devin subscription and purchased credits' }).textContent).toContain('Subscription-only spending is unverified.');
     expect(section.textContent).not.toMatch(/live|fresh|0%|org-x|Ashlr Verse/);
     expect(screen.getByText('3.125 ACUs consumed')).toBeInTheDocument();
     expect(screen.getByText('tracked budget')).toBeInTheDocument();
@@ -235,7 +240,20 @@ describe('DevinResource', () => {
     const measuredZero = consumption({ report: { totalAcus: 0, days: [{ date: 123, acus: 0,
       products: { devin: 0, cascade: 0, terminal: 0, automation: null, review: null } }] } });
     expect(devinConsumptionEvidence(measuredZero)?.value).toBe('0 ACUs consumed');
-    expect(devinConsumptionEvidence(consumption({ report: { totalAcus: 3.125, days: [] } }))?.value).toBe('No consumption reported');
+    expect(devinConsumptionEvidence(consumption({ report: { totalAcus: 3.125, days: [] } }))?.value).toBe('3.125 ACUs consumed');
+  });
+
+  it.each([false, true])('retains a positive fractional aggregate without daily buckets (stale: %s)', async stale => {
+    overview = { ...(overview as Record<string, unknown>), consumption: consumption({ stale, report: { totalAcus: 0.03125, days: [] } }) };
+    mount();
+    const section = await screen.findByRole('region', { name: 'Devin organization consumption' });
+    expect(within(section).getByText(`0.03125 ACUs consumed${stale ? ' · last' : ''}`)).toBeInTheDocument();
+    expect(within(section).queryByText('No consumption reported')).toBeNull();
+    expect(within(section).getByText('Daily consumption (0 reporting buckets)')).toBeInTheDocument();
+    expect(within(section).queryByRole('list')).toBeNull();
+    expect(section.textContent).not.toMatch(/\$|% left|resets in/);
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual(['/api/verse/devin']);
+    expect(posts).toHaveLength(0);
   });
 
   it('retains a permission-qualified last reading without representing current capacity', async () => {
@@ -285,11 +303,13 @@ describe('DevinResource', () => {
     expect(screen.queryByText(/ACUs.*available/)).toBeNull();
   });
 
-  it('the Devin CLI: says its usage is not reported (not counted) instead of implying it is — even with no API key (3.15)', async () => {
+  it('the Devin CLI: distinguishes telemetry not imported by Ashlr from the cloud budget, even with no API key', async () => {
     overview = { generatedAt: 'x', status: status(), budget: budget(), tasks: [], cli: { state: 'ready', usage: 'not-reported' } };
     const { unmount } = mount();
-    const line = await screen.findByText(/usage not reported by the CLI/);
+    const line = await screen.findByText(/Ashlr has not imported CLI session usage/);
     expect(line.closest('[data-devin-cli]')!.getAttribute('data-devin-cli')).toBe('ready');
+    expect(line.textContent).toContain('The tracked ACU budget covers cloud sessions.');
+    expect(line.textContent).not.toContain('usage not reported by the CLI');
     unmount();
     evictAll();
 
@@ -298,7 +318,7 @@ describe('DevinResource', () => {
       status: status({ enabled: false, connected: false, state: 'disabled', reason: 'Not set up.' }),
     };
     mount();
-    const loggedOut = await screen.findByText(/usage not reported by the CLI/);
+    const loggedOut = await screen.findByText(/Ashlr has not imported CLI session usage/);
     expect(loggedOut.textContent).toMatch(/logged out; run devin auth login/);
     expect(screen.queryByRole('meter')).toBeNull();
   });
@@ -326,7 +346,7 @@ describe('DevinResource', () => {
 
     overview = { generatedAt: 'x', status: status(), budget: budget(), tasks: [], cli: { state: 'ready', usage: 'not-reported' }, models: { freeFamilies: 'SWE-2' } };
     mount();
-    await screen.findByText(/usage not reported by the CLI/);
+    await screen.findByText(/Ashlr has not imported CLI session usage/);
     expect(screen.queryByText(/^Models:/)).toBeNull();
   });
 
@@ -334,7 +354,7 @@ describe('DevinResource', () => {
     overview = { generatedAt: 'x', status: status(), budget: budget(), tasks: [], cli: { state: 'missing', usage: 'not-reported' } };
     mount();
     await screen.findByText('34 ACUs of 50 ACUs left');
-    expect(screen.queryByText(/usage not reported by the CLI/)).toBeNull();
+    expect(screen.queryByText(/Ashlr has not imported CLI session usage/)).toBeNull();
   });
 
   it('paused: the pill and the budget\'s own reason', async () => {
