@@ -1,4 +1,3 @@
-import { runClaudeNativeAdapter } from '../sandbox/claude-native-adapter.js';
 import { assertSelectedOutcomeAdmission, selectedOutcomeAdmissionCurrent, SelectedOutcomeAdmissionRefusal } from './outcome-admission.js';
 /**
  * sandboxed-engine.ts — M45: run an external agent CLI (Claude Code / Codex)
@@ -2217,11 +2216,14 @@ export async function runEngineSandboxed(
     if (finished.violations.length) await recordAutonomousViolations({engine,sourceRepo:opts.sourceRepo,runId:id,operations:finished.violations});
     if (finished.violationsKnown !== true) await recordSandboxEvidenceUnknown({engine,sourceRepo:opts.sourceRepo,runId:id,evidence:finished.kernelEvidence});
   };
-  const runSelectedClaude = (prompt: string, timeoutMs: number, onEvent?: (event: import('./engines.js').RunEvent) => void): Promise<import('./engines.js').SpawnEngineResult> =>
-    runClaudeNativeAdapter({cfg,runId:id,seatId:opts.seatId!,model:model!,prompt,worktree:sb.worktreePath,signal:opts.signal!,timeoutMs,onEvent,
+  const runSelectedClaude = async (prompt: string, timeoutMs: number, onEvent?: (event: import('./engines.js').RunEvent) => void): Promise<import('./engines.js').SpawnEngineResult> => {
+    // Keep account admission/runtime modules outside ordinary worker import evaluation.
+    const { runClaudeNativeAdapter } = await import('../sandbox/claude-native-adapter.js');
+    return runClaudeNativeAdapter({cfg,runId:id,seatId:opts.seatId!,model:model!,prompt,worktree:sb.worktreePath,signal:opts.signal!,timeoutMs,onEvent,
       admission:() => { try { return opts.selectedClaudeAdmission?.() === true && (!opts.selectedOutcomeAdmission || opts.selectedOutcomeAdmission()); } catch { return false; } },
       recordEvidence:claudeEvidence,retainCleanupFailure:() => { sandboxRetention=retainedSandboxEvidence(sb); },
       ...(claudeEffort ? {effort:claudeEffort} : {})}).then(result => { if(result.captureDenied)claudeCaptureDenied=true;return result; });
+  };
   let autonomousSpawn: AutonomousSpawn | null = null;
   let autonomousFinished = false;
   let selectedGrokCommand: { launcher: EngineCommand; direct: NonNullable<ReturnType<typeof grokCliDirectCommand>> } | null = null;
