@@ -1335,3 +1335,68 @@ describe('reset-aware selected batch — real routing seam with injected advice'
     expect(advice).not.toHaveBeenCalled();expect(hooks.route(item(),CFG).hold).toBeNull();
   });
 });
+
+describe('task-scoped reset reserve reaches actual dispatch admission',()=>{
+  function resetHarness() {
+    let clock=NOW; let model='model-a';
+    let budget={...defaultBudgetPolicy(),resetSpending:{enabled:true},seats:{claude:{seatId:'claude',enabled:true,reservePercent:40,maxSessionWindowPercent:70}}};
+    const hint='a'.repeat(64);
+    const capacity={...claudeSeat(),accountHint:hint,subscriptionOnlyBoundary:{source:'claude-native-extra-usage' as const,accountHint:hint,observedAt:NOW_ISO,expiresAt:new Date(NOW+60000).toISOString(),creditsEnabled:false as const}};
+    capacity.windows[1]={...capacity.windows[1]!,usedPercent:65,resetsAt:new Date(NOW+45000).toISOString(),
+      resetProvenance:{kind:'weekly-deadline',at:new Date(NOW+45000).toISOString(),description:null,source:'claude-native-usage-report',plan:'max'}};
+    policy={...policy!,engines:['claude-cli']};
+    const nativeGate=vi.fn<LiveHooksDeps['subscriptionAllows']>(()=>({allowed:true,reason:'fixture current native throttle'}));
+    const advice=vi.fn(async()=>null);
+    const hooks=createLiveTickHooks({deps:{...h.deps,now:()=>clock,loadBudget:()=>budget,
+      capacitySnapshot:()=>({v:1,publishedAt:NOW_ISO,seats:[capacity]}),
+      legacyRoute:()=>({backend:'claude',tier:'frontier',model,reason:'explicit fixture model'}),
+      subscriptionAllows:nativeGate,resourceAdvice:advice,
+      workHistory:async()=>[{id:'completed',engine:'claude',model:'model-a',seatId:null,taskKind:'todo',completed:true,durationMs:30000,tokens:1000}],
+    }});
+    return {hooks,capacity,nativeGate,advice,budget,setClock:(value:number)=>{clock=value;},setModel:(value:string)=>{model=value;},setOff:()=>{budget={...budget,resetSpending:{enabled:false}};}};
+  }
+  async function prepare(r:ReturnType<typeof resetHarness>) {
+    r.hooks.effectiveConfig(CFG);await r.hooks.beforeTick(hookCtx);
+    await r.hooks.prepareDispatchPlan!([item()],CFG);r.hooks.beginDispatchPlan(['item-1']);return r.hooks.route(item(),CFG);
+  }
+  it('admits eligible work above the saved reserve and passes the derived policy through the native gate',async()=>{
+    const r=resetHarness();expect(await prepare(r)).toMatchObject({backend:'claude',hold:null,model:'model-a'});
+    expect(r.hooks.seatAllows('claude',{maxPercent:90,itemId:'item-1',model:'model-a'}).allowed).toBe(true);
+    expect(r.nativeGate).toHaveBeenLastCalledWith('claude',expect.objectContaining({budget:expect.objectContaining({seats:expect.objectContaining({claude:expect.objectContaining({reservePercent:20})})})}));
+    expect(r.budget.seats.claude.reservePercent).toBe(40);
+    expect(r.hooks.nextResetWake?.(NOW)).toBe(NOW+15000);
+  });
+  it.each(['off','account','credits','expired','reset','model','grant'] as const)('revalidates %s before every subsequent provider contact',async(kind)=>{
+    const r=resetHarness();expect((await prepare(r)).hold).toBeNull();
+    if(kind==='off')r.setOff();
+    if(kind==='account')r.capacity.accountHint='b'.repeat(64);
+    if(kind==='credits')delete (r.capacity as SeatCapacity).subscriptionOnlyBoundary;
+    if(kind==='expired')r.setClock(NOW+60000);
+    if(kind==='reset')r.setClock(NOW+45001);
+    if(kind==='model')r.setModel('model-b');
+    if(kind==='grant')policy=null;
+    expect(r.hooks.seatAllows('claude',{maxPercent:90,itemId:'item-1',model:'model-a'}).allowed).toBe(false);
+    expect(r.nativeGate).not.toHaveBeenCalled();
+    expect(r.hooks.nextResetWake?.(kind==='expired'?NOW+60000:kind==='reset'?NOW+45001:NOW)).toBeNull();
+  });
+  it('keeps the signed floor and every other native account binding',async()=>{
+    const r=resetHarness();policy!.spend.seats.claude!.reserveFloorPercent=40;
+    expect((await prepare(r)).hold).not.toBeNull();
+    expect(r.nativeGate).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('independent local task admission',()=>{
+  it('keeps local task contacts available without querying unavailable paid telemetry',async()=>{
+    const capacity=vi.fn<LiveHooksDeps['capacitySnapshot']>(()=>null);
+    const hooks=createLiveTickHooks({deps:{...h.deps,capacitySnapshot:capacity,workHistory:async()=>[]}});
+    hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);
+    await hooks.prepareDispatchPlan!([item()],CFG);hooks.beginDispatchPlan(['item-1']);
+    const route=hooks.route(item(),CFG);expect(route.hold).toBeNull();
+    expect(fleetLaneOf(route.backend,CFG)).toBe('local');
+    capacity.mockClear();
+    expect(hooks.seatAllows(route.backend,{maxPercent:90,itemId:'item-1',model:route.model??null}).allowed).toBe(true);
+    expect(capacity).not.toHaveBeenCalled();
+  });
+});

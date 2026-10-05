@@ -1,7 +1,7 @@
 /** Task-scoped allowance policy. It never changes a grant, provider billing or saved reserve. */
 import { standingSeatFor } from '../authority/effective-config.js';
 import type { EffectivePolicy } from '../authority/types.js';
-import { assessSeat, HEADROOM_READING_MAX_AGE_MS, type SeatCapacity } from './headroom.js';
+import { assessSeat, type SeatCapacity } from './headroom.js';
 import { effectiveSeatPolicy } from './policy.js';
 import { assessResetOpportunity, forecastFit, hasResetDeadline } from './reset-pressure.js';
 import type { BudgetPolicy } from './types.js';
@@ -41,7 +41,7 @@ export function projectResetSpendingStatus(policy: BudgetPolicy, seats: readonly
       subscriptionOnly: subscriptionOnlyCurrent(seat, nowMs) ? 'verified' : 'unknown',
     };
     accounts[seat.seatId] = status;
-    if (floor !== null && floor >= saved.reservePercent) status.constraints.push(`Signed reserve minimum is ${floor}%.`);
+    if (floor !== null && floor > 0 && floor >= saved.reservePercent) status.constraints.push(`Signed reserve minimum is ${floor}%.`);
     if (granted && !granted.roles.includes('producer')) status.constraints.push('This account has no signed coding-producer role.');
     if (saved.maxSessionWindowPercent !== undefined) status.constraints.push(`Short-window usage ceiling is ${saved.maxSessionWindowPercent}%.`);
     const maxPercent = options.maxPercent ?? 90;
@@ -50,9 +50,16 @@ export function projectResetSpendingStatus(policy: BudgetPolicy, seats: readonly
     const finish = (state: ResetSpendingAccountStatus['state'], reason: string): void => { status.state = state; status.reason = reason; };
     if (!resetPriorityEnabled(policy, seat.seatId)) { finish('disabled', 'Allowance before resets is off; new work uses the saved reserve.'); continue; }
     if (!status.enabled) { finish('legacy-priority', 'Existing reset-aware routing remains on; reserve shrinking is not enrolled.'); continue; }
+    if (seat.free || seat.costBasis === 'credits' || seat.costBasis === 'per-token') {
+      status.subscriptionOnly = 'unsupported'; status.constraints = [];
+      finish('unqualified', 'No expiring subscription allowance; ordinary work remains available.'); continue;
+    }
     if (authorityState !== 'active' || !standing) { finish('authority-paused', 'Configured on; autonomous authority is not active.'); continue; }
     if (!saved.enabled || !granted?.enabled) { finish('account-disabled', 'This account is disabled in the saved policy or signed grant.'); continue; }
     if (!granted.roles.includes('producer')) { finish('producer-not-granted', 'The signed grant does not give this account a coding-producer role.'); continue; }
+    if (saved.reservePercent === 0 && floor === 0) {
+      finish('ordinary', 'There is no saved reserve to release; ordinary work remains available.'); continue;
+    }
     if (floor === null || floor >= saved.reservePercent) { finish('signed-floor', 'The signed minimum holds the reserve; review the existing grant to allow a lower minimum.'); continue; }
     const probePolicy = { ...saved, reservePercent: Math.max(0, floor) };
     const opportunity = assessResetOpportunity(seat, probePolicy, nowMs, forecast ?? null);
@@ -63,7 +70,7 @@ export function projectResetSpendingStatus(policy: BudgetPolicy, seats: readonly
     if (status.subscriptionOnly !== 'verified') { finish('overage-unverified', 'Reserve shrinking is held until this account has a verified subscription-only billing boundary.'); continue; }
     const duration = forecast?.durationMs;
     const recorded = forecast?.recordedAt ? Date.parse(forecast.recordedAt) : NaN;
-    if (!forecast || !duration || !Number.isFinite(recorded) || recorded > nowMs || nowMs - recorded > HEADROOM_READING_MAX_AGE_MS ||
+    if (!forecast || !duration || !Number.isFinite(recorded) || recorded > nowMs ||
       !forecast.cohort.model || !Number.isFinite(duration.p75) || duration.p75 <= 0 || duration.samples < 1 ||
       !(forecast.cohort.engine === seat.engine || seat.engine === 'grok' && forecast.cohort.engine === 'grok-cli') ||
       forecast.cohort.seatId !== null && forecast.cohort.seatId !== seat.seatId) {

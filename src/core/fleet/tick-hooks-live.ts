@@ -66,6 +66,9 @@ import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { buildSchedulingView, readWorkHistory, taskForecast } from '../routing/scheduling.js';
 import { writeRecordedScheduling } from '../routing/scheduling-cache.js';
+import { taskResetBudget, resetPriorityEnabled, nextResetSpendingWake } from '../routing/reset-spending.js';
+import type { TaskWorkForecast } from '../routing/scheduling-types.js';
+import type { ResetSpendingStatus } from '../routing/reset-spending-types.js';
 import { hasResetDeadline, opportunityPriority } from '../routing/reset-pressure.js';
 import type { ResourceChoiceCandidate, AccountSchedulingView } from '../routing/scheduling-types.js';
 import type { WorkHistorySample } from '../routing/work-estimates.js';
@@ -73,7 +76,7 @@ import { join, resolve } from 'node:path';
 
 import type { AshlrConfig, EngineId, EngineTier, WorkItem } from '../types.js';
 import type { DaemonActivationCapability } from '../daemon/activation-permit.js';
-import { loadConfigReadOnlyStrict } from '../config.js';
+import { resolveSubscriptionMaxPercent, loadConfigReadOnlyStrict } from '../config.js';
 import { resolveLeaderPreferences, unavailableLeaderPreferences, type ResolvedLeaderPreferences } from '../vision/leader-preferences.js';
 import type { MintStandingTickResult, StandingSession } from '../authority/capability.js';
 import type {
@@ -138,6 +141,7 @@ import {
   anyFanoutCandidate,
   clampLeaderDirectives,
   countOf,
+  executionForSeat,
   fleetLaneOf,
   laneOfSeat,
   laneStates,
@@ -280,7 +284,7 @@ export interface LiveHooksDeps {
   recordReserveBreaches(input: { capacity: unknown; policy: EffectivePolicy; now?: Date; usedSeatIds?: readonly string[] }): Promise<number>;
   installed(engine: EngineId, cfg: AshlrConfig): boolean;
   tierOf(engine: EngineId, cfg: AshlrConfig): EngineTier | null;
-  subscriptionAllows(engine: EngineId, opts: { maxPercent: number; autonomous: true }): SubscriptionAllowResult;
+  subscriptionAllows(engine: EngineId, opts: { maxPercent: number; autonomous: true; budget?: BudgetPolicy }): SubscriptionAllowResult;
   isSubscriptionEngine(engine: EngineId): boolean;
   legacyRoute(item: WorkItem, cfg: AshlrConfig): RouteDecision;
   localFleetEngine(cfg: AshlrConfig): EngineId | null;
@@ -766,6 +770,10 @@ interface TickContext {
   meteredUsdExhausted: boolean;
   dispatchSources: string | null;
   itemScheduling: Map<string,Record<string,AccountSchedulingView>>;
+  itemForecasts: Map<string,Record<string,TaskWorkForecast>>;
+  forecastItems: Map<string,WorkItem>;
+  forecastAccountHints: Map<string,Record<string,string | null>>;
+  itemResetStatus: Map<string,ResetSpendingStatus>;
   advisedPair: ResourceChoiceCandidate | null;
   nowMs: number;
   cfg: AshlrConfig;
@@ -1056,6 +1064,24 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
   const creditedVerdicts = new Set<string>();
   /** True once this KILL episode's armed merges were revoked cleanly; reset when KILL clears. */
   let killMergesRevoked = false;
+
+  const budgetForItem = (current: TickContext, itemId: string | undefined, maxPercent: number): BudgetPolicy => {
+    if (!itemId) return current.budget;
+    const recorded = current.itemForecasts.get(itemId) ?? {};
+    const hints = current.forecastAccountHints.get(itemId) ?? {};
+    const task = current.forecastItems.get(itemId);
+    const forecasts = Object.fromEntries(Object.entries(recorded).filter(([seatId,forecast]) => {
+      const seat = current.capacity.find(s => s.seatId === seatId);
+      if (!seat || !task || !Object.hasOwn(hints,seatId) || (seat.accountHint ?? null) !== hints[seatId]) return false;
+      try {
+        const actual = executionForSeat(task,deps.legacyRoute(task,current.cfg),seat,current.router);
+        return actual?.backend === forecast.cohort.engine && (actual.model ?? null) === forecast.cohort.model;
+      } catch { return false; }
+    }));
+    const result = taskResetBudget(current.budget, current.capacity, current.policy, current.nowMs, forecasts, {maxPercent});
+    current.itemResetStatus.set(itemId, result.status);
+    return result.budget;
+  };
 
   /**
    * U3 (INT2 left this to U5): a tick that observes KILL revokes every ARMED
@@ -1817,7 +1843,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       ctx = {
         meteredUsdExhausted: hookCtx.meteredUsdExhausted === true,
         dispatchSources: dispatchBudgetSource && dispatchConfigSource ? createHash('sha256').update(JSON.stringify({budget:dispatchBudgetSource,directives,config:dispatchConfigSource})).digest('hex') : null,
-        itemScheduling: new Map(), advisedPair: null,
+        itemScheduling: new Map(), forecastItems: new Map(), itemForecasts: new Map(), forecastAccountHints: new Map(), itemResetStatus: new Map(), advisedPair: null,
         nowMs,
         cfg,
         policy,
@@ -1944,19 +1970,28 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       if (!refreshCurrent()) { await recordStopped(); return; }
       const candidates: ResourceChoiceCandidate[] = [];
       const candidateCapacity = new Map<string,string>();
-      const capacityIdentity = (seat:SeatCapacity) => JSON.stringify({engine:seat.engine,contextWindow:seat.contextWindow,tier:seat.tier,costBasis:seat.costBasis,windowless:seat.windowless,free:seat.free});
+      const capacityIdentity = (seat:SeatCapacity) => JSON.stringify({accountHint:seat.accountHint ?? null,engine:seat.engine,contextWindow:seat.contextWindow,tier:seat.tier,costBasis:seat.costBasis,windowless:seat.windowless,free:seat.free});
       for (const item of items) {
         const projections: Record<string,AccountSchedulingView> = Object.create(null) as Record<string,AccountSchedulingView>;
+        const forecasts: Record<string,TaskWorkForecast> = {};
+        const hints: Record<string,string|null> = {};
+        current.forecastItems.set(item.id,item);
+        current.itemForecasts.set(item.id, forecasts); current.forecastAccountHints.set(item.id, hints);
         let legacy: RouteDecision;
         try { legacy = deps.legacyRoute(item,cfg); } catch { continue; }
         for (const seat of current.capacity) {
           // Restrict to this candidate to exercise ALL actual route/grant/
           // model/context/demotion checks before asking for optional advice.
           const candidateLanes = Object.fromEntries(FLEET_ENGINES.map(lane=>[lane,{...current.lanes[lane],slots:current.routeLaneCaps[lane]}])) as Record<FleetEngine,LanePlan>;
-          const route = routeWorkItem(item,legacy,{...current.router,lanes:candidateLanes,capacity:[seat],cfg});
+          const execution = executionForSeat(item, legacy, seat, current.router);
+          if (!execution) continue;
+          const forecast = taskForecast(item,execution.backend,execution.model ?? null,history,current.nowMs,seat.seatId,seat.accountHint);
+          forecasts[seat.seatId] = forecast; hints[seat.seatId] = seat.accountHint ?? null;
+          const taskBudget = budgetForItem(current,item.id,resolveSubscriptionMaxPercent(cfg));
+          const route = routeWorkItem(item,legacy,{...current.router,budget:taskBudget,lanes:candidateLanes,capacity:[seat],cfg});
           if (route.hold || route.seatDecision?.seatId !== seat.seatId) continue;
-          const forecast = taskForecast(item,route.backend,route.model ?? null,history,current.nowMs);
-          const view = buildSchedulingView([seat],current.budget,current.nowMs,{[seat.seatId]:forecast}).accounts[0]!;
+          const view = buildSchedulingView([seat],taskBudget,current.nowMs,{[seat.seatId]:forecast}).accounts[0]!;
+          if (!resetPriorityEnabled(current.budget,seat.seatId)) view.opportunity = {kind:'ordinary',reason:'Allowance before resets is off; use ordinary routing.'};
           projections[seat.seatId] = view;
           if (view.admission !== 'eligible') continue;
           const id = createHash('sha256').update(JSON.stringify([item.id,seat.seatId])).digest('hex');
@@ -1995,7 +2030,8 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
           try { legacy = deps.legacyRoute(item,cfg); } catch { /* The final route retains its ordinary fallback. */ }
           for (const seat of current.capacity) {
             const candidateLanes = Object.fromEntries(FLEET_ENGINES.map(lane=>[lane,{...current.lanes[lane],slots:current.routeLaneCaps[lane]}])) as Record<FleetEngine,LanePlan>;
-            const actual = legacy ? routeWorkItem(item,legacy,{...current.router,lanes:candidateLanes,capacity:[seat],cfg}) : null;
+            const taskBudget = budgetForItem(current,item.id,resolveSubscriptionMaxPercent(cfg));
+            const actual = legacy ? routeWorkItem(item,legacy,{...current.router,budget:taskBudget,lanes:candidateLanes,capacity:[seat],cfg}) : null;
             const taskEligible = actual && !actual.hold && actual.seatDecision?.seatId===seat.seatId;
             const prior = projections[seat.seatId];
             const recorded = prior?.forecast;
@@ -2003,7 +2039,8 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
             const sameCapacity = original && candidateCapacity.get(original.id)===capacityIdentity(seat);
             const forecast = taskEligible && sameCapacity && recorded && actual.backend===recorded.cohort.engine &&
               (actual.model ?? null)===recorded.cohort.model ? recorded : null;
-            const view = buildSchedulingView([seat],current.budget,current.nowMs,forecast ? {[seat.seatId]:forecast} : {}).accounts[0]!;
+            const view = buildSchedulingView([seat],taskBudget,current.nowMs,forecast ? {[seat.seatId]:forecast} : {}).accounts[0]!;
+            if (!resetPriorityEnabled(current.budget,seat.seatId)) view.opportunity = {kind:'ordinary',reason:'Allowance before resets is off; use ordinary routing.'};
             if (!taskEligible) {
               view.admission='held';view.opportunity={kind:'held',reason:'This selected task has no admitted route on this account.'};
             }
@@ -2032,6 +2069,29 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         const priority = (id:string) => Object.values(current.itemScheduling.get(id) ?? {}).reduce((best,view)=>Math.max(best,opportunityPriority(view,current.nowMs)),0);
         return priority(b.id)-priority(a.id);
       }).map((item) => item.id);
+    },
+
+    nextResetWake(nowMs: number): number | null {
+      const current = ctx;
+      if (!current || killActiveFailClosed()) return null;
+      try {
+        const standing = deps.standingPolicy();
+        if (!standing || standing.grantId !== current.policy.grantId || standing.grantSeq !== current.policy.grantSeq ||
+          JSON.stringify(standing.spend) !== JSON.stringify(current.policy.spend) ||
+          JSON.stringify(standing.repos) !== JSON.stringify(current.policy.repos) ||
+          JSON.stringify(standing.engines) !== JSON.stringify(current.policy.engines) ||
+          JSON.stringify(standing.rollout) !== JSON.stringify(current.policy.rollout) || !resetPriorityEnabled(deps.loadBudget())) return null;
+        const sources = createHash('sha256').update(JSON.stringify({budget:deps.loadBudget(),
+          directives:clampLeaderDirectives(deps.directives(),standing),config:deps.liveLeaderConfig(current.cfg)})).digest('hex');
+        if (sources !== current.dispatchSources) return null;
+        const fresh = deps.capacitySnapshot(); if (!fresh) return null;
+        current.nowMs = nowMs; current.capacity = [...fresh.seats.filter(s=>s.engine!=='local'),...current.capacity.filter(s=>s.engine==='local')];
+        for (const itemId of current.itemForecasts.keys()) budgetForItem(current,itemId,resolveSubscriptionMaxPercent(current.cfg));
+        const candidates = [...current.itemResetStatus.values()].flatMap(status => {
+          const at = nextResetSpendingWake(status,nowMs); return at === null ? [] : [at];
+        });
+        return candidates.length ? Math.min(...candidates) : null;
+      } catch { return null; }
     },
 
     beginDispatchPlan(itemIds: readonly string[]): void {
@@ -2079,6 +2139,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
           }];
         })) as Record<FleetEngine, LanePlan>;
         decision = routeWorkItem(item, legacy, { ...current.router, lanes, cfg,
+          budget: budgetForItem(current,item.id,resolveSubscriptionMaxPercent(cfg)),
           scheduling: current.itemScheduling.get(item.id),
           advisorySeatId: current.advisedPair?.taskId === item.id ? current.advisedPair.seatId : null });
         if (planning && !decision.hold && decision.lane !== null) {
@@ -2116,7 +2177,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         return { allowed: false, reason: `${engine} is not a fleet lane under the standing grant (per-token APIs and agents whose spend cannot be read never are).` };
       }
       if (lane === DEVIN_CLI_LANE) return devinCliSeatAllows(current);
-      if (lane === 'grok-cli' && opts.seatId !== undefined) {
+      if (opts.itemId !== undefined || lane === 'grok-cli' && opts.seatId !== undefined) {
         // Selected-account execution may follow awaited planning or sandbox
         // setup. Re-read its actual authority and telemetry synchronously;
         // never substitute the configured default or an earlier tick reading.
@@ -2131,20 +2192,28 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
             createHash('sha256').update(JSON.stringify({budget:deps.loadBudget(),
               directives:clampLeaderDirectives(deps.directives(),standing),config:deps.liveLeaderConfig(current.cfg)})).digest('hex') !== current.dispatchSources) {
             ctx = null;
-            return { allowed: false, reason: 'Selected Grok account authority changed or is unavailable; a fresh tick is required.' };
+            return { allowed: false, reason: 'Selected task account authority changed or is unavailable; a fresh tick is required.' };
           }
-          const fresh = deps.capacitySnapshot();
-          if (!fresh || fresh.seats.filter(s => s.seatId === opts.seatId && laneOfSeat(s) === lane).length !== 1) {
-            ctx = null;
-            return { allowed: false, reason: 'Selected Grok account has no unique current capacity reading.' };
+          // Local runtime evidence belongs to this tick's owner. An unavailable
+          // paid account collector must not erase independently admitted local work.
+          if (lane !== 'local') {
+            const fresh = deps.capacitySnapshot();
+            if (!fresh || opts.seatId !== undefined && fresh.seats.filter(s => s.seatId === opts.seatId && laneOfSeat(s) === lane).length !== 1) {
+              return { allowed: false, reason: 'Selected task account has no unique current capacity reading.' };
+            }
+            current.capacity = [...fresh.seats.filter(s => s.engine !== 'local'),...current.capacity.filter(s => s.engine === 'local')];
           }
           current.nowMs = deps.now();
-          current.capacity = [...fresh.seats.filter(s => s.engine !== 'local'),...current.capacity.filter(s => s.engine === 'local')];
         } catch {
           ctx = null;
-          return { allowed: false, reason: 'Selected Grok account authority or capacity cannot be read.' };
+          return { allowed: false, reason: 'Selected task account authority or capacity cannot be read.' };
         }
       }
+      const routed = opts.itemId ? current.routeCache.get(opts.itemId) : undefined;
+      if (opts.itemId && (!routed || routed.hold || routed.backend !== engine || (opts.model ?? null) !== (routed.model ?? null))) {
+        return {allowed:false,reason:'The current task engine/model route changed; a fresh admitted route is required.'};
+      }
+      const taskBudget = budgetForItem(current,opts.itemId,opts.maxPercent);
       if (!current.policy.engines.includes(grantEngineOfLane(lane))) {
         return { allowed: false, reason: `The grant's current rollout stage does not include ${FLEET_LANE_LABEL[lane]}.` };
       }
@@ -2164,7 +2233,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         if (!grant.roles.includes('producer')) {
           return { allowed: false, reason: `Seat ${seat.seatId} has no producer role in the grant.` };
         }
-        const assessed = assessSeat(seat, effectiveSeatPolicy(current.budget, seat.seatId, seat.engine), { nowMs: current.nowMs });
+        const assessed = assessSeat(seat, effectiveSeatPolicy(taskBudget, seat.seatId, seat.engine), { nowMs: current.nowMs });
         if (!assessed.headroom.eligibleForAutonomy) {
           return {
             allowed: false,
@@ -2180,7 +2249,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       // the tick's budget (the seat's eligibility was just assessed above).
       if (lane === 'codex' && seats.some((seat) => current.directiveSeats.has(seat.seatId))) {
         for (const seat of seats) {
-          const assessed = assessSeat(seat, effectiveSeatPolicy(current.budget, seat.seatId, seat.engine), { nowMs: current.nowMs });
+          const assessed = assessSeat(seat, effectiveSeatPolicy(taskBudget, seat.seatId, seat.engine), { nowMs: current.nowMs });
           const used = Math.max(assessed.headroom.sessionUsedPercent ?? 0, assessed.headroom.weeklyUsedPercent ?? 0);
           if (used >= opts.maxPercent) {
             return { allowed: false, reason: `${engine} seat ${seat.seatId} window ${Math.round(used)}% used (max ${opts.maxPercent}%)` };
@@ -2199,7 +2268,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
           subscription = true;
         }
         if (subscription) {
-          const verdict = deps.subscriptionAllows(engine, { maxPercent: opts.maxPercent, autonomous: true });
+          const verdict = deps.subscriptionAllows(engine, { maxPercent: opts.maxPercent, autonomous: true, budget: taskBudget });
           if (!verdict.allowed) return verdict;
         }
       }
@@ -2214,6 +2283,9 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       const info = current?.itemInfo.get(outcome.itemId) ?? null;
       const title = info?.title ?? outcome.itemId;
       const hold = !outcome.dispatched ? cached?.hold ?? null : null;
+      const resetStatus = current?.itemResetStatus.get(outcome.itemId);
+      const chosenSeat = cached?.seatDecision?.seatId;
+      const chosenReset = chosenSeat ? resetStatus?.accounts[chosenSeat] : undefined;
       deps.appendJournal({
         v: 1,
         type: 'dispatch',
@@ -2228,11 +2300,13 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         model: outcome.model,
         lane: outcome.lane,
         seatId: outcome.seatId ?? (outcome.dispatched ? cached?.seatDecision?.seatId ?? null : null),
+        accountHint: outcome.dispatched && current && cached && fleetLaneOf(cached.backend,current.cfg) === 'grok-cli' && cached.seatDecision?.seatId ? current?.forecastAccountHints.get(outcome.itemId)?.[cached.seatDecision.seatId] ?? null : null,
         dispatched: outcome.dispatched,
         skipReason: outcome.skipReason,
         proposalId: outcome.proposalId,
         spentUsd: outcome.spentUsd,
         seatDecision: cached?.seatDecision ?? null,
+        ...(resetStatus && chosenReset && chosenSeat ? {resetSpending:{...resetStatus,accounts:{[chosenSeat]:chosenReset}}} : {}),
         hold,
         // Only a tick that knew its harness may attribute the run to one.
         ...(current && harnessKnownThisTick ? { harnessVersionId: current.harness.versionId } : {}),

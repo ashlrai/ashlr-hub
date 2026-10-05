@@ -6,6 +6,7 @@ import { sanitizeSeatCapacity } from '../src/core/routing/budget-store.js';
 import type { SeatCapacity } from '../src/core/routing/headroom.js';
 import type { BudgetPolicy } from '../src/core/routing/types.js';
 import type { TaskWorkForecast } from '../src/core/routing/scheduling-types.js';
+import { clampBudgetPolicy } from '../src/core/authority/effective-config.js';
 import type { EffectivePolicy } from '../src/core/authority/types.js';
 const now = Date.parse('2026-10-05T12:00:00.000Z');
 const at = (delta: number) => new Date(now + delta).toISOString();
@@ -32,12 +33,35 @@ describe('reset spending enrollment and current task admission',()=>{
     expect(sanitizeBudgetPolicy(JSON.parse(JSON.stringify(p)))).toEqual(p);
     expect(()=>parseBudgetUpdate({resetSpending:{enabled:true,source:'fake'}})).toThrow();
   });
+  it('preserves validated enrollment while keeping signed floor and roles unchanged',()=>{
+    const saved=policy();saved.seats.claude!.resetSpending=false;
+    const granted=standing(50);
+    const clamped=clampBudgetPolicy(saved,granted);
+    expect(clamped).toMatchObject({resetSpending:{enabled:true},seats:{claude:{resetSpending:false,reservePercent:50}}});
+    expect(granted.spend.seats.claude!.roles).toEqual(['producer']);
+    const malformed={...saved,resetSpending:{enabled:'true'}} as unknown as BudgetPolicy;
+    expect(clampBudgetPolicy(malformed,granted).resetSpending).toBeUndefined();
+  });
   it('uses current observed work slack, retains the saved reserve and signed floor',()=>{
     const before=policy();const result=taskResetBudget(before,[seat()],standing(),now,{claude:forecast()});
     expect(result.status.accounts.claude).toMatchObject({state:'ready',savedReservePercent:40,effectiveReservePercent:20,signedFloorPercent:0});
     expect(result.budget.seats.claude?.reservePercent).toBe(20);expect(before.seats.claude?.reservePercent).toBe(40);
     expect(project(seat(),before,standing(40)).state).toBe('signed-floor');
     expect(project(seat(),before,standing(10),forecast(),now+10000).effectiveReservePercent).toBe(15);
+  });
+  it('distinguishes no reserve from a binding signed minimum and excludes free work',()=>{
+    const zero=policy();zero.seats.claude!.reservePercent=0;
+    expect(project(seat(),zero,standing(0))).toMatchObject({state:'ordinary',effectiveReservePercent:null});
+    expect(project(seat(),zero,standing(40)).state).toBe('signed-floor');
+    const local={...seat(),free:true};
+    expect(project(local)).toMatchObject({state:'unqualified',subscriptionOnly:'unsupported'});
+    expect(project(seat(),policy(),standing(40)).state).toBe('signed-floor');
+  });
+  it('does not turn a long-running task forecast into an artificial time budget',()=>{
+    const time=now+600000;const current=seat();current.observedAt=new Date(time).toISOString();
+    current.subscriptionOnlyBoundary={...current.subscriptionOnlyBoundary!,observedAt:current.observedAt,expiresAt:new Date(time+60000).toISOString()};
+    current.windows[1]={...current.windows[1]!,resetsAt:new Date(time+45000).toISOString(),resetProvenance:{kind:'weekly-deadline',at:new Date(time+45000).toISOString(),description:null,source:'claude-native-usage-report',plan:'max'}};
+    expect(project(current,policy(),standing(),forecast(),time)).toMatchObject({state:'ready',effectiveReservePercent:20});
   });
   it('never claims an applied reserve from a GET without an actual task or inactive authority',()=>{
     expect(projectResetSpendingStatus(policy(),[seat()],standing(),now).accounts.claude?.effectiveReservePercent).toBeNull();

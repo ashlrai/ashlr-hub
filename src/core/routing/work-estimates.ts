@@ -2,6 +2,8 @@
 import type { TaskWorkForecast, ObservedPercentiles } from './scheduling-types.js';
 export interface WorkHistorySample {
   id: string; engine: string; model: string | null; seatId: string | null; taskKind: string;
+  /** Native account proof recorded with the routed attempt, absent legacy data stays pooled. */
+  accountHint?: string | null;
   completed: boolean; durationMs: number | null; tokens: number | null;
 }
 export function observedPercentiles(values: readonly (number | null)[]): ObservedPercentiles | null {

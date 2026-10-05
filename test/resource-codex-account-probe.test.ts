@@ -138,6 +138,15 @@ describe('explicit Codex metadata protocol and identity hints', () => {
     }
   });
 
+  it('preserves the qualified secondary deadline only through a settled matching native account',async()=>{
+    const result=await probeCodexResourceAccount(options());
+    expect(result.resetDeadlines).toEqual([{windowId:'codex_codex_secondary',resetProvenance:{kind:'weekly-deadline',at:new Date(2000000000*1000).toISOString(),description:'Current native weekly allowance deadline on a matched Plus/Pro account; no start inferred.',source:'codex-native-rate-limits',plan:'pro',windowDurationMins:10080}}]);
+    const changed=await probeCodexResourceAccount(options({after:{...ACCOUNT,account:{...ACCOUNT.account,email:'other@example.invalid'}}}));
+    expect(changed.resetDeadlines).toEqual([]);
+    const rolling=quota();rolling.rateLimitsByLimitId.codex.secondary.windowDurationMins=300;
+    expect((await probeCodexResourceAccount(options({quota:rolling}))).resetDeadlines).toEqual([]);
+  });
+
   it('preserves HOME unchanged while omitting ambient auth, endpoint, proxy and loader overrides', async () => {
     for (const key of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'NODE_OPTIONS',
       'NODE_PATH', 'OPENAI_BASE_URL', 'HTTPS_PROXY']) vi.stubEnv(key, '/fixture/not-used');

@@ -55,6 +55,9 @@ export interface SeatAllowsOptions {
   maxPercent: number;
   /** Exact routed Grok account; absent preserves the legacy all-seat gate. */
   seatId?: string;
+  /** Exact current work identity/model; absent never borrows a task reserve release. */
+  itemId?: string;
+  model?: string | null;
 }
 
 export interface TickHookContext {
@@ -90,6 +93,8 @@ export interface TickHooks {
   prepareDispatchPlan?(items: readonly WorkItem[], cfg: AshlrConfig, signal?: AbortSignal): Promise<readonly string[] | void>;
   /** Begin routing the selected dispatch batch; preselection probes must not reserve seats. */
   beginDispatchPlan?(itemIds: readonly string[]): void;
+  /** Advisory future wake only; the next tick still performs every admission check. */
+  nextResetWake?(nowMs: number): number | null;
   route(item: WorkItem, cfg: AshlrConfig): TickRouteDecision;
   seatAllows(engine: EngineId, opts: SeatAllowsOptions): SubscriptionAllowResult;
   beforeTick(ctx: TickHookContext): Promise<BeforeTickResult>;
