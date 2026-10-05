@@ -458,6 +458,78 @@ describe('seatAllows', () => {
     },
   );
 
+  function selectedClaudeHooks(other: 'disabled' | 'exhausted' = 'disabled') {
+    const p = policyFixture({ engines: ['claude-cli'] });
+    p.spend.seats.claude.enabled = other !== 'disabled';
+    p.spend.seats['claude-b'] = { seatId: 'claude-b', enabled: true, reserveFloorPercent: 0, maxSessionWindowPercent: null, roles: ['producer'] };
+    let clock = NOW;
+    let stopped = false;
+    let snapshot: ReturnType<LiveHooksDeps['capacitySnapshot']> = { v: 1, publishedAt: NOW_ISO,
+      seats: [claudeSeat(other === 'exhausted' ? 100 : 20), { ...claudeSeat(), seatId: 'claude-b' }] };
+    const budget = { ...defaultBudgetPolicy(), seats: {
+      claude: { seatId: 'claude', enabled: true, reservePercent: 0 },
+      'claude-b': { seatId: 'claude-b', enabled: true, reservePercent: 0 },
+    } };
+    const nativeGate = vi.fn<LiveHooksDeps['subscriptionAllows']>(() => ({ allowed: false, reason: 'ambient account exhausted' }));
+    const hooks = createLiveTickHooks({ deps: { ...h.deps,
+      standingPolicy: () => p, capacitySnapshot: () => snapshot, loadBudget: () => budget, now: () => clock, killActive: () => stopped,
+      subscriptionAllows: nativeGate,
+      legacyRoute: () => ({ backend: 'claude', tier: 'frontier', model: 'model-a', reason: 'explicit model' }),
+    } });
+    return { hooks, p, budget, nativeGate, snapshot: () => snapshot,
+      setSnapshot: (value: typeof snapshot) => { snapshot = value; }, setClock: (value: number) => { clock = value; }, setStop: () => { stopped = true; } };
+  }
+
+  it.each(['disabled', 'exhausted'] as const)('admits the selected Claude account while the other account is %s', async other => {
+    const r = selectedClaudeHooks(other);
+    r.hooks.effectiveConfig(CFG); await r.hooks.beforeTick(hookCtx);
+    const route = r.hooks.route(item(), CFG);
+    expect(route).toMatchObject({ backend: 'claude', model: 'model-a', hold: null, seatDecision: { seatId: 'claude-b' } });
+    expect(r.hooks.seatAllows('claude', { maxPercent: 90, seatId: 'claude-b', itemId: 'item-1', model: 'model-a' }).allowed).toBe(true);
+    expect(r.nativeGate).not.toHaveBeenCalled();
+    // The legacy unbound call keeps its conservative all-account gate.
+    expect(r.hooks.seatAllows('claude', { maxPercent: 90 }).allowed).toBe(false);
+    for (const seatId of ['missing-account', '', 'grok', 'claude']) {
+      expect(r.hooks.seatAllows('claude', { maxPercent: 90, seatId, itemId: 'item-1', model: 'model-a' }).allowed).toBe(false);
+    }
+  });
+
+  it('refuses a different healthy Claude account than the task route selected', async () => {
+    const r = selectedClaudeHooks('exhausted');
+    r.nativeGate.mockReturnValue({ allowed: true, reason: 'ambient account eligible' });
+    r.snapshot()!.seats[0]!.windows = claudeSeat().windows;
+    r.hooks.effectiveConfig(CFG); await r.hooks.beforeTick(hookCtx);
+    const route = r.hooks.route(item(), CFG);
+    expect(route.hold).toBeNull();
+    const selected = route.seatDecision!.seatId!;
+    expect(['claude', 'claude-b']).toContain(selected);
+    const other = selected === 'claude' ? 'claude-b' : 'claude';
+    expect(r.hooks.seatAllows('claude', { maxPercent: 90, seatId: other, itemId: 'item-1', model: route.model }).allowed).toBe(false);
+  });
+
+  it.each(['grant', 'producer-role', 'capacity', 'unknown-usage', 'missing-capacity', 'duplicate-capacity', 'stale', 'budget', 'session-ceiling', 'weekly-ceiling', 'stop'] as const)(
+    'rechecks the selected Claude account after %s changes', async kind => {
+      const r = selectedClaudeHooks();
+      r.hooks.effectiveConfig(CFG); await r.hooks.beforeTick(hookCtx);
+      expect(r.hooks.seatAllows('claude', { maxPercent: 90, seatId: 'claude-b' }).allowed).toBe(true);
+      const snapshot = r.snapshot()!;
+      const selected = snapshot.seats.find(seat => seat.seatId === 'claude-b')!;
+      if (kind === 'grant') r.p.spend.seats['claude-b']!.enabled = false;
+      if (kind === 'producer-role') r.p.spend.seats['claude-b']!.roles = ['judge'];
+      if (kind === 'capacity') selected.windows = claudeSeat(100).windows;
+      if (kind === 'unknown-usage') selected.windows = [];
+      if (kind === 'missing-capacity') r.setSnapshot(null);
+      if (kind === 'duplicate-capacity') snapshot.seats.push({ ...selected });
+      if (kind === 'stale') r.setClock(NOW + 86_400_000);
+      if (kind === 'budget') r.budget.seats['claude-b']!.enabled = false;
+      if (kind === 'session-ceiling') selected.windows[0]!.usedPercent = 90;
+      if (kind === 'weekly-ceiling') selected.windows[1]!.usedPercent = 90;
+      if (kind === 'stop') r.setStop();
+      expect(r.hooks.seatAllows('claude', { maxPercent: 90, seatId: 'claude-b' }).allowed).toBe(false);
+      expect(r.nativeGate).not.toHaveBeenCalled();
+    },
+  );
+
   it('still applies master\'s subscription gate to claude (it only tightens)', async () => {
     subscriptionAllowed = false;
     const hooks = createLiveTickHooks({ deps: h.deps });

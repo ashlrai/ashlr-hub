@@ -241,6 +241,11 @@ describe('selected Claude account — standing producer forwarding', () => {
       expect(opts.seatId).toBe('claude:connected-account');
       expect(opts.selectedClaudeAdmission).toBeTypeOf('function');
       admission = opts.selectedClaudeAdmission;
+      // The initial gate must use this account too, before any runner starts.
+      expect(gate.mock.calls.length).toBeGreaterThan(0);
+      for (const [, checked] of gate.mock.calls as unknown as [string, { seatId?: string }][]) {
+        expect(checked.seatId).toBe('claude:connected-account');
+      }
       expect(admission!()).toBe(true);
       expect(gate).toHaveBeenLastCalledWith('claude', expect.objectContaining({
         seatId: 'claude:connected-account', itemId: expect.any(String), model,
