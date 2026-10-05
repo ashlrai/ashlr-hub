@@ -16,9 +16,10 @@
  *
  * ⌘K and the keys (command-keys.ts fleet.*) run the same handlers.
  */
-import { useState, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import type { FleetControlActionResultV1, FleetControlStateV1, FleetNextAction } from '../../../../core/fleet/fleet-control-types.js';
 import { Button } from '../../../components/primitives/Button.js';
+import { Input } from '../../../components/primitives/Input.js';
 import { Meter } from '../../../components/primitives/Meter.js';
 import { IconLock, IconPause, IconPlay, IconRefresh, IconStop } from '../../../components/primitives/icons.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
@@ -73,6 +74,16 @@ function money(n: number | null): string {
   return n >= 100 ? `$${Math.round(n)}` : `$${n.toFixed(2)}`;
 }
 
+/** Syntax only; native validates the actual directory, origin and installer. */
+function custodyCheckoutValid(value: string): boolean {
+  const characters = [...value];
+  return (value.startsWith('/') || value.startsWith('~/'))
+    && characters.length <= 1024 && characters.every((character) => {
+      const code = character.codePointAt(0)!;
+      return code > 31 && code !== 127;
+    });
+}
+
 /** The native op a next action maps to, if any. */
 function nativeOpFor(action: FleetNextAction): NativeFleetOp | null {
   if (action.kind === 'resident-start') return 'resident-start';
@@ -104,7 +115,12 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
   const [did, setDid] = useState<string[]>([]);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [needs, setNeeds] = useState<FleetNextAction | null>(null);
+  const [checkoutOverride, setCheckoutOverride] = useState<string | null>(null);
+  const nativePending = useRef(false);
   const state = read.data?.value ?? null;
+  const checkout = (checkoutOverride ?? state?.custody.hubCheckout ?? '').trim();
+  const checkoutValid = custodyCheckoutValid(checkout);
+  const busy = actions.busy || (progress !== null && progress.event !== null ? !['done', 'failed', 'cancelled'].includes(progress.event.phase) : progress !== null);
 
   function afterAction(result: FleetControlActionResultV1): void {
     setDid(result.did);
@@ -114,7 +130,8 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
   }
 
   function runNative(op: NativeFleetOp, checkout?: string): void {
-    if (!nativeFleetAvailable(op)) return;
+    if (nativePending.current || (op === 'custody-install' && busy) || !nativeFleetAvailable(op)) return;
+    nativePending.current = true;
     setProgress({ op, event: null });
     const track = (event: NativeFleetEvent) => setProgress((prev) => ({ op, event, ...(event.command ?? prev?.command ? { command: event.command ?? prev?.command } : {}) }));
     void runNativeFleetOp(op, { ...(checkout ? { checkout } : {}), onProgress: track })
@@ -123,7 +140,12 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
         if (event.phase === 'done') setNeeds(null);
       })
       .catch((error: unknown) => setProgress({ op, event: { id: '', op, phase: 'failed', message: error instanceof Error ? error.message : String(error) } }))
-      .finally(() => refetch());
+      .finally(() => { nativePending.current = false; refetch(); });
+  }
+
+  function installCustody(detected = state?.custody.hubCheckout): void {
+    const selected = (checkoutOverride ?? detected ?? '').trim();
+    if (custodyCheckoutValid(selected)) runNative('custody-install', selected);
   }
 
   /** Do the single next thing Mason was asked to do. */
@@ -143,9 +165,9 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
     const op = nativeOpFor(action);
     if (op && nativeFleetAvailable(op)) {
       if (op === 'custody-install') {
-        const checkout = current?.custody.hubCheckout;
-        if (!checkout) return;
-        runNative(op, checkout);
+        // A just-read default is useful before the next render; an explicit
+        // choice (including empty) must never fall back to another checkout.
+        installCustody(current?.custody.hubCheckout);
       } else runNative(op);
     }
   }
@@ -188,8 +210,7 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
   useCommandHandler('fleet.restart-daemon', () => restartDaemon());
   useCommandHandler('fleet.edit-grant', () => editGrant());
   useCommandHandler('fleet.install-custody', () => {
-    const checkout = state?.custody.hubCheckout;
-    if (checkout && nativeFleetAvailable('custody-install')) runNative('custody-install', checkout);
+    installCustody();
   });
 
   if (!state) {
@@ -207,7 +228,6 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
 
   const blocker = state.blocker;
   const nativeCapable = nativeFleetAvailable();
-  const busy = actions.busy || (progress !== null && progress.event !== null ? !['done', 'failed', 'cancelled'].includes(progress.event.phase) : progress !== null);
   const g = state.grant;
   const stage = g.stageId ? `${g.stageId}${g.stageIndex !== null && g.stageCount ? ` (${g.stageIndex + 1}/${g.stageCount})` : ''}` : null;
   const tickProgress = state.daemon.liveness === 'alive' && state.daemon.pid !== null ? state.daemon.tickProgress : null;
@@ -245,13 +265,13 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
           reason={blocker.reason}
           action={blocker.action}
           nativeCapable={nativeCapable}
-          hubCheckout={state.custody.hubCheckout}
+          hubCheckout={checkoutValid ? checkout : null}
           busy={busy}
           onTake={() => void take(blocker.action)}
           setupShownBelow={setupShownBelow}
         />
       ) : needs && needs.kind !== 'grant' && needs.kind !== 're-approve' ? (
-        <BlockerRow reason="one step left" action={needs} nativeCapable={nativeCapable} hubCheckout={state.custody.hubCheckout} busy={busy} onTake={() => void take(needs)} />
+        <BlockerRow reason="one step left" action={needs} nativeCapable={nativeCapable} hubCheckout={checkoutValid ? checkout : null} busy={busy} onTake={() => void take(needs)} />
       ) : null}
 
       {did.length > 0 ? (
@@ -323,12 +343,21 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
               ? `Installed${state.custody.keyInitialized === true ? ' · key ready' : state.custody.keyInitialized === false ? ' · no key yet' : ''}`
               : state.custody.installed === false ? 'Not installed' : 'unknown'}
             <span className={styles.factSub}>Signs grants with Touch ID; holds the GitHub App key</span>
-            {nativeCapable && state.custody.hubCheckout ? (
-              <span className={styles.inlineButtons}>
-                <Button size="sm" variant="ghost" onClick={() => runNative('custody-install', state.custody.hubCheckout!)} disabled={busy}>
-                  {state.custody.installed === true ? 'Reinstall / upgrade' : 'Install'}
-                </Button>
-              </span>
+            {nativeCapable ? (
+              <>
+                <Input label="Custody source checkout" size="sm" mono
+                  value={checkoutOverride ?? state.custody.hubCheckout ?? ''}
+                  onChange={(event) => setCheckoutOverride(event.target.value)}
+                  disabled={busy} autoComplete="off" spellCheck={false}
+                  placeholder="/absolute/path/to/ashlr-hub"
+                  hint="Choose the trusted Hub source to build. Native checks the checkout and confirms its installer hash and command; administrator approval is required."
+                  error={checkoutOverride !== null && !checkoutValid ? 'Enter an absolute path or ~/path within the native 1024-character limit.' : undefined} />
+                <span className={styles.inlineButtons}>
+                  <Button size="sm" variant="ghost" onClick={() => installCustody()} disabled={busy || !checkoutValid}>
+                    {state.custody.installed === true ? 'Reinstall / upgrade' : 'Install'}
+                  </Button>
+                </span>
+              </>
             ) : null}
           </dd>
         </div>

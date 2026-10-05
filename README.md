@@ -84,7 +84,7 @@ boundaries. Current Claude producers remain held until an account-bound native
 CLI broker with an isolated tool executor is qualified; Codex, Grok and Devin
 have no verified no-spillover boundary here. Purchased credits are excluded.
 See [reset controls](docs/RESET-AWARE-SCHEDULING.md),
-[desktop power](desktop/README.md#automatic-awake-during-local-work) and
+[desktop power](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md#automatic-awake-during-local-work) and
 [Growth measurements](docs/VERSE.md#adoption-fixed-public-project-metadata).
 
 **Work with me** opens your interactive chats: guide the agent, inspect its

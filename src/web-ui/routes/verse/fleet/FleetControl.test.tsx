@@ -6,7 +6,7 @@
  * `__ASHLR_DESKTOP__.fleet`, run steering and the grant editor's diff.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { FleetSection } from '../sections/FleetSection.js';
 import { evictAll } from '../../../data/cache.js';
@@ -197,6 +197,98 @@ describe('the controls', () => {
     expect(posted).toEqual([]);
     act(() => { executeCatalogCommand('fleet.pause', { via: 'palette' }); });
     await waitFor(() => expect(posted).toContainEqual({ url: '/api/verse/fleet/control', body: { action: 'pause' } }));
+  });
+});
+
+describe('custody source checkout', () => {
+  function nativeInstall(complete = true) {
+    const sent: { id: string; op: string; checkout?: string }[] = [];
+    (window as unknown as Record<string, unknown>).__ASHLR_DESKTOP__ = {
+      fleet: { version: 1, ops: ['custody-install'], send: (message: typeof sent[number]) => {
+        sent.push(message);
+        if (complete) setTimeout(() => finish(message), 0);
+        return true;
+      } },
+    };
+    function finish(message: typeof sent[number]) {
+      window.dispatchEvent(new CustomEvent('ashlr:fleet', { detail: {
+        id: message.id, op: message.op, phase: 'cancelled', message: 'Nothing was changed.',
+      } }));
+    }
+    return { sent, finish };
+  }
+
+  it('defaults to the detected checkout and preserves native confirmation', async () => {
+    const { sent } = nativeInstall();
+    stubSurfaceFetch({ kind: 'live' });
+    render(<FleetSection />);
+    const region = await control();
+    expect(within(region).getByRole('textbox', { name: 'Custody source checkout' })).toHaveValue('~/code/ashlr-hub');
+    expect(region).toHaveTextContent('administrator approval is required');
+    await userEvent.setup().click(within(region).getByRole('button', { name: 'Reinstall / upgrade' }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({ op: 'custody-install', checkout: '~/code/ashlr-hub' });
+    await waitFor(() => expect(region).toHaveTextContent('Nothing was changed.'));
+  });
+
+  it('uses the same explicit alternate checkout for the button and menu', async () => {
+    const { sent } = nativeInstall();
+    stubSurfaceFetch({ kind: 'live' });
+    render(<FleetSection />);
+    const region = await control();
+    const field = within(region).getByRole('textbox', { name: 'Custody source checkout' });
+    fireEvent.change(field, { target: { value: '/demo/validated hub' } });
+    await userEvent.setup().click(within(region).getByRole('button', { name: 'Reinstall / upgrade' }));
+    await waitFor(() => expect(region).toHaveTextContent('Nothing was changed.'));
+    act(() => { executeCatalogCommand('fleet.install-custody', { via: 'palette' }); });
+    await waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent.map(({ checkout }) => checkout)).toEqual(['/demo/validated hub', '/demo/validated hub']);
+    expect(field).toHaveValue('/demo/validated hub');
+  });
+
+  it.each(['', 'relative/hub', '/demo/\u0000hub', '/' + 'a'.repeat(1024)])('refuses invalid choice %j without falling back to detected source', async (value) => {
+    const { sent } = nativeInstall();
+    stubSurfaceFetch({ kind: 'live' });
+    render(<FleetSection />);
+    const region = await control();
+    fireEvent.change(within(region).getByRole('textbox', { name: 'Custody source checkout' }), { target: { value } });
+    expect(within(region).getByRole('button', { name: 'Reinstall / upgrade' })).toBeDisabled();
+    expect(within(region).getByRole('textbox', { name: 'Custody source checkout' })).toHaveAttribute('aria-invalid', 'true');
+    act(() => { executeCatalogCommand('fleet.install-custody', { via: 'palette' }); });
+    expect(sent).toEqual([]);
+  });
+
+  it('allows an explicit trusted source when detection is unavailable', async () => {
+    const { sent } = nativeInstall();
+    const state = fleetControl('live');
+    state.custody.hubCheckout = null;
+    stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/fleet/control': state } });
+    render(<FleetSection />);
+    const region = await control();
+    const button = within(region).getByRole('button', { name: 'Reinstall / upgrade' });
+    expect(button).toBeDisabled();
+    fireEvent.change(within(region).getByRole('textbox', { name: 'Custody source checkout' }), { target: { value: '~/reviewed-hub' } });
+    await userEvent.setup().click(button);
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({ checkout: '~/reviewed-hub' });
+  });
+
+  it('refuses repeated menu requests while native confirmation or installation is pending', async () => {
+    const { sent, finish } = nativeInstall(false);
+    stubSurfaceFetch({ kind: 'live' });
+    render(<FleetSection />);
+    const region = await control();
+    act(() => {
+      executeCatalogCommand('fleet.install-custody', { via: 'palette' });
+      executeCatalogCommand('fleet.install-custody', { via: 'palette' });
+    });
+    expect(sent).toHaveLength(1);
+    expect(within(region).getByRole('button', { name: 'Reinstall / upgrade' })).toBeDisabled();
+    expect(within(region).getByRole('textbox', { name: 'Custody source checkout' })).toBeDisabled();
+    act(() => { executeCatalogCommand('fleet.install-custody', { via: 'palette' }); });
+    expect(sent).toHaveLength(1);
+    act(() => { finish(sent[0]!); });
+    await waitFor(() => expect(within(region).getByRole('button', { name: 'Reinstall / upgrade' })).toBeEnabled());
   });
 });
 

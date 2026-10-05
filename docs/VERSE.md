@@ -789,6 +789,14 @@ prints exactly what it did. Afterwards the recurring steps are one Touch ID per
 The resident daemon still re-verifies the grant, Stop and the switch on every
 tick.
 
+In the desktop Fleet control, **Custody source checkout** defaults to the detected
+enrolled Hub checkout. Choose another trusted Hub checkout before **Reinstall /
+upgrade** if it contains the reviewed helper version you need; the install menu
+uses the same choice. Native validates the checkout and shows the installer hash
+and command before asking for administrator approval. Choosing a path does not
+change enrollment, a grant, credentials or the running helper. Installation and
+any existing-item Keychain reauthorization still require your confirmation.
+
 Private repositories on GitHub's free plan cannot have rulesets. There, a grant
 uses **local enforcement** with the fleet App's host-verified `ashlr/verify`
 check, and `ashlr authority status` says which repos are enforced which way.
