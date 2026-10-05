@@ -402,7 +402,7 @@ use a separately signed elite-direct ceiling.
 
 ## Benchmarks and traces
 
-See the [measured CI fixture comparison](docs/benchmarks/fixture-performance.md):
+See the [measured CI fixture comparison](https://github.com/ashlrai/ashlr-hub/blob/master/docs/benchmarks/fixture-performance.md):
 three local pairs saved a median paired 27.318 seconds (36.74%) in the affected
 pack fixture, with all 30 shared cases passing in each sample.
 
