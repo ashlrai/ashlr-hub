@@ -345,6 +345,7 @@
 /test/local-only-consumer-parity.test.ts @masonwyatt23
 /test/local-only-dispatch-paths.test.ts @masonwyatt23
 /test/local-only-policy.test.ts @masonwyatt23
+/test/local-work-observation.test.ts @masonwyatt23
 /test/locus-firm-onboard.test.ts @masonwyatt23
 /test/locus.probe.test.ts @masonwyatt23
 /test/m100.web-open.test.ts @masonwyatt23
