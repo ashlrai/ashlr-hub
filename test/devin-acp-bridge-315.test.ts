@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 import { choosePermission, devinAcpArgs, runDevinCliTurn } from '../src/core/devin/acp-bridge.js';
 import type { DevinTurnIo } from '../src/core/devin/chat-runner.js';
 import type { DevinTurnLine, DevinTurnPayload } from '../src/core/devin/turn-protocol.js';
+import { createDevinParser, devinLineToEvent } from '../src/core/verse/adapters/devin.js';
 
 type Msg = { id?: number; method?: string; params?: Record<string, unknown>; result?: unknown; error?: unknown };
 
@@ -111,6 +112,64 @@ function payload(patch: Partial<DevinTurnPayload> = {}): DevinTurnPayload {
 const types = (lines: DevinTurnLine[]) => lines.map((l) => l.type);
 
 describe('Devin CLI over ACP', () => {
+  it('imports only same-session ACP v1 context readings, without billing or extra requests', async () => {
+    for (const protocolVersion of [1, 2, undefined]) {
+      const h = harness({
+        onRequest(msg, agent) {
+          if (msg.method === 'initialize') return { ...initResult(true), protocolVersion };
+          if (msg.method === 'session/load') {
+            agent.update('brisk-otter', { sessionUpdate: 'usage_update', used: 999, size: 1_000 });
+            return {};
+          }
+          if (msg.method === 'session/prompt') {
+            agent.update('another-session', { sessionUpdate: 'usage_update', used: 888, size: 1_000 });
+            agent.update('brisk-otter', { sessionUpdate: 'usage_update', used: 0, size: 200, cost: { amount: 40, currency: 'USD' } });
+            agent.update('brisk-otter', { sessionUpdate: 'usage_update', used: 250, size: 200 });
+            agent.update('brisk-otter', { sessionUpdate: 'usage_update', used: 20, size: 200 });
+            for (const invalid of [
+              { used: -1, size: 200 }, { used: 1.5, size: 200 },
+              { used: NaN, size: 200 }, { used: Infinity, size: 200 },
+              { used: Number.MAX_SAFE_INTEGER + 1, size: 200 },
+              { used: '20', size: 200 }, { used: 20, size: 0 },
+              { used: 20, size: -1 }, { used: 20, size: 2.5 },
+              { used: 20, size: Infinity }, { used: 20, size: Number.MAX_SAFE_INTEGER + 1 },
+              { used: 20 },
+            ]) agent.update('brisk-otter', { sessionUpdate: 'usage_update', ...invalid });
+            agent.update('brisk-otter', { sessionUpdate: 'unknown_usage', used: 123, size: 200 });
+            agent.send({ method: '_cognition.ai/output', params: { usage: { input_tokens: 999_999 }, message: 'cog_leakleakleakleak' } });
+            setImmediate(() => agent.send({ id: msg.id, result: { stopReason: 'end_turn' } }));
+            return null;
+          }
+          return { error: { code: -32601, message: 'nope' } };
+        },
+      });
+      expect(await runDevinCliTurn(payload({ nativeId: 'brisk-otter' }), h.io, h.deps)).toBe(0);
+      const contexts = h.lines.filter((line) => line.type === 'context');
+      expect(contexts).toEqual(protocolVersion === 1 ? [
+        { type: 'context', contextTokens: 0, contextWindow: 200 },
+        { type: 'context', contextTokens: 250, contextWindow: 200 },
+        { type: 'context', contextTokens: 20, contextWindow: 200 },
+      ] : []);
+      const parser = createDevinParser('turn-1');
+      expect(contexts.flatMap((line) => parser.push(JSON.stringify(line)))).toEqual(contexts.map((line) => ({ ...line, turnId: 'turn-1', exact: true })));
+      expect(h.agent.received.filter((msg) => msg.method).map((msg) => msg.method)).toEqual(['initialize', 'session/load', 'session/prompt']);
+      expect(JSON.stringify(h.lines)).not.toMatch(/cost|currency|input_tokens|999999|leakleak/);
+      // Process closure cannot publish a late context reading.
+      h.agent.update('brisk-otter', { sessionUpdate: 'usage_update', used: 777, size: 1_000 });
+      expect(h.lines.filter((line) => line.type === 'context')).toEqual(contexts);
+    }
+    for (const line of [
+      { type: 'context', contextTokens: -1, contextWindow: 200 },
+      { type: 'context', contextTokens: NaN, contextWindow: 200 },
+      { type: 'context', contextTokens: Infinity, contextWindow: 200 },
+      { type: 'context', contextTokens: Number.MAX_SAFE_INTEGER + 1, contextWindow: 200 },
+      { type: 'context', contextTokens: 20, contextWindow: 0 },
+      { type: 'context', contextTokens: 20, contextWindow: 1.5 },
+      { type: 'context', contextTokens: 20, contextWindow: Infinity },
+      { type: 'context', contextTokens: 20, contextWindow: Number.MAX_SAFE_INTEGER + 1 },
+    ]) expect(devinLineToEvent(line, 'turn-1')).toBeNull();
+  });
+
   it('new session: streams text, tool calls and results, then ends the turn', async () => {
     const h = harness({
       onRequest(msg, agent) {
