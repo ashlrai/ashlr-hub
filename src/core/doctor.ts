@@ -460,7 +460,7 @@ function checkPhantom(): DoctorCheck {
         'Phantom secrets CLI',
         'warn',
         'phantom not found on PATH',
-        'Install: brew install ashlrai/tap/phantom  or  https://phantom.sh',
+        'Install: brew install ashlrai/tap/phantom  or  https://phm.dev',
       );
     }
     const ver = status.version ? ` v${status.version}` : '';

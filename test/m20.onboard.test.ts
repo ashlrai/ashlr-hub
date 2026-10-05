@@ -184,6 +184,17 @@ describe('onboard — basic shape', () => {
       expect(typeof step.detail).toBe('string');
     }
   });
+
+  it('directs missing Phantom setup to the actual secrets product', async () => {
+    mockFetch.mockRejectedValue(new Error('offline'));
+    mockExecFileSync.mockImplementation(() => { throw new Error('not found'); });
+    const onboard = await importOnboard();
+    const result = await onboard(makeConfig(), { wire: false, yes: false });
+    expect(result.steps.find(step => step.name === 'phantom')).toMatchObject({
+      status: 'manual',
+      detail: 'Phantom not installed. Install from https://phm.dev to enable secrets management.',
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

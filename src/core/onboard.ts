@@ -204,7 +204,7 @@ async function stepPhantom(): Promise<OnboardStep> {
       return step(
         'phantom',
         'manual',
-        'Phantom not installed. Install from https://phantom.sh to enable secrets management.',
+        'Phantom not installed. Install from https://phm.dev to enable secrets management.',
       );
     }
     if (!status.initialized) {
