@@ -448,7 +448,9 @@ export async function converseWithLeader(event: InboundEvent, text: string, cfg:
           await replyTo(event, 'That typed question is held. Your words were not submitted; do not repeat an uncertain submission.', cfg);
           return;
         }
-        if (question.questionForm?.mode === 'short-answer' && !question.answered) {
+        // An expired, current, unclaimed form still permits this genuine written reply.
+        if (question.questionForm?.mode === 'short-answer' && !question.answered &&
+            Date.parse(question.questionForm.expiresAt) > Date.now()) {
           const claimed = namespace && typeof event.replyToMessageId === 'number' && typeof event.messageId === 'number'
             ? claimTelegramQuestionText(namespace, event.replyToMessageId, event.messageId, repliedTo.questionId, text) : null;
           if (!claimed?.claim || claimed.form.revision !== question.questionForm.revision || namespace !== telegramQuestionNamespace(cfg, event.fromChatId)) {
@@ -463,7 +465,7 @@ export async function converseWithLeader(event: InboundEvent, text: string, cfg:
           return;
         }
       }
-      // For a choice form, an actual human reply in words is the intentional
+      // For a choice or expired short form, an actual human reply is the intentional
       // ordinary answer/refinement path, never a failed typed submission fallback.
       ({ message, reply } = await mod.answerLeaderQuestion(repliedTo.questionId, text, { channel: 'telegram', cfg }));
     } else {

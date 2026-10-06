@@ -549,6 +549,47 @@ describe('shared typed Leader question controls', () => {
     mountForm(question()); await screen.findByText(/Your draft is kept/);
     expect(screen.queryByRole('textbox')).toBeNull(); expect(screen.queryByRole('checkbox')).toBeNull(); expect(net.posts()).toHaveLength(0);
   });
+  it('requires an explicit ordinary answer for an expired short form and preserves its written draft', async () => {
+    const q = question('short-answer'); q.askedAt = new Date(Date.now() - 86400000 - 1_000).toISOString();
+    q.questionForm!.expiresAt = new Date(Date.parse(q.askedAt) + 86400000).toISOString();
+    const net = stub({ onGet: url => url.includes('/questions/') ? json({ question: q, typedQuestionsSupported: true }) : undefined });
+    const view = mountForm(q); await userEvent.type(await screen.findByRole('textbox', { name: 'Your answer' }), 'Please check the tests.');
+    expect(screen.getByRole('button', { name: 'Submit answer' })).toBeDisabled(); expect(view.legacy).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'Write an answer' }));
+    expect(screen.getByRole('textbox', { name: 'Your answer' })).toHaveValue('Please check the tests.');
+    expect(screen.queryByRole('button', { name: 'Submit answer' })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Send answer' }));
+    await waitFor(() => expect(view.legacy).toHaveBeenCalledExactlyOnceWith('Please check the tests.'));
+    expect(net.posts()).toHaveLength(0);
+  });
+  it.each(['changed', 'answered', 'unsupported'] as const)('fresh-checks an expired written answer and holds %s state', async fault => {
+    const q = question('short-answer'); q.askedAt = new Date(Date.now() - 86400000 - 1_000).toISOString();
+    q.questionForm!.expiresAt = new Date(Date.parse(q.askedAt) + 86400000).toISOString();
+    let current: unknown = { question: q, typedQuestionsSupported: true };
+    const net = stub({ onGet: url => url.includes('/questions/') ? json(current) : undefined });
+    const view = mountForm(q); await screen.findByRole('button', { name: 'Write an answer' });
+    await userEvent.click(screen.getByRole('button', { name: 'Write an answer' }));
+    await userEvent.type(screen.getByRole('textbox', { name: 'Your answer' }), 'Keep this draft.');
+    current = fault === 'unsupported' ? { typedQuestionsSupported: false } : { typedQuestionsSupported: true, question: fault === 'changed'
+      ? { ...q, questionForm: { ...q.questionForm!, revision: Array(8).fill('b'.repeat(8)).join('-') } }
+      : { ...q, answered: true, answer: { text: 'Another device answered.', at: new Date().toISOString(), channel: 'verse', messageId: 'a' } } };
+    await userEvent.click(screen.getByRole('button', { name: 'Send answer' }));
+    await screen.findByText(/Your written draft is kept/);
+    expect(view.store.get(q.questionId)?.drafts[revision]?.text).toBe('Keep this draft.');
+    expect(view.legacy).not.toHaveBeenCalled(); expect(net.posts()).toHaveLength(0);
+  });
+  it('does not turn an expired uncertain short submission into an ordinary answer', async () => {
+    const q = question('short-answer'); q.askedAt = new Date(Date.now() - 86400000 - 1_000).toISOString();
+    q.questionForm!.expiresAt = new Date(Date.parse(q.askedAt) + 86400000).toISOString();
+    const store: QuestionFormStore = new Map([[q.questionId, { question: q, capability: 'supported', busy: false, status: null,
+      drafts: { [revision]: { indices: [], text: 'An uncertain answer.', write: false } },
+      uncertain: { schemaVersion: 1, formRevision: revision, kind: 'text', text: 'An uncertain answer.' } }]]);
+    const net = stub({ onGet: url => url.includes('/questions/') ? json({ question: q, typedQuestionsSupported: true }) : undefined });
+    const view = mountForm(q, store); await screen.findByText(/The submitted answer is not confirmed/);
+    expect(screen.getByRole('button', { name: 'Write an answer' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Retry the same submission' })).toBeDisabled();
+    expect(view.legacy).not.toHaveBeenCalled(); expect(net.posts()).toHaveLength(0);
+  });
   it.each([null, { schemaVersion: 2 }, { schemaVersion: 1, revision: 'invalid' }])('holds malformed supplied authoritative form metadata instead of enabling a legacy composer', async questionForm => {
     const q = { ...question(), questionForm };
     const net = stub({ onGet: url => url.includes('/questions/') ? json({ question: q, typedQuestionsSupported: true }) : undefined });

@@ -962,6 +962,42 @@ describe('typed Leader question controls with strict offline drafts', () => {
     expect(thread.appendMasonMessage).toHaveBeenCalledOnce();
     expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
   });
+  it('records a genuine reply to a current unclaimed expired short form as an ordinary answer', async () => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(f.form.expiresAt) + 1);
+    try {
+      thread.answerLeaderQuestion.mockResolvedValue({ message: { id: 'lt-20260926063002-abcdef' }, reply: null });
+      await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2000, replyToMessageId: 1000 },
+        'Please check the tests first.', cfg());
+      expect(thread.answerLeaderQuestion).toHaveBeenCalledExactlyOnceWith(f.questionId, 'Please check the tests first.',
+        { channel: 'telegram', cfg: cfg() });
+      expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.approveLeaderAction).not.toHaveBeenCalled();
+      expect(lookupTelegramMessage(1000)).toMatchObject({ kind: 'question', threadId: f.threadId, questionId: f.questionId });
+      expect(lookupTelegramMessage(2000)).toMatchObject({ threadId: 'lt-20260926063002-abcdef' });
+    } finally { clock.mockRestore(); }
+  });
+  it.each(['missing', 'changed'] as const)('holds an expired short reply with %s delivered-question binding', async fault => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    if (fault === 'missing') rmSync(join(home, '.ashlr', 'comms', 'telegram-questions', 'drafts.json'));
+    else f.changeQuestion({ ...f.question(), questionForm: { ...f.form, revision: Array(8).fill('b'.repeat(8)).join('-') } });
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(f.form.expiresAt) + 1);
+    try {
+      await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2000, replyToMessageId: 1000 }, 'Keep this answer.', cfg());
+      expect(thread.answerLeaderQuestion).not.toHaveBeenCalled(); expect(thread.submitLeaderQuestion).not.toHaveBeenCalled();
+      expect(texts().at(-1)).toMatch(/typed question is held/);
+    } finally { clock.mockRestore(); }
+  });
+  it('holds an expired short reply after an uncertain typed claim without downgrading it', async () => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    thread.submitLeaderQuestion.mockRejectedValue(new Error('Unknown canonical result'));
+    await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2000, replyToMessageId: 1000 }, 'First answer.', cfg());
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(f.form.expiresAt) + 1);
+    try {
+      await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2001, replyToMessageId: 1000 }, 'Replacement answer.', cfg());
+      expect(thread.submitLeaderQuestion).toHaveBeenCalledOnce(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+      expect(texts().at(-1)).toMatch(/do not repeat an uncertain submission/);
+    } finally { clock.mockRestore(); }
+  });
 
   it.each(['missing', 'symlink', 'hardlink', 'mismatched-claim'] as const)('holds %s private state and never replays delivery or canonical submission', async fault => {
     const f = typedQuestionFixture(); await sendThreadMessage(f.message, cfg());

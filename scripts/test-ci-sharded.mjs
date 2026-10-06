@@ -36,6 +36,9 @@ const isolatedSuites = [
   // A concurrent local full run failed a bounded campaign trial; the isolated
   // whole file passed. Retain all 17 cases and deadlines in one fresh home.
   'test/universe-campaign-integration.test.ts',
+  // Preserve all successor quota, delivery, accounting and restart cases with
+  // their original finite budgets in one fresh home after competing shards.
+  'test/resource-engineering-successor-acceptance.test.ts',
 ];
 const isolatedAcceptance = 'test/universe-hub-marker-campaign.test.ts';
 const exclusions = [...isolatedSuites, isolatedAcceptance].map((file) => `--exclude=${file}`);

@@ -177,6 +177,13 @@ export default function LeaderQuestionForm({ questionId, revisionHint, store, di
           update(value => ({ ...value, question: current.question, status: 'This question changed. Your written draft is kept.' }));
           return;
         }
+        // Expiry permits a deliberate ordinary answer, never an uncertain typed retry.
+        if (form?.mode === 'short-answer' && (!current.supported || current.question.answered ||
+          current.question.questionForm?.mode !== 'short-answer' || Date.now() < Date.parse(current.question.questionForm.expiresAt))) {
+          update(value => ({ ...value, ...(current.supported ? { question: current.question } : {}),
+            status: 'This expired question could not be verified as unanswered. Your written draft is kept.' }));
+          return;
+        }
         const saved = await onLegacyAnswer(text);
         update(value => ({ ...value, status: saved ? 'Your written answer was sent.' : 'Delivery was not confirmed. Your draft is kept.',
           ...(saved && value.drafts[key]?.text.trim() === text ? { drafts: { ...value.drafts, [key]: emptyDraft() } } : {}) }));
@@ -206,11 +213,11 @@ export default function LeaderQuestionForm({ questionId, revisionHint, store, di
               <button type="button" className={styles.textButton} onClick={() => setDraft(value => ({ ...value, indices: [] }))}>Clear</button>
             </div> : null}
             <button type="button" className={styles.textButton} onClick={() => setDraft(value => ({ ...value, write: true }))}>Write an answer</button>
-          </> : draft.write && form.mode !== 'short-answer' ? <div>
+          </> : draft.write ? <div>
             {renderWrittenAnswer({ variant: 'answer', label: 'Your answer', placeholder: 'Write your own answer…',
               value: draft.text, onChange: text => setDraft(value => ({ ...value, text })), onSend: sendWritten,
               disabledReason: held ?? (state.busy || state.uncertain ? 'Check the pending submission before writing a replacement answer.' : null), autoFocus: true })}
-            <button type="button" className={styles.textButton} onClick={() => setDraft(value => ({ ...value, write: false }))}>Back to choices</button>
+            <button type="button" className={styles.textButton} onClick={() => setDraft(value => ({ ...value, write: false }))}>{form.mode === 'short-answer' ? 'Back to form' : 'Back to choices'}</button>
           </div> : <label style={{ display: 'block' }} htmlFor={`${id}-text`}>Your answer
             <div className={styles.composerRow}>
               <textarea id={`${id}-text`} className={styles.composerBox} style={{ width: '100%', minHeight: 'var(--control-h-lg)', overflowWrap: 'anywhere' }}
@@ -220,7 +227,9 @@ export default function LeaderQuestionForm({ questionId, revisionHint, store, di
           {!draft.write ? <button type="button" className={styles.send} style={{ width: 'auto', minHeight: 'var(--control-h-lg)', paddingInline: 'var(--space-3)' }} disabled={state.busy || !!state.uncertain || expired || over ||
             (draft.write || form.mode === 'short-answer' ? !draft.text.trim() : draft.indices.length === 0)} onClick={() => submit()}>Submit answer</button> : null}
           {over ? <p role="alert">The complete answer must fit within 2,000 characters.</p> : null}
-          {expired ? <p role="status">These choices expired. You can send a deliberate answer in the conversation.</p> : null}
+          {expired && form.mode === 'short-answer' && !draft.write ? <button type="button" className={styles.textButton}
+            disabled={state.busy || !!state.uncertain} onClick={() => setDraft(value => ({ ...value, write: true }))}>Write an answer</button> : null}
+          {expired ? <p role="status">These controls expired. You can still write an answer.</p> : null}
         </fieldset>
       ) : !question?.answered && (state.capability === 'unsupported' || state.capability === 'supported' && !form) && !state.uncertain ? (
         renderWrittenAnswer({ variant: 'answer', label: showQuestion ? 'Your answer' : `Answer the Leader: ${question?.text ?? fallbackText}`, placeholder: 'Answer the Leader…',
