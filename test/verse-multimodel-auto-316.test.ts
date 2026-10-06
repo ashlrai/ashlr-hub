@@ -162,6 +162,23 @@ describe('adviseSeat — the choice and its one-line explanation', () => {
     expect(a.alternatives.some((o) => o.seatId === 'claude')).toBe(false);
   });
 
+  it('calls a spent Codex subscription an Auto funding exclusion, not a whole-account denial', () => {
+    const spent = paid('codex-personal', 'codex', 'Personal Codex', 100);
+    const a = adviseSeat({ classification: classifyPrompt('architect a scheduler'), seats: [spent, GROK],
+      policy: POLICY, mode: 'auto', nowMs: NOW, pinnedSeatId: spent.seatId });
+    expect(a.choice?.seatId).toBe('grok');
+    expect(a.held).toEqual([{ seatId: spent.seatId, label: spent.label,
+      reason: 'Subscription window spent; Auto does not select Codex credit-funded turns. Credit balance and manual access are separate.' }]);
+    expect(a.alternatives.some((option) => option.seatId === spent.seatId)).toBe(false);
+    const alone = adviseSeat({ classification: classifyPrompt('architect a scheduler'), seats: [spent],
+      policy: POLICY, mode: 'auto', nowMs: NOW });
+    expect(alone.choice).toBeNull();
+    expect(alone.why).toBe('Auto cannot route this work. Codex credit balance and manual access are separate.');
+    expect(adviseSeat({ classification: classifyPrompt('architect a scheduler'), seats: [
+      paid(spent.seatId, 'codex', spent.label, 100, { signedOut: true }), GROK],
+      policy: POLICY, mode: 'auto', nowMs: NOW }).held[0]!.reason).toMatch(/Signed out/);
+  });
+
   it('a request larger than a seat can hold is not sent there', () => {
     const small = local('local:tiny', 'Tiny (local)', { window: 8_192 });
     const a = adviseSeat({ classification: classifyPrompt('what is this?'), seats: [small, CODEX], policy: POLICY, mode: 'auto', nowMs: NOW, contextTokens: 50_000 });

@@ -121,7 +121,53 @@ describe.runIf(process.platform === 'darwin')('Universe foreground supervision w
     expect(first.status, JSON.stringify(first)).toBe('completed');
     const after = readUniverseOverview(value);
     for (const outcome of first.outcomes) {
-      expect(outcome).toMatchObject({ attempted: true, observedState: 'completed', delivery: { status: 'delivered' } });
+      let failureContext: string | undefined;
+      if (!outcome.attempted || outcome.observedState !== 'completed' || outcome.delivery?.status !== 'delivered') {
+        try {
+          // Reuse settled observations only; retain trial evidence before fixture cleanup.
+          const closed = (input: unknown, allowed: readonly string[]): string =>
+            typeof input === 'string' && allowed.includes(input) ? input : 'unknown';
+          const finite = (input: number | null | undefined): number | null =>
+            typeof input === 'number' && Number.isFinite(input) ? input : null;
+          const trialReason = new Map([
+            ['Worker timed out', 'worker-timeout'], ['Evaluator timed out', 'evaluator-timeout'],
+            ['Trial budget exhausted before worker', 'trial-before-worker'],
+            ['Worker budget exhausted before dispatch', 'worker-before-dispatch'],
+            ['Trial budget exhausted before evaluator', 'trial-before-evaluator'],
+            ['Trial or evaluator budget exhausted before score publication', 'score-publication-expired'],
+            ['Fixed evaluator rejected the candidate', 'evaluator-rejected'],
+          ]);
+          failureContext = JSON.stringify({
+            failedOutcome: first.outcomes.indexOf(outcome),
+            outcomes: first.outcomes.slice(0, 2).map((row) => ({
+              status: closed(row.status, ['queued', 'waiting', 'running', 'delivering', 'completed', 'held', 'failed', 'cancelled', 'unavailable']),
+              reason: closed(row.reasonCode, ['delivery-withheld', 'delivery-completed', 'delivery-failed', 'evidence-changed',
+                'evidence-degraded', 'runner-failed', 'invocation-duration-exhausted', 'caller-cancelled']),
+              attempted: row.attempted === true,
+              observedState: closed(row.observedState, ['ready', 'running', 'pause-requested', 'paused', 'stop-requested', 'stopped', 'completed', 'failed', 'interrupted']),
+              deliveryStatus: closed(row.delivery?.status, ['delivered', 'withheld', 'failed']),
+              deliveryReason: row.delivery && row.delivery.status !== 'delivered'
+                ? closed(row.delivery.reason, ['no-strict-improvement', 'not-attempted', 'campaign-not-completed', 'cancelled', 'delivery-failed']) : null,
+            })),
+            universes: after.universes.slice(0, 2).map((universe) => ({
+              sourceState: closed(universe.sourceState, ['healthy', 'degraded']),
+              runCount: universe.runs.length, truncated: universe.runs.length > 2,
+              runs: universe.runs.slice(0, 2).map((run) => ({
+                generation: finite(run.generation), status: closed(run.status, ['running', 'completed', 'interrupted', 'failed']),
+                durationMs: finite(run.durationMs), trialCount: run.trials.length, truncated: run.trials.length > 1,
+                trials: run.trials.slice(0, 1).map((trial) => ({
+                  status: closed(trial.status, ['passed', 'failed', 'timed-out', 'cancelled']),
+                  reason: trial.error === undefined ? 'none' : trialReason.get(trial.error) ?? 'unknown',
+                  durationMs: finite(trial.durationMs), score: finite(trial.score), delta: finite(trial.delta),
+                  selected: trial.selected === true, hasParent: trial.parentTrialId !== null,
+                  hasArtifact: trial.artifact !== null, currentElite: universe.elites.some((elite) => elite.trialId === trial.id),
+                })),
+              })),
+            })),
+          });
+        } catch { failureContext = 'Supervision failure context unavailable'; }
+      }
+      expect(outcome, failureContext).toMatchObject({ attempted: true, observedState: 'completed', delivery: { status: 'delivered' } });
       if (outcome.delivery?.status !== 'delivered') throw new Error('Expected local branch');
       const receipt = outcome.delivery.receipt;
       const git = (...args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-C', receipt.repo, ...args], { encoding: 'utf8' }).trim();

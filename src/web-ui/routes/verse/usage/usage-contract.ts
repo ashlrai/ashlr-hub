@@ -260,6 +260,8 @@ export interface AccountCredits {
   balance: string | null;
   /** `balance` parsed, or null when it was absent/unparseable. */
   balanceValue: number | null;
+  /** Provider spending hold; absent or malformed remains unknown. Display only. */
+  spendControlReached?: boolean | null;
 }
 
 export interface Account {
@@ -527,6 +529,7 @@ function projectCredits(raw: unknown): AccountCredits | null {
     unlimited: bool(r, 'unlimited'),
     balance,
     balanceValue: typeof parsed === 'number' && Number.isFinite(parsed) ? parsed : null,
+    spendControlReached: typeof r['spendControlReached'] === 'boolean' ? r['spendControlReached'] : null,
   };
 }
 

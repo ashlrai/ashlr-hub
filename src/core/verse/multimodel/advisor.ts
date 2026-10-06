@@ -247,7 +247,10 @@ export function adviseSeat(input: AdviseInput): SeatAdvice {
   const held = decision.exclusions.map((e) => ({
     seatId: e.seatId,
     label: byId.get(e.seatId)?.label ?? e.seatId,
-    reason: (e.details?.[0]?.text ?? e.reasons[0] ?? 'Not available right now.').replace(/\s+$/, ''),
+    // Codex selection here uses subscription windows, without authorizing credit spending.
+    reason: byId.get(e.seatId)?.engine === 'codex' && e.details?.[0]?.kind === 'spent'
+      ? 'Subscription window spent; Auto does not select Codex credit-funded turns. Credit balance and manual access are separate.'
+      : (e.details?.[0]?.text ?? e.reasons[0] ?? 'Not available right now.').replace(/\s+$/, ''),
   }));
 
   const midChat = (input.turnCount ?? 0) > 0 && typeof input.currentSeatId === 'string';
@@ -282,7 +285,10 @@ export function adviseSeat(input: AdviseInput): SeatAdvice {
     if (localOnly.on && pool.length === 0) {
       return empty('This repo is local-only and no local model is running — start Ollama or LM Studio, or pick a seat yourself.');
     }
-    return empty(clip(decision.summary ?? decision.why));
+    return empty(clip(held.some((entry) => byId.get(entry.seatId)?.engine === 'codex' &&
+      decision.exclusions.find((excluded) => excluded.seatId === entry.seatId)?.details?.[0]?.kind === 'spent')
+      ? 'Auto cannot route this work. Codex credit balance and manual access are separate.'
+      : decision.summary ?? decision.why));
   }
 
   const ranked = order(rows);

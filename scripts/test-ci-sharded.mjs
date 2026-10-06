@@ -39,6 +39,9 @@ const isolatedSuites = [
   // Preserve all successor quota, delivery, accounting and restart cases with
   // their original finite budgets in one fresh home after competing shards.
   'test/resource-engineering-successor-acceptance.test.ts',
+  // A concurrent full run withheld delivery; the standalone whole file passed.
+  // Retain all 12 supervision cases and deadlines without competing workers.
+  'test/universe-supervision-integration.test.ts',
 ];
 const isolatedAcceptance = 'test/universe-hub-marker-campaign.test.ts';
 const exclusions = [...isolatedSuites, isolatedAcceptance].map((file) => `--exclude=${file}`);

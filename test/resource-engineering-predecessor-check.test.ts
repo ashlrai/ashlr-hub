@@ -5,7 +5,7 @@ import { checkResourceEngineeringPredecessor, type ResourceEngineeringPredecesso
 
 const hooks = vi.hoisted(() => ({ stat: vi.fn(), setup: vi.fn(), json: vi.fn(), registry: vi.fn(), prepared: vi.fn(),
   graph: vi.fn(), source: vi.fn(), queue: vi.fn(), preview: vi.fn(), console: vi.fn(), project: vi.fn(),
-  accounting: vi.fn(), history: vi.fn(), journal: vi.fn(), campaign: vi.fn(), universe: vi.fn(), outcomes: vi.fn(), seed: vi.fn(), capture: vi.fn(), builtin: vi.fn() }));
+  accounting: vi.fn(), history: vi.fn(), journal: vi.fn(), campaign: vi.fn(), universe: vi.fn(), projection: vi.fn(), outcomes: vi.fn(), seed: vi.fn(), capture: vi.fn(), builtin: vi.fn() }));
 vi.mock('node:fs', async original => ({ ...await original<object>(), lstatSync: hooks.stat }));
 vi.mock('../src/core/resources/engineering-autonomous-setup.js', async original => ({ ...await original<object>(), readResourceEngineeringAutonomousSetupEvidence: hooks.setup }));
 vi.mock('../src/core/resources/engineering-preparation-registry.js', async original => ({ ...await original<object>(), createResourceEngineeringPreparationRegistry: hooks.registry }));
@@ -17,7 +17,7 @@ vi.mock('../src/core/resources/pool-supervisor.js', async original => ({ ...awai
 vi.mock('../src/core/resources/pool-runtime.js', async original => ({ ...await original<object>(), readResourceJson: hooks.json,
   resourcePoolStatus: hooks.accounting, readResourcePoolHistory: hooks.history }));
 vi.mock('../src/core/resources/engineering-successor-store.js', async original => ({ ...await original<object>(), readEngineeringSuccessorJournal: hooks.journal }));
-vi.mock('../src/core/universe/campaign-store.js', async original => ({ ...await original<object>(), readUniverseCampaign: hooks.campaign, campaignUniverse: hooks.universe, assertCampaignSeedEvaluatorsSettled: hooks.seed }));
+vi.mock('../src/core/universe/campaign-store.js', async original => ({ ...await original<object>(), readUniverseCampaign: hooks.campaign, campaignUniverse: hooks.universe, readUniverseCampaignProjection: hooks.projection, assertCampaignSeedEvaluatorsSettled: hooks.seed }));
 vi.mock('../src/core/universe/preparation-measurement-capture-store.js', async original => ({ ...await original<object>(), assertPreparationMeasurementsSettled: hooks.capture }));
 vi.mock('../src/core/universe/builtin-trial-custody.js', async original => ({ ...await original<object>(), assertBuiltinTrialEvaluatorsSettled: hooks.builtin }));
 
@@ -93,8 +93,12 @@ function fixture() {
   hooks.console.mockReturnValue({ schemaVersion: 1, paused: false, jobs: [] }); hooks.history.mockReturnValue([]);
   hooks.accounting.mockImplementation(() => ({ sourceState: 'healthy', attempts: structuredClone(attempts) }));
   hooks.journal.mockImplementation(() => ({ records: structuredClone(rows), recordsDigest: hash(rows) }));
-  hooks.campaign.mockImplementation((id: string) => ({ definition: { id, universeId: id + '-universe' }, definitionDigest: h(id), steps: [] }));
+  hooks.campaign.mockImplementation((id: string) => ({ sourceState: 'healthy', definition: { id, universeId: id + '-universe' }, definitionDigest: h(id), steps: [] }));
   hooks.universe.mockReturnValue({ sourceState: 'healthy', runs: [] });
+  hooks.projection.mockImplementation((id: string, options: unknown) => {
+    const campaign = hooks.campaign(id, options);
+    return { campaign, universe: hooks.universe(campaign, options) };
+  });
   hooks.outcomes.mockReturnValue({ sourceState: 'healthy', campaigns: [{ sourceState: 'healthy', reasons: [] }], usage: { attempts: 1, joinedAttempts: 1 } });
   const options = { setup: { recipe: {}, policy: {}, output: '/fixture/setup', resourceRuntime: '/fixture/runtime.json',
     workspace: '/fixture/project', projectsFile: '/fixture/projects.json' }, expectedPlanDigest: plan.planDigest, expectedDeadlineAt: deadline } as ResourceEngineeringPredecessorCheckOptions;
@@ -153,6 +157,43 @@ describe('predecessor completion joins over mocked host evidence', () => {
     expect(result.evidenceDigest).toMatch(/^[a-f0-9]{64}$/); expect(hooks.setup).toHaveBeenCalledTimes(2);
     expect(hooks.seed).toHaveBeenCalledTimes(4); expect(hooks.capture).toHaveBeenCalledTimes(4); expect(hooks.builtin).toHaveBeenCalledTimes(4);
   });
+  it('joins each coherent campaign/Universe pair without requesting an independent projection', () => {
+    const f = fixture();
+    hooks.campaign.mockImplementation(() => { throw Error('Independent campaign read'); });
+    hooks.universe.mockImplementation(() => { throw Error('Independent Universe read'); });
+    hooks.projection.mockImplementation((id: string) => {
+      const definitionDigest = h(id);
+      return { campaign: { sourceState: 'healthy', definition: { id, universeId: id + '-universe' }, definitionDigest,
+        steps: [{ runId: 'run-' + id, ordinal: 1, generation: 1 }] },
+      universe: { sourceState: 'healthy', runs: [{ id: 'run-' + id, generation: 1,
+        campaign: { id, ordinal: 1, definitionDigest } }] } };
+    });
+    expect(checkResourceEngineeringPredecessor(f.options)).toMatchObject({ status: 'verified', reasons: [],
+      executionAuthorized: false, effectsExecuted: false, providerContacted: false });
+    expect(hooks.projection.mock.calls).toEqual([
+      ['campaign-initial', { root: '/fixture/universe-initial' }], ['campaign-child', { root: '/fixture/universe-child' }],
+      ['campaign-initial', { root: '/fixture/universe-initial' }], ['campaign-child', { root: '/fixture/universe-child' }],
+    ]);
+    expect(hooks.campaign).not.toHaveBeenCalled(); expect(hooks.universe).not.toHaveBeenCalled();
+  });
+  it.each(['missing-universe', 'campaign-degraded', 'universe-degraded', 'changed-attribution'])(
+    'refuses fresh second-sample paired evidence after %s drift', mode => {
+      const f = fixture(); let reads = 0;
+      hooks.projection.mockImplementation((id: string, options: unknown) => {
+        const campaign = hooks.campaign(id, options);
+        const universe = hooks.universe(campaign, options);
+        if (++reads <= f.registrations.length) return { campaign, universe };
+        if (mode === 'missing-universe') return { campaign, universe: null };
+        if (mode === 'campaign-degraded') return { campaign: { ...campaign, sourceState: 'degraded' }, universe };
+        if (mode === 'universe-degraded') return { campaign, universe: { ...universe, sourceState: 'degraded' } };
+        return { campaign: { ...campaign, steps: [{ runId: 'changed', ordinal: 1, generation: 1 }] },
+          universe: { ...universe, runs: [{ id: 'changed', generation: 1,
+            campaign: { id, ordinal: 1, definitionDigest: h('changed-definition') } }] } };
+      });
+      held(f.options, 'custody'); expect(hooks.setup).toHaveBeenCalledTimes(2);
+      expect(hooks.projection).toHaveBeenCalledTimes(f.registrations.length + 1);
+      expect(hooks.projection.mock.calls.at(-1)).toEqual(['campaign-initial', { root: '/fixture/universe-initial' }]);
+    });
   it('retains a verified stop outcome as stop-requested, not eligibility', () => {
     const f = fixture(); f.link('child');
     expect(checkResourceEngineeringPredecessor(f.options)).toMatchObject({ status: 'verified', continuation: 'stop-requested', tip: { enrollmentId: 'child' } });
@@ -247,7 +288,7 @@ describe('predecessor completion joins over mocked host evidence', () => {
     const f = fixture();
     hooks.universe.mockImplementation((campaign: { definition: { id: string }; definitionDigest: string }) => ({ sourceState: 'healthy',
       runs: [{ id: 'run', generation: 1, campaign: { id: campaign.definition.id, ordinal: 1, definitionDigest: campaign.definitionDigest } }] }));
-    hooks.campaign.mockImplementation((id: string) => ({ definition: { id, universeId: id + '-universe' }, definitionDigest: h(id), steps: mode === 'orphan' ? []
+    hooks.campaign.mockImplementation((id: string) => ({ sourceState: 'healthy', definition: { id, universeId: id + '-universe' }, definitionDigest: h(id), steps: mode === 'orphan' ? []
       : [{ runId: 'run', ordinal: mode === 'ordinal' ? 2 : 1, generation: mode === 'generation' ? 2 : 1 }] }));
     if (mode === 'definition') hooks.universe.mockImplementation((campaign: { definition: { id: string } }) => ({ sourceState: 'healthy',
       runs: [{ id: 'run', generation: 1, campaign: { id: campaign.definition.id, ordinal: 1, definitionDigest: h('other') } }] }));

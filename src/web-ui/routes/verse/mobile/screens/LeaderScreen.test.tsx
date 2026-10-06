@@ -13,7 +13,7 @@ import { clearMutationToken, setMutationToken } from '../../../../data/auth-stor
 import { evictAll } from '../../../../data/cache.js';
 import { leaderState } from '../../command/fixtures.test-support.js';
 import { directives, msg, QUESTION_TEXT, threadMessages } from '../../leader/thread-fixtures.test-support.js';
-import type { LeaderThreadMessage, OperatorDirective } from '../../leader/thread-types.js';
+import type { LeaderQuestionProjection, LeaderThreadMessage, OperatorDirective } from '../../leader/thread-types.js';
 import { resetGuard } from '../../shell/guard-store.js';
 import { MobileGuardSheet } from '../MobileGuardSheet.js';
 import { MobileToasts, resetMobileToastsForTest } from '../mobile-toast.js';
@@ -284,4 +284,60 @@ it('opens typed controls separately while the normal conversation composer remai
   await userEvent.type(text, 'Independent{Enter}answer');
   expect(text).toHaveValue('Independent\nanswer'); expect(net.posts()).toHaveLength(0);
   expect(within(sheet).getByRole('button', { name: 'Send answer' })).toBeEnabled();
+});
+
+it('keeps a multiple-choice draft through a separate phone interjection and submits the same choices', async () => {
+  const revision = Array(8).fill('a'.repeat(8)).join('-');
+  const form = { schemaVersion: 1 as const, revision, mode: 'multiple' as const,
+    options: ['Startup speed', 'Reliable agents', 'Phone controls'],
+    expiresAt: new Date(Date.now() + 86400000).toISOString() };
+  const question: LeaderQuestionProjection = { questionId: 'memo-0924:0', text: 'Which improvements matter most?',
+    askedAt: new Date().toISOString(), messageId: 'q-multiple', answered: false, answer: null, questionForm: form };
+  let current = question;
+  const answerPath = '/api/verse/leader/questions/memo-0924:0/answer';
+  const interjection = 'Also check the failing tests before starting that work.';
+  const answerText = 'Startup speed; Phone controls';
+  const answerId = 'lt-20261006180000-abcdef';
+  const net = stubLeader({ thread: [msg({ id: question.messageId!, kind: 'question', text: question.text,
+    questionId: question.questionId, questionForm: form })], routes: {
+    'GET /api/verse/leader/questions/memo-0924:0': () => ({ question: current, typedQuestionsSupported: true }),
+    [`POST ${THREAD}`]: () => sent({ id: 'phone-interjection', text: interjection }),
+    [`POST ${answerPath}`]: () => {
+      const at = new Date().toISOString();
+      current = { ...question, answered: true, answer: { text: answerText, at, channel: 'verse', messageId: answerId,
+        typedAcceptance: { schemaVersion: 1, formRevision: revision, kind: 'options', optionIndices: [0, 2],
+          text: answerText, at, messageId: answerId } } };
+      return { outcome: 'recorded', question: current,
+        message: msg({ id: answerId, from: 'mason', kind: 'answer', questionId: question.questionId, text: answerText, at }), reply: null };
+    },
+  } });
+  renderMobile(<Harness />);
+  await userEvent.click(await screen.findByRole('button', { name: /^Answer:/ }));
+  await userEvent.click(await screen.findByRole('checkbox', { name: 'Phone controls' }));
+  await userEvent.click(screen.getByRole('checkbox', { name: 'Startup speed' }));
+  expect(net.posts()).toHaveLength(0);
+
+  // Use the independent composer while the answer sheet is closed, then reopen its saved draft.
+  await userEvent.keyboard('{Escape}');
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Answer the Leader' })).not.toBeInTheDocument());
+  await userEvent.type(composer(), interjection);
+  await userEvent.click(screen.getByRole('button', { name: 'Send' }));
+  await waitFor(() => expect(net.posts()).toHaveLength(1));
+  expect(net.posts()[0]).toMatchObject({ method: 'POST', url: THREAD, body: { text: interjection } });
+  expect(net.posts()[0]!.headers['x-ashlr-token']).toBe(TOKEN);
+  await waitFor(() => expect(composer()).toHaveValue(''));
+  expect(await screen.findByText(interjection)).toBeInTheDocument();
+
+  await userEvent.click(screen.getByRole('button', { name: /^Answer:/ }));
+  expect(await screen.findByRole('checkbox', { name: 'Startup speed' })).toBeChecked();
+  expect(screen.getByRole('checkbox', { name: 'Phone controls' })).toBeChecked();
+  expect(screen.getByRole('checkbox', { name: 'Reliable agents' })).not.toBeChecked();
+  expect(net.posts()).toHaveLength(1);
+  await userEvent.click(screen.getByRole('button', { name: 'Submit answer' }));
+  await waitFor(() => expect(net.posts()).toHaveLength(2));
+  expect(net.posts().map(call => call.url)).toEqual([THREAD, answerPath]);
+  expect(net.posts()[1]!.body).toEqual({ submission: { schemaVersion: 1, formRevision: revision, kind: 'options', optionIndices: [0, 2] } });
+  expect(net.posts()[1]!.headers['x-ashlr-token']).toBe(TOKEN);
+  expect(await screen.findByText(/Your answer is saved/)).toBeInTheDocument();
+  expect(net.posts()).toHaveLength(2);
 });

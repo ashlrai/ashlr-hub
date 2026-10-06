@@ -5,7 +5,7 @@ import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
 import { ownsLocalStoreLock, type LocalStoreLock } from '../fleet/local-store-lock.js';
 import { canonical, digest } from '../universe/artifacts.js';
 import { validateResourceGenerationRuntime } from '../universe/resource-generation.js';
-import { assertCampaignSeedEvaluatorsSettled, campaignUniverse, readUniverseCampaign } from '../universe/campaign-store.js';
+import { assertCampaignSeedEvaluatorsSettled, readUniverseCampaignProjection } from '../universe/campaign-store.js';
 import { assertPreparationMeasurementsSettled } from '../universe/preparation-measurement-capture-store.js';
 import { assertBuiltinTrialEvaluatorsSettled } from '../universe/builtin-trial-custody.js';
 import { universePath } from '../universe/store.js';
@@ -141,9 +141,9 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
           absent(join(portfolioControllerDirectory(enrollment.row.host.definition.id, { root: enrollment.row.host.root }), name));
         }
         for (const task of enrollment.row.host.definition.tasks) {
-          const campaign = readUniverseCampaign(task.campaignId, { root: enrollment.row.host.root });
-          const universe = campaignUniverse(campaign, { root: enrollment.row.host.root });
-          requireEvidence(universe.sourceState === 'healthy' && universe.runs.every(run => {
+          // Reuse one coherent read inside this sample; the next sample reads again.
+          const { campaign, universe } = readUniverseCampaignProjection(task.campaignId, { root: enrollment.row.host.root });
+          requireEvidence(campaign.sourceState === 'healthy' && universe !== null && universe.sourceState === 'healthy' && universe.runs.every(run => {
             const attribution = run.campaign;
             return attribution?.id !== campaign.definition.id || campaign.steps.some(step => step.runId === run.id &&
               step.ordinal === attribution.ordinal && attribution.definitionDigest === campaign.definitionDigest && step.generation === run.generation);

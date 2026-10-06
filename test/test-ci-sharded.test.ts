@@ -10,7 +10,7 @@ const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 function runFixture(
-  failure: 'none' | 'middle' | 'isolated' | 'successor',
+  failure: 'none' | 'middle' | 'isolated' | 'successor' | 'supervision',
   phaseEnvironment: Record<string, string> = {},
 ) {
   const root = mkdtempSync(join(tmpdir(), 'ashlr-test-ci-shards-')); roots.push(root);
@@ -28,6 +28,8 @@ if (process.env.ASHLR_FAKE_FAILURE === 'middle' && shard === '--shard=2/3') {
   setInterval(() => {}, 1000);
 } else if (process.env.ASHLR_FAKE_FAILURE === 'successor' && process.argv.includes('test/resource-engineering-successor-acceptance.test.ts')) {
   process.exitCode = 11;
+} else if (process.env.ASHLR_FAKE_FAILURE === 'supervision' && process.argv.includes('test/universe-supervision-integration.test.ts')) {
+  process.exitCode = 12;
 } else if (process.env.ASHLR_FAKE_FAILURE === 'isolated' && process.argv.includes('automatic seed measurement: true')) {
   process.exitCode = 9;
 }
@@ -57,7 +59,7 @@ describe('local exhaustive prepublish shards', () => {
     // Observe actual coordinator launches, independent of child log ordering.
     // All partitions still run once; the measured longest pair gets both slots.
     expect([...result.stderr.matchAll(/started (\d)\/3/g)].map(match => Number(match[1]))).toEqual([3, 2, 1]);
-    expect(rows).toHaveLength(16);
+    expect(rows).toHaveLength(17);
     expect(rows.every((row) => row.setupTiming === '1' && row.successorTiming === '1' && row.admissionTiming === '1')).toBe(true);
     expect(rows.every((row) => row.hardTimeout === '4000' && row.idleTimeout === '4000')).toBe(true);
     const isolatedFiles = [
@@ -72,8 +74,9 @@ describe('local exhaustive prepublish shards', () => {
       'test/universe-engineering-handoff-recovery.test.ts',
       'test/universe-campaign-integration.test.ts',
       'test/resource-engineering-successor-acceptance.test.ts',
+      'test/universe-supervision-integration.test.ts',
     ];
-    expect(rows.filter((row) => row.shard).every((row) => row.excludes.length === 12 &&
+    expect(rows.filter((row) => row.shard).every((row) => row.excludes.length === 13 &&
       [...isolatedFiles, 'test/universe-hub-marker-campaign.test.ts'].every((file) =>
         row.excludes.includes(`--exclude=${file}`)))).toBe(true);
     expect(rows.filter((row) => !row.shard).map((row) => row.file)).toEqual([
@@ -81,13 +84,13 @@ describe('local exhaustive prepublish shards', () => {
       'test/universe-hub-marker-campaign.test.ts', 'test/universe-hub-marker-campaign.test.ts',
     ]);
     expect(rows.filter((row) => !row.shard).map((row) => row.filter)).toEqual([
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       'automatic seed measurement: false', 'automatic seed measurement: true',
     ]);
     expect(rows.every((row) => row.workers === '--maxWorkers=1')).toBe(true);
     expect(rows.every((row) => row.parallelism.length === 1 && row.parallelism[0] === '--fileParallelism=false')).toBe(true);
     expect(rows.every((row) => row.bail === '--bail=1')).toBe(true);
-    expect(new Set(rows.map((row) => row.home)).size).toBe(16);
+    expect(new Set(rows.map((row) => row.home)).size).toBe(17);
     expect(rows.every((row) => row.tmp === join(row.home, 'tmp'))).toBe(true);
     expect(result.stderr).toContain('[test-ci:sharded] PASS');
   });
@@ -106,7 +109,7 @@ describe('local exhaustive prepublish shards', () => {
     const rows = result.stdout.trim().split('\n').map((line) => JSON.parse(line) as {
       setupTiming: string; successorTiming: string; admissionTiming: string; hardTimeout: string; idleTimeout: string;
     });
-    expect(rows).toHaveLength(16);
+    expect(rows).toHaveLength(17);
     expect(rows.every((row) => row.setupTiming === setup && row.successorTiming === successor && row.admissionTiming === admission)).toBe(true);
     expect(rows.every((row) => row.hardTimeout === '4000' && row.idleTimeout === '4000')).toBe(true);
     expect(result.stderr).toContain('[test-ci:sharded] PASS');
@@ -128,13 +131,26 @@ describe('local exhaustive prepublish shards', () => {
     expect(rows.at(-1)).toMatchObject({ file: 'test/resource-engineering-successor-acceptance.test.ts' });
     expect(rows.at(-1)?.filter).toBeUndefined();
     expect(result.stdout).not.toContain('"file":"test/universe-hub-marker-campaign.test.ts"');
+    expect(result.stdout).not.toContain('"file":"test/universe-supervision-integration.test.ts"');
     expect(result.stderr).toContain('[test-ci:sharded] FAIL (0, 0, 0, isolated 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 11)');
+    expect(result.stderr).not.toContain('[test-ci:sharded] PASS');
+  });
+
+  it('fails closed before marker cases when the whole isolated supervision fixture fails', () => {
+    const result = runFixture('supervision');
+    expect(result.error).toBeUndefined(); expect(result.status).toBe(12);
+    const rows = result.stdout.trim().split('\n').map((line) => JSON.parse(line) as { file?: string; filter?: string });
+    expect(rows).toHaveLength(15); // Three shards and twelve whole files; no marker case starts.
+    expect(rows.at(-1)).toMatchObject({ file: 'test/universe-supervision-integration.test.ts' });
+    expect(rows.at(-1)?.filter).toBeUndefined();
+    expect(result.stdout).not.toContain('"file":"test/universe-hub-marker-campaign.test.ts"');
+    expect(result.stderr).toContain('[test-ci:sharded] FAIL (0, 0, 0, isolated 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12)');
     expect(result.stderr).not.toContain('[test-ci:sharded] PASS');
   });
 
   it('fails closed when the isolated campaign acceptance fails', () => {
     const result = runFixture('isolated');
     expect(result.error).toBeUndefined(); expect(result.status).toBe(9);
-    expect(result.stderr).toContain('[test-ci:sharded] FAIL (0, 0, 0, isolated 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9)');
+    expect(result.stderr).toContain('[test-ci:sharded] FAIL (0, 0, 0, isolated 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9)');
   });
 });

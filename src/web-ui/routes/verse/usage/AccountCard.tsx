@@ -28,7 +28,7 @@
 import type { CSSProperties, ReactNode } from 'react';
 import { StatusBadge, type Tone } from '../../../components/primitives/StatusBadge.js';
 import { ENGINE_LABEL } from '../verse-model.js';
-import type { AccountCardModel, AccountVerdictState } from './accounts-model.js';
+import { accountCreditDetail, type AccountCardModel, type AccountVerdictState } from './accounts-model.js';
 import { WindowMeter } from './WindowMeter.js';
 import styles from './usage.module.css';
 
@@ -59,9 +59,7 @@ function CreditsRow({ credits, historical }: { credits: AccountCardModel['credit
         {value ?? 'not reported'}
       </span>
       <p className={styles.reason}>
-        {historical
-          ? 'Prior balance for context only; current access and spendability are unconfirmed.'
-          : 'Separate from the window above — spendable even when the window is full.'}
+        {accountCreditDetail(credits, historical)}
       </p>
     </div>
   );

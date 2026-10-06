@@ -27,6 +27,13 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 ### Fixed
 
 - Upgrade the bundled MCP SDK to 1.31.0, addressing GHSA-6qxp-vccf-f47h.
+- Keep Codex subscription allowance, credit balances and provider spending holds
+  distinct; unconfirmed credit access remains explicit, and Auto describes its
+  subscription-only selection without authorizing credit-funded turns.
+- Reuse one coherent predecessor campaign and Universe observation per sample,
+  preserving fresh second-sample custody, attribution and drift checks.
+- Run every foreground supervision integration case in the serial local phase
+  and retain bounded trial details on failure without changing its deadlines.
 - Avoid redundant private-directory permission writes and repeated dispatch
   readiness reads while preserving fresh checks immediately before launch.
 - Preserve cached macOS journal permission checks when the directory is

@@ -267,10 +267,20 @@ const TIGHT_AT = 80;
 const FULL_AT = 100;
 
 export function creditsSpendable(credits: Account['credits']): boolean {
-  if (!credits) return false;
+  if (!credits || credits.spendControlReached === true) return false;
   if (credits.unlimited) return true;
   if (!credits.hasCredits) return false;
   return credits.balanceValue !== null && credits.balanceValue > 0;
+}
+
+/** Provider credit facts, separate from subscription eligibility and spending consent. */
+export function accountCreditDetail(credits: NonNullable<Account['credits']>, historical: boolean): string {
+  if (historical) return 'Prior balance for context only; current access and spendability are unconfirmed.';
+  if (credits.spendControlReached === true) return 'Balance reported; the provider reports credit spending held. Separate from subscription usage.';
+  if (credits.spendControlReached !== false) return 'Balance reported; credit spending control is unconfirmed. Separate from subscription usage.';
+  return creditsSpendable(credits)
+    ? 'The provider reports credits available. Separate from subscription usage; automatic credit spending is not enabled.'
+    : 'The provider reports no available credits. Separate from subscription usage.';
 }
 
 function describeCredits(credits: NonNullable<Account['credits']>): string {
@@ -313,6 +323,18 @@ export function accountVerdict(account: Account, binding: AccountWindow | null):
     };
   }
 
+  // A balance alone cannot turn an unknown native spending control into eligibility.
+  const creditOnly = binding === null || (binding.usedPercent === null && !binding.limitReached) ||
+    binding.limitReached || (binding.usedPercent !== null && binding.usedPercent >= FULL_AT);
+  if (creditOnly && account.credits && account.credits.spendControlReached !== false &&
+    (account.credits.hasCredits || account.credits.unlimited)) {
+    return {
+      state: 'unknown',
+      headline: account.credits.spendControlReached === true ? 'Credit spending held' : 'Credit access unconfirmed',
+      detail: accountCreditDetail(account.credits, false),
+      code: account.reason,
+    };
+  }
   const spendable = creditsSpendable(account.credits);
 
   if (binding === null || (binding.usedPercent === null && !binding.limitReached)) {

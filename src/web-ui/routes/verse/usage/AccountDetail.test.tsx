@@ -57,6 +57,23 @@ function detail(model: AccountCardModel, onClose = vi.fn()): void {
 }
 
 describe('AccountDetail', () => {
+  it.each([true, false, null, undefined])('shows credit control %s in card and detail without changing the subscription meter', (spendControlReached) => {
+    const model = card({ id: 'codex-a', label: 'Codex A', engine: 'codex',
+      binding: window({ id: 'primary', usedPct: 100 }),
+      credits: { hasCredits: true, unlimited: false, balance: '3626.2145675', balanceValue: 3626.2145675, spendControlReached } });
+    const copy = spendControlReached === true ? /provider reports credit spending held/
+      : spendControlReached === false ? /provider reports credits available/ : /spending control is unconfirmed/;
+    const view = render(<AccountCard card={model} />);
+    expect(screen.getByText(copy)).toBeInTheDocument();
+    expect(screen.getByTitle('3626.2145675')).toBeInTheDocument();
+    expect(screen.getByRole('meter', { name: /Codex A primary used/ })).toHaveAttribute('aria-valuenow', '100');
+    view.unmount();
+    detail(model);
+    expect(screen.getByText(copy)).toBeInTheDocument();
+    expect(screen.getByTitle('3626.2145675')).toBeInTheDocument();
+    expect(screen.queryByText(/spendable even when the window is full/)).not.toBeInTheDocument();
+  });
+
   it('keeps retained windows and credits as historical evidence when access is unconfirmed', () => {
     detail(card({
       id: 'codex-a',
