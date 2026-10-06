@@ -22,6 +22,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 - Give Telegram Leader summaries readable labels and local dates while
   preserving exact action controls, literal user text and useful quantities.
+- Make generated Leader notes and action outcomes readable in desktop,
+  Command previews and phone views without rewriting saved conversation text.
+- Name the Leader's selected account from cached labels and keep missing
+  labels explicit instead of displaying machine keys.
 - Retain clipped replies in full and send the saved answer on request with
   `more`, including long lines and replies longer than the phone summary.
 - Group Telegram help and clarify that pause/resume controls fleet messages.
