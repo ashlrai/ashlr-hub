@@ -27,6 +27,9 @@ const isolatedSuites = [
   // Git and private-store filesystem work consuming the request deadlines.
   'test/resource-console-engineering-acceptance.test.ts',
   'test/universe-firm-engineering-control.test.ts',
+  // The same real evaluator/Git/delivery recovery path has bounded allowances;
+  // preserve all cases without a competing local real-I/O shard.
+  'test/universe-engineering-handoff-recovery.test.ts',
 ];
 const isolatedAcceptance = 'test/universe-hub-marker-campaign.test.ts';
 const exclusions = [...isolatedSuites, isolatedAcceptance].map((file) => `--exclude=${file}`);
