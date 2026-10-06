@@ -396,6 +396,11 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
     ['request-budget-exhausted', 'paused', 'budget-exhausted'],
     ['duration-budget-exhausted', 'paused', 'budget-exhausted'],
   ] as const)('persists verified %s without replaying held work or changing graph scheduling', async (reasonCode, state, disposition) => {
+    // This checks durable holds across restart, not elapsed downtime. Keep
+    // private ledger IO from exhausting the unrelated synthetic allowance.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-09T12:00:00.000Z'));
+    vi.spyOn(performance, 'now').mockReturnValue(100);
     const f = fixture(['a', 'b', 'c']);
     f.definition.tasks[1]!.dependsOn = ['a'];
     const options = { ...f.options, deliveryPlan: { schemaVersion: 1 as const,
