@@ -521,7 +521,11 @@ function ensurePrivatePath(path: string): BigIntStats {
   if (!safeRepairHandoffDirectory(dirStat)) {
     throw new Error('unsafe repair handoff directory');
   }
-  chmodSync(dir, 0o700);
+  // Keep a current private mode without invalidating Darwin ACL ctime verdicts.
+  // Full permission bits still require repair, including sticky/set-ID bits.
+  if (created || (process.platform !== 'win32' && (dirStat.mode & 0o7777n) !== 0o700n)) {
+    chmodSync(dir, 0o700);
+  }
   assureRepairHandoffStoragePath(
     dir,
     'directory',
@@ -531,6 +535,7 @@ function ensurePrivatePath(path: string): BigIntStats {
   const assuredDirStat = lstatSync(dir, { bigint: true });
   if (
     !safeRepairHandoffDirectory(assuredDirStat) ||
+    (process.platform !== 'win32' && (assuredDirStat.mode & 0o7777n) !== 0o700n) ||
     assuredDirStat.dev !== dirStat.dev || assuredDirStat.ino !== dirStat.ino
   ) throw new Error('unsafe repair handoff directory');
   if (existsSync(path)) {

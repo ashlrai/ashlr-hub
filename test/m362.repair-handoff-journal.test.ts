@@ -1,7 +1,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   linkSync,
   mkdirSync,
   readFileSync,
@@ -117,7 +119,11 @@ import { queueSelfHealItem } from '../src/core/fleet/self-heal.js';
 import { repairTreatmentForUnitId } from '../src/core/fleet/generated-repair-identity.js';
 import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
 import { inboxDir } from '../src/core/inbox/store.js';
-import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
+import {
+  _setPrivateStorageTestControlForTest,
+  assurePrivateStoragePath,
+  PRIVATE_STORAGE_TEST_CONTROL,
+} from '../src/core/util/private-storage.js';
 
 let fx: H1Fixture;
 
@@ -150,6 +156,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
   _setRepairHandoffJournalFaultForTest(undefined);
   privateStorageHarness.semanticFailure = undefined;
   privateStorageHarness.captureFileContents = false;
@@ -391,6 +398,52 @@ function recordDiagnosticProposal(
 }
 
 describe('M362 durable repair handoff journal', () => {
+  it.runIf(process.platform === 'darwin')('reuses current Darwin custody verdicts across unchanged journal reads', () => {
+    const repo = fx.makeRepo();
+    expect(recordRepairHandoffs(event(repo.dir))).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const path = repairHandoffV2JournalPath();
+    const directory = dirname(path);
+    const before = lstatSync(directory, { bigint: true });
+    const bytes = readFileSync(path);
+    let probes = 0;
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      enableVerdictCache: true,
+      observeInvocation: () => { probes += 1; },
+    });
+
+    const first = readRepairHandoffs();
+    expect(first.sourceState).toBe('healthy');
+    const primedProbes = probes;
+    expect(primedProbes).toBeGreaterThan(0);
+    expect(readRepairHandoffs()).toEqual(first);
+    expect(readRepairHandoffs()).toEqual(first);
+    expect(probes).toBe(primedProbes);
+    const after = lstatSync(directory, { bigint: true });
+    expect({ dev: after.dev, ino: after.ino, mode: after.mode, ctimeNs: after.ctimeNs })
+      .toEqual({ dev: before.dev, ino: before.ino, mode: before.mode, ctimeNs: before.ctimeNs });
+    expect(readFileSync(path)).toEqual(bytes);
+  });
+
+  it.runIf(process.platform !== 'win32').each([
+    { label: 'ordinary 0755', mode: 0o755 },
+    { label: 'sticky 01700', mode: 0o1700 },
+  ])('repairs an existing $label journal directory before trusting its rows', ({ mode }) => {
+    const repo = fx.makeRepo();
+    expect(recordRepairHandoffs(event(repo.dir))).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const path = repairHandoffV2JournalPath();
+    const directory = dirname(path);
+    const bytes = readFileSync(path);
+    const before = lstatSync(directory, { bigint: true });
+    chmodSync(directory, mode);
+    expect(lstatSync(directory, { bigint: true }).mode & 0o7777n).toBe(BigInt(mode));
+
+    expect(readRepairHandoffs()).toMatchObject({ sourceState: 'healthy', observations: [expect.any(Object)] });
+    const after = lstatSync(directory, { bigint: true });
+    expect(after.mode & 0o7777n).toBe(0o700n);
+    expect({ dev: after.dev, ino: after.ino }).toEqual({ dev: before.dev, ino: before.ino });
+    expect(readFileSync(path)).toEqual(bytes);
+  });
+
   it('does not assign diagnostic treatment metadata to capture repairs', () => {
     const repo = fx.makeRepo();
     const observation = repairHandoffFromDispatchEvent(event(repo.dir, {

@@ -28,6 +28,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 - Avoid redundant private-directory permission writes and repeated dispatch
   readiness reads while preserving fresh checks immediately before launch.
+- Preserve cached macOS journal permission checks when the directory is
+  already private; changed permissions and special mode bits still require repair.
 - Reuse a coherent campaign observation within each read while rechecking
   source bytes on subsequent observations and before execution.
 - Isolate complete admission scenarios from competing local test shards and
