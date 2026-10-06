@@ -5,7 +5,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, delimiter } from 'node:path';
 import { fileURLToPath, URL } from 'node:url';
 import { collectLane, normalizeReport, reportNames } from '../scripts/ci-qualification-lane.mjs';
 import { bindSource } from '../scripts/ci-source-binding.mjs';
@@ -59,8 +59,8 @@ function simulatedRun(f, role, mutate) {
       assert.deepEqual(args, ['run', 'test:web', '--', '--reporter=default', '--reporter=json', `--outputFile.json=${join(reports, 'web.json')}`]);
       assert.equal(Object.hasOwn(options.env, 'ASHLR_TEST_CI_REPORT_DIRECTORY'), false);
     } else {
-      assert.equal(command, process.execPath); reports = options.env.ASHLR_TEST_CI_REPORT_DIRECTORY;
-      assert.deepEqual(args, [join(f.root, 'scripts/test-ci-sharded.mjs'), role === 'mac-isolated' ? '--isolated-only' : `--general-shard=${role.slice(-1)}/4`]);
+      assert.equal(command, 'npm'); reports = options.env.ASHLR_TEST_CI_REPORT_DIRECTORY;
+      assert.deepEqual(args, ['run', 'test:ci:sharded', '--', role === 'mac-isolated' ? '--isolated-only' : `--general-shard=${role.slice(-1)}/4`]);
     }
     assert.notEqual(reports, f.env.ASHLR_TEST_CI_REPORT_DIRECTORY);
     assert.equal(fs.statSync(reports).mode & 0o7777, 0o700);
@@ -182,6 +182,47 @@ for (const role of ['web', 'mac-general-1', 'mac-general-2', 'mac-general-3', 'm
     assert.equal(fs.readFileSync(join(f.root, 'tracked.txt'), 'utf8'), 'original\n');
   });
 }
+
+// Real npm supplies launch metadata; this inert script never discovers or runs
+// repository tests. Its synthetic report proves only the collector boundary.
+test('Mac collector uses real npm script metadata from the active Node toolchain', { skip: typeof process.getuid !== 'function' }, (t) => {
+  const f = fixture(t);
+  fs.writeFileSync(join(f.root, 'package.json'), JSON.stringify({ private: true, scripts: { 'test:ci:sharded': 'node launch.mjs' } }));
+  fs.writeFileSync(join(f.root, 'launch.mjs'), `import * as fs from 'node:fs';
+import { join, dirname } from 'node:path';
+const reports = process.env.ASHLR_TEST_CI_REPORT_DIRECTORY;
+fs.writeFileSync(join(dirname(reports), 'npm-context.json'), JSON.stringify({
+  args: process.argv.slice(2), npm: fs.realpathSync(process.env.npm_execpath),
+  node: fs.realpathSync(process.execPath), npmNode: fs.realpathSync(process.env.npm_node_execpath),
+  lifecycle: process.env.npm_lifecycle_event, reports
+}), { mode: 0o600 });
+fs.writeFileSync(join(reports, 'general-3-of-4.json'), ${JSON.stringify(JSON.stringify(report(f.root)))}, { mode: 0o600 });
+`);
+  f.git(['add', '.']); f.commit('inert npm fixture');
+  const revision = f.git(['rev-parse', 'HEAD']), tree = f.git(['rev-parse', 'HEAD^{tree}']);
+  const env = { ...f.env, ASHLR_CI_SOURCE_SHA: revision, ASHLR_CI_EVENT_SHA: revision,
+    npm_config_cache: join(f.parent, 'npm-cache'), npm_config_userconfig: join(f.parent, 'no-npmrc'),
+    npm_config_audit: 'false', npm_config_fund: 'false', npm_config_update_notifier: 'false' };
+  assert.equal(Object.hasOwn(env, 'npm_execpath'), false);
+  assert.equal(Object.hasOwn(env, 'npm_node_execpath'), false);
+  const npmPath = process.env.PATH.split(delimiter).map((entry) => join(entry, 'npm')).find((path) => fs.existsSync(path));
+  assert.ok(npmPath, 'installed npm is required for this launch boundary');
+  const directory = collectLane({ role: 'mac-general-3', root: f.root, parent: f.parent, env });
+  const context = JSON.parse(fs.readFileSync(join(directory, 'npm-context.json')));
+  assert.deepEqual(context.args, ['--general-shard=3/4']);
+  assert.equal(context.lifecycle, 'test:ci:sharded');
+  assert.equal(context.npm, fs.realpathSync(npmPath));
+  assert.match(context.npm, /[/\\]npm[/\\]bin[/\\]npm-cli\.js$/);
+  assert.equal(context.node, fs.realpathSync(process.execPath));
+  assert.equal(context.npmNode, fs.realpathSync(process.execPath));
+  assert.equal(context.reports, join(directory, 'reports'));
+  assert.notEqual(context.reports, f.env.ASHLR_TEST_CI_REPORT_DIRECTORY);
+  const lane = JSON.parse(fs.readFileSync(join(directory, 'lane.json')));
+  assert.deepEqual(lane.source, { revision, tree, eventSha: revision });
+  assert.deepEqual(lane.reports.map((item) => item.file), ['general-3-of-4.json']);
+  assert.equal(f.git(['status', '--porcelain']), '');
+  assert.equal(f.git(['rev-parse', 'HEAD']), revision);
+});
 
 for (const role of ['mac-general-0', 'mac-general-5', 'mac-general-1/4', '../web', 'web --filter']) {
   test(`unknown role ${role} refuses before any child or output`, (t) => {

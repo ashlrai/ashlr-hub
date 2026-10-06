@@ -53,11 +53,13 @@ export function collectLane({ role, root, parent, env = process.env, run = spawn
   const startedAt = now();
   const args = role === 'web'
     ? ['run', 'test:web', '--', '--reporter=default', '--reporter=json', `--outputFile.json=${join(reports, names[0])}`]
-    : [join(root, 'scripts/test-ci-sharded.mjs'), role === 'mac-isolated' ? '--isolated-only' : `--general-shard=${role.slice(-1)}/4`];
+    // npm supplies its actual active-toolchain metadata. Native launch
+    // contracts depend on that metadata; keep the existing script boundary.
+    : ['run', 'test:ci:sharded', '--', role === 'mac-isolated' ? '--isolated-only' : `--general-shard=${role.slice(-1)}/4`];
   const childEnv = { ...env };
   delete childEnv.ASHLR_TEST_CI_REPORT_DIRECTORY;
   if (role !== 'web') childEnv.ASHLR_TEST_CI_REPORT_DIRECTORY = reports;
-  const child = run(role === 'web' ? 'npm' : process.execPath, args, { cwd: root, env: childEnv, stdio: 'inherit' });
+  const child = run('npm', args, { cwd: root, env: childEnv, stdio: 'inherit' });
   if (child.error || child.signal || child.status !== 0) throw new Error(`Qualification command failed (${child.status ?? child.signal ?? child.error})`);
   if (JSON.stringify(readdirSync(reports).sort()) !== JSON.stringify([...names].sort())) throw new Error('Missing or extra qualification reports');
   const result = names.map((file) => {
