@@ -10669,7 +10669,10 @@ export function buildItemGoal(item: WorkItem): string {
   // executor role and TITRR already provide broader context.
   parts.push(
     'Make the smallest focused change that fully addresses this. ' +
-    'Match existing conventions. Run/keep tests green. ' +
+    'Match existing conventions. Keep tests green. ' +
+    'Run command checks only with supplied executable tools. When those tools are ' +
+    'unavailable, the host handles required checks; do not claim they ran, and ' +
+    'identify unobserved checks as pending host verification. ' +
     'If on inspection this is NOT actionable as a code change ' +
     '(e.g. a platform-gated or intentionally-skipped test, an issue requiring ' +
     'product decisions, or already done), make NO changes and stop — ' +
@@ -10688,9 +10691,10 @@ export function buildItemGoal(item: WorkItem): string {
     'Do not delete, regenerate, or wholesale-rewrite a file to make this change — ' +
     'edit only what the task requires. A diff that removes unrelated dependencies, ' +
     'scripts, or content is treated as destructive and rejected outright, even when ' +
-    'the stated intent was minor. If you cannot produce a complete diff that passes ' +
-    'this repo’s tests, typecheck, and lint within the available budget, produce NO ' +
-    'diff and stop — a filed partial/unverified change is worse than no proposal.',
+    'the stated intent was minor. Produce a complete scoped diff for this repo’s tests, ' +
+    'typecheck, and lint verification; host checks must pass before acceptance. If you ' +
+    'cannot complete the change within the available budget, produce NO diff and stop ' +
+    '— a filed unfinished change is worse than no proposal.',
   );
 
   return parts.join('\n\n');

@@ -27,6 +27,7 @@
  */
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The status test's daemon is this test process, which holds no daemon lock;
@@ -64,6 +65,7 @@ import {
   readTickProgress,
 } from '../src/core/daemon/tick-progress.js';
 import { loadDaemonState, saveDaemonState } from '../src/core/daemon/state.js';
+import { verifiedProcessStartRef } from '../src/core/fleet/local-store-lock.js';
 import { cmdDaemon } from '../src/cli/daemon.js';
 import { readFleetDaemonStatus } from '../src/core/fleet/status.js';
 import type { EffectivePolicy } from '../src/core/authority/types.js';
@@ -163,15 +165,49 @@ describe('A · runDependencyInstall', () => {
   posixOnly('an abort (tick deadline / shutdown) cancels the install and kills its group', async () => {
     const dir = join(fx.home, 'abort');
     const pids = join(dir, 'pids');
-    const bin = script(dir, 'fake-pm', `sleep 300 &\necho $! > "${pids}"\nwait`);
+    // Opening a redirect creates the PID file before echo writes it. Publish
+    // the complete worker PID atomically before allowing the caller to abort.
+    const bin = script(dir, 'fake-pm', `sleep 300 &\nprintf '%s\\n' "$!" > "${pids}.tmp"\n/bin/mv "${pids}.tmp" "${pids}"\nwait`);
     const controller = new AbortController();
     const running = runDependencyInstall(bin, [], { cwd: dir, env: { PATH: process.env['PATH'] ?? '' }, timeoutMs: 60_000, killGraceMs: 300, signal: controller.signal });
-    await eventually(() => existsSync(pids));
-    controller.abort();
-    const run = await running;
-    expect(run).toMatchObject({ ok: false, cancelled: true, timedOut: false });
-    const worker = Number(readFileSync(pids, 'utf8').trim());
-    expect(await eventually(() => !alive(worker))).toBe(true);
+    try {
+      const ready = await eventually(() => {
+        if (!existsSync(pids)) return false;
+        const value = readFileSync(pids, 'utf8');
+        if (!/^[1-9][0-9]*\n$/.test(value)) return false;
+        const pid = Number(value.trim());
+        return Number.isSafeInteger(pid) && pid > 1;
+      });
+      expect(ready, 'A complete positive worker PID must be published before abort').toBe(true);
+      const worker = Number(readFileSync(pids, 'utf8').trim());
+      expect(Number.isSafeInteger(worker) && worker > 1).toBe(true);
+      const workerStartRef = verifiedProcessStartRef(worker);
+      expect(workerStartRef, 'Bind the actual live fixture worker before abort').toBeDefined();
+      controller.abort();
+      const run = await running;
+      expect(run).toMatchObject({ ok: false, cancelled: true, timedOut: false });
+      const stopped = await eventually(() => !alive(worker));
+      let failureContext: unknown;
+      if (!stopped) {
+        let selectedProcess: string | null = null;
+        try {
+          selectedProcess = execFileSync('/bin/ps', ['-p', String(worker), '-o', 'pid=,ppid=,pgid=,state=,comm='], {
+            encoding: 'utf8', timeout: 1_000, maxBuffer: 4_096, stdio: ['ignore', 'pipe', 'ignore'],
+          }).trim();
+        } catch { /* Unknown process state remains a failed liveness proof. */ }
+        failureContext = { worker, workerStartRef, currentWorkerStartRef: verifiedProcessStartRef(worker) ?? null,
+          selectedProcess, run: { ok: run.ok, code: run.code, signal: run.signal, timedOut: run.timedOut,
+            cancelled: run.cancelled, abandoned: run.abandoned, durationMs: run.durationMs } };
+      }
+      // Keep the original assertion: a zombie, live survivor or unreadable
+      // process is not silently accepted as whole-group cleanup.
+      expect(stopped, failureContext === undefined ? undefined : JSON.stringify(failureContext)).toBe(true);
+    } finally {
+      // Failed readiness/identity assertions must also cancel and await the
+      // exact install owned by this test before fixture directories disappear.
+      controller.abort();
+      await running;
+    }
   }, REAL_IO_TIMEOUT);
 
   posixOnly('a failing install reports its exit code and the tail of its output; a clean exit reaps stragglers', async () => {

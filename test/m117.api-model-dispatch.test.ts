@@ -265,6 +265,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     const fakeProposalId = `prop-${randomUUID().slice(0, 8)}`;
     const capturedClientArgs: unknown[] = [];
     const capturedTaskArgs: unknown[] = [];
+    const capturedEngineerContexts: unknown[] = [];
     const capturedProposalArgs: unknown[] = [];
     const capturedGateArgs: unknown[] = [];
 
@@ -328,10 +329,13 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     }));
 
     vi.doMock('../src/core/mcp-native-engineer.js', () => ({
-      buildEngineerToolSpecs: () => [
-        { name: 'read_file', fn: async () => 'content' },
-        { name: 'write_file', fn: async () => 'ok' },
-      ],
+      buildEngineerToolSpecs: (ctx: unknown) => {
+        capturedEngineerContexts.push(ctx);
+        return [
+          { name: 'read_file', fn: async () => 'content' },
+          { name: 'write_file', fn: async () => 'ok' },
+        ];
+      },
     }));
 
     vi.doMock('../src/core/seams/inbox.js', () => ({
@@ -378,11 +382,14 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     const taskContext = capturedTaskArgs[0] as {
       tools?: unknown[];
       adaptivePrompts?: boolean;
+      hostVerification?: boolean;
       reserveModelStep?: unknown;
     };
     expect(Array.isArray(taskContext.tools)).toBe(true);
     expect(taskContext.tools!.length).toBeGreaterThan(0);
     expect(taskContext.adaptivePrompts).toBe(true);
+    expect(taskContext.hostVerification).toBe(true);
+    expect(capturedEngineerContexts).toEqual([expect.objectContaining({ allowWrite: true, allowExec: false })]);
     expect(taskContext.reserveModelStep).toEqual(expect.any(Function));
 
     // Proposal filed with correct fields

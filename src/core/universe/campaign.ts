@@ -9,7 +9,7 @@ import { scheduledVariants, universePath } from './store.js';
 import { canonical, defaultUniverseRoot, digest } from './artifacts.js';
 import {
   appendCampaignEvent, CampaignControlConflictError, campaignDirectory, campaignUniverse, foldCampaignEvents,
-  projectCampaign, readCampaignEvents, readUniverseCampaign, terminalCampaign, validCampaignDispatchId,
+  projectCampaign, readCampaignEvents, readUniverseCampaign, readUniverseCampaignProjection, terminalCampaign, validCampaignDispatchId,
 } from './campaign-store.js';
 import type { UniverseCampaignSummary, UniverseRunOptions } from './types.js';
 
@@ -214,7 +214,8 @@ async function runCampaignWithLease(id: string, options: CampaignOptions, lock: 
 
     while (true) {
       if (!ownsLocalStoreLock(lock)) throw new Error('Campaign execution ownership was lost');
-      summary = readUniverseCampaign(id, options);
+      const projection = readUniverseCampaignProjection(id, options);
+      summary = projection.campaign;
       assertExpectation(summary, options.expectedIdentity, false);
       if (summary.sourceState !== 'healthy') throw new Error('Campaign evidence is degraded');
       if (summary.state === 'pause-requested' || summary.state === 'stop-requested') {
@@ -227,8 +228,8 @@ async function runCampaignWithLease(id: string, options: CampaignOptions, lock: 
       if (exhausted) return finish(exhausted.state, exhausted.reason);
       if (controller.signal.aborted) return finish('paused', 'Campaign paused by caller cancellation');
 
-      const current = campaignUniverse(summary, options);
-      if (current.sourceState !== 'healthy') throw new Error('Universe evidence is degraded');
+      const current = projection.universe;
+      if (current === null || current.sourceState !== 'healthy') throw new Error('Universe evidence is degraded');
       const generation = current.runs.length + 1;
       const previous = summary.steps.at(-1);
       if (previous) {

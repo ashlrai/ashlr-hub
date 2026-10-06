@@ -3985,6 +3985,7 @@ export async function runApiModelSandboxed(
       usage,
       sink: streamSink,
       adaptivePrompts: adaptivePromptsEnabled(cfg),
+      ...(engine === 'local-coder' ? { hostVerification: true } : {}),
       reserveModelStep,
       onStep: (step) => {
         steps.push(step);

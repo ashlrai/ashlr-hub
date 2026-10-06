@@ -30,8 +30,12 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   readiness reads while preserving fresh checks immediately before launch.
 - Preserve cached macOS journal permission checks when the directory is
   already private; changed permissions and special mode bits still require repair.
-- Reuse a coherent campaign observation within each read while rechecking
-  source bytes on subsequent observations and before execution.
+- Release the journal lock before waiting for parent authority to settle,
+  then revalidate current journals and admission without duplicating durable rows.
+- Describe the local coding agent's actual executable tools and distinguish
+  file readback from required host checks that have not yet run.
+- Reuse a coherent campaign observation within each read and foreground iteration,
+  rechecking source bytes on subsequent observations and before execution.
 - Isolate complete admission scenarios from competing local test shards and
   report actual completed cases during long suites without extending deadlines.
 - Give Telegram Leader summaries readable labels and local dates while
