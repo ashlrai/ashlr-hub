@@ -20,6 +20,14 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Fixed
 
+- Give Telegram Leader summaries readable labels and local dates while
+  preserving exact action controls, literal user text and useful quantities.
+- Retain clipped replies in full and send the saved answer on request with
+  `more`, including long lines and replies longer than the phone summary.
+- Group Telegram help and clarify that pause/resume controls fleet messages.
+- Pace actual Telegram message chunks per bot and chat, honor reported
+  rate-limit waits, and retry a confirmed short rate limit once without
+  replaying a chunk after an ambiguous network response.
 - Retain unresolved Devin session exposure across retries and reconcile reported
   organization consumption independently of remaining plan quota.
 - Account for native Devin provider contacts across retry attempts rather than
