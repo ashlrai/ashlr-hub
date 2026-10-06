@@ -229,7 +229,12 @@ function assureLockDirectory(
     if (
       initial.isSymbolicLink() || !initial.isDirectory() || !owned(initial.uid)
     ) return null;
-    if (created || process.platform !== 'win32') chmodSync(path, PRIVATE_DIRECTORY_MODE);
+    // Avoid invalidating private-storage ctime verdicts with an unchanged mode.
+    // Full permission bits still require repair, including sticky/set-ID bits.
+    if (created || (process.platform !== 'win32' &&
+      (initial.mode & 0o7777n) !== BigInt(PRIVATE_DIRECTORY_MODE))) {
+      chmodSync(path, PRIVATE_DIRECTORY_MODE);
+    }
     const before = lstatSync(path, { bigint: true });
     if (
       before.isSymbolicLink() || !before.isDirectory() || !owned(before.uid) ||

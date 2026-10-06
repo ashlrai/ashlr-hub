@@ -44,6 +44,12 @@ function empty(id: string, state: 'missing' | 'degraded', at: string): UniverseP
 
 /** A projection validates source receipts, not process liveness; unresolved intents stay unresolved. */
 function inspect(id: string, events: PortfolioControllerEvent[], root: string, at: string, verifyLedger = true): UniversePortfolioControllerReport {
+  return inspectProjection(id, events, root, at, verifyLedger).report;
+}
+
+/** Admission-only evidence stays local to this synchronous projection. */
+function inspectProjection(id: string, events: PortfolioControllerEvent[], root: string, at: string, verifyLedger = true,
+  finalCampaignId?: string): { report: UniversePortfolioControllerReport; finalReadiness: UniverseCampaignReadiness | null } {
   if (verifyLedger && canonical(readPortfolioControllerEvents(portfolioControllerDirectory(id, { root }))) !== canonical(events)) {
     throw new Error('Controller ledger changed during observation');
   }
@@ -52,28 +58,52 @@ function inspect(id: string, events: PortfolioControllerEvent[], root: string, a
   const enrollment = folded.first.enrollment;
   const reasons: string[] = [];
   if (at < folded.highWaterAt) reasons.push('controller-clock-rollback');
-  const outcomes = [...folded.states.values()].map((row) => {
+  const rows = [...folded.states.values()];
+  const rowReasons = new Map<string, string>();
+  const project = (row: typeof rows[number], captured?: {
+    readiness: UniverseCampaignReadiness; deliveries: ReturnType<typeof readUniverseDeliveries> | null;
+  }) => {
     if (row.state === 'in-flight') return { ...row };
     const pin = folded.pins.get(row.campaignId)!;
-    const readiness = readUniverseCampaignReadiness(row.campaignId, { root });
+    const readiness = captured?.readiness ?? readUniverseCampaignReadiness(row.campaignId, { root });
     const expectedRecords = folded.settlements.get(row.campaignId)?.recordsDigest ?? pin.recordsDigest;
     if (!matches(pin, readiness) || readiness.expectedIdentity!.summaryDigest !== row.campaignDigest || readiness.recordsDigest !== expectedRecords ||
         row.state === 'completed' && readiness.observedState !== 'completed') {
-      reasons.push(`${row.campaignId}:campaign-evidence-changed`);
+      rowReasons.set(row.campaignId, `${row.campaignId}:campaign-evidence-changed`);
       return { ...row, state: 'held' as const, reasonCode: 'campaign-evidence-changed' };
     }
     if (row.deliveryDigest !== null) {
       const target = enrollment.deliveryPlan?.deliveries.find((item) => item.campaignId === row.campaignId);
-      const deliveries = readUniverseDeliveries(pin.universeId, { root });
-      if (!target || deliveries.sourceState !== 'healthy' || !deliveries.deliveries.some((receipt) => receipt.status === 'delivered' &&
+      const deliveries = captured ? captured.deliveries : readUniverseDeliveries(pin.universeId, { root });
+      if (!target || !deliveries || deliveries.sourceState !== 'healthy' || !deliveries.deliveries.some((receipt) => receipt.status === 'delivered' &&
           receipt.branch === target.branch && receipt.baseCommit === target.baseCommit && digest(canonical(receipt)) === row.deliveryDigest)) {
-        reasons.push(`${row.campaignId}:delivery-evidence-changed`);
+        rowReasons.set(row.campaignId, `${row.campaignId}:delivery-evidence-changed`);
         return { ...row, state: 'held' as const, reasonCode: 'delivery-evidence-changed' };
       }
     }
     return { ...row, ...(row.state === 'pending' && pin.dispatch === 'campaign' && waitable(readiness)
       ? { reasonCode: 'waiting-for-universe-owner' } : {}) };
-  });
+  };
+  const projected = new Map<string, ReturnType<typeof project>>();
+  for (const row of rows) if (row.campaignId !== finalCampaignId) projected.set(row.campaignId, project(row));
+  let finalReadiness: UniverseCampaignReadiness | null = null;
+  if (finalCampaignId !== undefined) {
+    const row = rows.find(value => value.campaignId === finalCampaignId);
+    if (!row) throw new Error('Controller admission target missing');
+    const pin = folded.pins.get(finalCampaignId)!;
+    // Complete target delivery IO before the final target readiness read too.
+    // No filesystem observation follows that read inside this projection.
+    const deliveries = row.state !== 'in-flight' && row.deliveryDigest !== null
+      ? readUniverseDeliveries(pin.universeId, { root }) : null;
+    finalReadiness = readUniverseCampaignReadiness(finalCampaignId, { root });
+    projected.set(finalCampaignId, project(row, { readiness: finalReadiness, deliveries }));
+  }
+  // Preserve stored outcome/reason order despite admission's target-last IO.
+  const outcomes = rows.map(row => projected.get(row.campaignId)!);
+  for (const row of rows) {
+    const reason = rowReasons.get(row.campaignId);
+    if (reason !== undefined) reasons.push(reason);
+  }
   // Declared order need not be topological. Propagate holds to a fixed point
   // without changing either the stored enrollment or scheduling priority.
   for (let pass = 0; pass < outcomes.length; pass++) {
@@ -88,7 +118,7 @@ function inspect(id: string, events: PortfolioControllerEvent[], root: string, a
     if (!changed) break;
   }
   const sourceState = reasons.length ? 'degraded' : 'healthy';
-  return { schemaVersion: 1, controllerId: id, definitionDigest: enrollment.definitionDigest, sourceState,
+  const report: UniversePortfolioControllerReport = { schemaVersion: 1, controllerId: id, definitionDigest: enrollment.definitionDigest, sourceState,
     status: sourceState === 'degraded' ? 'unavailable' : outcomes.every((row) => row.state === 'completed') ? 'completed' :
       at >= enrollment.deadlineAt ? 'timed-out' : folded.control?.mode === 'drain'
         ? folded.control.acknowledgedAt === null ? 'draining' : 'drained' : 'incomplete',
@@ -98,6 +128,7 @@ function inspect(id: string, events: PortfolioControllerEvent[], root: string, a
     topology: enrollment.definition.tasks.map((task) => ({ campaignId: task.campaignId,
       dependsOn: [...task.dependsOn], prerequisites: portfolioControllerPrerequisites(enrollment, task.campaignId) })),
     ...(folded.control ? { control: { ...folded.control } } : {}) };
+  return { report, finalReadiness };
 }
 
 class ControllerTransactionWaitStopped extends Error {}
@@ -463,8 +494,10 @@ async function runPortfolioController(input: unknown, options: UniversePortfolio
           // Every short-lock retry must discard its old evidence. This is a
           // fresh synchronous projection, not a lock over all campaign stores.
           // The caller still holds the exact Universe lease passed to the runner.
-          const report = inspect(definition.id, events, root, new Date().toISOString(), false);
-          const current = readUniverseCampaignReadiness(campaignId, { root });
+          const projection = inspectProjection(definition.id, events, root, new Date().toISOString(), false, campaignId);
+          const report = projection.report;
+          const current = projection.finalReadiness;
+          if (current === null) throw new ControllerAdmissionRejected('Controller admission target unavailable');
           if (stopping()) throw new ControllerTransactionWaitStopped('Controller admission stopped');
           checkLease();
           const reason = !matches(pin, current) || current.expectedIdentity!.summaryDigest !== pin.campaignDigest ||
