@@ -138,7 +138,8 @@ describe('M30 CI workflow', () => {
       expect(job).toContain('run: node scripts/cleanup-launchd-test.mjs');
       expect(job).not.toMatch(/--testNamePattern|(?:^|\s)-t(?:\s|$)|--project|--exclude/);
     }
-    expect(qualificationLane).toContain('scripts/test-ci-sharded.mjs');
+    expect(qualificationLane).toContain("['run', 'test:ci:sharded', '--'");
+    expect(pkg.scripts?.['test:ci:sharded']).toBe('node scripts/test-ci-sharded.mjs');
     expect(qualificationLane).toContain("role === 'mac-isolated' ? '--isolated-only' : `--general-shard=${role.slice(-1)}/4`");
     expect(qualificationLane).toContain('ASHLR_TEST_CI_REPORT_DIRECTORY = reports');
     expect(qualificationLane).toContain('general-${general[1]}-of-4.json');
