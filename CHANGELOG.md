@@ -49,6 +49,16 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   while retaining independent-worker cancellation and settlement coverage.
 - Load the build-identity API fixture during test collection so its request
   assertions retain their existing deadlines independently of module loading.
+- Treat structured native CLI errors and cancellations as failed runs even
+  when the process exits successfully, preserving partial changes for review.
+- Count native tool calls across initial attempts, retries and repairs in
+  the run trace without changing provider usage or billing accounting.
+- Run the complete transcript suite after other web workers finish, preserving
+  the streaming performance target, and await effect-driven approval focus.
+- Wait for the review pane's initial file selection before fixture keyboard
+  navigation, retaining the original line-comment and file-switch assertions.
+- Run the complete handoff-recovery fixture in the serial local integration
+  phase, retaining all cases and their original delivery deadlines.
 - Reuse the same CI job's verified build for packaging and run the Windows
   native-alias suite once, preserving every distinct platform test.
 
