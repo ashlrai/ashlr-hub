@@ -98,9 +98,15 @@ handle. The runner preserves the separate worker limits of the unit and
 serialized real-I/O lanes defined in [vitest.config.ts](vitest.config.ts).
 
 Hosted CI includes exhaustive Ubuntu shards, named Windows portability contracts,
-macOS queue coverage and native broker checks. Local tests and hosted checks
+four exhaustive Mac partitions, a separate serial Mac lane for all isolated
+suites, macOS queue coverage and native broker checks. Local tests and hosted checks
 prove different environments. Inspect each actual run and report unavailable or
 skipped coverage separately; do not weaken checks to make a release pass.
+
+The optional [qualified build handoff](docs/RELEASING.md#qualified-ci-build-handoff)
+reuses the same tested build and package bytes after complete CI qualification
+and trusted attestation. It preserves native packaging, signing, installation
+and live verification. `npm run prepublishOnly` remains the full local fallback.
 
 ---
 

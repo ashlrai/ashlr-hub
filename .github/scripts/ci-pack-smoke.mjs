@@ -149,7 +149,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const [command, operand, extra] = process.argv.slice(2);
     assert.equal(extra, undefined, 'unexpected operand');
     assert.ok(operand, 'missing operand');
-    const options = { root: process.cwd(), eventSha: process.env.GITHUB_SHA };
+    const options = { root: process.cwd(), eventSha: process.env.ASHLR_CI_SOURCE_SHA ?? process.env.GITHUB_SHA };
     let path;
     if (command === 'capture') path = captureBuild({ ...options, parent: operand });
     else if (command === 'pack') path = packBuild({ ...options, snapshotPath: operand, parent: process.env.RUNNER_TEMP });

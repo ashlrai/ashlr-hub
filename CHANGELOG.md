@@ -13,6 +13,15 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Added
 
+- Qualify the complete Mac backend in four independent hosted partitions and
+  one serial isolated lane, retaining case deadlines and recording actual
+  passed, skipped and todo results. Candidate checkouts must match GitHub's
+  original event tree before any checks run.
+- Capture the tested build and exact same-job npm archive for optional local
+  reuse. A separate default-branch workflow verifies full CI coverage and signs
+  the original bytes; the local consumer checks fresh CI results and signatures
+  before adopting into an absent build directory. Native and live gates remain
+  separate; mismatches refuse reuse. End-to-end savings are not yet measured.
 - Answer structured Leader questions with single choice, multiple choice,
   Select all/Clear, or short text across desktop, phone and Telegram, while
   keeping the conversation composer available for interjections.

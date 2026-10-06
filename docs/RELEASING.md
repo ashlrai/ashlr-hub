@@ -124,6 +124,72 @@ filesystem-semantics tests remain truthful. Those test stages retain the host
 account's authority. See
 [`CONTRACT-M571.md`](contracts/CONTRACT-M571.md) for the exact boundary.
 
+## Qualified CI build handoff
+
+The optional handoff avoids repeating the complete source qualification and
+JavaScript build on the packaging computer. It does not skip native compilation,
+signing, offline installation, resident-work draining, rollback checks or live
+verification. The full `npm run prepublishOnly` remains the fallback when hosted
+evidence is unavailable, expired or rejected. No end-to-end speedup has yet been
+measured for this path.
+
+CI checks out the candidate commit and proves its tree matches the original
+GitHub event tree before running checks. All existing Ubuntu, Windows and native
+checks remain. Four independent Mac jobs run the complete general partitions;
+a fifth job runs every isolated suite serially. Test deadlines remain unchanged.
+Actual Vitest reports retain passed, skipped and todo cases, including repeated
+parameterized titles. Failed or unfinished runs cannot qualify.
+
+The first Ubuntu job captures `dist.tar`, its source/build manifest, the exact
+archive used by its successful npm installation smoke check, and the full web
+report. Each Mac job uploads its actual report closure. After the candidate is
+merged with an identical default-branch tree, dispatch **Attest qualified CI
+build** on `master` with the exact CI run ID, attempt, candidate SHA and producer
+artifact ID. The trusted workflow checks fresh official jobs/artifact metadata,
+complete module coverage and all bytes, then signs the existing build, manifest
+and aggregate qualification. It never executes downloaded source or build bytes.
+
+Download its `ashlr-attested-…` artifact into a private folder and retain all
+contents together. In a clean checkout at the exact candidate commit, verify:
+
+```sh
+node scripts/hosted-build-artifact.mjs verify \
+  --root "$PWD" --sha "$candidate_sha" --bundle "$bundle" \
+  --run "$ci_run_id" --attempt "$ci_run_attempt" \
+  --attestor-sha "$trusted_master_sha" \
+  --attestor-run "$attestor_run_id" --attestor-attempt "$attestor_run_attempt"
+```
+
+Use the same arguments with `adopt` to install verified build output into an
+**absent** `dist` directory. Adoption performs fresh verification in that process;
+a saved success receipt alone cannot authorize it. Existing output is refused
+so the caller can preserve it deliberately before proceeding. Keep the original
+npm archive for exact-byte publication; do not repack it. Dependency Audit and
+all required pull-request checks must also pass before merge. Record native,
+publication, installation and production evidence separately from this source
+qualification.
+
+After adoption, the native compiler can reuse those same JavaScript bytes:
+
+```sh
+node scripts/build-sea.mjs \
+  --hosted-bundle "$bundle" --run "$ci_run_id" --attempt "$ci_run_attempt" \
+  --attestor-sha "$trusted_master_sha" \
+  --attestor-run "$attestor_run_id" --attestor-attempt "$attestor_run_attempt"
+```
+
+This command repeats fresh provenance verification and compares every adopted
+file and mode before native compilation. A missing signature, changed source,
+altered build or incomplete arguments fail rather than skip the build unchecked.
+Without these arguments, `npm run build:binary` still performs its ordinary
+local JavaScript build. Adoption assumes exclusive use of the owned checkout;
+its atomic rename publishes the directory but is not a kernel no-replace
+guarantee against a simultaneous external writer with the same OS user.
+
+The first attestor invocation requires these policy files on `master`. Keep
+existing public downloads and the production site valid during that bootstrap;
+do not claim pre-merge signed admission or promote unpublished download targets.
+
 ## Trusted-publisher configuration used for 3.3.2
 
 The 3.3.2 release used npm **trusted publishing**. Any future publishing

@@ -5,8 +5,8 @@
  * and asserts the CI runs on Node 22.15+ (the hard minimum — install.sh hard-fails
  * below 22.15, so a 20+22 matrix would silently lie), runs the required
  * typecheck / lint / build / test steps with hermetic isolation, that npm
- * caching is enabled, and that NOTHING public is wired in (no deploy/publish/
- * release step) — per the M30 "nothing public / self-hostable" invariant.
+ * caching is enabled, and that CI remains read-only without deploy, registry
+ * publication, or signing authority. Trusted attestation uses a separate workflow.
  * Read-only; touches no real config.
  */
 import { describe, it, expect } from 'vitest';
@@ -20,6 +20,13 @@ const repoRoot = resolve(here, '..');
 
 const ciYml = readFileSync(resolve(repoRoot, '.github/workflows/ci.yml'), 'utf8');
 const vitestConfig = readFileSync(resolve(repoRoot, 'vitest.config.ts'), 'utf8');
+const sourceBinding = readFileSync(resolve(repoRoot, '.github/scripts/ci-source-binding.mjs'), 'utf8');
+const qualificationLane = readFileSync(resolve(repoRoot, '.github/scripts/ci-qualification-lane.mjs'), 'utf8');
+
+function workflowJob(id: string): string {
+  return ciYml.match(new RegExp(`^ {2}${id}:\\n[\\s\\S]*?(?=^ {2}[\\w-]+:|$(?![\\s\\S]))`, 'm'))?.[0] ?? '';
+}
+
 const pkg = JSON.parse(
   readFileSync(resolve(repoRoot, 'package.json'), 'utf8'),
 ) as { engines?: { node?: string }; scripts?: Record<string, string> };
@@ -79,18 +86,117 @@ function declaredTestTitles(file: string): string[] {
 describe('M30 CI workflow', () => {
   it('is reusable as the canonical release verification authority', () => {
     expect(ciYml).toMatch(/(?:^|\n)\s{2}workflow_call:\s*(?:\n|$)/);
-    expect(ciYml.match(/^permissions:\n[\s\S]*?(?=^jobs:)/m)?.[0]).toBe(
-      'permissions:\n  contents: read\n\n' +
-      '# Feature-branch updates are validated through the PR merge ref, not an\n' +
-      '# equivalent push checkout. Superseded PR revisions can stop safely; default\n' +
-      '# branch pushes and reusable workflow callers retain independent full matrices.\n' +
-      'concurrency:\n' +
-      '  group: ci-${{ github.event.pull_request.number || github.ref }}\n' +
-      "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n\n",
+    // Policy-bearing permissions are independent of explanatory header comments.
+    expect(ciYml.match(/^permissions:\n(?: {2}[^\n]*\n)+/m)?.[0].trim()).toBe(
+      'permissions:\n  contents: read',
     );
     expect(ciYml.match(/^\s{2,}permissions:/gm) ?? []).toHaveLength(0);
     expect(ciYml).toMatch(/^concurrency:\n {2}group: ci-\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}\n {2}cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}$/m);
     expect(ciYml).toMatch(/^ {2}push:\n {4}branches: \[master\]$/m);
+  });
+
+  it('checks out the exact candidate and binds its tree to the original event before gates', () => {
+    for (const id of ['ci', 'mac-general', 'mac-isolated', 'native-macos-broker-foundation', 'windows-service-authority']) {
+      const job = workflowJob(id);
+      expect(job, `missing job ${id}`).not.toBe('');
+      expect(job).toContain('ref: ${{ github.event.pull_request.head.sha || github.sha }}');
+      expect(job).toContain('persist-credentials: false');
+      expect(job).toContain('fetch-depth: 0');
+      expect(job).toContain('ASHLR_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}');
+      expect(job.indexOf('- name: Bind candidate source')).toBeGreaterThan(job.indexOf('- name: Checkout'));
+      expect(job.indexOf('- name: Bind candidate source')).toBeLessThan(job.indexOf('- name: Set up'));
+      expect(job).toContain('run: node .github/scripts/ci-source-binding.mjs');
+    }
+    expect(sourceBinding).toContain("git(['rev-parse', 'HEAD']) !== candidate");
+    expect(sourceBinding).toContain("git(['status', '--porcelain', '--untracked-files=normal'])");
+    expect(sourceBinding).toContain("git(['fetch', '--no-tags', 'origin', eventSha])");
+    expect(sourceBinding).toContain("git(['rev-parse', `${eventSha}^{tree}`]) !== tree");
+    expect(sourceBinding).toContain('ASHLR_CI_SOURCE_SHA=${source.revision}');
+    expect(sourceBinding).toContain('ASHLR_CI_EVENT_SHA=${source.eventSha}');
+    expect(sourceBinding).not.toMatch(/appendFileSync\([^;]*GITHUB_SHA=/s);
+  });
+
+  it('adds all four exhaustive Mac general partitions and one complete serial isolated lane', () => {
+    const general = workflowJob('mac-general');
+    const isolated = workflowJob('mac-isolated');
+    expect(general).toContain('name: Mac exhaustive (${{ matrix.shard }}/4)');
+    expect(general).toContain('shard: [1, 2, 3, 4]');
+    expect(general).toContain('max-parallel: 4');
+    expect(general).toContain('fail-fast: false');
+    expect(general).toContain('run: node .github/scripts/ci-qualification-lane.mjs mac-general-${{ matrix.shard }}');
+    expect(isolated).toContain('name: Mac exhaustive (isolated)');
+    expect(isolated).toContain('run: node .github/scripts/ci-qualification-lane.mjs mac-isolated');
+    for (const job of [general, isolated]) {
+      expect(job).toContain('runs-on: macos-15');
+      expect(job).toContain("ASHLR_VITEST_TEST_TIMEOUT_MS: '5000'");
+      expect(job).toContain("ASHLR_RUN_NATIVE_LAUNCHD_TEST: '1'");
+      expect(job).toContain("node-version: '22.22.3'");
+      expect(job).toContain('run: npm ci');
+      expect(job).toContain('run: npm run build');
+      expect(job).toContain('if-no-files-found: error');
+      expect(job).toContain('if: always()');
+      expect(job).toContain('run: node scripts/cleanup-launchd-test.mjs');
+      expect(job).not.toMatch(/--testNamePattern|(?:^|\s)-t(?:\s|$)|--project|--exclude/);
+    }
+    expect(qualificationLane).toContain('scripts/test-ci-sharded.mjs');
+    expect(qualificationLane).toContain("role === 'mac-isolated' ? '--isolated-only' : `--general-shard=${role.slice(-1)}/4`");
+    expect(qualificationLane).toContain('ASHLR_TEST_CI_REPORT_DIRECTORY = reports');
+    expect(qualificationLane).toContain('general-${general[1]}-of-4.json');
+    expect(qualificationLane).toContain('length: 14');
+  });
+
+  it('captures complete web JSON before backend work and retains same-build package verification', () => {
+    const job = workflowJob('ci');
+    const web = job.match(/^ {6}- name: Test web operator console[\s\S]*?(?=^ {6}- name:)/m)?.[0] ?? '';
+    expect(web).toContain("if: matrix.label == 'ubuntu, authority 1/3'");
+    expect(web).toContain('id: web');
+    expect(web).toContain('run: node .github/scripts/ci-qualification-lane.mjs web');
+    expect(job.indexOf('- name: Capture pack smoke build snapshot')).toBeLessThan(job.indexOf('- name: Test web operator console'));
+    expect(job.indexOf('- name: Test web operator console')).toBeLessThan(job.indexOf('- name: Test (hermetic)'));
+    expect(job).toContain('npm run check:first-paint:built');
+    expect(qualificationLane).toContain("['run', 'test:web', '--', '--reporter=default', '--reporter=json'");
+    expect(qualificationLane).not.toMatch(/--testNamePattern|--project|--exclude/);
+    expect(job).toContain('node .github/scripts/ci-pack-smoke.mjs verify "$ASHLR_PACK_SMOKE_SNAPSHOT"');
+    expect(job).toContain('--package-tarball "$TARBALL"');
+    expect(job).toContain('--reports "${{ steps.web.outputs.lane_dir }}"');
+    expect(job).toContain('name: ashlr-build-${{ github.run_id }}-${{ github.run_attempt }}');
+    expect(job).toContain('if-no-files-found: error');
+  });
+
+  it('keeps native broker coverage behind the complete Mac lanes without giving CI signing authority', () => {
+    const native = workflowJob('native-macos-broker-foundation');
+    expect(native).toContain('needs: [mac-general, mac-isolated]');
+    for (const step of ['Check native broker formatting', 'Check native broker library', 'Lint native broker library', 'Test native broker library']) {
+      expect(native).toContain(`- name: ${step}`);
+    }
+    expect(ciYml).not.toMatch(/id-token:\s*write|attestations:\s*write|actions\/attest/);
+    expect(ciYml).not.toContain('pull_request_target');
+  });
+
+  it('keeps artifact signing in a trusted default-branch workflow with verified data inputs', () => {
+    const signing = readFileSync(resolve(repoRoot, '.github/workflows/attest-ci-build.yml'), 'utf8');
+    const inputs = readFileSync(resolve(repoRoot, '.github/scripts/ci-attestation-inputs.mjs'), 'utf8');
+    expect(signing).toMatch(/^ {2}workflow_dispatch:/m);
+    expect(signing).not.toMatch(/^ {2}(?:pull_request(?:_target)?|workflow_call|push):/m);
+    expect(signing).toContain("if: github.ref == 'refs/heads/master'");
+    expect(signing).toContain('ref: ${{ github.sha }}');
+    expect(signing).toContain('persist-credentials: false');
+    expect(signing).toContain('id-token: write');
+    expect(signing).toContain('attestations: write');
+    expect(signing).toContain('digest-mismatch: error');
+    expect(signing).toContain('merge-multiple: false');
+    expect(signing).toContain('node .github/scripts/ci-attestation-inputs.mjs assemble "$DIRECTORY"');
+    expect(signing).toContain('node scripts/hosted-build-artifact.mjs qualify');
+    expect(signing.indexOf('- name: Verify complete qualification')).toBeLessThan(signing.indexOf('- name: Attest original build bytes'));
+    for (const file of ['dist.tar', 'manifest.json', 'qualification.json']) {
+      expect(signing).toContain(`steps.inputs.outputs.directory }}/bundle/${file}`);
+    }
+    expect(signing).not.toMatch(/npm (?:ci|install|run build|publish)|node "?\$DIRECTORY\/(?:candidate|bundle)\//);
+    expect(inputs).toContain("assert.equal(env.GITHUB_EVENT_NAME, 'workflow_dispatch')");
+    expect(inputs).toContain("assert.equal(env.GITHUB_REF, 'refs/heads/master')");
+    expect(inputs).toContain("assert.equal(env.GITHUB_REPOSITORY, repository)");
+    expect(inputs).toContain("assert.equal(trusted.tree.sha, candidate.tree.sha");
+    expect(inputs).toContain("assert.equal(ci.path, '.github/workflows/ci.yml')");
   });
 
   it('runs on Node 22.15 or newer only (install.sh enforces the synchronous-hook floor)', () => {
@@ -110,6 +216,11 @@ describe('M30 CI workflow', () => {
   it('keeps the typecheck / lint / build / test steps (hermetic invocation)', () => {
     expect(ciYml).toContain('npm run typecheck');
     expect(ciYml).toContain('npm run lint');
+    const docs = ciYml.match(/^ {6}- name: Check documentation[\s\S]*?(?=^ {6}- name:)/gm) ?? [];
+    expect(docs).toHaveLength(1);
+    expect(docs[0]).toContain("if: matrix.label == 'ubuntu, authority 3/3'");
+    expect(docs[0]).toContain('run: npm run check:docs');
+    expect(workflowJob('windows-service-authority')).not.toContain('- name: Typecheck');
     expect(ciYml).toContain('npm run build');
     // The canonical test runner isolates HOME and adds a watchdog timeout.
     expect(ciYml).toContain('npm run test:ci');
