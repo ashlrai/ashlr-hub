@@ -30,12 +30,11 @@ first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
 [first-run guide](docs/QUICKSTART.md#open-verse).
 
-![Work with me: the Ashlr Verse 3.22 chat workbench with collapsed projects and the active chat preserved, using labeled sample accounts](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/verse-work-with-me-3.22-demo.jpg)
+![Ashlr Verse 3.24.3 Work with me: read-only Demo chat with labeled sample accounts and provider-inactive conversation.](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/verse-work-with-me-3.24.3-demo.jpg)
 
-![Work for me: the Ashlr Verse 3.22 Fleet view with an inline verification and GitHub timeline, unknown CI and deployment coverage](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/verse-work-for-me-3.22-demo.jpg)
+![Ashlr Verse 3.24.3 Work for me: synthetic Demo history excerpt with unknown CI and unrecorded release and deployment.](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/verse-work-for-me-3.24.3-demo.jpg)
 
-*Actual compiled 3.22 browser workbench with labeled demo accounts, sample usage and synthetic execution timelines.
-No provider ran and no fleet was active for these screenshots. They show the web UI, not native app chrome.*
+*Actual compiled 3.24.3 browser UI with labeled Demo accounts, a sample conversation and synthetic history. No provider ran and no fleet was active. Verification, merge and production are separate records; CI is unknown and release/deployment is unrecorded. These screenshots show the browser UI, not native app chrome.*
 
 ---
 

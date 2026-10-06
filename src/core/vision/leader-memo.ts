@@ -30,6 +30,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { readdirSync, unlinkSync } from 'node:fs';
 
+import { LEADER_QUESTION_FORM_LIMITS } from './leader-thread-types.js';
 import { scrubPrivateText } from '../util/scrub.js';
 import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
 import { BUDGET_MODES, type BudgetMode, type RoutingDifficulty } from '../routing/types.js';
@@ -54,6 +55,7 @@ import {
   type LeaderExpectedDelta,
   type LeaderGoalProposal,
   type LeaderMemo,
+  type LeaderMemoQuestionForm,
   type LeaderMemoSummary,
   type LeaderOutcomeRecord,
 } from './leader-types.js';
@@ -157,6 +159,46 @@ export function cleanModelText(value: unknown, max: number): string | null {
   const scrubbed = scrubPrivateText(stripped.slice(0, max * 2), { emails: true }).trim();
   if (scrubbed.length === 0) return null;
   return scrubbed.length > max ? `${scrubbed.slice(0, max - 1)}…` : scrubbed;
+}
+
+/** Invalid optional presentation falls back to ordinary questions, never inferred choices. */
+export function normalizeLeaderQuestionForms(
+  value: unknown,
+  questions: readonly string[],
+): LeaderMemoQuestionForm[] | null {
+  if (!Array.isArray(value) || value.length > LEADER_MEMO_CAPS.maxQuestions) return null;
+  const forms: LeaderMemoQuestionForm[] = [];
+  const indices = new Set<number>();
+  for (const raw of value) {
+    if (!isRecord(raw) || !hasExactKeys(raw, ['index', 'mode'], ['options']) ||
+      !Number.isInteger(raw['index']) || (raw['index'] as number) < 0 ||
+      (raw['index'] as number) >= questions.length || indices.has(raw['index'] as number)) return null;
+    const index = raw['index'] as number;
+    if (raw['mode'] === 'short-answer') {
+      if ('options' in raw) return null;
+      forms.push({ index, mode: 'short-answer' });
+    } else if (raw['mode'] === 'single' || raw['mode'] === 'multiple') {
+      if (!Array.isArray(raw['options']) || raw['options'].length === 0 ||
+        raw['options'].length > LEADER_QUESTION_FORM_LIMITS.maxOptions) return null;
+      const options: string[] = [];
+      const labels = new Set<string>();
+      for (const rawLabel of raw['options']) {
+        if (typeof rawLabel !== 'string' || rawLabel.length > LEADER_QUESTION_FORM_LIMITS.optionMaxChars) return null;
+        const label = cleanModelText(rawLabel.replace(/[\u200B\u200E\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, ''),
+          LEADER_QUESTION_FORM_LIMITS.optionMaxChars * 2);
+        if (!label || label.length > LEADER_QUESTION_FORM_LIMITS.optionMaxChars) return null;
+        const distinct = label.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (labels.has(distinct)) return null;
+        labels.add(distinct);
+        options.push(label);
+      }
+      // Select all must produce a complete visible answer, without a truncated suffix.
+      if (options.join('; ').length > LEADER_QUESTION_FORM_LIMITS.answerMaxChars) return null;
+      forms.push({ index, mode: raw['mode'], options });
+    } else return null;
+    indices.add(index);
+  }
+  return forms;
 }
 
 function cleanList(value: unknown, maxItems: number, maxChars: number): string[] {
@@ -641,6 +683,7 @@ export interface LeaderMemoDraft {
   seatPlan: LeaderMemo['seatPlan'];
   hypotheses: LeaderHypothesisDraft[];
   questionsForMason: string[];
+  questionForms?: LeaderMemoQuestionForm[];
   actions: AnyLeaderActionDraft[];
   /** Plain sentences about what was dropped or truncated (never model text). */
   notes: string[];
@@ -889,6 +932,15 @@ export function parseLeaderMemoOutput(raw: string, opts: LeaderMemoParseOptions)
   }
 
   const questionsForMason = cleanList(obj['questionsForMason'], LEADER_MEMO_CAPS.maxQuestions, TEXT.line);
+  let questionForms: LeaderMemoQuestionForm[] | undefined;
+  if ('questionForms' in obj) {
+    const rawQuestions = obj['questionsForMason'];
+    const indicesPreserved = Array.isArray(rawQuestions) && rawQuestions.length === questionsForMason.length &&
+      rawQuestions.every((text, index) => cleanModelText(text, TEXT.line) === questionsForMason[index]);
+    const parsedForms = indicesPreserved ? normalizeLeaderQuestionForms(obj['questionForms'], questionsForMason) : null;
+    if (parsedForms === null) notes.push('invalid question forms were dropped; ordinary text questions remain available');
+    else if (parsedForms.length > 0) questionForms = parsedForms;
+  }
 
   // ---- actions: explicit, then compiled from the sections ----------------
   const actions: AnyLeaderActionDraft[] = [];
@@ -957,6 +1009,7 @@ export function parseLeaderMemoOutput(raw: string, opts: LeaderMemoParseOptions)
       seatPlan,
       hypotheses,
       questionsForMason,
+      ...(questionForms ? { questionForms } : {}),
       actions,
       notes,
     },
@@ -976,6 +1029,7 @@ export const LEADER_MEMO_SCHEMA_TEXT = `{
   "seatPlan": [{"role": "producer|judge|leader", "seatId": "<seat id>", "share": <0..1>, "rationale": "<why>"}],
   "hypotheses": [{"target": "prompt|effort|sampling|routing|skill", "patch": <config-only patch, e.g. {"effort": {"local": "high"}} or {"prompts": {"producer": "<text appended to the producer prompt>"}}>, "statement": "<claim>", "metric": "<metric>", "predictedDelta": <number>}],
   "questionsForMason": ["<a genuine strategic fork only Mason can decide>"],
+  "questionForms": [{"index": "<corresponding questionsForMason slot, starting at 0>", "mode": "single|multiple|short-answer", "options": ["<complete visible label; omit options for short-answer>"]}],
   "actions": [{"kind": "<action kind>", "params": {<exact params for the kind>}, "summary": "<one line>", "why": "<argument>"}]
 }`;
 
@@ -1078,7 +1132,13 @@ export function readLeaderMemo(id: string): LeaderMemo | null {
   if (!read || read.truncated) return null;
   try {
     const parsed: unknown = JSON.parse(read.text);
-    return isMemoShape(parsed) && parsed.id === id ? parsed : null;
+    if (!isMemoShape(parsed) || parsed.id !== id) return null;
+    if (parsed.questionForms !== undefined) {
+      const forms = normalizeLeaderQuestionForms(parsed.questionForms, parsed.questionsForMason ?? []);
+      const { questionForms: _ignored, ...legacy } = parsed;
+      return forms && forms.length > 0 ? { ...legacy, questionForms: forms } : legacy;
+    }
+    return parsed;
   } catch {
     return null;
   }

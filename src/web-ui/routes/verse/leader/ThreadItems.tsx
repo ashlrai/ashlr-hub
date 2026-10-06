@@ -20,6 +20,10 @@
  * rest of Mind. Conversational text goes through MessageMarkdown, the chat's
  * sanitising renderer (DOMPurify; links open in a new tab, no HTML survives).
  */
+import { lazy, Suspense } from 'react';
+import type { LeaderQuestionFormProps } from './LeaderQuestionForm.js';
+const TypedQuestionForm = lazy(() => import('./LeaderQuestionForm.js'));
+
 import type { LeaderAction, LeaderStateV1 } from '../../../../core/vision/leader-types.js';
 import { IconCheck } from '../../../components/primitives/icons.js';
 import { MessageMarkdown } from '../MessageMarkdown.js';
@@ -80,6 +84,7 @@ export interface ThreadContext {
   sendDisabledReason: string | null;
   /** Autonomy is off: memos are dry runs. */
   dormant: boolean;
+  questionFormProps?: (question: LeaderThreadMessage) => LeaderQuestionFormProps;
 }
 
 /** The question an answer closes, by its id or the message it replies to. */
@@ -177,7 +182,11 @@ function QuestionCard({ message, ctx }: { message: LeaderThreadMessage; ctx: Thr
       <div className={styles.prose}>
         <MessageMarkdown text={message.text} />
       </div>
-      {answer ? (
+      {message.questionForm && ctx.questionFormProps ? (
+        <Suspense fallback={<p role="status">Reading the current question…</p>}>
+          <TypedQuestionForm key={message.questionId ?? message.id} {...ctx.questionFormProps(message)} />
+        </Suspense>
+      ) : answer ? (
         <p className={styles.answered}>
           <IconCheck /> Answered{answer.channel !== 'verse' ? ` on ${CHANNEL_LABEL[answer.channel]}` : ''} · <span className={styles.answeredText}>{previewText(answer.text, 120)}</span>
         </p>

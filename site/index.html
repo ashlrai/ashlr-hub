@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="description" content="Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.">
+<meta name="description" content="One coding-agent workbench for individual engineers and engineering teams. Use your accounts and local models, review changes, and add signed fleet work when ready.">
 <meta name="color-scheme" content="light dark">
 <link rel="canonical" href="https://verse.ashlr.ai/">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='54 55 146 146'%3E%3Cpath fill='%231A2B3C' d='M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z'/%3E%3Cpath fill='%232563EB' d='M110 121H143L133 152H120Z'/%3E%3C/svg%3E">
@@ -11,14 +11,14 @@
 <meta property="og:url" content="https://verse.ashlr.ai/">
 <meta property="og:title" content="Ashlr Verse — one workbench for coding agents">
 <meta property="og:site_name" content="Ashlr Verse">
-<meta property="og:description" content="Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.">
-<meta property="og:image" content="https://verse.ashlr.ai/assets/work-with-me-3.22-demo.jpg">
-<meta property="og:image:alt" content="Ashlr Verse 3.22 browser chat with collapsed project groups and labeled demo accounts">
+<meta property="og:description" content="One coding-agent workbench for individual engineers and engineering teams. Use your accounts and local models, review changes, and add signed fleet work when ready.">
+<meta property="og:image" content="https://verse.ashlr.ai/assets/work-with-me-3.24.3-demo.jpg">
+<meta property="og:image:alt" content="Ashlr Verse 3.24.3 compiled browser Demo chat with labeled sample accounts; no provider ran">
 <meta name="twitter:title" content="Ashlr Verse — one workbench for coding agents">
-<meta name="twitter:description" content="Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.">
-<meta name="twitter:image:alt" content="Ashlr Verse 3.22 browser chat with collapsed project groups and labeled demo accounts">
+<meta name="twitter:description" content="One coding-agent workbench for individual engineers and engineering teams. Use your accounts and local models, review changes, and add signed fleet work when ready.">
+<meta name="twitter:image:alt" content="Ashlr Verse 3.24.3 compiled browser Demo chat with labeled sample accounts; no provider ran">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="https://verse.ashlr.ai/assets/work-with-me-3.22-demo.jpg">
+<meta name="twitter:image" content="https://verse.ashlr.ai/assets/work-with-me-3.24.3-demo.jpg">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -34,7 +34,7 @@
       "@id": "https://verse.ashlr.ai/#application",
       "name": "Ashlr Verse",
       "url": "https://verse.ashlr.ai/",
-      "description": "Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.",
+      "description": "One coding-agent workbench for individual engineers and engineering teams. Use your accounts and local models, review changes, and add signed fleet work when ready.",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "macOS, Linux, Windows",
       "softwareVersion": "3.24.3",
@@ -138,7 +138,7 @@
   a:focus-visible, button:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
   .skip-link { position: fixed; z-index: 30; top: -100px; left: var(--gutter); padding: 10px 14px; background: var(--ink); color: var(--surface); border-radius: 3px; font-weight: 600; text-decoration: none; }
   .skip-link:focus { top: max(12px, env(safe-area-inset-top)); }
-  main, section, #mobile-index { scroll-margin-top: 72px; }
+  main, section, #mobile-index, #start-individual, #start-team, #install-verse { scroll-margin-top: 72px; }
 
   /* masthead */
   .masthead {
@@ -372,7 +372,7 @@
   .status .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--live); margin-right: 7px; vertical-align: 1px; }
   kbd { font-family: var(--f-mono); font-size: .8125em; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 5px; background: var(--surface); }
   .sub-h { font-size: var(--step-1); margin: 38px 0 14px; }
-  .note a, .status a { color: var(--accent); text-underline-offset: 2px; }
+  .note a:not(.btn), .status a { color: var(--accent); text-underline-offset: 2px; }
 
 </style>
 
@@ -403,17 +403,18 @@
   <div class="wrap hero">
     <div class="hero-grid">
       <div class="intro">
-        <p class="eyebrow">Ashlr Verse 3.24 &middot; The coding agent workbench</p>
-        <h1>Work with me.<br>Work for me.</h1>
+        <p class="eyebrow">Ashlr Verse &middot; by <a href="https://ashlr.ai">AshlrAI</a></p>
+        <h1>Your coding agents.<br>One workbench.</h1>
         <p class="lede">
-          Bring Claude Code, Codex, Grok, local models and Devin into one workbench.
-          Start an Automatic chat, or give the fleet a desired outcome. Shared accounts and projects connect both workspaces.
+          For individual engineers and engineering teams. Work with your agents in a chat,
+          or give eligible fleet work a clear outcome. Bring your own accounts, local models and projects.
         </p>
-        <p class="lede-tail">Keep your chats, drafts and tools close. Let eligible fleet agents land verified work within the scope you sign once with Touch ID, including the change-volume limits you choose.</p>
+        <p class="lede-tail">Start with one project and a small, checkable task. Review the changes and results; add signed unattended work when you are ready. Both modes use your accounts and projects.</p>
         <div class="cta-row">
-          <a class="btn btn-primary" href="#start">Install Verse</a>
-          <a class="btn btn-ghost" href="https://github.com/ashlrai/ashlr-hub">Explore the source</a>
+          <a class="btn btn-primary" href="#start-individual">Start on your own</a>
+          <a class="btn btn-primary" href="#start-team">Start with your team</a>
         </div>
+        <p class="lede-tail"><a href="https://github.com/ashlrai/ashlr-hub">Explore the source</a></p>
       </div>
       <div class="journey" role="region" aria-labelledby="journey-heading">
         <div class="journey-top"><span><span class="journey-light" aria-hidden="true"></span><strong>Verse / work in motion</strong></span><span>3.24</span></div>
@@ -614,14 +615,14 @@
       </div>
 
       <figure class="shot">
-        <img src="assets/work-with-me-3.22-demo.jpg" width="1280" height="720" loading="lazy" decoding="async"
-             alt="Ashlr Verse 3.22 Work with me: collapsed saved projects and chat groups preserve the active conversation. Labeled demo accounts." />
-        <figcaption>Work with me: the actual compiled 3.22 browser workbench with collapsible projects and a demo conversation. No provider ran.</figcaption>
+        <img src="assets/work-with-me-3.24.3-demo.jpg" width="1280" height="720" loading="lazy" decoding="async"
+             alt="Ashlr Verse 3.24.3 Work with me: read-only Demo chat with labeled sample accounts and provider-inactive conversation." />
+        <figcaption>Work with me: actual compiled 3.24.3 browser UI with labeled Demo accounts and a sample conversation. No provider ran and no fleet was active.</figcaption>
       </figure>
       <figure class="shot">
-        <img src="assets/work-for-me-3.22-demo.jpg" width="1280" height="720" loading="lazy" decoding="async"
-             alt="Ashlr Verse 3.22 Work for me: inline verification, GitHub PR and merge timeline with unknown CI and unrecorded deployment. Synthetic demo data." />
-        <figcaption>Work for me: actual compiled 3.22 timeline with synthetic verification and GitHub stages. CI stays unknown and release/deployment is unrecorded. No fleet was active, no provider or GitHub service ran. These are browser captures, not native app chrome.</figcaption>
+        <img src="assets/work-for-me-3.24.3-demo.jpg" width="1280" height="720" loading="lazy" decoding="async"
+             alt="Ashlr Verse 3.24.3 Work for me: synthetic Demo history excerpt with unknown CI and unrecorded release and deployment." />
+        <figcaption>Work for me: actual compiled 3.24.3 browser UI with synthetic Demo history; no provider ran and no fleet was active. Verification, merge and production are separate records. CI is unknown; release and deployment are unrecorded.</figcaption>
       </figure>
 
       <div class="seats">
@@ -1187,14 +1188,42 @@ ashlr wiki ask "where are standing grants verified?"</pre>
     <div class="wrap">
       <div class="sec-head">
         <p class="eyebrow">Get started</p>
-        <h2>Open the console. Talk to the Leader. Turn on autonomy when you are ready.</h2>
+        <h2>Start with useful work. Add autonomy when you are ready.</h2>
       </div>
+
+      <div class="two" style="margin-bottom:44px">
+        <article class="note" id="start-individual" aria-labelledby="start-individual-heading">
+          <p class="eyebrow">For individual engineers</p>
+          <h3 id="start-individual-heading">Your first useful task.</h3>
+          <p>Open an owned project with an existing coding CLI or a tool-capable local model. Describe a small change, inspect its tools and diff, and review the result.</p>
+          <div class="cta-row">
+            <a class="btn btn-primary" href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/QUICKSTART.md#make-your-first-useful-turn">Open your first project</a>
+          </div>
+          <p style="margin-top:14px"><a href="#install-verse">Install Verse</a>, then follow the guide with your own accounts.</p>
+        </article>
+        <article class="note" id="start-team" aria-labelledby="start-team-heading">
+          <p class="eyebrow">For engineering teams</p>
+          <h3 id="start-team-heading">Prove one repository together.</h3>
+          <p>Choose a repository, a maintainer and a clear definition of done. Each engineer uses their own permitted accounts. Coordinate changes through your existing GitHub pull requests, checks and review.</p>
+          <ol>
+            <li>Agree one small task and its reviewer.</li>
+            <li>Install Verse and open the project.</li>
+            <li>Produce a change, check the evidence and review it.</li>
+          </ol>
+          <div class="cta-row">
+            <a class="btn btn-primary" href="#install-verse">Start a repository pilot</a>
+          </div>
+          <p style="margin-top:14px">AshlrAI is the first team pilot for this path. We’ll measure reviewed changes and completed work before sharing results.</p>
+          <p style="margin-top:14px">For optional unattended work, read <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTOMATIC-OUTCOMES.md">Automatic work</a> and <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTHORITY.md">autonomy setup</a>.</p>
+        </article>
+      </div>
+      <p class="evidence-note">Chats and agent tools use the context you provide to your configured providers. Account readings keep their source and billing qualifiers; see <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESOURCE-EVIDENCE.md">resource evidence</a>. This page adds no signup or tracking.</p>
 
       <div class="two" style="gap:44px">
         <div class="steps">
           <div class="step"><span class="n"></span><div>
-            <h3>Install and open the console</h3>
-            <p>Inspect reported tools and context in each chat, and open source-line evidence from the local module map. Install Verse 3.24.3 with the same CLI command on all three platforms. On an Apple silicon Mac, you can also download the <a href="https://github.com/ashlrai/ashlr-hub/releases/tag/v3.24.3">Verse 3.24.3 desktop DMG</a>. It is locally signed, not Apple Developer ID notarized, so macOS may require Open Anyway on first launch.</p>
+            <h3 id="install-verse">Install and open the console</h3>
+            <p>Inspect reported tools and context in each chat, and open source-line evidence from the local module map. After release publication and download verification, install Verse 3.24.3 with the same CLI command on all three platforms. On an Apple silicon Mac, the release also provides the <a href="https://github.com/ashlrai/ashlr-hub/releases/tag/v3.24.3">Verse 3.24.3 desktop DMG</a>. It is locally signed, not Apple Developer ID notarized, so macOS may require Open Anyway on first launch.</p>
             <p>New in 3.24: Automatic awake during observed local desktop work, reported Devin consumption and source-qualified Growth measurements. Reset controls retain signed reserves and hold allowance taper when the execution account is unconfirmed. Automatic chat and editable fleet outcomes remain available.</p>
             <pre id="install-command">npm i -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.3/ashlr-hub-3.24.3.tgz
 ashlr verse</pre>
@@ -1208,13 +1237,13 @@ ashlr verse</pre>
   --executable /path/to/claude</pre>
           </div></div>
           <div class="step"><span class="n"></span><div>
-            <h3>Talk to the Leader</h3>
+            <h3>Optional: talk to the Leader</h3>
             <p>Open Mind with <kbd>&#8984;4</kbd>, or from the terminal. Add Telegram for a two-way line on your phone, or configure the separate <a href="#phone">phone gateway</a> for browser access.</p>
             <pre>ashlr leader say "focus: the flaky retry test"
 ashlr comms setup-telegram</pre>
           </div></div>
           <div class="step"><span class="n"></span><div>
-            <h3>Set up resident autonomy once</h3>
+            <h3>Optional: set up unattended work</h3>
             <p>macOS only. Setup does what it can and stops for what only you may do: the custody install, Touch ID, two GitHub clicks. Then you start the resident daemon in your own terminal. The default signed ladder begins in shadow; a separately signed elite-direct grant can begin verified merges immediately.</p>
             <pre>ashlr authority setup --dry-run
 ashlr authority setup

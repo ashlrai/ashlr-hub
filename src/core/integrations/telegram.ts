@@ -156,6 +156,13 @@ function resolveChatId(cfg: AshlrConfig): string | undefined {
   return cfg.comms?.telegram?.chatId;
 }
 
+/** Opaque configuration binding; never contains the bot token or chat identity. */
+export function telegramQuestionNamespace(cfg: AshlrConfig, receivedChatId?: string): string | null {
+  const token = resolveToken(cfg), chatId = resolveChatId(cfg);
+  if (!telegramEnabled(cfg) || !token || !chatId || receivedChatId !== undefined && receivedChatId !== String(chatId)) return null;
+  return createHash('sha256').update(JSON.stringify(['leader-question-v1', token, String(chatId)])).digest('hex');
+}
+
 /** True when Telegram transport is usably configured. */
 export function telegramEnabled(cfg: AshlrConfig): boolean {
   return (
@@ -683,4 +690,18 @@ export async function answerCallbackQuery(
   } catch {
     // best-effort ack — failure is harmless (spinner times out on its own)
   }
+}
+
+/** One supported markup edit; unknown/throttled results never trigger replay. */
+export async function editTelegramQuestionKeyboard(messageId: number, keyboard: TelegramButton[][], cfg: AshlrConfig): Promise<boolean> {
+  if (!telegramEnabled(cfg) || !Number.isSafeInteger(messageId) || messageId <= 0 || keyboard.length > 12 ||
+      keyboard.some(row => row.length > 3 || row.some(button => !('data' in button) ||
+        !callbackDataOk(button.data) || !button.text || button.text.length > 220))) return false;
+  try {
+    const result = await callApi(cfg, 'editMessageReplyMarkup', { chat_id: resolveChatId(cfg), message_id: messageId,
+      reply_markup: { inline_keyboard: buildKeyboard({ keyboard }) ?? [] } });
+    if (!result || typeof result !== 'object') return false;
+    const row = result as Record<string, unknown>;
+    return row['ok'] === true && (row['result'] === true || typeof row['result'] === 'object' && row['result'] !== null);
+  } catch { return false; }
 }

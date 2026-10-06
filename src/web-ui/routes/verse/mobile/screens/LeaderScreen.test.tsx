@@ -257,3 +257,31 @@ describe('LeaderScreen — generated display text', () => {
     expect(raw).toContain(memoId);
   });
 });
+
+
+it('opens typed controls separately while the normal conversation composer remains available', async () => {
+  const revision = Array(8).fill('a'.repeat(8)).join('-');
+  const form = { schemaVersion: 1 as const, revision, mode: 'single' as const, options: ['Startup speed', 'Reliability'],
+    expiresAt: new Date(Date.now() + 86400000).toISOString() };
+  const question = { questionId: 'memo-0924:0', text: 'Choose the next improvement?', askedAt: new Date().toISOString(), messageId: 'q-typed',
+    answered: false, answer: null, questionForm: form };
+  const net = stubLeader({ thread: [{ id: 'q-typed', at: question.askedAt, from: 'leader', channel: 'verse', kind: 'question',
+    text: question.text, questionId: question.questionId, questionForm: form }], routes: {
+      'GET /api/verse/leader/questions/memo-0924:0': { question, typedQuestionsSupported: true },
+    } });
+  renderMobile(<Harness />);
+  await userEvent.click(await screen.findByRole('button', { name: /^Answer:/ }));
+  await userEvent.click(await screen.findByRole('radio', { name: 'Reliability' })); expect(net.posts()).toHaveLength(0);
+  // Closing the sheet exposes the independent conversation composer, preserving the selection.
+  await userEvent.keyboard('{Escape}');
+  expect(screen.getByRole('textbox', { name: 'Message the Leader' })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: /^Answer:/ }));
+  expect(await screen.findByRole('radio', { name: 'Reliability' })).toBeChecked(); expect(net.posts()).toHaveLength(0);
+  await userEvent.click(screen.getByRole('button', { name: 'Write an answer' }));
+  const sheet = screen.getByRole('dialog', { name: 'Answer the Leader' });
+  expect(within(sheet).getByRole('button', { name: 'Dictation unavailable in this browser' })).toBeInTheDocument();
+  const text = within(sheet).getByRole('textbox', { name: 'Your answer' });
+  await userEvent.type(text, 'Independent{Enter}answer');
+  expect(text).toHaveValue('Independent\nanswer'); expect(net.posts()).toHaveLength(0);
+  expect(within(sheet).getByRole('button', { name: 'Send answer' })).toBeEnabled();
+});

@@ -16,7 +16,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync, linkSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -25,12 +25,16 @@ const thread = vi.hoisted(() => ({
   delivered: [] as Array<{ id: string; channel: string; ok: boolean }>,
   appendMasonMessage: vi.fn(),
   answerLeaderQuestion: vi.fn(),
+  readLeaderQuestion: vi.fn(),
+  submitLeaderQuestion: vi.fn(),
   approveLeaderAction: vi.fn(),
 }));
 
 vi.mock('../src/core/vision/leader-thread.js', () => ({
   appendMasonMessage: thread.appendMasonMessage,
   answerLeaderQuestion: thread.answerLeaderQuestion,
+  readLeaderQuestion: thread.readLeaderQuestion,
+  submitLeaderQuestion: thread.submitLeaderQuestion,
   approveLeaderAction: thread.approveLeaderAction,
   pendingOutbound: vi.fn(() => thread.outbound.filter((m) => !thread.delivered.some((d) => d.id === m['id'] && d.ok))),
   markDelivered: vi.fn((id: string, channel: string, ok: boolean) => {
@@ -64,7 +68,13 @@ import {
 } from '../src/core/integrations/telegram.js';
 import { runCommsCycle } from '../src/core/comms/dispatch.js';
 import { listRequests, markSent, outstanding, postRequest } from '../src/core/comms/requests.js';
-import { lookupTelegramMessage } from '../src/core/comms/telegram-thread-map.js';
+import { lookupTelegramMessage, readTelegramQuestionControl, registerTelegramQuestion,
+  bindTelegramQuestionMessage, changeTelegramQuestion } from '../src/core/comms/telegram-thread-map.js';
+import { telegramQuestionNamespace } from '../src/core/integrations/telegram.js';
+import { typedQuestionKeyboard } from '../src/core/comms/leader-line.js';
+import { handleLeaderButton, sendThreadMessage, converseWithLeader } from '../src/core/comms/telegram-channel.js';
+import type { LeaderThreadMessage, LeaderQuestionProjection } from '../src/core/vision/leader-thread-types.js';
+import { cleanOperatorText, OPERATOR_LIMITS } from '../src/core/vision/leader-operator.js';
 import { writeLeaderMemo } from '../src/core/vision/leader-memo.js';
 import {
   collectDigestFacts,
@@ -195,6 +205,10 @@ beforeEach(() => {
   thread.delivered = [];
   thread.appendMasonMessage.mockReset();
   thread.answerLeaderQuestion.mockReset();
+  thread.readLeaderQuestion.mockReset();
+  thread.readLeaderQuestion.mockImplementation((questionId: string) => ({ questionId, text: 'Legacy question', askedAt: '',
+    messageId: null, answered: false, answer: null }));
+  thread.submitLeaderQuestion.mockReset();
   thread.approveLeaderAction.mockReset();
   apply.vetoLeaderMemo.mockClear();
   apply.vetoLeaderAction.mockClear();
@@ -750,4 +764,274 @@ describe('change-driven digest', () => {
     expect(second.posted).toBe(false);
     expect(listRequests({ kind: 'fleet-digest' })).toHaveLength(1);
   });
+});
+
+function typedQuestionFixture(mode: 'single' | 'multiple' | 'short-answer' = 'multiple') {
+  const questionId = `${MEMO_ID}:0`, threadId = 'lt-20260926063000-abcdef';
+  const form = { schemaVersion: 1 as const, revision: Array(8).fill('a'.repeat(8)).join('-'), mode,
+    ...(mode === 'short-answer' ? {} : { options: ['Startup speed', 'Agent reliability', 'Phone experience'] }),
+    expiresAt: new Date(Date.now() + 60_000).toISOString() };
+  let question: LeaderQuestionProjection = { questionId, text: 'Which improvements matter most?',
+    askedAt: new Date().toISOString(), messageId: threadId, questionForm: form, answered: false, answer: null };
+  thread.readLeaderQuestion.mockImplementation(() => structuredClone(question));
+  thread.submitLeaderQuestion.mockImplementation(async (_id, submission) => {
+    const text = submission.kind === 'options' ? submission.optionIndices.map((index: number) => form.options![index]).join('; ') : cleanOperatorText(submission.text, OPERATOR_LIMITS.answerMaxChars * 2)!;
+    const at = new Date().toISOString(), messageId = 'lt-20260926063001-abcdef';
+    question = { ...question, answered: true, answer: { text, at, channel: 'telegram', messageId,
+      typedAcceptance: { schemaVersion: 1, formRevision: form.revision, kind: submission.kind,
+        ...(submission.kind === 'options' ? { optionIndices: [...submission.optionIndices] } : {}), text, at, messageId } } };
+    return { outcome: 'recorded', question: structuredClone(question), message: { id: messageId, at, from: 'mason',
+      channel: 'telegram', kind: 'answer', text, questionId }, reply: null };
+  });
+  const message: LeaderThreadMessage = { id: threadId, at: new Date().toISOString(), from: 'leader', channel: 'telegram',
+    kind: 'question', questionId, questionForm: form, text: question.text };
+  const namespace = telegramQuestionNamespace(cfg())!;
+  return { form, questionId, threadId, message, namespace,
+    question: () => structuredClone(question), changeQuestion: (next: LeaderQuestionProjection) => { question = next; } };
+}
+function controlEvent(data: string, callbackId = 'typed-callback', messageId = 1000) {
+  return { kind: 'callback' as const, fromChatId: CHAT, data, messageId, callbackQueryId: callbackId };
+}
+function draftFor(data: string, namespace: string, messageId = 1000) {
+  return readTelegramQuestionControl(data.split(':')[2]!, namespace, messageId)!;
+}
+function control(draft: ReturnType<typeof draftFor>, suffix: string) {
+  return `lt:q:${draft.token}:${draft.revision.toString(36)}:${suffix}`;
+}
+
+describe('typed Leader question controls with strict offline drafts', () => {
+  it('keeps draft toggles/all/clear and empty Submit separate from model or approval work', async () => {
+    const f = typedQuestionFixture(); expect(await sendThreadMessage(f.message, cfg())).toBe(true);
+    const first = keyboardData(sends()[0]!)[0]!, token = first.split(':')[2]!;
+    expect(Buffer.byteLength(first)).toBeLessThanOrEqual(64);
+    const get = () => readTelegramQuestionControl(token, f.namespace, 1000)!;
+    await handleLeaderButton(controlEvent(control(get(), 'o:0'), 'toggle'), cfg());
+    expect(get().selected).toEqual([0]);
+    await handleLeaderButton(controlEvent(control(get(), 'a'), 'all'), cfg());
+    expect(get().selected).toEqual([0, 1, 2]);
+    await handleLeaderButton(controlEvent(control(get(), 'c'), 'clear'), cfg());
+    expect(get().selected).toEqual([]);
+    await handleLeaderButton(controlEvent(control(get(), 's'), 'empty'), cfg());
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled();
+    expect(thread.answerLeaderQuestion).not.toHaveBeenCalled(); expect(thread.approveLeaderAction).not.toHaveBeenCalled();
+    expect(lookupTelegramMessage(1000)).toMatchObject({ kind: 'question', questionId: f.questionId, threadId: f.threadId });
+  });
+
+  it('submits the frozen exact selection once and reconciles both duplicate callback identities without replay', async () => {
+    const f = typedQuestionFixture(); expect(await sendThreadMessage(f.message, cfg())).toBe(true);
+    const first = keyboardData(sends()[0]!)[0]!, token = first.split(':')[2]!;
+    const get = () => readTelegramQuestionControl(token, f.namespace, 1000)!;
+    await handleLeaderButton(controlEvent(control(get(), 'o:2'), 'third'), cfg());
+    await handleLeaderButton(controlEvent(control(get(), 'o:0'), 'first'), cfg());
+    const submit = control(get(), 's');
+    await handleLeaderButton(controlEvent(submit, 'submit'), cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledExactlyOnceWith(f.questionId,
+      { schemaVersion: 1, formRevision: f.form.revision, kind: 'options', optionIndices: [0, 2] }, { channel: 'telegram', cfg: cfg() });
+    expect(get().claim?.submission).toEqual({ schemaVersion: 1, formRevision: f.form.revision, kind: 'options', optionIndices: [0, 2] });
+    await handleLeaderButton(controlEvent(submit, 'submit'), cfg());
+    await handleLeaderButton(controlEvent(submit, 'different-repeat'), cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledOnce();
+    expect(thread.answerLeaderQuestion).not.toHaveBeenCalled(); expect(thread.approveLeaderAction).not.toHaveBeenCalled();
+    expect(lookupTelegramMessage(1000)).toMatchObject({ kind: 'question', questionId: f.questionId, threadId: f.threadId });
+    expect(calls.filter(call => call.method === 'editMessageReplyMarkup').at(-1)?.body['reply_markup']).toEqual({ inline_keyboard: [] });
+    expect(calls.some(call => call.method === 'answerCallbackQuery')).toBe(true);
+  });
+
+  it('serializes concurrent same-revision toggles and refuses the old visible Submit keyboard', async () => {
+    const f = typedQuestionFixture(); await sendThreadMessage(f.message, cfg());
+    const first = keyboardData(sends()[0]!)[0]!;
+    await Promise.all([handleLeaderButton(controlEvent(first, 'same'), cfg()), handleLeaderButton(controlEvent(first, 'same'), cfg())]);
+    const current = draftFor(first, f.namespace);
+    expect(current.selected).toEqual([0]); expect(current.revision).toBe(1);
+    await handleLeaderButton(controlEvent(first.replace(/o:0$/, 's'), 'old-submit'), cfg());
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled();
+    expect(draftFor(first, f.namespace).selected).toEqual([0]);
+    expect(calls.filter(call => call.method === 'editMessageReplyMarkup').at(-1)?.body['reply_markup']).toEqual({
+      inline_keyboard: typedQuestionKeyboard(current).map(row => row.map(button => ({ text: button.text, callback_data: 'data' in button ? button.data : '' }))),
+    });
+  });
+
+  it.each(['message', 'chat', 'bot', 'form', 'expiry'] as const)('holds a changed %s binding without answering or approving', async changed => {
+    const f = typedQuestionFixture(); await sendThreadMessage(f.message, cfg());
+    const first = keyboardData(sends()[0]!)[0]!, configuration = cfg();
+    const event = controlEvent(first);
+    if (changed === 'message') event.messageId++;
+    if (changed === 'chat') event.fromChatId = 'foreign';
+    if (changed === 'bot') configuration.comms!.telegram!.botToken = 'rotated-synthetic';
+    if (changed === 'form') f.changeQuestion({ ...f.question(), questionForm: { ...f.form, revision: Array(8).fill('b'.repeat(8)).join('-') } });
+    if (changed === 'expiry') {
+      // Actual supplied time fence, not a larger timeout or bypassed transport.
+      const row = draftFor(first, f.namespace);
+      expect(changeTelegramQuestion({ token: row.token, namespace: f.namespace, messageId: 1000, revision: 0,
+        callbackId: 'expired', operation: 'option', optionIndex: 0 }, Date.parse(f.form.expiresAt))).toMatchObject({ outcome: 'held' });
+      expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+      expect(thread.approveLeaderAction).not.toHaveBeenCalled(); expect(draftFor(first, f.namespace).selected).toEqual([]);
+      return;
+    }
+    await handleLeaderButton(event, configuration);
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+    expect(thread.approveLeaderAction).not.toHaveBeenCalled();
+    expect(draftFor(first, f.namespace).selected).toEqual([]);
+  });
+
+  it('retains a canonical uncertain claim and reconciles its exact acceptance without another submit', async () => {
+    const f = typedQuestionFixture(); await sendThreadMessage(f.message, cfg());
+    const first = keyboardData(sends()[0]!)[0]!; await handleLeaderButton(controlEvent(first, 'choice'), cfg());
+    const submission = control(draftFor(first, f.namespace), 's');
+    const accept = thread.submitLeaderQuestion.getMockImplementation()!;
+    thread.submitLeaderQuestion.mockImplementation(async (...args) => { await accept(...args); throw new Error('Lost reply'); });
+    await handleLeaderButton(controlEvent(submission, 'submit'), cfg());
+    expect(draftFor(first, f.namespace).claim).not.toBeNull();
+    await handleLeaderButton(controlEvent(submission, 'uncertain-repeat'), cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledOnce();
+    expect(draftFor(first, f.namespace).claim?.messageId).toBe('lt-20260926063001-abcdef');
+    expect(calls.some(call => call.method === 'answerCallbackQuery' && call.body['text'] === 'Your answer is saved.')).toBe(true);
+  });
+
+  it('does not equate another device or a legacy refinement answered boolean with this claim', async () => {
+    const f = typedQuestionFixture(); await sendThreadMessage(f.message, cfg());
+    const first = keyboardData(sends()[0]!)[0]!; await handleLeaderButton(controlEvent(first, 'choice'), cfg());
+    thread.submitLeaderQuestion.mockRejectedValue(new Error('Unknown canonical result'));
+    const submission = control(draftFor(first, f.namespace), 's');
+    await handleLeaderButton(controlEvent(submission, 'submit'), cfg());
+    f.changeQuestion({ ...f.question(), answered: true, answer: { text: 'Someone else answered', at: new Date().toISOString(),
+      channel: 'verse', messageId: 'lt-20260926063002-abcdef' } });
+    calls = [];
+    await handleLeaderButton(controlEvent(submission, 'uncertain-repeat'), cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledOnce();
+    expect(draftFor(first, f.namespace).claim?.messageId).toBeNull();
+    expect(calls.some(call => call.body['text'] === 'Your answer is saved.')).toBe(false);
+    expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+  });
+
+  it('uses the same typed seam for a genuine short answer while preserving the bot question and duplicate human identity', async () => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    const event = { kind: 'text' as const, fromChatId: CHAT, messageId: 2000, replyToMessageId: 1000 };
+    await converseWithLeader(event, 'Check the failing tests.', cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledExactlyOnceWith(f.questionId,
+      { schemaVersion: 1, formRevision: f.form.revision, kind: 'text', text: 'Check the failing tests.' }, { channel: 'telegram', cfg: cfg() });
+    expect(lookupTelegramMessage(1000)).toMatchObject({ kind: 'question', questionId: f.questionId });
+    expect(lookupTelegramMessage(2000)).toMatchObject({ kind: 'answer', questionId: f.questionId });
+    await converseWithLeader(event, 'Check the failing tests.', cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledOnce(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+    await converseWithLeader({ ...event, messageId: 2001 }, 'Also check the README.', cfg());
+    expect(thread.answerLeaderQuestion).toHaveBeenCalledOnce();
+  });
+
+  it('holds malformed storage instead of resetting claims, and never persists a raw bot token', async () => {
+    const f = typedQuestionFixture(); await sendThreadMessage(f.message, cfg());
+    const first = keyboardData(sends()[0]!)[0]!, path = join(home, '.ashlr', 'comms', 'telegram-questions', 'drafts.json');
+    expect(readFileSync(path, 'utf8')).not.toContain('fake-token-314');
+    writeFileSync(path, '{broken', { mode: 0o600 });
+    await handleLeaderButton(controlEvent(first), cfg());
+    expect(readFileSync(path, 'utf8')).toBe('{broken');
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+    expect(registerTelegramQuestion(f.namespace, f.questionId, f.threadId, f.form)).toBeNull();
+  });
+
+  it('bounds aggregate labels, keeps literal Unicode labels and requires safe delivered message identity', () => {
+    const f = typedQuestionFixture();
+    const bad = { ...f.form, options: Array.from({ length: 10 }, (_, index) => `${index}${'x'.repeat(199)}`) };
+    expect(registerTelegramQuestion(f.namespace, f.questionId, f.threadId, bad)).toBeNull();
+    const row = registerTelegramQuestion(f.namespace, f.questionId, f.threadId, { ...f.form, options: ['Read "x.ts" 🚀', 'Skip it'] })!;
+    expect(typedQuestionKeyboard(row)[0]![0]!.text).toBe('○ Read "x.ts" 🚀');
+    expect(bindTelegramQuestionMessage(row.token, f.namespace, -1)).toBe(false);
+    expect(bindTelegramQuestionMessage(row.token, f.namespace, 1000)).toBe(true);
+    expect(bindTelegramQuestionMessage(row.token, f.namespace, 1001)).toBe(false);
+    expect(changeTelegramQuestion({ token: row.token, namespace: f.namespace, messageId: 1001, revision: 0,
+      callbackId: 'forged-message', operation: 'submit' })).toBeNull();
+  });
+  it.each(['single', 'multiple'] as const)('offers an intentional ordinary written reply for %s without a typed-mode downgrade', async mode => {
+    const f = typedQuestionFixture(mode); await sendThreadMessage(f.message, cfg());
+    const first = keyboardData(sends()[0]!)[0]!;
+    await handleLeaderButton(controlEvent(control(draftFor(first, f.namespace), 'w'), 'write-navigation'), cfg());
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+    thread.answerLeaderQuestion.mockResolvedValue({ message: { id: 'lt-20260926063002-abcdef' }, reply: null });
+    await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2000, replyToMessageId: 1000 },
+      'Please explain the tradeoff first.', cfg());
+    expect(thread.answerLeaderQuestion).toHaveBeenCalledExactlyOnceWith(f.questionId, 'Please explain the tradeoff first.',
+      { channel: 'telegram', cfg: cfg() });
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.approveLeaderAction).not.toHaveBeenCalled();
+    expect(lookupTelegramMessage(1000)).toMatchObject({ kind: 'question', threadId: f.threadId });
+  });
+
+  it('does not use a pending short answer to consume an unbound interjection', async () => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    thread.appendMasonMessage.mockResolvedValue({ message: { id: 'lt-20260926063002-abcdef' }, reply: null });
+    await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2000 }, 'Also consider startup speed.', cfg());
+    expect(thread.appendMasonMessage).toHaveBeenCalledOnce();
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+  });
+
+  it.each(['missing', 'symlink', 'hardlink', 'mismatched-claim'] as const)('holds %s private state and never replays delivery or canonical submission', async fault => {
+    const f = typedQuestionFixture(); await sendThreadMessage(f.message, cfg());
+    const first = keyboardData(sends()[0]!)[0]!, path = join(home, '.ashlr', 'comms', 'telegram-questions', 'drafts.json');
+    const original = readFileSync(path, 'utf8'), outside = join(home, 'outside-draft.json');
+    if (fault === 'mismatched-claim') {
+      const state = JSON.parse(original);
+      state.drafts[0].claim = { submission: { schemaVersion: 1, formRevision: f.form.revision, kind: 'options', optionIndices: [9] },
+        messageId: null, inboundMessageId: null };
+      writeFileSync(path, JSON.stringify(state), { mode: 0o600 });
+    } else {
+      rmSync(path);
+      if (fault !== 'missing') {
+        writeFileSync(outside, original, { mode: 0o600 });
+        if (fault === 'symlink') symlinkSync(outside, path); else linkSync(outside, path);
+      }
+    }
+    await handleLeaderButton(controlEvent(first), cfg());
+    expect(await sendThreadMessage(f.message, cfg())).toBe(false);
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+    expect(sends()).toHaveLength(1);
+    if (fault === 'symlink' || fault === 'hardlink') expect(readFileSync(outside, 'utf8')).toBe(original);
+  });
+
+  it('reserves one typed delivery attempt even when the transport outcome is unknown', async () => {
+    const f = typedQuestionFixture();
+    failSends = true;
+    expect(await sendThreadMessage(f.message, cfg())).toBe(false);
+    failSends = false;
+    expect(await sendThreadMessage(f.message, cfg())).toBe(false);
+    expect(sends()).toHaveLength(1);
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled();
+  });
+
+  it('holds a different genuine reply while the first short-answer claim remains unconfirmed', async () => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    thread.submitLeaderQuestion.mockRejectedValue(new Error('Unknown canonical result'));
+    await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2000, replyToMessageId: 1000 }, 'Check the tests.', cfg());
+    await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2001, replyToMessageId: 1000 }, 'Check something else.', cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledOnce(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+  });
+
+  it('accepts one-choice canonical forms and reads a draft without rewriting its protected state', async () => {
+    const f = typedQuestionFixture('single'); f.message.questionForm = { ...f.form, options: ['Use the existing approach'] };
+    expect(await sendThreadMessage(f.message, cfg())).toBe(true);
+    const first = keyboardData(sends()[0]!)[0]!, path = join(home, '.ashlr', 'comms', 'telegram-questions', 'drafts.json');
+    const before = lstatSync(path, { bigint: true }), bytes = readFileSync(path);
+    const row = draftFor(first, f.namespace);
+    expect(row.form.options).toEqual(['Use the existing approach']);
+    expect(lstatSync(path, { bigint: true })).toMatchObject({ ino: before.ino, dev: before.dev, mtimeNs: before.mtimeNs, ctimeNs: before.ctimeNs });
+    expect(readFileSync(path)).toEqual(bytes);
+  });
+
+  it('reconciles the exact canonical text normalization without treating answered alone as acceptance', async () => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    const text = '  Check\u0000the tests.\nKeep the README.  ';
+    await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2000, replyToMessageId: 1000 }, text, cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledExactlyOnceWith(f.questionId,
+      { schemaVersion: 1, formRevision: f.form.revision, kind: 'text', text }, { channel: 'telegram', cfg: cfg() });
+    const first = keyboardData(sends()[0]!)[0]!;
+    expect(draftFor(first, f.namespace).claim?.messageId).toBe('lt-20260926063001-abcdef');
+    expect(texts().at(-1)).toBe('Your answer is saved.');
+  });
+
+  it('holds a short-answer reply without a genuine message ID instead of matching two missing IDs', async () => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    await converseWithLeader({ kind: 'text', fromChatId: CHAT, replyToMessageId: 1000 }, 'Check the tests.', cfg());
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+    expect(thread.appendMasonMessage).not.toHaveBeenCalled();
+    expect(texts().at(-1)).toContain('held');
+  });
+
 });

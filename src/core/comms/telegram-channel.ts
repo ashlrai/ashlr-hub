@@ -41,6 +41,8 @@
 import type { AshlrConfig } from '../types.js';
 import {
   answerCallbackQuery,
+  editTelegramQuestionKeyboard,
+  telegramQuestionNamespace,
   sendTelegramMessage,
   type InboundEvent,
   type TelegramButton,
@@ -49,6 +51,7 @@ import {
 } from '../integrations/telegram.js';
 import { escapeTelegramHtml, leaderDisplayText } from '../integrations/telegram-format.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { cleanOperatorText, OPERATOR_LIMITS } from '../vision/leader-operator.js';
 import type { CommsRequest } from './requests.js';
 import {
   lookupTelegramMessage,
@@ -58,12 +61,22 @@ import {
   registerButtonTarget,
   resolveButtonTarget,
   telegramIdForThread,
+  registerTelegramQuestion,
+  bindTelegramQuestionMessage,
+  changeTelegramQuestion,
+  claimTelegramQuestionText,
+  readTelegramQuestionDraft,
+  readTelegramQuestionControl,
+  settleTelegramQuestionClaim,
+  validTelegramQuestionForm,
+  type TelegramQuestionDraft,
   type TelegramButtonTarget,
   type TelegramThreadKind,
 } from './telegram-thread-map.js';
 import type { LeaderThreadMessage } from '../vision/leader-thread.js';
+import type { LeaderQuestionProjection, LeaderQuestionSubmission, SubmitLeaderQuestionResult } from '../vision/leader-thread-types.js';
 import { LEADER_TELEGRAM_DETAIL_MAX_LINES, LEADER_TELEGRAM_MAX_LINES, fitTelegram, guardPersonaText, wantsDetail } from '../vision/leader-persona.js';
-import { QUESTION_ANSWERS, instantBrief, rememberFullReply, routeLeaderText, type ThreadLineHooks } from './leader-line.js';
+import { QUESTION_ANSWERS, typedQuestionKeyboard, instantBrief, rememberFullReply, routeLeaderText, type ThreadLineHooks } from './leader-line.js';
 
 export const LEADER_CALLBACK_PREFIX = 'lt:';
 const LEADER_MEMO_ID_RE = /^lm-\d{14}-[a-f0-9]{6}$/;
@@ -251,6 +264,13 @@ export async function sendThreadMessage(
   shape: { maxLines?: number; keyboard?: TelegramButton[][] | null } = {},
 ): Promise<boolean> {
   const opts: TelegramSendOpts = {};
+  let typedDraft: TelegramQuestionDraft | null = null;
+  const namespace = telegramQuestionNamespace(cfg);
+  if (msg.kind === 'question' && msg.questionForm !== undefined) {
+    if (!namespace || !msg.questionId || !validTelegramQuestionForm(msg.questionForm)) return false;
+    typedDraft = registerTelegramQuestion(namespace, msg.questionId, msg.id, msg.questionForm);
+    if (!typedDraft) return false;
+  }
   const replyTarget = replyToTg ?? telegramIdForThread(msg.replyTo);
   if (typeof replyTarget === 'number') opts.replyToMessageId = replyTarget;
 
@@ -276,6 +296,7 @@ export async function sendThreadMessage(
     // 3.15: a yes/no Leader question gets Yes / No / Your call.
     opts.keyboard = shape.keyboard;
   }
+  if (typedDraft) opts.keyboard = typedQuestionKeyboard(typedDraft);
 
   let text = formatThreadMessage(msg);
   if (shape.maxLines !== undefined) {
@@ -286,6 +307,11 @@ export async function sendThreadMessage(
     text = fit.text;
   }
   const res = await sendTelegramMessage(text, opts, cfg);
+  if (typedDraft) {
+    const keyboardMessageId = res.messageIds?.at(-1) ?? res.messageId;
+    if (!res.ok || res.partial || namespace !== telegramQuestionNamespace(cfg) || typeof keyboardMessageId !== 'number' ||
+        !bindTelegramQuestionMessage(typedDraft.token, namespace!, keyboardMessageId)) return false;
+  }
   if (res.ok) {
     recordTelegramMessages(sendResultIds(res), {
       threadId: msg.id,
@@ -402,6 +428,43 @@ export async function converseWithLeader(event: InboundEvent, text: string, cfg:
     let reply: LeaderThreadMessage | null = null;
     let directive: unknown;
     if (repliedTo?.kind === 'question' && repliedTo.questionId) {
+      if (typeof mod.readLeaderQuestion === 'function' && typeof mod.submitLeaderQuestion === 'function') {
+        const question = mod.readLeaderQuestion(repliedTo.questionId);
+        if (!question) {
+          await replyTo(event, 'That question is unavailable. Your words were not submitted.', cfg); return;
+        }
+        const namespace = telegramQuestionNamespace(cfg, event.fromChatId);
+        const draft = namespace && typeof event.replyToMessageId === 'number'
+          ? readTelegramQuestionDraft(namespace, event.replyToMessageId, repliedTo.questionId) : null;
+        const pendingClaim = draft?.claim;
+        if (typeof event.messageId === 'number' && pendingClaim && pendingClaim.inboundMessageId !== null &&
+            pendingClaim.inboundMessageId === event.messageId) {
+          await replyTo(event, exactTypedAcceptance(question, pendingClaim.submission)
+            ? 'Your answer is saved.' : 'That submission is unconfirmed. Your draft is retained.', cfg);
+          return;
+        }
+        if (question.questionForm && !question.answered &&
+            (!draft || draft.form.revision !== question.questionForm.revision || draft.claim)) {
+          await replyTo(event, 'That typed question is held. Your words were not submitted; do not repeat an uncertain submission.', cfg);
+          return;
+        }
+        if (question.questionForm?.mode === 'short-answer' && !question.answered) {
+          const claimed = namespace && typeof event.replyToMessageId === 'number' && typeof event.messageId === 'number'
+            ? claimTelegramQuestionText(namespace, event.replyToMessageId, event.messageId, repliedTo.questionId, text) : null;
+          if (!claimed?.claim || claimed.form.revision !== question.questionForm.revision || namespace !== telegramQuestionNamespace(cfg, event.fromChatId)) {
+            await replyTo(event, 'That typed question is held. Your words were not submitted; do not repeat an uncertain submission.', cfg);
+            return;
+          }
+          const result = await mod.submitLeaderQuestion(repliedTo.questionId, claimed.claim.submission, { channel: 'telegram', cfg });
+          if (result.outcome === 'recorded' && result.message) {
+            recordTelegramMessages([event.messageId!], { kind: 'answer', threadId: result.message.id, questionId: repliedTo.questionId });
+          }
+          await replyTo(event, await deliverTypedQuestionResult(result, claimed, cfg, event.messageId!), cfg);
+          return;
+        }
+      }
+      // For a choice form, an actual human reply in words is the intentional
+      // ordinary answer/refinement path, never a failed typed submission fallback.
       ({ message, reply } = await mod.answerLeaderQuestion(repliedTo.questionId, text, { channel: 'telegram', cfg }));
     } else {
       // A reply to a memo the comms queue delivered has no thread id: name
@@ -462,6 +525,102 @@ function resultMessage(r: unknown, fallback: string): { ok: boolean; message: st
   return { ok: Boolean(r), message: fallback };
 }
 
+function exactTypedAcceptance(question: LeaderQuestionProjection | null, submission: LeaderQuestionSubmission): boolean {
+  const accepted = question?.answer?.typedAcceptance;
+  if (!accepted || accepted.formRevision !== submission.formRevision || accepted.kind !== submission.kind) return false;
+  if (submission.kind === 'text') return accepted.text === cleanOperatorText(submission.text, OPERATOR_LIMITS.answerMaxChars * 2);
+  return JSON.stringify(accepted.optionIndices) === JSON.stringify(submission.optionIndices) &&
+    accepted.text === submission.optionIndices.map(index => question?.questionForm?.options?.[index]).join('; ');
+}
+
+async function deliverTypedQuestionResult(result: SubmitLeaderQuestionResult, draft: TelegramQuestionDraft,
+  cfg: AshlrConfig, replyToMessageId: number): Promise<string> {
+  const submission = draft.claim?.submission;
+  if (!submission) return 'That submission is held.';
+  if (telegramQuestionNamespace(cfg) !== draft.namespace) return 'Question configuration changed. Submission status is held.';
+  if (exactTypedAcceptance(result.question, submission)) {
+    const messageId = result.question?.answer?.typedAcceptance?.messageId;
+    if (messageId) settleTelegramQuestionClaim(draft.token, draft.namespace, submission, messageId);
+    // The BOT question retains its original association. Only a genuine human
+    // inbound message can be mapped to a separate canonical answer message.
+    await editTelegramQuestionKeyboard(draft.messageId!, [], cfg);
+    if (result.outcome === 'recorded' && result.reply) {
+      const mod = await thread();
+      const ok = await sendThreadMessage(result.reply, cfg, replyToMessageId, { maxLines: LEADER_TELEGRAM_MAX_LINES + 1 });
+      await mod?.markDelivered(result.reply.id, 'telegram', ok);
+    }
+    return 'Your answer is saved.';
+  }
+  if (result.outcome === 'already-answered') return 'This question already has an answer.';
+  if (result.outcome === 'stale') return 'That question changed. Your draft was retained; no answer was submitted.';
+  return 'Submission is held. Your draft was retained; do not repeat it.';
+}
+
+async function handleTypedQuestionButton(event: InboundEvent, cfg: AshlrConfig): Promise<boolean> {
+  if (!(event.data ?? '').startsWith('lt:q:')) return false;
+  const ack = async (text: string): Promise<void> => {
+    if (event.callbackQueryId) await answerCallbackQuery(event.callbackQueryId, cfg, text);
+  };
+  const match = /^lt:q:([a-f0-9]{24}):([0-9a-z]{1,6}):([oacsw])(?::(\d{1,2}))?$/.exec(event.data!);
+  const namespace = telegramQuestionNamespace(cfg, event.fromChatId);
+  if (!namespace) return true;
+  await ack('Checking question…');
+  if (!match || !namespace || !event.callbackQueryId || !Number.isSafeInteger(event.messageId) ||
+      (match[3] === 'o') !== (match[4] !== undefined)) {
+    await ack('That question control is unavailable.'); return true;
+  }
+  const bound = readTelegramQuestionControl(match[1]!, namespace, event.messageId!);
+  const mod = await thread();
+  if (!bound || !mod || typeof mod.readLeaderQuestion !== 'function' || typeof mod.submitLeaderQuestion !== 'function') {
+    await ack('Typed answers are unavailable. Your draft is retained.'); return true;
+  }
+  let question: LeaderQuestionProjection | null;
+  try { question = mod.readLeaderQuestion(bound.questionId); }
+  catch { await ack('Question state is held. Your draft is retained.'); return true; }
+  if (namespace !== telegramQuestionNamespace(cfg, event.fromChatId) ||
+      !question || question.questionForm?.revision !== bound.form.revision || question.answered && !bound.claim) {
+    await ack('That question changed or already has an answer. Your draft is retained.'); return true;
+  }
+  const operation = { o: 'option', a: 'all', c: 'clear', s: 'submit', w: 'write' } as const;
+  const changed = changeTelegramQuestion({ token: match[1]!, namespace, messageId: event.messageId!,
+    revision: parseInt(match[2]!, 36), callbackId: event.callbackQueryId,
+    operation: operation[match[3] as keyof typeof operation],
+    ...(match[4] === undefined ? {} : { optionIndex: Number(match[4]) }) });
+  if (!changed) { await ack('Question state is held. Reply in words when it is available.'); return true; }
+  const draft = changed.draft;
+  if (changed.outcome === 'draft' || changed.outcome === 'stale') {
+    if (namespace === telegramQuestionNamespace(cfg, event.fromChatId)) {
+      const edited = await editTelegramQuestionKeyboard(event.messageId!, typedQuestionKeyboard(draft), cfg);
+      await ack(changed.outcome === 'stale' ? 'Old keyboard: use the updated choices.'
+        : edited ? 'Choices updated. Submit when ready.' : 'Choices retained. Keyboard update is unconfirmed.');
+    }
+    return true;
+  }
+  if (changed.outcome === 'write') {
+    await ack('Reply to the question in your own words.'); return true;
+  }
+  try {
+    question = mod.readLeaderQuestion(draft.questionId);
+    if (changed.outcome !== 'submit') {
+      if (draft.claim && exactTypedAcceptance(question, draft.claim.submission)) {
+        const messageId = question?.answer?.typedAcceptance?.messageId;
+        if (messageId) settleTelegramQuestionClaim(draft.token, namespace, draft.claim.submission, messageId);
+        if (namespace === telegramQuestionNamespace(cfg, event.fromChatId)) await editTelegramQuestionKeyboard(event.messageId!, [], cfg);
+        await ack('Your answer is saved.');
+      } else await ack(changed.outcome === 'duplicate' ? 'That tap was already handled.'
+        : 'Submission is held. Your draft is retained.');
+      return true;
+    }
+    if (namespace !== telegramQuestionNamespace(cfg, event.fromChatId) ||
+        question?.questionForm?.revision !== draft.form.revision || !draft.claim) {
+      await ack('That question changed. Your submission is held.'); return true;
+    }
+    const result = await mod.submitLeaderQuestion(draft.questionId, draft.claim.submission, { channel: 'telegram', cfg });
+    await ack(await deliverTypedQuestionResult(result, draft, cfg, event.messageId!));
+  } catch { await ack('Submission is unconfirmed. Your draft is retained; do not repeat it.'); }
+  return true;
+}
+
 async function memoDetails(memoId: string): Promise<string> {
   try {
     const { readLeaderMemo } = await import('../vision/leader-memo.js');
@@ -498,6 +657,7 @@ async function actionDetails(actionIds: string[]): Promise<string> {
  * tapped message with the outcome. Returns true when the tap was ours.
  */
 export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig): Promise<boolean> {
+  if (await handleTypedQuestionButton(event, cfg)) return true;
   const data = event.data ?? '';
   const m = /^lt:([avdync]):(\d{1,12})$/.exec(data);
   if (!m) return false;
@@ -524,7 +684,8 @@ export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig):
       }
       await ack(verb === 'y' ? 'Yes' : verb === 'n' ? 'No' : 'Your call');
       const { message, reply } = await mod.answerLeaderQuestion(questionId, QUESTION_ANSWERS[verb], { channel: 'telegram', cfg });
-      if (typeof event.messageId === 'number' && message?.id) recordTelegramMessages([event.messageId], { threadId: message.id, kind: 'answer', questionId });
+      // A tapped BOT message remains the question. It is not a human reply.
+      void message;
       if (reply && typeof reply.text === 'string' && reply.text.trim()) {
         const ok = await sendThreadMessage(reply, cfg, event.messageId, { maxLines: LEADER_TELEGRAM_MAX_LINES + 1 });
         await mod.markDelivered(reply.id, 'telegram', ok);

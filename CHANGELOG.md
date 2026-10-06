@@ -9,10 +9,16 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.24.3] — 2026-10-05
+## [3.24.3] — 2026-10-06
 
 ### Added
 
+- Answer structured Leader questions with single choice, multiple choice,
+  Select all/Clear, or short text across desktop, phone and Telegram, while
+  keeping the conversation composer available for interjections.
+- Record structured answers once and reconcile uncertain submissions against
+  the saved question; stale controls and another device's answer cannot
+  silently overwrite it.
 - Show native Devin chat context readings when the official CLI reports them,
   while retaining unknown values when no reading is available.
 - Add opt-in local request size and context-structure diagnostics without
@@ -20,6 +26,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Fixed
 
+- Avoid redundant private-directory permission writes and repeated dispatch
+  readiness reads while preserving fresh checks immediately before launch.
 - Give Telegram Leader summaries readable labels and local dates while
   preserving exact action controls, literal user text and useful quantities.
 - Make generated Leader notes and action outcomes readable in desktop,

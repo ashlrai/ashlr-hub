@@ -17,6 +17,7 @@ const thread = vi.hoisted(() => ({
   delivered: [] as Array<{ id: string; ok: boolean }>,
   posted: [] as Array<Record<string, unknown>>,
   answerLeaderQuestion: vi.fn(),
+  readLeaderQuestion: vi.fn(),
   appendMasonMessage: vi.fn(),
   approveLeaderAction: vi.fn(),
 }));
@@ -24,6 +25,7 @@ const thread = vi.hoisted(() => ({
 vi.mock('../src/core/vision/leader-thread.js', () => ({
   appendMasonMessage: thread.appendMasonMessage,
   answerLeaderQuestion: thread.answerLeaderQuestion,
+  readLeaderQuestion: thread.readLeaderQuestion,
   approveLeaderAction: thread.approveLeaderAction,
   leaderNarrativeLine: vi.fn(async () => null),
   postLeaderMessage: vi.fn((m: Record<string, unknown>) => {
@@ -167,6 +169,12 @@ beforeEach(() => {
   thread.delivered = [];
   thread.posted = [];
   thread.answerLeaderQuestion.mockReset();
+  // This suite's briefSources explicitly supplies a legacy canonical question.
+  // Missing mock exports are unavailable capability, not a valid legacy row.
+  thread.readLeaderQuestion.mockReset();
+  thread.readLeaderQuestion.mockImplementation((questionId: string) => ({ questionId,
+    text: 'Should we move the budget to balanced?', askedAt: new Date(ET('06:30')).toISOString(),
+    messageId: null, answered: false, answer: null }));
   thread.appendMasonMessage.mockReset();
   thread.approveLeaderAction.mockReset();
   setTelegramTransportForTests(fakeTransport);
@@ -282,6 +290,20 @@ describe('pacing — quiet hours, caps, one question at a time', () => {
 // ---------------------------------------------------------------------------
 
 describe('runLeaderLine — briefs and reports on schedule, never nagging', () => {
+  it.each(['typed', 'missing'] as const)('does not consume a %s canonical question as a legacy brief prompt', async state => {
+    setLeaderLineDepsForTest(lineDeps({ now: () => ET('08:05'),
+      thread: async () => ({ readLeaderQuestion: () => state === 'missing' ? null : {
+        questionForm: { schemaVersion: 1, revision: Array(8).fill('a'.repeat(8)).join('-'), mode: 'single', options: ['Yes'],
+          expiresAt: new Date(ET('08:05') + 60_000).toISOString() },
+      } }) as never,
+    }));
+    expect((await runLeaderLine(cfg())).brief).toBe('morning');
+    expect(texts()[0]).not.toMatch(/^Q: /m);
+    expect(readLineState().question).toBeNull();
+    expect(thread.delivered).toEqual([]);
+    expect(keyboardData(sends()[0]!).some(data => data.startsWith('lt:y:'))).toBe(false);
+  });
+
   it('sends the morning brief once, with Approve / Veto for the pending launch', async () => {
     setLeaderLineDepsForTest(lineDeps({ now: () => ET('08:05') }));
     const first = await runLeaderLine(cfg());

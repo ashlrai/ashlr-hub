@@ -23,6 +23,7 @@ describe('unstarted remote gateway policy', () => {
     for (const target of [
       '/api/verse/seats', '/api/verse/session-meta', '/api/verse/cloud', '/api/verse/leader',
       '/api/verse/leader/directives', '/api/verse/sessions/vs_1',
+      '/api/verse/leader/questions/lm-20260927120000-abcdef:0',
       '/api/verse/cloud/previews', '/api/verse/devin/previews',
       '/api/verse/activity?since=v1.1234abcd.e.42',
       '/api/verse/activity?since=v1.1234abcd.t.0',
@@ -44,6 +45,9 @@ describe('unstarted remote gateway policy', () => {
       'https://phone.example.com/api/verse/activity', '/api/verse/activity#fragment',
       '/api/verse/leader/thread?limit=50&limit=50',
       '/api/verse/leader/thread?limit=50&before=..%2Fsecret',
+      '/api/verse/leader/questions/lm-20260927120000-abcdef:0?revision=anything',
+      '/api/verse/leader/questions/lm-20260927120000-abcdef%3A0',
+      '/api/verse/leader/questions/nope', '/api/verse/leader/questions/lm-20260927120000-abcdef:0/answer',
       '/api/verse/checkpoints/diff?chatId=s1&turnId=t1&rootId=1234abcd&mode=since&file=..%2Fsecret',
       '/api/events?topics=all', '/api/events?topics=verse-sessions&client=raw-local-proof',
       '/api/verse/sessions/s1/events?after=1&client=raw-local-proof',
@@ -124,6 +128,24 @@ describe('unstarted remote gateway policy', () => {
   it('refuses raw Hub credentials even on an otherwise allowed read', () => {
     expect(checkRemoteEnvelope(request('GET', { 'x-ashlr-token': 'local-token' }), ORIGIN)).toEqual({ ok: false, reason: 'hub-token' });
     expect(checkRemoteEnvelope(request('GET', { 'x-ashlr-read-client': 'local-proof' }), ORIGIN)).toEqual({ ok: false, reason: 'hub-token' });
+  });
+
+  it('accepts exact typed question submissions without extending session or action authority', () => {
+    const decision = classifyRemoteRoute('POST', '/api/verse/leader/questions/lm-20260927120000-abcdef:0/answer');
+    expect(decision).toMatchObject({ kind: 'write', stepUp: false });
+    const submission = { schemaVersion: 1, formRevision: Array(8).fill('aaaaaaaa').join('-'), kind: 'options', optionIndices: [0, 2] };
+    expect(validateRemoteMutation(decision, { submission })).toBe(true);
+    expect(validateRemoteMutation(decision, { submission: { schemaVersion: 1, formRevision: Array(8).fill('aaaaaaaa').join('-'), kind: 'text', text: 'Prioritize reliability.' } })).toBe(true);
+    for (const body of [
+      { submission, text: 'Fallback' }, { submission, channel: 'system' }, { submission, action: 'approve' },
+      { submission: { ...submission, actor: 'owner' } }, { submission: { ...submission, optionIndices: [] } },
+      { submission: { ...submission, optionIndices: [0, 0] } }, { submission: { ...submission, optionIndices: [10] } },
+      { submission: { ...submission, formRevision: 'wrong' } },
+      { submission: { schemaVersion: 1, formRevision: Array(8).fill('aaaaaaaa').join('-'), kind: 'text', text: 'x'.repeat(2_001) } },
+    ]) expect(validateRemoteMutation(decision, body)).toBe(false);
+    expect(validateRemoteMutation(classifyRemoteRoute('POST', '/api/verse/sessions/vs_1/turns'), { submission })).toBe(false);
+    expect(validateRemoteMutation(classifyRemoteRoute('POST', '/api/verse/leader/actions/a1/approve'), { submission })).toBe(false);
+    expect(classifyRemoteRoute('POST', '/api/verse/leader/questions/lm-20260927120000-abcdef:0/answer?force=true')).toEqual({ kind: 'deny' });
   });
 });
 

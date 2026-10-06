@@ -16,6 +16,9 @@ import { ActionStatus, useSurfaceActions } from '../command/actions.js';
 import { leaderState } from '../command/fixtures.test-support.js';
 import { leaderQuery } from '../command/surface-data.js';
 import { getVerseUiState, resetVerseUi } from '../verse-ui-store.js';
+import LeaderQuestionForm, { type QuestionFormStore } from './LeaderQuestionForm.js';
+import type { LeaderQuestionProjection, LeaderQuestionForm as QuestionForm } from './thread-types.js';
+import { LeaderComposer, type LeaderComposerProps } from './LeaderComposer.js';
 import { LeaderConversation } from './LeaderConversation.js';
 import { getLeaderFocus, requestLeaderFocus, resetLeaderFocus } from './leader-focus.js';
 import { directive, directives, msg, QUESTION_TEXT, threadMessages } from './thread-fixtures.test-support.js';
@@ -43,6 +46,7 @@ function stub(
     thread?: LeaderThreadMessage[] | null;
     leader?: LeaderStateV1;
     directives?: OperatorDirective[];
+    onGet?: (url: string) => Response | Promise<Response> | undefined;
     onPost?: (url: string, body: Record<string, unknown>) => Response | Promise<Response> | undefined;
   } = {},
 ): Stub {
@@ -63,6 +67,8 @@ function stub(
       state.calls.push({ url, method, body });
       if (method === 'POST') return (await opts.onPost?.(url, body ?? {})) ?? json({ ok: true });
       if (method === 'DELETE') return json({ ok: true });
+      const customRead = await opts.onGet?.(url);
+      if (customRead) return customRead;
       const path = url.split('?')[0];
       if (path === '/api/verse/leader/thread') return opts.thread === null ? json({ error: 'not found' }, 404) : json({ messages: state.thread });
       if (path === '/api/verse/leader/directives') return json({ directives: state.directives });
@@ -430,9 +436,10 @@ describe('LeaderConversation — focus requests', () => {
     expect(getLeaderFocus()).toBeNull();
   });
 
-  it('a question the thread does not carry is answered as a quoted message', async () => {
+  it('uses a quoted message only when the server explicitly reports typed questions unsupported', async () => {
     setMutationToken(TOKEN);
-    const s = stub({ thread: threadMessages().filter((m) => m.kind !== 'question') });
+    const s = stub({ thread: threadMessages().filter((m) => m.kind !== 'question'),
+      onGet: url => url.includes('/questions/') ? json({ typedQuestionsSupported: false }) : undefined });
     await mount();
     await screen.findByText('Status?');
     act(() => requestLeaderFocus({ kind: 'question', questionId: 'memo-0924:1', text: 'Keep Codex off?' }));
@@ -479,4 +486,182 @@ describe('generated Leader notes remain readable with exact action controls', ()
     await waitFor(() => expect(net.posts().some((call) => call.url === `/api/verse/leader/actions/${actionId}/approve`)).toBe(true));
     expect(net.thread[0]!.text).toBe(raw);
   });
+});
+
+
+describe('shared typed Leader question controls', () => {
+  const revision = Array(8).fill('a'.repeat(8)).join('-');
+  const question = (mode: QuestionForm['mode'] = 'multiple', questionId = 'memo:0'): LeaderQuestionProjection => ({
+    questionId, text: 'Which improvements matter most?', askedAt: new Date().toISOString(), messageId: 'q-message', answered: false, answer: null,
+    questionForm: { schemaVersion: 1, revision, mode, ...(mode !== 'short-answer' ? { options: ['Startup speed', 'Reliable agents'] } : {}),
+      expiresAt: new Date(Date.now() + 86400000).toISOString() },
+  });
+  const saved = (q: LeaderQuestionProjection, indices = [0]): LeaderQuestionProjection => {
+    const text = indices.map(index => q.questionForm!.options![index]).join('; '); const at = new Date().toISOString();
+    return { ...q, answered: true, answer: { text, at, channel: 'verse', messageId: 'a-message',
+      typedAcceptance: { schemaVersion: 1, formRevision: q.questionForm!.revision, kind: 'options', optionIndices: indices, text, at, messageId: 'a-message' } } };
+  };
+  function mountForm(q: LeaderQuestionProjection, store: QuestionFormStore = new Map(), disabledReason: string | null = null) {
+    const legacy = vi.fn(async () => true); const result = vi.fn();
+    const writtenComposer = vi.fn((props: LeaderComposerProps) => <LeaderComposer {...props} />);
+    const props = { questionId: q.questionId, store, disabledReason, fallbackText: q.text, requestSubmit: (run: () => Promise<void>) => { void run(); },
+      onLegacyAnswer: legacy, onResult: result, showQuestion: true, renderWrittenAnswer: writtenComposer };
+    return { ...render(<LeaderQuestionForm {...props} />), props, legacy, result, store, writtenComposer };
+  }
+  it('single choice and Select all/Clear change only local accessible controls; Submit sends stable indices once', async () => {
+    setMutationToken(TOKEN); const q = question(); let current = q;
+    const net = stub({ onGet: url => url.includes('/questions/') ? json({ question: current, typedQuestionsSupported: true }) : undefined,
+      onPost: (_url, body) => { expect(body).toEqual({ submission: { schemaVersion: 1, formRevision: revision, kind: 'options', optionIndices: [0, 1] } });
+        current = saved(q, [0, 1]); return json({ outcome: 'recorded', question: current, message: null, reply: null }); } });
+    mountForm(q); await screen.findByRole('checkbox', { name: 'Startup speed' });
+    await userEvent.click(screen.getByRole('button', { name: 'Select all' }));
+    expect(screen.getByRole('checkbox', { name: 'Reliable agents' })).toBeChecked(); expect(net.posts()).toHaveLength(0);
+    await userEvent.click(screen.getByRole('button', { name: 'Clear' })); expect(screen.getByRole('checkbox', { name: 'Startup speed' })).not.toBeChecked();
+    expect(net.posts()).toHaveLength(0); await userEvent.click(screen.getByRole('button', { name: 'Select all' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Submit answer' })); await waitFor(() => expect(net.posts()).toHaveLength(1));
+    await screen.findByText(/Your answer is saved/); expect(net.posts()[0]!.body).not.toHaveProperty('text');
+  });
+  it('keeps radio selection and a separately keyed revised draft across rerenders', async () => {
+    const q = question('single'); let current = q;
+    const net = stub({ onGet: url => url.includes('/questions/') ? json({ question: current, typedQuestionsSupported: true }) : undefined });
+    const view = mountForm(q); const radio = await screen.findByRole('radio', { name: 'Reliable agents' }); await userEvent.click(radio);
+    view.rerender(<LeaderQuestionForm {...view.props} revisionHint={revision} />); expect(radio).toBeChecked(); expect(net.posts()).toHaveLength(0);
+    current = { ...q, questionForm: { ...q.questionForm!, revision: Array(8).fill('b'.repeat(8)).join('-'), options: ['New first', 'New second'] } };
+    view.rerender(<LeaderQuestionForm {...view.props} revisionHint={Array(8).fill('b'.repeat(8)).join('-')} />);
+    expect(await screen.findByRole('radio', { name: 'New second' })).not.toBeChecked();
+    expect(view.store.get(q.questionId)?.drafts[revision]?.indices).toEqual([1]); expect(net.posts()).toHaveLength(0);
+  });
+  it('makes Write an answer an explicit legacy send, never a choice-form typed text submission', async () => {
+    const q = question('single'); const net = stub({ onGet: url => url.includes('/questions/') ? json({ question: q, typedQuestionsSupported: true }) : undefined });
+    const view = mountForm(q); await screen.findByRole('radio', { name: 'Startup speed' });
+    await userEvent.click(screen.getByRole('button', { name: 'Write an answer' }));
+    expect(view.writtenComposer).toHaveBeenCalled();
+    const text = screen.getByRole('textbox', { name: 'Your answer' });
+    await userEvent.type(text, 'My own direction');
+    fireEvent.keyDown(text, { key: 'Enter', isComposing: true });
+    fireEvent.keyDown(text, { key: 'Enter', shiftKey: true });
+    expect(view.legacy).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'Send answer' }));
+    await waitFor(() => expect(view.legacy).toHaveBeenCalledWith('My own direction')); expect(net.posts()).toHaveLength(0);
+  });
+  it.each([401, 404, 409, 503])('holds HTTP%s exact reads instead of exposing a legacy fallback', async status => {
+    const net = stub({ onGet: url => url.includes('/questions/') ? json({ error: 'Question unavailable', code: 'VERSE_NOT_FOUND' }, status) : undefined });
+    mountForm(question()); await screen.findByText(/Your draft is kept/);
+    expect(screen.queryByRole('textbox')).toBeNull(); expect(screen.queryByRole('checkbox')).toBeNull(); expect(net.posts()).toHaveLength(0);
+  });
+  it.each([null, { schemaVersion: 2 }, { schemaVersion: 1, revision: 'invalid' }])('holds malformed supplied authoritative form metadata instead of enabling a legacy composer', async questionForm => {
+    const q = { ...question(), questionForm };
+    const net = stub({ onGet: url => url.includes('/questions/') ? json({ question: q, typedQuestionsSupported: true }) : undefined });
+    mountForm(question()); await screen.findByText(/Your draft is kept/);
+    expect(screen.queryByRole('textbox')).toBeNull(); expect(screen.queryByRole('checkbox')).toBeNull(); expect(net.posts()).toHaveLength(0);
+  });
+  it('reconciles lost responses only against exact accepted revision/value and never resends automatically', async () => {
+    setMutationToken(TOKEN); const q = question(); let current = q;
+    const net = stub({ onGet: url => url.includes('/questions/') ? json({ question: current, typedQuestionsSupported: true }) : undefined,
+      onPost: () => { current = saved(q); throw new TypeError('lost response'); } });
+    mountForm(q); await userEvent.click(await screen.findByRole('checkbox', { name: 'Startup speed' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Submit answer' }));
+    await screen.findByText(/Your submitted answer is saved/); expect(net.posts()).toHaveLength(1);
+    await userEvent.click(screen.getByRole('button', { name: 'Check saved answer' })); expect(net.posts()).toHaveLength(1);
+  });
+  it('does not call an answer from another device this request saved', async () => {
+    setMutationToken(TOKEN); const q = question(); let current = q;
+    const net = stub({ onGet: url => url.includes('/questions/') ? json({ question: current, typedQuestionsSupported: true }) : undefined,
+      onPost: () => { current = saved(q, [1]); throw new TypeError('lost'); } });
+    mountForm(q); await userEvent.click(await screen.findByRole('checkbox', { name: 'Startup speed' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Submit answer' }));
+    await screen.findByText(/revision or value differs from this request/); expect(screen.queryByText(/Your submitted answer is saved/)).toBeNull(); expect(net.posts()).toHaveLength(1);
+  });
+  it('keeps text typed while a short-answer request is in flight', async () => {
+    setMutationToken(TOKEN); const q = question('short-answer'); let release!: (response: Response) => void;
+    const net = stub({ onGet: url => url.includes('/questions/') ? json({ question: q, typedQuestionsSupported: true }) : undefined,
+      onPost: () => new Promise<Response>(resolve => { release = resolve; }) });
+    const view = mountForm(q); const text = await screen.findByRole('textbox', { name: 'Your answer' });
+    await userEvent.type(text, 'First'); await userEvent.click(screen.getByRole('button', { name: 'Submit answer' }));
+    await waitFor(() => expect(net.posts()).toHaveLength(1)); await userEvent.type(text, ' and next');
+    const at = new Date().toISOString(); const answered = { ...q, answered: true, answer: { text: 'First', at, channel: 'verse', messageId: 'a',
+      typedAcceptance: { schemaVersion: 1, formRevision: revision, kind: 'text', text: 'First', at, messageId: 'a' } } };
+    await act(async () => release(json({ outcome: 'recorded', question: answered, message: null, reply: null })));
+    await screen.findByText(/Your answer is saved/); expect(view.store.get(q.questionId)?.drafts[revision]?.text).toBe('First and next');
+  });
+  it('does not let an earlier display GET overwrite a subsequently recorded submission', async () => {
+    setMutationToken(TOKEN); const q = question(); let reads = 0; let old!: (response: Response) => void;
+    const net = stub({ onGet: url => url.includes('/questions/') ? ++reads === 2
+      ? new Promise<Response>(resolve => { old = resolve; }) : json({ question: q, typedQuestionsSupported: true }) : undefined,
+      onPost: () => json({ outcome: 'recorded', question: saved(q), message: null, reply: null }) });
+    mountForm(q); await userEvent.click(await screen.findByRole('checkbox', { name: 'Startup speed' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Check saved answer' })); await waitFor(() => expect(old).toBeTypeOf('function'));
+    await userEvent.click(screen.getByRole('button', { name: 'Submit answer' })); await screen.findByText(/Your answer is saved/);
+    await act(async () => old(json({ question: q, typedQuestionsSupported: true })));
+    expect(screen.getByText(/Answered · Startup speed/)).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox')).toBeNull(); expect(net.posts()).toHaveLength(1);
+  });
+  it('keeps a newer form revision visible when an older submission response settles', async () => {
+    setMutationToken(TOKEN); const q = question(); let current = q; let release!: (response: Response) => void;
+    const net = stub({ onGet: url => url.includes('/questions/') ? json({ question: current, typedQuestionsSupported: true }) : undefined,
+      onPost: () => new Promise<Response>(resolve => { release = resolve; }) });
+    const view = mountForm(q); await userEvent.click(await screen.findByRole('checkbox', { name: 'Startup speed' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Submit answer' })); await waitFor(() => expect(net.posts()).toHaveLength(1));
+    current = { ...q, questionForm: { ...q.questionForm!, revision: Array(8).fill('b'.repeat(8)).join('-'), options: ['Current choice'] } };
+    view.rerender(<LeaderQuestionForm {...view.props} revisionHint={current.questionForm!.revision} />);
+    await screen.findByRole('checkbox', { name: 'Current choice' });
+    await act(async () => release(json({ outcome: 'recorded', question: saved(q), message: null, reply: null })));
+    expect(screen.getByRole('checkbox', { name: 'Current choice' })).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: 'Startup speed' })).toBeNull(); expect(net.posts()).toHaveLength(1);
+    expect(view.result).not.toHaveBeenCalled();
+  });
+  it('fences a delayed earlier-revision GET for the same question identity', async () => {
+    let old!: (response: Response) => void; const first = question(); let reads = 0;
+    const second = { ...first, text: 'Revised question?', questionForm: { ...first.questionForm!, revision: Array(8).fill('b'.repeat(8)).join('-'), options: ['Current choice'] } };
+    const net = stub({ onGet: url => url.includes('/questions/') ? ++reads === 1
+      ? new Promise<Response>(resolve => { old = resolve; }) : json({ question: second, typedQuestionsSupported: true }) : undefined });
+    const view = mountForm(first); await waitFor(() => expect(old).toBeTypeOf('function'));
+    view.rerender(<LeaderQuestionForm {...view.props} revisionHint={second.questionForm.revision} />);
+    await screen.findByRole('checkbox', { name: 'Current choice' });
+    await act(async () => old(json({ question: first, typedQuestionsSupported: true })));
+    expect(screen.getByText('Revised question?')).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: 'Startup speed' })).toBeNull(); expect(net.posts()).toHaveLength(0);
+  });
+  it('shows a canonically normalized saved text without attributing a different value to this request', async () => {
+    setMutationToken(TOKEN); const q = question('short-answer'); let current = q;
+    const net = stub({ onGet: url => url.includes('/questions/') ? json({ question: current, typedQuestionsSupported: true }) : undefined,
+      onPost: () => { const at = new Date().toISOString(); current = { ...q, answered: true, answer: { text: '[email]', at, channel: 'verse', messageId: 'a',
+        typedAcceptance: { schemaVersion: 1, formRevision: revision, kind: 'text', text: '[email]', at, messageId: 'a' } } };
+        return json({ outcome: 'recorded', question: current, message: null, reply: null }); } });
+    const view = mountForm(q); await userEvent.type(await screen.findByRole('textbox', { name: 'Your answer' }), 'person@example.com');
+    await userEvent.click(screen.getByRole('button', { name: 'Submit answer' }));
+    await screen.findByText(/Delivery is uncertain/); await userEvent.click(screen.getByRole('button', { name: 'Check saved answer' }));
+    await screen.findByText(/A saved answer is visible, but its revision or value differs/);
+    expect(view.store.get(q.questionId)?.drafts[revision]?.text).toBe('person@example.com');
+    expect(screen.queryByRole('button', { name: 'Retry the same submission' })).toBeNull(); expect(net.posts()).toHaveLength(1);
+  });
+  it('fences a delayed old-question GET when the same mounted form changes question ID', async () => {
+    let old!: (response: Response) => void; const first = question(); const second = { ...question('single', 'memo:1'), text: 'Second question?' };
+    stub({ onGet: url => url.endsWith('/memo:0') ? new Promise<Response>(resolve => { old = resolve; }) :
+      url.endsWith('/memo:1') ? json({ question: second, typedQuestionsSupported: true }) : undefined });
+    const view = mountForm(first); await waitFor(() => expect(old).toBeTypeOf('function'));
+    view.rerender(<LeaderQuestionForm {...view.props} questionId={second.questionId} />);
+    await screen.findByText('Second question?'); await act(async () => old(json({ question: first, typedQuestionsSupported: true })));
+    expect(screen.getByText('Second question?')).toBeInTheDocument(); expect(screen.queryByText(first.text)).toBeNull();
+  });
+});
+
+
+it('opens a canonical typed question outside the thread page without converting its clipped title into a message', async () => {
+  setMutationToken(TOKEN);
+  const revision = Array(8).fill('c'.repeat(8)).join('-');
+  const question = { questionId: 'memo-0924:8', text: 'Complete canonical question, including all context?', askedAt: new Date().toISOString(),
+    messageId: 'q-old', answered: false, answer: null, questionForm: { schemaVersion: 1, revision, mode: 'multiple',
+      options: ['Startup speed', 'Phone controls'], expiresAt: new Date(Date.now() + 86400000).toISOString() } };
+  const net = stub({ thread: threadMessages().filter(message => message.kind !== 'question'),
+    onGet: url => url.endsWith('/memo-0924:8') ? json({ question, typedQuestionsSupported: true }) : undefined,
+    onPost: (_url, body) => json({ message: msg({ id: 'interjection', from: 'mason', text: String(body['text']), at: now() }), reply: null }) });
+  await mount(); await screen.findByText('Status?');
+  act(() => requestLeaderFocus({ kind: 'question', questionId: question.questionId, text: 'Clipped summary…' }));
+  await screen.findByText(question.text); await userEvent.click(screen.getByRole('checkbox', { name: 'Phone controls' }));
+  expect(net.posts()).toHaveLength(0); expect(screen.queryByText('Answering: Clipped summary…')).toBeNull();
+  await userEvent.type(composer(), 'Also inspect the tests{Enter}');
+  await waitFor(() => expect(net.posts()).toHaveLength(1));
+  expect(net.posts()[0]!.body).toEqual({ text: 'Also inspect the tests' });
+  expect(screen.getByRole('checkbox', { name: 'Phone controls' })).toBeChecked();
 });

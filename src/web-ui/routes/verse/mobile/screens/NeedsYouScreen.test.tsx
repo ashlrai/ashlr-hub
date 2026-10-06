@@ -255,6 +255,7 @@ describe('NeedsYouScreen — actions', () => {
 
   it('answers a Leader question in a sheet and posts to its answer route', async () => {
     const stub = stubFetch({
+      'GET /api/verse/leader/questions/memo-1:0': { typedQuestionsSupported: false },
       'POST /api/verse/leader/questions/memo-1:0/answer': json({ message: { id: 'lt-1', at: '2026-09-27T12:00:00Z', from: 'mason', channel: 'verse', kind: 'answer', text: 'Stay local.' }, reply: null }),
     });
     const { context } = renderMobile(<Harness />, { activity: withItems([leaderQuestion]) });
@@ -262,8 +263,9 @@ describe('NeedsYouScreen — actions', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /^Answer:/ }));
     const sheet = await screen.findByRole('dialog', { name: 'Answer the Leader' });
-    expect(within(sheet).getByText(/move it to propose-only until it has CI/)).toBeInTheDocument();
-    await userEvent.type(within(sheet).getByLabelText('Your answer'), 'Stay local.');
+    expect(await within(sheet).findByText(/move it to propose-only until it has CI/)).toBeInTheDocument();
+    expect(within(sheet).getByRole('button', { name: 'Dictation unavailable in this browser' })).toBeInTheDocument();
+    await userEvent.type(await within(sheet).findByLabelText('Your answer'), 'Stay local.');
     await userEvent.click(within(sheet).getByRole('button', { name: 'Send answer' }));
 
     await waitFor(() => expect(stub.posts()).toHaveLength(1));
@@ -276,10 +278,10 @@ describe('NeedsYouScreen — actions', () => {
   });
 
   it('keeps the answer and reopens the sheet when the send fails', async () => {
-    stubFetch({ 'POST /api/verse/leader/questions/memo-1:0/answer': json({ error: 'The Leader is busy.' }, 500) });
+    stubFetch({ 'GET /api/verse/leader/questions/memo-1:0': { typedQuestionsSupported: false }, 'POST /api/verse/leader/questions/memo-1:0/answer': json({ error: 'The Leader is busy.' }, 500) });
     renderMobile(<Harness />, { activity: withItems([leaderQuestion]) });
     await userEvent.click(screen.getByRole('button', { name: /^Answer:/ }));
-    await userEvent.type(screen.getByLabelText('Your answer'), 'Stay local.');
+    await userEvent.type(await screen.findByLabelText('Your answer'), 'Stay local.');
     await userEvent.click(screen.getByRole('button', { name: 'Send answer' }));
     const sheet = await screen.findByRole('dialog', { name: 'Answer the Leader' });
     expect(within(sheet).getByLabelText('Your answer')).toHaveValue('Stay local.');
@@ -366,5 +368,29 @@ describe('NeedsYouScreen — model', () => {
       actions: [{ kind: 'approve', label: 'Land', request: { method: 'POST', path: '/api/x', body: {} }, confirm: { title: 'Land?', body: 'Squash-merges exactly abc1234 into main.', confirmLabel: 'Land' }, destructive: false }],
     });
     expect(consequenceLine(withCopy, withCopy.actions[0]!)).toBe('Squash-merges exactly abc1234 into main.');
+  });
+});
+
+
+describe('typed question sheet', () => {
+  const revision = Array(8).fill('a'.repeat(8)).join('-');
+  const question = { questionId: 'memo-1:0', text: 'Full canonical question beyond the clipped summary?', askedAt: new Date().toISOString(),
+    messageId: 'q', answered: false, answer: null, questionForm: { schemaVersion: 1, revision, mode: 'multiple',
+      options: ['Faster startup', 'Better phone controls'], expiresAt: new Date(Date.now() + 86400000).toISOString() } };
+  it('loads full canonical choices, keeps local selection when closed, and sends no request on Select all', async () => {
+    const net = stubFetch({ 'GET /api/verse/leader/questions/memo-1:0': { question, typedQuestionsSupported: true } });
+    renderMobile(<Harness />, { activity: withItems([leaderQuestion]) });
+    await userEvent.click(screen.getByRole('button', { name: /^Answer:/ }));
+    await screen.findByText(question.text); await userEvent.click(screen.getByRole('button', { name: 'Select all' }));
+    expect(screen.getByRole('checkbox', { name: 'Better phone controls' })).toBeChecked(); expect(net.posts()).toHaveLength(0);
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await userEvent.click(screen.getByRole('button', { name: /^Answer:/ }));
+    expect(await screen.findByRole('checkbox', { name: 'Better phone controls' })).toBeChecked(); expect(net.posts()).toHaveLength(0);
+  });
+  it('keeps a missing/held current question held, never converts the clipped title into an answer form', async () => {
+    const net = stubFetch({ 'GET /api/verse/leader/questions/memo-1:0': json({ code: 'VERSE_NOT_FOUND', typedQuestionsSupported: true, error: 'No such question' }, 404) });
+    renderMobile(<Harness />, { activity: withItems([leaderQuestion]) });
+    await userEvent.click(screen.getByRole('button', { name: /^Answer:/ })); await screen.findByText(/Your draft is kept/);
+    expect(screen.queryByLabelText('Your answer')).toBeNull(); expect(screen.queryByRole('button', { name: 'Send answer' })).toBeNull(); expect(net.posts()).toHaveLength(0);
   });
 });

@@ -23,13 +23,18 @@
  * NODE-ONLY and cheap: leader.ts (a Tier-1 root) imports this for the memo
  * evidence, so its imports are fs / crypto and the private-file helpers only.
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
+import { lstatSync } from 'node:fs';
 
+import { fsyncDirectory } from '../util/durability.js';
+import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { scrubPrivateText } from '../util/scrub.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
-import { leaderRoot } from './leader-memo.js';
+import { leaderRoot, normalizeLeaderQuestionForms } from './leader-memo.js';
+import type { LeaderMemoQuestionForm } from './leader-types.js';
+import { LEADER_QUESTION_FORM_LIMITS, parseLeaderQuestionSubmission, type LeaderQuestionAcceptance, type LeaderQuestionForm, type LeaderQuestionProjection, type LeaderQuestionSubmission } from './leader-thread-types.js';
 import { OPERATOR_DIRECTIVE_MAX, type OperatorChannel, type OperatorDirective, type OperatorDirectiveKind } from './leader-thread-types.js';
 
 export type { OperatorChannel, OperatorDirective, OperatorDirectiveKind } from './leader-thread-types.js';
@@ -83,7 +88,8 @@ export interface LeaderQuestionRecord {
   askedAt: string;
   /** The thread message that asked it; null until posted. */
   messageId: string | null;
-  answer: { text: string; at: string; channel: OperatorChannel; messageId: string | null } | null;
+  questionForm?: LeaderQuestionForm;
+  answer: { text: string; at: string; channel: OperatorChannel; messageId: string | null; typedAcceptance?: LeaderQuestionAcceptance } | null;
 }
 
 export type OperatorApprovalOutcome =
@@ -182,7 +188,9 @@ function readList<T>(path: string, key: string, valid: (x: unknown) => x is T): 
 
 function writeList(path: string, key: string, items: readonly unknown[], nowMs: number): void {
   ensurePrivateDirectory(leaderRoot());
-  writePrivateFileAtomic(path, `${JSON.stringify({ v: 1, updatedAt: new Date(nowMs).toISOString(), [key]: items })}\n`);
+  const content = `${JSON.stringify({ v: 1, updatedAt: new Date(nowMs).toISOString(), [key]: items })}\n`;
+  if (path === operatorQuestionsPath()) writeQuestionPrivateFile(path, content);
+  else writePrivateFileAtomic(path, content);
 }
 
 /** Read-modify-write under the operator lock. */
@@ -291,6 +299,245 @@ export function retireOperatorDirective(id: string, via: OperatorChannel, nowMs:
 // Questions and answers
 // ---------------------------------------------------------------------------
 
+/** Protect each newly published inode; Windows inherited ACLs are not an exact private DACL. */
+function writeQuestionPrivateFile(path: string, content: string): void {
+  writePrivateFileAtomic(path, content);
+  const rootBefore = lstatSync(leaderRoot(), { bigint: true });
+  const before = lstatSync(path, { bigint: true });
+  const owned = (uid: bigint): boolean => typeof process.getuid !== 'function' || uid === BigInt(process.getuid());
+  if (!rootBefore.isDirectory() || rootBefore.isSymbolicLink() || !owned(rootBefore.uid) ||
+    !before.isFile() || before.isSymbolicLink() || !owned(before.uid) || before.nlink !== 1n ||
+    before.size !== BigInt(Buffer.byteLength(content)) || process.platform !== 'win32' &&
+    ((rootBefore.mode & 0o7777n) !== 0o700n || (before.mode & 0o7777n) !== 0o600n) ||
+    !assurePrivateStoragePath(path, 'file', 'secure-created', { anchorPath: leaderRoot() }).ok) {
+    throw new Error('Leader question state is unavailable');
+  }
+  const after = lstatSync(path, { bigint: true });
+  const rootAfter = lstatSync(leaderRoot(), { bigint: true });
+  if (!after.isFile() || after.isSymbolicLink() || after.nlink !== 1n || before.dev !== after.dev ||
+    before.ino !== after.ino || before.uid !== after.uid || before.size !== after.size || before.mode !== after.mode ||
+    !rootAfter.isDirectory() || rootAfter.isSymbolicLink() || rootBefore.dev !== rootAfter.dev ||
+    rootBefore.ino !== rootAfter.ino || rootBefore.uid !== rootAfter.uid || rootBefore.mode !== rootAfter.mode) {
+    throw new Error('Leader question state is unavailable');
+  }
+}
+
+/** Exact private reads are shared by the question container and initialization marker. */
+function readQuestionPrivateJson(path: string, maxBytes: number): unknown {
+  const rootBefore = lstatSync(leaderRoot(), { bigint: true });
+  const before = lstatSync(path, { bigint: true });
+  const owned = (uid: bigint): boolean => typeof process.getuid !== 'function' || uid === BigInt(process.getuid());
+  if (!rootBefore.isDirectory() || rootBefore.isSymbolicLink() || !owned(rootBefore.uid) ||
+    !before.isFile() || before.isSymbolicLink() || !owned(before.uid) || before.nlink !== 1n ||
+    process.platform !== 'win32' && ((rootBefore.mode & 0o7777n) !== 0o700n || (before.mode & 0o7777n) !== 0o600n) ||
+    !assurePrivateStoragePath(path, 'file', 'inspect-existing', { anchorPath: leaderRoot() }).ok) {
+    throw new Error('Leader question state is unavailable');
+  }
+  const read = readPrivateFileCapped(path, maxBytes);
+  const after = lstatSync(path, { bigint: true });
+  const rootAfter = lstatSync(leaderRoot(), { bigint: true });
+  if (!read || read.truncated || before.dev !== after.dev || before.ino !== after.ino ||
+    before.mode !== after.mode || before.uid !== after.uid || before.size !== after.size ||
+    before.ctimeNs !== after.ctimeNs || rootBefore.dev !== rootAfter.dev || rootBefore.ino !== rootAfter.ino ||
+    rootBefore.mode !== rootAfter.mode || rootBefore.uid !== rootAfter.uid || rootBefore.ctimeNs !== rootAfter.ctimeNs) {
+    throw new Error('Leader question state is unavailable');
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(read.text); } catch { throw new Error('Leader question state is unavailable'); }
+  return parsed;
+}
+
+function questionInitializationPath(): string { return join(leaderRoot(), 'question-initialized.json'); }
+
+function readQuestionInitialization(): boolean {
+  try { lstatSync(questionInitializationPath()); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw new Error('Leader question state is unavailable');
+  }
+  const marker = readQuestionPrivateJson(questionInitializationPath(), 1_024);
+  if (!isRecord(marker) || Object.keys(marker).sort().join(',') !== 'initialized,schemaVersion' ||
+    marker['schemaVersion'] !== 1 || marker['initialized'] !== true) throw new Error('Leader question state is unavailable');
+  return true;
+}
+
+/** Called only under the operator lock; never reconstructs a marked missing store. */
+function ensureQuestionInitialization(nowMs: number): void {
+  if (readQuestionInitialization()) {
+    // A prior initializer may have renamed the marker before a durability failure.
+    fsyncDirectory(leaderRoot());
+    return;
+  }
+  let missing = false;
+  try { lstatSync(operatorQuestionsPath()); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') missing = true;
+    else throw new Error('Leader question state is unavailable');
+  }
+  if (missing) {
+    writeList(operatorQuestionsPath(), 'questions', [], nowMs);
+    fsyncDirectory(leaderRoot());
+  } else readQuestionsStrict();
+  writeQuestionPrivateFile(questionInitializationPath(), JSON.stringify({ schemaVersion: 1, initialized: true }) + '\n');
+  fsyncDirectory(leaderRoot());
+  readQuestionInitialization();
+}
+
+/** Typed controls never interpret an unreadable/malformed store as unanswered. */
+function readQuestionsStrict(): LeaderQuestionRecord[] {
+  readQuestionInitialization();
+  const parsed = readQuestionPrivateJson(operatorQuestionsPath(), MAX_FILE_BYTES);
+  if (!isRecord(parsed) || parsed['v'] !== 1 || !Array.isArray(parsed['questions']) ||
+    parsed['questions'].length > OPERATOR_LIMITS.keepQuestions ||
+    !parsed['questions'].every((row) => isQuestion(row) &&
+      questionIdFor(row.memoId, row.index) === row.questionId &&
+      (row.messageId === null || typeof row.messageId === 'string'))) {
+    throw new Error('Leader question state is unavailable');
+  }
+  const questions = parsed['questions'] as LeaderQuestionRecord[];
+  if (new Set(questions.map((q) => q.questionId)).size !== questions.length) {
+    throw new Error('Leader question state is unavailable');
+  }
+  return questions;
+}
+
+function questionFormFor(
+  question: Pick<LeaderQuestionRecord, 'questionId' | 'text' | 'askedAt' | 'index'>,
+  form: LeaderMemoQuestionForm,
+): LeaderQuestionForm | null {
+  const askedAt = Date.parse(question.askedAt);
+  if (!Number.isFinite(askedAt)) return null;
+  const expiry = askedAt + LEADER_QUESTION_FORM_LIMITS.presentationMaxAgeMs;
+  if (!Number.isFinite(new Date(expiry).getTime())) return null;
+  const expiresAt = new Date(expiry).toISOString();
+  const payload = { questionId: question.questionId, text: question.text, askedAt: question.askedAt,
+    index: question.index, mode: form.mode, ...(form.options ? { options: form.options } : {}), expiresAt };
+  return { schemaVersion: 1, revision: createHash('sha256').update(JSON.stringify(payload)).digest('hex').replace(/(.{8})(?=.)/g, '$1-'),
+    mode: form.mode, ...(form.options ? { options: [...form.options] } : {}), expiresAt };
+}
+
+function currentQuestionForm(question: LeaderQuestionRecord): LeaderQuestionForm | null {
+  const form = question.questionForm;
+  if (!form || form.schemaVersion !== 1 ||
+    Object.keys(form).sort().join(',') !== (form.mode === 'short-answer'
+      ? 'expiresAt,mode,revision,schemaVersion' : 'expiresAt,mode,options,revision,schemaVersion')) return null;
+  const forms = normalizeLeaderQuestionForms([{ index: 0, mode: form.mode,
+    ...(form.options !== undefined ? { options: form.options } : {}) }], [question.text]);
+  if (!forms || !forms[0]) return null;
+  const expected = questionFormFor(question, { ...forms[0], index: question.index });
+  return expected && expected.revision === form.revision && expected.expiresAt === form.expiresAt &&
+    JSON.stringify(expected.options) === JSON.stringify(form.options) ? expected : null;
+}
+
+/** Safe exact read projection; fields outside the question contract never leave the store. */
+export function projectLeaderQuestion(question: LeaderQuestionRecord): LeaderQuestionProjection {
+  const form = currentQuestionForm(question);
+  if (question.questionForm !== undefined && !form) throw new Error('Leader question state is unavailable');
+  const answer = question.answer;
+  let projectedAnswer: LeaderQuestionProjection['answer'] = null;
+  if (answer) {
+    const text = cleanOperatorText(answer.text, OPERATOR_LIMITS.answerMaxChars);
+    if (!text || !isOperatorChannel(answer.channel) || !Number.isFinite(Date.parse(answer.at)) ||
+      !(answer.messageId === null || typeof answer.messageId === 'string')) {
+      throw new Error('Leader question state is unavailable');
+    }
+    projectedAnswer = { text, at: answer.at, channel: answer.channel, messageId: answer.messageId };
+    const acceptance = answer.typedAcceptance;
+    if (acceptance && form && acceptance.schemaVersion === 1 && acceptance.formRevision === form.revision &&
+      acceptance.text === text && acceptance.at === answer.at && acceptance.messageId === answer.messageId) {
+      const parsed = parseLeaderQuestionSubmission({ schemaVersion: 1, formRevision: acceptance.formRevision,
+        kind: acceptance.kind, ...(acceptance.kind === 'options'
+          ? { optionIndices: acceptance.optionIndices } : { text: acceptance.text }) });
+      const exactValue = parsed && (parsed.kind === 'text' ? form.mode === 'short-answer' :
+        form.options && form.mode !== 'short-answer' && (form.mode !== 'single' || parsed.optionIndices.length === 1) &&
+        parsed.optionIndices.every((index, position) => index < form.options!.length &&
+          (position === 0 || index > parsed.optionIndices[position - 1]!)) &&
+        parsed.optionIndices.map((index) => form.options![index]!).join('; ') === text);
+      if (parsed && exactValue) projectedAnswer.typedAcceptance = { schemaVersion: 1, formRevision: form.revision,
+        kind: parsed.kind, ...(parsed.kind === 'options' ? { optionIndices: [...parsed.optionIndices] } : {}),
+        text, at: answer.at, messageId: answer.messageId };
+    }
+  }
+  const text = cleanOperatorText(question.text, OPERATOR_LIMITS.questionMaxChars);
+  if (!text || !Number.isFinite(Date.parse(question.askedAt))) throw new Error('Leader question state is unavailable');
+  return { questionId: question.questionId, text, askedAt: question.askedAt, messageId: question.messageId,
+    ...(form ? { questionForm: form } : {}), answered: answer !== null, answer: projectedAnswer };
+}
+
+export function readLeaderQuestionStrict(questionId: string): LeaderQuestionProjection | null {
+  const question = readQuestionsStrict().find((q) => q.questionId === questionId);
+  return question ? projectLeaderQuestion(question) : null;
+}
+
+export type RecordTypedLeaderAnswerResult = {
+  outcome: 'recorded' | 'already-answered' | 'stale' | 'held';
+  question: LeaderQuestionProjection | null;
+  reason?: string;
+};
+
+/** Canonical acceptance precedes thread append/model work and cannot be reopened by a replay. */
+export function recordTypedLeaderAnswer(
+  questionId: string,
+  submission: LeaderQuestionSubmission,
+  input: { channel: OperatorChannel; messageId: string },
+  nowMs: number = Date.now(),
+): RecordTypedLeaderAnswerResult {
+  if (!LEADER_QUESTION_ID_RE.test(questionId) || !parseLeaderQuestionSubmission(submission) ||
+    !isOperatorChannel(input.channel) || !/^lt-\d{14}-[a-f0-9]{6}$/.test(input.messageId) || !Number.isFinite(nowMs)) {
+    return { outcome: 'stale', question: null, reason: 'The submitted question is invalid.' };
+  }
+  const started = performance.now();
+  try {
+    return withOperatorLock((): RecordTypedLeaderAnswerResult => {
+      const all = readQuestionsStrict();
+      const question = all.find((q) => q.questionId === questionId);
+      if (!question) return { outcome: 'stale', question: null, reason: 'This question is unavailable.' };
+      const form = currentQuestionForm(question);
+      const projection = projectLeaderQuestion(question);
+      if (!form || form.revision !== submission.formRevision) {
+        return { outcome: 'stale', question: projection, reason: 'This question presentation changed.' };
+      }
+      if (question.answer !== null) return { outcome: 'already-answered', question: projection };
+      const acceptedAtMs = nowMs + Math.max(0, performance.now() - started);
+      if (acceptedAtMs < Date.parse(question.askedAt) || acceptedAtMs >= Date.parse(form.expiresAt)) {
+        return { outcome: 'stale', question: projection, reason: 'This question presentation expired; you can still write an answer.' };
+      }
+      let text: string;
+      let optionIndices: number[] | undefined;
+      if (submission.kind === 'options') {
+        optionIndices = [...submission.optionIndices].sort((a, b) => a - b);
+        if (!form.options || form.mode === 'short-answer' ||
+          form.mode === 'single' && optionIndices.length !== 1 ||
+          optionIndices.some((index) => index >= form.options!.length)) {
+          return { outcome: 'stale', question: projection, reason: 'The selection does not match this question.' };
+        }
+        text = optionIndices.map((index) => form.options![index]!).join('; ');
+      } else {
+        if (form.mode !== 'short-answer') {
+          return { outcome: 'stale', question: projection, reason: 'This form requires a choice; write an ordinary answer to refine it.' };
+        }
+        const cleaned = cleanOperatorText(submission.text, OPERATOR_LIMITS.answerMaxChars * 2);
+        if (!cleaned || cleaned.length > OPERATOR_LIMITS.answerMaxChars) {
+          return { outcome: 'stale', question: projection, reason: 'The complete answer must fit within 2000 characters.' };
+        }
+        text = cleaned;
+      }
+      if (!text || text.length > OPERATOR_LIMITS.answerMaxChars) return { outcome: 'stale', question: projection };
+      const at = new Date(acceptedAtMs).toISOString();
+      ensureQuestionInitialization(acceptedAtMs);
+      question.answer = { text, at, channel: input.channel, messageId: input.messageId,
+        typedAcceptance: { schemaVersion: 1, formRevision: form.revision, kind: submission.kind,
+          ...(optionIndices ? { optionIndices } : {}), text, at, messageId: input.messageId } };
+      writeList(operatorQuestionsPath(), 'questions', all, acceptedAtMs);
+      fsyncDirectory(leaderRoot());
+      return { outcome: 'recorded', question: projectLeaderQuestion(question) };
+    });
+  } catch {
+    // The write may have completed before a later failure: only an exact canonical read can reconcile it.
+    return { outcome: 'held', question: null, reason: 'Leader question state is unavailable; check the saved answer before submitting again.' };
+  }
+}
+
 /** Every recorded question, oldest first. */
 export function listLeaderQuestions(): LeaderQuestionRecord[] {
   return readList(operatorQuestionsPath(), 'questions', isQuestion);
@@ -306,7 +553,7 @@ export function findLeaderQuestion(questionId: string): LeaderQuestionRecord | n
  * its record, answer included). Returns the records for this memo, in order.
  */
 export function registerLeaderQuestions(
-  memo: { id: string; at: string; questionsForMason: readonly string[] },
+  memo: { id: string; at: string; questionsForMason: readonly string[]; questionForms?: readonly LeaderMemoQuestionForm[] },
   nowMs: number = Date.now(),
 ): LeaderQuestionRecord[] {
   const wanted = memo.questionsForMason.flatMap((raw, index) => {
@@ -315,8 +562,18 @@ export function registerLeaderQuestions(
     return questionId && text ? [{ questionId, index, text }] : [];
   });
   if (wanted.length === 0) return [];
+  const forms = normalizeLeaderQuestionForms(memo.questionForms ?? [], memo.questionsForMason) ?? [];
   return withOperatorLock(() => {
-    const all = listLeaderQuestions();
+    let missing = false;
+    try { lstatSync(operatorQuestionsPath()); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') missing = true;
+      else throw new Error('Leader question state is unavailable');
+    }
+    const initialized = readQuestionInitialization();
+    if (missing && initialized) throw new Error('Leader question state is unavailable');
+    const all = missing ? [] : readQuestionsStrict();
+    if (forms.length > 0) ensureQuestionInitialization(nowMs);
     const byId = new Map(all.map((q) => [q.questionId, q]));
     let added = false;
     const out: LeaderQuestionRecord[] = [];
@@ -329,12 +586,20 @@ export function registerLeaderQuestions(
       const record: LeaderQuestionRecord = {
         v: 1, questionId: w.questionId, memoId: memo.id, index: w.index, text: w.text, askedAt: memo.at, messageId: null, answer: null,
       };
+      const form = forms.find((f) => f.index === w.index);
+      if (form) {
+        const bound = questionFormFor(record, form);
+        if (bound) record.questionForm = bound;
+      }
       all.push(record);
       byId.set(record.questionId, record);
       out.push(record);
       added = true;
     }
-    if (added) writeList(operatorQuestionsPath(), 'questions', all.slice(-OPERATOR_LIMITS.keepQuestions), nowMs);
+    if (added) {
+      writeList(operatorQuestionsPath(), 'questions', all.slice(-OPERATOR_LIMITS.keepQuestions), nowMs);
+      if (forms.length > 0 || initialized) fsyncDirectory(leaderRoot());
+    }
     return out;
   });
 }

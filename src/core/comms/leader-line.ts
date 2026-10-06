@@ -54,7 +54,8 @@ import type { LeaderApplyDeps } from '../vision/leader-apply.js';
 import type { LeaderAction } from '../vision/leader-types.js';
 import type { LeaderThreadMessage } from '../vision/leader-thread.js';
 import { briefFactsText, composeBrief, gatherBriefFacts, type BriefKind, type BriefSources } from './leader-brief.js';
-import { lookupTelegramMessage, recordTelegramMessages, registerButtonTarget, type TelegramThreadEntry } from './telegram-thread-map.js';
+import { lookupTelegramMessage, recordTelegramMessages, registerButtonTarget, type TelegramThreadEntry,
+  type TelegramQuestionDraft } from './telegram-thread-map.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -302,6 +303,20 @@ export function questionKeyboard(target: { questionId: string; threadId?: string
   ]];
 }
 
+/** Explicit typed forms only: every tap names the visible draft revision. */
+export function typedQuestionKeyboard(draft: TelegramQuestionDraft): TelegramButton[][] {
+  const data = (verb: string, index?: number): string =>
+    `lt:q:${draft.token}:${draft.revision.toString(36)}:${verb}${index === undefined ? '' : `:${index}`}`;
+  if (draft.claim) return [];
+  const rows: TelegramButton[][] = (draft.form.options ?? []).map((label, index) => [{
+    text: `${draft.selected.includes(index) ? '✓ ' : '○ '}${label}`, data: data('o', index),
+  }]);
+  if (draft.form.mode === 'multiple') rows.push([{ text: 'Select all', data: data('a') }, { text: 'Clear', data: data('c') }]);
+  if (draft.form.mode !== 'short-answer') rows.push([{ text: 'Submit', data: data('s') }, { text: 'Write an answer', data: data('w') }]);
+  else rows.push([{ text: 'Write an answer', data: data('w') }]);
+  return rows;
+}
+
 function actionKeyboard(actionIds: readonly string[]): TelegramButton[][] {
   const token = registerButtonTarget({ actionIds: [...actionIds] });
   return [[
@@ -508,9 +523,30 @@ async function deliverBrief(
     question = null;
   }
   const opts: TelegramSendOpts = {};
+  let legacyQuestionControls = true;
+  if (question) {
+    try {
+      const mod = await d.thread();
+      if (typeof mod?.readLeaderQuestion === 'function') {
+        const current = mod.readLeaderQuestion(question.questionId);
+        legacyQuestionControls = current !== null && !current.questionForm;
+        if (!legacyQuestionControls) {
+          // Typed prompts must leave through the real thread delivery path,
+          // which binds their actual bot message and owns the draft. A brief
+          // must not mark that pending prompt delivered without its controls.
+          text = text.split('\n').filter(line => !line.startsWith('Q: ')).join('\n');
+          question = null;
+        }
+      }
+    } catch {
+      legacyQuestionControls = false;
+      text = text.split('\n').filter(line => !line.startsWith('Q: ')).join('\n');
+      question = null;
+    }
+  }
   if (typeof replyToMessageId === 'number') opts.replyToMessageId = replyToMessageId;
   if (brief.pendingActionIds.length > 0) opts.keyboard = actionKeyboard(brief.pendingActionIds.slice(0, 10));
-  else if (question && isYesNoQuestion(question.text)) opts.keyboard = questionKeyboard({ questionId: question.questionId });
+  else if (question && legacyQuestionControls && isYesNoQuestion(question.text)) opts.keyboard = questionKeyboard({ questionId: question.questionId });
   const ok = await send(text, cfg, opts, {
     kind: question ? 'question' : 'update',
     ...(question ? { questionId: question.questionId } : {}),
@@ -682,7 +718,7 @@ export async function threadLineHooks(cfg: AshlrConfig): Promise<ThreadLineHooks
   let dirty = false;
   return {
     gate: (msg) => gateThreadMessage(msg, d.now(), lc, state, (id) => d.isAnswered(id)),
-    questionKeyboard: (msg) => (msg.kind === 'question' && msg.questionId && isYesNoQuestion(msg.text)
+    questionKeyboard: (msg) => (msg.kind === 'question' && msg.questionId && !msg.questionForm && isYesNoQuestion(msg.text)
       ? questionKeyboard({ questionId: msg.questionId, threadId: msg.id })
       : null),
     sent: (msg) => {

@@ -4,6 +4,7 @@
  * or the general /api/* router.
  */
 import { timingSafeEqual } from 'node:crypto';
+import { parseLeaderQuestionSubmission } from '../vision/leader-thread-types.js';
 
 export interface RemoteRequest {
   method?: string;
@@ -40,6 +41,7 @@ const CHECKPOINT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const ROOT_ID = /^[0-9a-f]{8,64}$/;
 const THREAD_ID = /^[A-Za-z0-9_:-]{1,128}$/;
 const ACTION_ID = /^[A-Za-z0-9_:-]{1,128}$/;
+const LEADER_QUESTION_ID = /^lm-\d{14}-[a-f0-9]{6}:\d{1,2}$/;
 const PROPOSAL_ID = /^[A-Za-z0-9._-]{1,160}$/;
 const CLOUD_TASK_ID = /^ct_\d{8}T\d{4}_[a-z0-9]{6}$/;
 const DEVIN_TASK_ID = /^dv_\d{8}T\d{4}_[a-z0-9]{6}$/;
@@ -106,6 +108,8 @@ export function classifyRemoteRoute(method: string | undefined, rawTarget: strin
   }
   if (method !== 'GET') return { kind: 'deny' };
   if (query === undefined && READ_ROUTES.has(path)) return { kind: 'read', path };
+  const leaderQuestion = /^\/api\/verse\/leader\/questions\/([^/]+)$/.exec(path);
+  if (query === undefined && leaderQuestion && LEADER_QUESTION_ID.test(leaderQuestion[1]!)) return { kind: 'read', path };
   if (/^\/api\/verse\/sessions\/([^/]+)$/.test(path) && query === undefined) {
     const id = path.slice('/api/verse/sessions/'.length);
     if (SESSION_ID.test(id)) return { kind: 'read', path };
@@ -192,8 +196,11 @@ export function validateRemoteMutation(decision: RemoteRouteDecision, body: unkn
       && typeof body.headSha === 'string' && HEAD_SHA.test(body.headSha)
       && (body.reason === undefined || (task[2] === 'close' && boundedText(body.reason, 200)));
   }
-  if (/^\/api\/verse\/sessions\/[^/]+\/turns$/.test(path)
-    || /^\/api\/verse\/leader\/questions\/[^/]+\/answer$/.test(path)) return keys(body, ['text']) && boundedText(body.text, 64_000);
+  if (/^\/api\/verse\/leader\/questions\/[^/]+\/answer$/.test(path)) {
+    if (Object.hasOwn(body, 'submission')) return keys(body, ['submission']) && parseLeaderQuestionSubmission(body.submission) !== null;
+    return keys(body, ['text']) && boundedText(body.text, 64_000);
+  }
+  if (/^\/api\/verse\/sessions\/[^/]+\/turns$/.test(path)) return keys(body, ['text']) && boundedText(body.text, 64_000);
   if (/^\/api\/verse\/agents\/[^/]+\/plan$/.test(path)) return keys(body, ['action'])
     && (body.action === 'approve' || body.action === 'discard');
   if (/^\/api\/verse\/queue\/[^/]+\/[^/]+\/send$/.test(path)) return Object.keys(body).length === 0;

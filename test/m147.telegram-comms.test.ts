@@ -105,6 +105,8 @@ import {
   pollTelegramUpdates,
   telegramEnabled,
   answerCallbackQuery,
+  editTelegramQuestionKeyboard,
+  telegramQuestionNamespace,
   setTelegramTransportForTests,
   setTelegramSendClockForTests,
 } from '../src/core/integrations/telegram.js';
@@ -976,5 +978,51 @@ describe('transport channel switch', () => {
     const result = await runCommsCycle(cfg);
     expect(result.sent).toBe(1);
     expect(_httpCalls.some((c) => c.path.includes('sendMessage'))).toBe(true);
+  });
+});
+
+// Typed controls use only the standard markup-edit primitive, never a send or
+// arbitrary method/recipient supplied by a callback.
+describe('typed question transport binding and markup edits', () => {
+  it('binds the exact bot/chat configuration without returning raw identities', () => {
+    const cfg = cfgTelegram(), first = telegramQuestionNamespace(cfg);
+    expect(first).toMatch(/^[a-f0-9]{64}$/);
+    expect(telegramQuestionNamespace(cfg, String(cfg.comms!.telegram!.chatId))).toBe(first);
+    expect(telegramQuestionNamespace(cfg, 'foreign-chat')).toBeNull();
+    const changed = structuredClone(cfg); changed.comms!.telegram!.botToken = 'another-synthetic-bot';
+    expect(telegramQuestionNamespace(changed)).not.toBe(first);
+    changed.comms!.telegram!.chatId = 'another-synthetic-chat';
+    expect(telegramQuestionNamespace(changed)).not.toBe(telegramQuestionNamespace(cfg));
+  });
+
+  it('edits only the exact configured message keyboard and permits explicit removal', async () => {
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    setTelegramTransportForTests(async (method, body) => { calls.push({ method, body }); return { ok: true, result: true }; });
+    const cfg = cfgTelegram();
+    expect(await editTelegramQuestionKeyboard(123, [[{ text: 'Submit', data: 'lt:q:bounded' }]], cfg)).toBe(true);
+    expect(await editTelegramQuestionKeyboard(123, [], cfg)).toBe(true);
+    expect(calls).toEqual([
+      { method: 'editMessageReplyMarkup', body: { chat_id: cfg.comms!.telegram!.chatId, message_id: 123,
+        reply_markup: { inline_keyboard: [[{ text: 'Submit', callback_data: 'lt:q:bounded' }]] } } },
+      { method: 'editMessageReplyMarkup', body: { chat_id: cfg.comms!.telegram!.chatId, message_id: 123,
+        reply_markup: { inline_keyboard: [] } } },
+    ]);
+  });
+
+  it.each([{ ok: false, error_code: 429, parameters: { retry_after: 600 } }, null, { ok: true },
+    { ok: false, error_code: 500 }, { ok: true, result: false }])('does not replay an unknown or refused edit %j', async response => {
+    const transport = vi.fn(async () => response); setTelegramTransportForTests(transport);
+    expect(await editTelegramQuestionKeyboard(123, [], cfgTelegram())).toBe(false);
+    expect(transport).toHaveBeenCalledOnce();
+  });
+
+  it('rejects invalid message IDs, oversized callbacks and URL controls before contact', async () => {
+    const transport = vi.fn(async () => ({ ok: true, result: true })); setTelegramTransportForTests(transport);
+    for (const id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(await editTelegramQuestionKeyboard(id, [], cfgTelegram())).toBe(false);
+    }
+    expect(await editTelegramQuestionKeyboard(123, [[{ text: 'bad', data: '🚀'.repeat(17) }]], cfgTelegram())).toBe(false);
+    expect(await editTelegramQuestionKeyboard(123, [[{ text: 'bad', url: 'https://example.com' }]], cfgTelegram())).toBe(false);
+    expect(transport).not.toHaveBeenCalled();
   });
 });

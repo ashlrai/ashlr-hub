@@ -31,7 +31,7 @@
  * of 10 s. There is no Leader event stream to subscribe to (/api/events has
  * no leader topic), so polling while visible is the honest refresh.
  */
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { LeaderStateV1 } from '../../../../core/vision/leader-types.js';
 import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
 import { hasMutationHold } from '../../../data/auth-store.js';
@@ -56,6 +56,9 @@ import {
   type PendingMessage,
 } from './thread-model.js';
 import { ThreadRows, type ThreadContext } from './ThreadItems.js';
+import type { QuestionFormStore } from './LeaderQuestionForm.js';
+const TypedQuestionForm = lazy(() => import('./LeaderQuestionForm.js'));
+
 import type { LeaderThreadMessage } from './thread-types.js';
 import styles from './leader.module.css';
 
@@ -129,6 +132,10 @@ export function LeaderConversation({ leader, actions, dormant }: LeaderConversat
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
   const [focusQuestionId, setFocusQuestionId] = useState<string | null>(null);
   const [addingDirective, setAddingDirective] = useState(false);
+  const questionForms = useRef<QuestionFormStore>(new Map());
+  const [exactQuestionText, setExactQuestionText] = useState('the Leader’s question');
+  const [exactQuestionId, setExactQuestionId] = useState<string | null>(null);
+  const [focusReadError, setFocusReadError] = useState<string | null>(null);
   const [readOnly, setReadOnly] = useState(false);
 
   const composerRef = useRef<LeaderComposerHandle>(null);
@@ -279,9 +286,13 @@ export function LeaderConversation({ leader, actions, dormant }: LeaderConversat
     if (!read) return;
     const q = findQuestion(messages, request);
     if (q) setFocusQuestionId(q.id);
-    else {
-      setQuote(request.text ?? 'the Leader’s question');
-      composerRef.current?.focus();
+    else if (request.questionId) {
+      const id = request.questionId;
+      setExactQuestionId(id);
+      setExactQuestionText(request.text ?? 'the Leader’s question');
+      setFocusReadError(null);
+    } else {
+      setFocusReadError('This question has no canonical identity. Open it from Needs you again.');
     }
     takeLeaderFocus(request.seq);
   }, [request, read, messages]);
@@ -380,6 +391,24 @@ export function LeaderConversation({ leader, actions, dormant }: LeaderConversat
     onDiscard,
     sendDisabledReason,
     dormant,
+    questionFormProps: question => ({
+      questionId: question.questionId ?? question.id, revisionHint: question.questionForm?.revision,
+      store: questionForms.current, disabledReason: sendDisabledReason,
+      renderWrittenAnswer: props => <LeaderComposer {...props} />,
+      requestSubmit: run => gate.run(SEND_TOKEN_REASON, () => { void run(); }),
+      onLegacyAnswer: async text => {
+        const result = await answerLeaderQuestion(question.questionId ?? question.id, text);
+        if (!result) return false;
+        setReceived(current => [...current, result.message, ...(result.reply ? [result.reply] : [])]);
+        refetchThread(); return true;
+      }, fallbackText: question.text,
+      autoFocus: focusQuestionId === question.id,
+      onReconciled: () => refetchThread(),
+      onResult: result => {
+        setReceived(current => [...current, ...(result.message ? [result.message] : []), ...(result.reply ? [result.reply] : [])]);
+        refetchThread();
+      },
+    }),
   };
 
   return (
@@ -439,6 +468,18 @@ export function LeaderConversation({ leader, actions, dormant }: LeaderConversat
           ) : (
             <ThreadRows rows={rows} ctx={ctx} />
           )}
+          {exactQuestionId ? <article className={styles.question} aria-label="Requested Leader question">
+            <Suspense fallback={<p role="status">Reading the current question…</p>}>
+              <TypedQuestionForm key={exactQuestionId} questionId={exactQuestionId} store={questionForms.current}
+                disabledReason={sendDisabledReason} requestSubmit={run => gate.run(SEND_TOKEN_REASON, () => { void run(); })}
+                fallbackText={exactQuestionText} autoFocus showQuestion renderWrittenAnswer={props => <LeaderComposer {...props} />} onReconciled={() => refetchThread()}
+                onLegacyAnswer={async text => { const result = await answerLeaderQuestion(exactQuestionId, text);
+                  if (!result) return false; setReceived(current => [...current, result.message, ...(result.reply ? [result.reply] : [])]); refetchThread(); return true; }}
+                onUnsupported={() => { setExactQuestionId(null); setQuote(exactQuestionText); composerRef.current?.focus(); }}
+                onResult={result => { setReceived(current => [...current, ...(result.message ? [result.message] : []), ...(result.reply ? [result.reply] : [])]); refetchThread(); }} />
+            </Suspense>
+          </article> : null}
+          {focusReadError ? <p role="alert">{focusReadError}</p> : null}
           {thinking ? (
             <p className={styles.thinking} role="status">
               <span className={styles.dots} aria-hidden="true">

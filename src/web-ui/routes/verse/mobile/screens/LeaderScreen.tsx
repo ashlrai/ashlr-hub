@@ -17,7 +17,7 @@
  *     confirmation (a message is cheap), Approve now and Retire WITH one.
  *     A failed send keeps the words in the box.
  */
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { LeaderAction } from '../../../../../core/vision/leader-types.js';
 import { refetchQuery } from '../../../../data/cache.js';
 import { readFailureReason } from '../../../../data/client.js';
@@ -34,6 +34,9 @@ import {
   sendLeaderMessage,
   THREAD_PAGE_SIZE,
 } from '../../leader/thread-data.js';
+import type { QuestionFormStore } from '../../leader/LeaderQuestionForm.js';
+const TypedQuestionForm = lazy(() => import('../../leader/LeaderQuestionForm.js'));
+
 import { answeredQuestions, CHANNEL_LABEL, clockTime, displayThreadText, groupThread, mergeThread, previewText, type ThreadRow } from '../../leader/thread-model.js';
 import { OPERATOR_DIRECTIVE_MAX, type DirectiveChip, type LeaderThreadKind, type LeaderThreadMessage } from '../../leader/thread-types.js';
 import { isApprovable } from '../../mind/leader-model.js';
@@ -255,6 +258,8 @@ export function LeaderScreen() {
   const [received, setReceived] = useState<LeaderThreadMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [answering, setAnswering] = useState<LeaderThreadMessage | null>(null);
+  const questionForms = useRef<QuestionFormStore>(new Map());
+  const [typedQuestion, setTypedQuestion] = useState<LeaderThreadMessage | null>(null);
   const [sending, setSending] = useState(false);
   const [adding, setAdding] = useState(false);
   const [directiveDraft, setDirectiveDraft] = useState('');
@@ -435,7 +440,7 @@ export function LeaderScreen() {
           canAct={canAct}
           offline={offline}
           answeringId={answering?.id ?? null}
-          onAnswer={(q) => setAnswering(q)}
+          onAnswer={q => { if (q.questionForm) setTypedQuestion(q); else setAnswering(q); }}
           onApprove={approve}
         />
       </>
@@ -506,6 +511,27 @@ export function LeaderScreen() {
       ) : null}
       {body}
       <div ref={end} />
+
+      <BottomSheet open={typedQuestion !== null} onClose={() => setTypedQuestion(null)} title="Answer the Leader">
+        {typedQuestion ? <Suspense fallback={<p role="status">Reading the current question…</p>}>
+          <TypedQuestionForm key={typedQuestion.questionId ?? typedQuestion.id} questionId={typedQuestion.questionId ?? typedQuestion.id}
+            revisionHint={typedQuestion.questionForm?.revision} store={questionForms.current} disabledReason={disabledReason}
+            renderWrittenAnswer={props => <MobileComposer value={props.value} onChange={props.onChange} onSubmit={props.onSend}
+              label={props.label} placeholder={props.placeholder} submitLabel="Send answer" disabled={props.disabledReason != null} hint={props.disabledReason} />}
+            showQuestion fallbackText={typedQuestion.text} onReconciled={() => { void refreshThread(); }} requestSubmit={run => { runMobileAction({
+              title: 'Answer the Leader', consequences: 'Records the selected answer to this question.', confirmLabel: 'Submit answer',
+              confirm: false, run,
+            }); }} onResult={result => {
+              setReceived(current => [...current, ...(result.message ? [result.message] : []), ...(result.reply ? [result.reply] : [])]);
+              void refreshThread();
+            }} onLegacyAnswer={async text => {
+              const question = typedQuestion; const result = await answerLeaderQuestion(question.questionId ?? question.id, text);
+              if (!result) return false;
+              setReceived(current => [...current, result.message, ...(result.reply ? [result.reply] : [])]);
+              void refreshThread(); return true;
+            }} />
+        </Suspense> : null}
+      </BottomSheet>
 
       <BottomSheet
         open={adding}

@@ -1,3 +1,4 @@
+import { narrowQuestionProjection, narrowQuestionSubmitResult, matchesQuestionAcceptance } from './question-model.js';
 import { describe, expect, it } from 'vitest';
 import {
   answeredQuestions,
@@ -12,6 +13,7 @@ import {
   narrowDirectives,
   narrowApprovalThread,
   narrowMessage,
+  narrowQuestionForm,
   narrowSendResult,
   narrowThreadPage,
   previewText,
@@ -267,5 +269,50 @@ describe('generated Leader display projection', () => {
   it('preserves code, quoted action-shaped lines, links and footer literals without altering timestamps', () => {
     const literal = `\`Memo ${memoId}\` https://example.com/${actionId}\n\`\`\`\n• [B] literal — scheduled (${actionId})\nApprove or veto any of them by id.\n\`\`\`\n"Approve or veto any of them by id."\n"quoted"Approve or veto any of them by id.\n2026-10-05T15:30:00.000Z`;
     expect(displayThreadText(msg({ id: 'literal', kind: 'memo', text: literal }))).toBe(literal);
+  });
+});
+
+
+describe('typed question projections', () => {
+  const revision = Array(8).fill('a'.repeat(8)).join('-');
+  const form = { schemaVersion: 1, revision, mode: 'multiple', options: ['Speed', 'Reliability'], expiresAt: '2027-01-01T00:00:00Z' };
+  const question = { questionId: 'memo:0', text: 'Which improvements?', askedAt: '2026-10-01T00:00:00Z', messageId: 'question-message',
+    questionForm: form, answered: false, answer: null };
+  it('retains readable questions but drops unknown/invalid optional form metadata', () => {
+    expect(narrowMessage({ ...msg({ id: 'question-valid-form', kind: 'question' }), questionForm: form })?.questionForm).toEqual(form);
+    expect(narrowMessage({ ...msg({ id: 'question-newer-form', kind: 'question', text: 'Literal question' }), questionForm: { ...form, schemaVersion: 2 } }))
+      .toMatchObject({ text: 'Literal question' });
+    expect(narrowQuestionForm({ ...form, options: ['duplicate', 'duplicate'] })).toBeNull();
+    expect(narrowQuestionForm({ ...form, mode: 'short-answer' })).toBeNull();
+    expect(narrowQuestionForm({ ...form, options: [2001] })).toBeNull();
+    expect(narrowQuestionForm({ ...form, expiresAt: 'unknown' })).toBeNull();
+    expect(narrowQuestionForm({ ...form, options: ['Only one'] })?.options).toEqual(['Only one']);
+  });
+  it('narrows recorded-once outcomes without requiring a thread reply or inventing success', () => {
+    expect(narrowQuestionSubmitResult({ outcome: 'held', question: null, message: null, reply: null })?.outcome).toBe('held');
+    expect(narrowQuestionSubmitResult({ outcome: 'stale', question, message: null, reply: null })?.message).toBeNull();
+    expect(narrowQuestionSubmitResult({ outcome: 'ok', question })).toBeNull();
+    expect(narrowQuestionProjection({ ...question, answered: true, answer: null })).toBeNull();
+  });
+  it('holds an explicitly malformed authoritative form but keeps a genuinely legacy form-less projection', () => {
+    expect(narrowQuestionProjection({ ...question, questionForm: undefined })).not.toBeNull();
+    expect(narrowQuestionProjection({ ...question, questionForm: null })).toBeNull();
+    expect(narrowQuestionProjection({ ...question, questionForm: { ...form, schemaVersion: 2 } })).toBeNull();
+    expect(narrowQuestionForm({ ...form, revision: 'a'.repeat(64) })).toBeNull();
+  });
+  it('requires exact revision and value, independent of answered state and channel', () => {
+    const submission = { schemaVersion: 1 as const, formRevision: revision, kind: 'options' as const, optionIndices: [1, 0] };
+    const answer = { text: 'Speed; Reliability', at: '2026-10-02T00:00:00Z', channel: 'telegram', messageId: 'answer-message',
+      typedAcceptance: { schemaVersion: 1, formRevision: revision, kind: 'options', optionIndices: [0, 1], text: 'Speed; Reliability',
+        at: '2026-10-02T00:00:00Z', messageId: 'answer-message' } };
+    const accepted = narrowQuestionProjection({ ...question, answered: true, answer })!;
+    expect(matchesQuestionAcceptance(accepted, submission)).toBe(true);
+    expect(narrowQuestionProjection({ ...question, answered: true, answer: { ...answer, typedAcceptance: { ...answer.typedAcceptance,
+      kind: 'text', optionIndices: undefined } } })?.answer).not.toHaveProperty('typedAcceptance');
+    expect(matchesQuestionAcceptance(accepted, { ...submission, optionIndices: [0] })).toBe(false);
+    expect(matchesQuestionAcceptance(accepted, { ...submission, formRevision: Array(8).fill('b'.repeat(8)).join('-') })).toBe(false);
+    expect(matchesQuestionAcceptance(narrowQuestionProjection({ ...question, answered: true, answer: { ...answer, typedAcceptance: undefined } })!, submission)).toBe(false);
+    expect(narrowQuestionProjection({ ...question, answered: true, answer: { ...answer,
+      typedAcceptance: { ...answer.typedAcceptance, messageId: 'forged' } } })?.answer).not.toHaveProperty('typedAcceptance');
   });
 });

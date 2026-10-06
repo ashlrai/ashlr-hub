@@ -848,6 +848,7 @@
     "src/core/vision/leader-persona.ts",
     "src/core/vision/leader-powers.ts",
     "src/core/vision/leader-preferences.ts",
+    "src/core/vision/leader-question-submission.ts",
     "src/core/vision/leader-run-chain.ts",
     "src/core/vision/leader-seat-plan.ts",
     "src/core/vision/leader-seat.ts",

@@ -222,3 +222,51 @@ it('accepts larger representable Grok directives as transport without manufactur
   expect(parseActionParams('lanes.grok', { slots: Number.MAX_SAFE_INTEGER })).toEqual({ ok: true, params: { slots: Number.MAX_SAFE_INTEGER } });
   for (const slots of [null, 0, -1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1, '17']) expect(parseActionParams('lanes.grok', { slots }).ok).toBe(false);
 });
+
+
+describe('optional explicit Leader question forms', () => {
+  it('parses all modes with scrubbed visible options while retaining legacy question text', () => {
+    const result = parseLeaderMemoOutput(JSON.stringify(memo({
+      questionsForMason: ['Choose one', 'Choose several', 'What matters?'],
+      questionForms: [{ index: 0, mode: 'single', options: ['Reliability', 'Phone'] },
+        { index: 1, mode: 'multiple', options: ['mason@example.com', 'Faster tests'] },
+        { index: 2, mode: 'short-answer' }],
+    })), { nowMs: NOW });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.draft.questionsForMason).toEqual(['Choose one', 'Choose several', 'What matters?']);
+    expect(result.draft.questionForms).toMatchObject([
+      { index: 0, mode: 'single', options: ['Reliability', 'Phone'] },
+      { index: 1, mode: 'multiple' }, { index: 2, mode: 'short-answer' },
+    ]);
+    expect(JSON.stringify(result.draft.questionForms)).not.toContain('mason@example.com');
+  });
+
+  it.each([
+    [{ index: 0, mode: 'single', options: ['Same', ' same '] }],
+    [{ index: 0, mode: 'single', options: ['a@example.com', 'b@example.com'] }],
+    [{ index: 0, mode: 'short-answer', options: ['Not permitted'] }],
+    [{ index: 0, mode: 'multiple', options: ['a'.repeat(200), ...Array.from({ length: 9 }, (_, i) => `${i}`.repeat(200))] }],
+    [{ index: 0, mode: 'single', options: ['ok', 'x'.repeat(201)] }],
+    [{ index: 0, mode: 'single', options: ['\u200B'] }],
+    [{ index: 2, mode: 'short-answer' }],
+    [{ index: 0, mode: 'short-answer' }, { index: 0, mode: 'short-answer' }],
+    [{ index: 0, mode: 'single', options: ['ok'], authority: true }],
+  ].map((questionForms) => ({ questionForms })))('drops malformed optional presentation $questionForms without losing the question', ({ questionForms }) => {
+    const result = parseLeaderMemoOutput(JSON.stringify(memo({ questionsForMason: ['Still ask this'], questionForms })), { nowMs: NOW });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.draft.questionsForMason).toEqual(['Still ask this']);
+    expect(result.draft.questionForms).toBeUndefined();
+    expect(result.draft.notes.join(' ')).toContain('invalid question forms');
+  });
+
+  it('does not reassign a form when a malformed question changes normalized indices', () => {
+    const result = parseLeaderMemoOutput(JSON.stringify(memo({ questionsForMason: ['', 'Keep this'],
+      questionForms: [{ index: 0, mode: 'single', options: ['Wrong question'] }] })), { nowMs: NOW });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.draft.questionsForMason).toEqual(['Keep this']);
+    expect(result.draft.questionForms).toBeUndefined();
+  });
+});

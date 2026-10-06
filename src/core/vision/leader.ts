@@ -1265,6 +1265,7 @@ async function runLeaderOnce(deps: LeaderRunDeps, trigger: LeaderTrigger, opts: 
   memo.move = draft.move;
   memo.killList = draft.killList;
   memo.questionsForMason = draft.questionsForMason;
+  if (draft.questionForms) memo.questionForms = draft.questionForms;
   memo.status = 'ok';
   memo.statusReason = draft.notes.length > 0 ? draft.notes.join('; ').slice(0, 400) : null;
   if (mode === 'checkin') {
