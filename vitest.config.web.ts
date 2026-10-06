@@ -30,6 +30,7 @@ export default defineConfig({
         extends: true,
         test: {
           name: 'console',
+          maxWorkers: 4,
           include: ['src/web-ui/**/*.test.{ts,tsx}'],
           exclude: [...excludes, transcriptTests],
           sequence: { groupOrder: 0 },
