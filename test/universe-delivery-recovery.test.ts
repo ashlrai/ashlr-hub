@@ -1,10 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UniverseCampaignSummary } from '../src/core/universe/types.js';
 const sources = vi.hoisted(() => ({ universe: vi.fn(), campaign: vi.fn(), deliveries: vi.fn(), manifest: vi.fn() }));
-// readCompletedCampaignDelivery re-reads the durable campaign so a caller
-// projection cannot hide a measured seed; the mock must expose that reader too.
+// Recovery reads the durable campaign and Universe together; forward both
+// existing hooks so caller drift, mutations and unavailable evidence stay observable.
 vi.mock('../src/core/universe/campaign-store.js', () => ({ campaignUniverse: sources.universe,
-  readUniverseCampaign: sources.campaign }));
+  readUniverseCampaign: sources.campaign,
+  readUniverseCampaignProjection: (id: string, options: unknown) => {
+    const campaign = sources.campaign(id, options);
+    return { campaign, universe: sources.universe(campaign, options) };
+  } }));
 vi.mock('../src/core/universe/delivery.js', () => ({ readUniverseDeliveries: sources.deliveries }));
 vi.mock('../src/core/universe/store.js', () => ({ manifestRecord: sources.manifest, universePath: () => '/synthetic/universe' }));
 import { readCompletedCampaignDelivery } from '../src/core/universe/campaign-delivery-recovery.js';
