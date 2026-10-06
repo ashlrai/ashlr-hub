@@ -33,6 +33,9 @@ const isolatedSuites = [
   // The same real evaluator/Git/delivery recovery path has bounded allowances;
   // preserve all cases without a competing local real-I/O shard.
   'test/universe-engineering-handoff-recovery.test.ts',
+  // A concurrent local full run failed a bounded campaign trial; the isolated
+  // whole file passed. Retain all 17 cases and deadlines in one fresh home.
+  'test/universe-campaign-integration.test.ts',
 ];
 const isolatedAcceptance = 'test/universe-hub-marker-campaign.test.ts';
 const exclusions = [...isolatedSuites, isolatedAcceptance].map((file) => `--exclude=${file}`);

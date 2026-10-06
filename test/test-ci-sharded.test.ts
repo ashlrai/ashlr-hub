@@ -55,7 +55,7 @@ describe('local exhaustive prepublish shards', () => {
     // Observe actual coordinator launches, independent of child log ordering.
     // All partitions still run once; the measured longest pair gets both slots.
     expect([...result.stderr.matchAll(/started (\d)\/3/g)].map(match => Number(match[1]))).toEqual([3, 2, 1]);
-    expect(rows).toHaveLength(14);
+    expect(rows).toHaveLength(15);
     expect(rows.every((row) => row.setupTiming === '1' && row.successorTiming === '1' && row.admissionTiming === '1')).toBe(true);
     expect(rows.every((row) => row.hardTimeout === '4000' && row.idleTimeout === '4000')).toBe(true);
     const isolatedFiles = [
@@ -68,8 +68,9 @@ describe('local exhaustive prepublish shards', () => {
       'test/resource-console-engineering-acceptance.test.ts',
       'test/universe-firm-engineering-control.test.ts',
       'test/universe-engineering-handoff-recovery.test.ts',
+      'test/universe-campaign-integration.test.ts',
     ];
-    expect(rows.filter((row) => row.shard).every((row) => row.excludes.length === 10 &&
+    expect(rows.filter((row) => row.shard).every((row) => row.excludes.length === 11 &&
       [...isolatedFiles, 'test/universe-hub-marker-campaign.test.ts'].every((file) =>
         row.excludes.includes(`--exclude=${file}`)))).toBe(true);
     expect(rows.filter((row) => !row.shard).map((row) => row.file)).toEqual([
@@ -77,13 +78,13 @@ describe('local exhaustive prepublish shards', () => {
       'test/universe-hub-marker-campaign.test.ts', 'test/universe-hub-marker-campaign.test.ts',
     ]);
     expect(rows.filter((row) => !row.shard).map((row) => row.filter)).toEqual([
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       'automatic seed measurement: false', 'automatic seed measurement: true',
     ]);
     expect(rows.every((row) => row.workers === '--maxWorkers=1')).toBe(true);
     expect(rows.every((row) => row.parallelism.length === 1 && row.parallelism[0] === '--fileParallelism=false')).toBe(true);
     expect(rows.every((row) => row.bail === '--bail=1')).toBe(true);
-    expect(new Set(rows.map((row) => row.home)).size).toBe(14);
+    expect(new Set(rows.map((row) => row.home)).size).toBe(15);
     expect(rows.every((row) => row.tmp === join(row.home, 'tmp'))).toBe(true);
     expect(result.stderr).toContain('[test-ci:sharded] PASS');
   });
@@ -102,7 +103,7 @@ describe('local exhaustive prepublish shards', () => {
     const rows = result.stdout.trim().split('\n').map((line) => JSON.parse(line) as {
       setupTiming: string; successorTiming: string; admissionTiming: string; hardTimeout: string; idleTimeout: string;
     });
-    expect(rows).toHaveLength(14);
+    expect(rows).toHaveLength(15);
     expect(rows.every((row) => row.setupTiming === setup && row.successorTiming === successor && row.admissionTiming === admission)).toBe(true);
     expect(rows.every((row) => row.hardTimeout === '4000' && row.idleTimeout === '4000')).toBe(true);
     expect(result.stderr).toContain('[test-ci:sharded] PASS');
@@ -119,6 +120,6 @@ describe('local exhaustive prepublish shards', () => {
   it('fails closed when the isolated campaign acceptance fails', () => {
     const result = runFixture('isolated');
     expect(result.error).toBeUndefined(); expect(result.status).toBe(9);
-    expect(result.stderr).toContain('[test-ci:sharded] FAIL (0, 0, 0, isolated 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9)');
+    expect(result.stderr).toContain('[test-ci:sharded] FAIL (0, 0, 0, isolated 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9)');
   });
 });
