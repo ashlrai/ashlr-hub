@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-/** Run the same exhaustive three-way partition as hosted CI on one Mac.
+/** Run an exhaustive four-way local partition with two bounded workers.
+ * Hosted CI retains its independent three-way partition.
  * Each test-ci wrapper owns a private HOME and its Vitest process tree. Keep
  * at most two shards active, each with one worker, so real-I/O fixtures do not
  * contend with two other local shards for their bounded startup windows.
@@ -8,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath, URL } from 'node:url';
 
 const runner = fileURLToPath(new URL('./test-ci.mjs', import.meta.url));
-const shards = [1, 2, 3];
+const shards = [1, 2, 3, 4];
 // Vitest 4 inline project caps override the root --maxWorkers value. Its
 // forwarded fileParallelism override forces each project's workers to one,
 // preserving this local runner's intended concurrency in both test lanes.
@@ -74,18 +75,18 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 }
 
 function runShard(shard) { return new Promise((resolve) => {
-  const child = spawn(process.execPath, [runner, `--shard=${shard}/3`, '--maxWorkers=1', '--fileParallelism=false', '--bail=1', ...exclusions], {
+  const child = spawn(process.execPath, [runner, `--shard=${shard}/${shards.length}`, '--maxWorkers=1', '--fileParallelism=false', '--bail=1', ...exclusions], {
     cwd: process.cwd(),
     env: childEnvironment,
     stdio: 'inherit',
   });
   children.set(shard, child);
-  console.error(`[test-ci:sharded] started ${shard}/3 (pid ${child.pid ?? 'unavailable'})`);
+  console.error(`[test-ci:sharded] started ${shard}/${shards.length} (pid ${child.pid ?? 'unavailable'})`);
   let settled = false;
   const finish = (code, detail) => {
     if (settled) return;
     settled = true;
-    console.error(`[test-ci:sharded] ${shard}/3 ${detail}`);
+    console.error(`[test-ci:sharded] ${shard}/${shards.length} ${detail}`);
     if (code !== 0 && !failure) {
       failure = code;
       stopOthers(shard);
@@ -96,9 +97,9 @@ function runShard(shard) { return new Promise((resolve) => {
   child.once('exit', (code, signal) => finish(code ?? 1, signal ? `exited via ${signal}` : `exited ${code}`));
 }); }
 
-// The completed 3.23 release measured shard 3 at 2422s, 2 at 2142s and
-// 1 at 1828s. Start the longest partitions first to reduce the serial tail
-// while retaining the same exact membership and two single-worker homes.
+// Four smaller deterministic partitions aim to reduce the indivisible final tail.
+// Keep exactly two single-worker wrappers active; every general file still runs
+// once and all isolated suites retain their separate serial homes.
 const pending = [...shards].reverse();
 const codes = [];
 async function runQueue() {

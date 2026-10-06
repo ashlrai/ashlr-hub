@@ -26,6 +26,15 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Fixed
 
+- Split local exhaustive qualification into four smaller partitions with the
+  same two active workers and all isolated suites. This aims to reduce the
+  last-wave tail; full-run savings are not yet measured.
+- Measure release first-paint budgets from the normal build's emitted Vite
+  manifest instead of rebuilding the UI. Keep standalone budget checks and
+  the existing desktop/phone limits.
+- Run the complete UI suite before the long backend partitions locally and in
+  its existing Ubuntu CI job, retaining every suite and deadline. This improves
+  failure visibility; end-to-end time savings have not yet been measured.
 - Upgrade the bundled MCP SDK to 1.31.0, addressing GHSA-6qxp-vccf-f47h.
 - Keep Codex subscription allowance, credit balances and provider spending holds
   distinct; unconfirmed credit access remains explicit, and Auto describes its

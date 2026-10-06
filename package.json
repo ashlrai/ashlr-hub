@@ -116,7 +116,7 @@
     "node": ">=22.15.0"
   },
   "scripts": {
-    "prepublishOnly": "npm run build && npm run check:first-paint && npm run check:docs && npm run typecheck && npm run lint && npm run test:ci:sharded && npm run test:web",
+    "prepublishOnly": "npm run build && npm run check:first-paint:built && npm run check:docs && npm run typecheck && npm run lint && npm run test:web && npm run test:ci:sharded",
     "prepack": "npm run build",
     "build": "tsc -p tsconfig.json && node scripts/authority-surface.mjs && node scripts/copy-assets.mjs && node scripts/build-preparation-builtin.mjs && vite build --config vite.config.web.ts && node scripts/build-release-dependency-inventory.mjs && node scripts/build-identity.mjs",
     "build:preparation-builtin": "node scripts/build-preparation-builtin.mjs",
@@ -135,6 +135,7 @@
     "test:engineering-responsiveness": "vitest run --config vitest.config.engineering-performance.ts",
     "conformance:ecosystem": "tsx scripts/run-ecosystem-conformance.ts",
     "check:first-paint": "node scripts/check-first-paint-budget.mjs --budget-kb 353 --mobile-budget-kb 250",
+    "check:first-paint:built": "node scripts/check-first-paint-budget.mjs --no-build --out-dir dist/core/web/public/next --budget-kb 353 --mobile-budget-kb 250",
     "check:docs": "node scripts/check-documentation.mjs",
     "gate": "node scripts/gate.mjs",
     "gate:full": "node scripts/gate.mjs --full",
