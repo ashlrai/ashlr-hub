@@ -529,21 +529,30 @@ describe('Leader memo buttons', () => {
 // ===========================================================================
 
 describe('slash commands and keywords', () => {
-  it('/help, /status, /directives, /leader and unknown commands all answer as replies', async () => {
+  it('/help, /start, /status, /directives, /leader and unknown commands all answer as replies', async () => {
     writeLeaderMemo(memo());
     updates = [
       textUpdate('/help', 1), textUpdate('/status', 2), textUpdate('/directives', 3),
-      textUpdate('/leader', 4), textUpdate('/bogus', 5),
+      textUpdate('/leader', 4), textUpdate('/bogus', 5), textUpdate('/start', 6),
     ];
     await runCommsCycle(cfg(), fastCycle);
     const s = sends();
-    expect(s.map(replyTarget)).toEqual([1, 2, 3, 4, 5]);
-    expect(texts()[0]).toContain('/status');
+    expect(s.map(replyTarget)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(texts()[0]).toContain('<b>Read</b>');
+    expect(texts()[0]).toContain('<b>Talk &amp; work</b>');
+    expect(texts()[0]).toContain('<b>Decisions</b>');
+    expect(texts()[0]).toContain('<b>Messages</b>');
+    expect(texts()[0]).toContain('<code>/status or /brief</code>');
+    expect(texts()[0]).toContain('<code>/task &lt;owner/repo&gt; &lt;what to do&gt;</code>');
+    expect(texts()[0]).not.toContain('&amp;lt;');
+    expect(texts()[0]).toContain('within the grant');
+    expect(texts()[0]!.length).toBeLessThanOrEqual(TELEGRAM_MAX_MESSAGE);
     expect(texts()[1]).toMatch(/Autonomy: off — next step: `ashlr authority setup`/);
     expect(texts()[2]).toMatch(/No standing directives/);
     expect(texts()[3]).toContain(MEMO_ID);
     expect(keyboardData(s[3]!).some((d) => d.startsWith('lt:d:'))).toBe(true);
-    expect(texts()[4]).toContain('Unknown command /bogus');
+    expect(texts()[4]).toContain('Unknown command <code>/bogus</code>');
+    expect(texts()[5]).toBe(texts()[0]);
     expect(thread.appendMasonMessage).not.toHaveBeenCalled();
   });
 
@@ -560,13 +569,14 @@ describe('slash commands and keywords', () => {
   it('paused: inbound still works (resume arrives) but nothing informational goes out', async () => {
     updates = [textUpdate('pause', 1)];
     await runCommsCycle(cfg(), fastCycle);
+    expect(texts()).toEqual(['⏸ Fleet messages paused. Send &quot;resume&quot; to resume messages.']);
     calls = [];
     postRequest({ kind: 'fleet-digest', type: 'report', text: 'held', options: [] });
     await runCommsCycle(cfg(), fastCycle);
     expect(sends()).toHaveLength(0);
     updates = [textUpdate('resume', 2)];
     await runCommsCycle(cfg(), fastCycle);
-    expect(texts()).toEqual(['▶️ Fleet resumed.', 'held']);
+    expect(texts()).toEqual(['▶️ Fleet messages resumed.', 'held']);
   });
 });
 

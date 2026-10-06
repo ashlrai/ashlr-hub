@@ -596,24 +596,49 @@ export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig):
 // Inbound: slash commands
 // ---------------------------------------------------------------------------
 
+const TELEGRAM_HELP_INTRO = 'Talk to the Leader: type a message, or reply to one to follow up.';
+const TELEGRAM_HELP_SECTIONS = [
+  ['Read', [
+    ['/status or /brief', 'shipped, running, blockers and next'],
+    ['status / update / what\'s up', 'the same instant brief'],
+    ['/leader', 'latest Leader memo'],
+    ['snapshot', 'full fleet snapshot'],
+  ]],
+  ['Talk & work', [
+    ['/leader <text>', 'message the Leader'],
+    ['/task <owner/repo> <what to do>', 'hand work to an enabled Telegram automation'],
+    ['build X / fix Y in owner/repo', 'ask the Leader to start work within the grant'],
+  ]],
+  ['Decisions', [
+    ['approve <id> / veto <id>', 'or reply "approve" / "veto" to an action message'],
+    ['/directives', 'your standing directives'],
+    ['/settings', 'Leader lanes, router tuning and standards'],
+  ]],
+  ['Messages', [
+    ['more', 'expand the last long reply'],
+    ['pause / resume', 'pause or resume fleet messages'],
+    ['/help', 'this guide'],
+  ]],
+] as const;
+const TELEGRAM_HELP_BUTTONS = 'Buttons: Approve applies a scheduled class-B action or records a class-C approval; Veto undoes the memo\'s actions; Details opens the full memo.';
+
+/** Plain help stays available to CLI/test consumers; Telegram uses source-built HTML. */
 export const TELEGRAM_HELP_TEXT = [
-  'Talk to the Leader: just type. Reply to a Leader message to answer it or follow up.',
-  '"status" / "update" / "what\'s up" — an instant brief. "more" — the rest of a long reply.',
-  '"build X" / "fix Y in owner/repo" — the Leader starts it now (cheapest lane that can do it) and pings you with the result.',
-  '"approve <id>" / "veto <id>" — or reply "approve" / "veto" to an action message.',
-  '',
-  'Commands',
-  '/status — the instant brief (shipped, running, blockers, next)',
-  '/brief — same',
-  '/leader — the latest Leader memo (or /leader <text> to message the Leader)',
-  '/directives — your standing directives to the Leader',
-  '/settings — the Leader\'s settings (lanes, router tuning) and standards',
-  '/task <owner/repo> <what to do> — hand work to a Telegram automation',
-  '/help — this list',
-  'pause / resume — hold or restart messages from the fleet',
-  'snapshot — full fleet snapshot',
-  '',
-  'Buttons: Approve (apply a scheduled class-B action now, or record your approval of a class-C ask), Veto (undo a memo\'s actions), Details (the full memo).',
+  TELEGRAM_HELP_INTRO,
+  ...TELEGRAM_HELP_SECTIONS.flatMap(([heading, entries]) => [
+    '', heading, ...entries.map(([command, description]) => `${command} — ${description}`),
+  ]),
+  '', TELEGRAM_HELP_BUTTONS,
+].join('\n');
+
+/** Escape every command/example before adding our fixed heading/code tags. */
+const TELEGRAM_HELP_HTML = [
+  escapeTelegramHtml(TELEGRAM_HELP_INTRO),
+  ...TELEGRAM_HELP_SECTIONS.flatMap(([heading, entries]) => [
+    '', `<b>${escapeTelegramHtml(heading)}</b>`,
+    ...entries.map(([command, description]) => `<code>${escapeTelegramHtml(command)}</code> — ${escapeTelegramHtml(description)}`),
+  ]),
+  '', escapeTelegramHtml(TELEGRAM_HELP_BUTTONS),
 ].join('\n');
 
 function ago(iso: string | null | undefined, nowMs: number): string {
@@ -755,7 +780,7 @@ export async function handleSlashCommand(event: InboundEvent, text: string, cfg:
   switch (cmd) {
     case 'help':
     case 'start':
-      await replyTo(event, TELEGRAM_HELP_TEXT, cfg);
+      await replyTo(event, TELEGRAM_HELP_HTML, cfg, { html: true });
       return true;
     case 'status':
     case 'brief':
@@ -790,7 +815,7 @@ export async function handleSlashCommand(event: InboundEvent, text: string, cfg:
       return true;
     }
     default:
-      await replyTo(event, `Unknown command /${cmd}.\n\n${TELEGRAM_HELP_TEXT}`, cfg);
+      await replyTo(event, `Unknown command <code>${escapeTelegramHtml(`/${cmd}`)}</code>.\n\n${TELEGRAM_HELP_HTML}`, cfg, { html: true });
       return true;
   }
 }
