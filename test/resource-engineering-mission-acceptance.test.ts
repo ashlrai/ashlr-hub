@@ -4,7 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { createServer } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
 import { canonical } from '../src/core/universe/artifacts.js';
 import { writePrivateFileAtomically } from '../src/core/util/private-file-write.js';
@@ -17,6 +17,69 @@ import { runResourceEngineeringMission } from '../src/core/resources/engineering
 import { readEngineeringMissionRecords, type ResourceEngineeringMissionConfig } from '../src/core/resources/engineering-mission-store.js';
 import { readEngineeringMissionInvocations } from '../src/core/resources/engineering-mission-invocations.js';
 import type { ResourceEngineeringRecipe } from '../src/core/resources/engineering-preparation-types.js';
+
+// Delegate the real mission requests unchanged; a failed outcome otherwise
+// hides fetch causes during fixture cleanup. Keep only bounded closed metadata.
+const missionDiagnostics = vi.hoisted(() => ({
+  events: [] as Array<Record<string, unknown>>, sequence: 0,
+  latestQueue: null as Record<string, unknown> | null,
+  latestSuccessors: null as Record<string, unknown> | null,
+}));
+vi.mock('../src/core/resources/engineering-mission-console.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/core/resources/engineering-mission-console.js')>(
+    '../src/core/resources/engineering-mission-console.js');
+  const { performance } = await import('node:perf_hooks');
+  const closed = (value: unknown, allowed: readonly string[]): string =>
+    typeof value === 'string' && allowed.includes(value) ? value : 'unknown';
+  const finite = (value: unknown): number | null => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1800_000 ? value : null;
+  const project = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  const event = (value: Record<string, unknown>): void => {
+    missionDiagnostics.events.push(value); if (missionDiagnostics.events.length > 64) missionDiagnostics.events.shift();
+  };
+  return { ...actual, async requestEngineeringMissionConsole(options: Parameters<typeof actual.requestEngineeringMissionConsole>[0]) {
+    const started = performance.now(); const sequence = missionDiagnostics.sequence = Math.min(1000_000, missionDiagnostics.sequence + 1);
+    const route = options.path === '/api/resources/engineering-supervision' ? 'supervision' :
+      options.path === '/api/resources/engineering-successors' ? 'successors' : 'other';
+    try { event({ sequence, route, stage: 'request-start' }); } catch { /* Observations never change requests. */ }
+    try {
+      const value = await actual.requestEngineeringMissionConsole(options);
+      try {
+        const row = project(value); const entries = Array.isArray(row?.entries) ? row.entries.slice(0, 8).map(project) : [];
+        if (route === 'supervision') missionDiagnostics.latestQueue = {
+          state: closed(row?.state, ['idle', 'running', 'paused', 'completed', 'timed-out', 'closed', 'unavailable']),
+          sourceState: closed(row?.sourceState, ['healthy', 'degraded']), paused: typeof row?.paused === 'boolean' ? row.paused : null,
+          entries: entries.map(entry => ({ state: closed(entry?.state, ['waiting', 'running', 'completed', 'held', 'stopped', 'unavailable']),
+            attempts: finite(entry?.attempts), reasons: Array.isArray(entry?.reasons) ? entry.reasons.slice(0, 8).map(reason => closed(reason,
+              ['not-started', 'waiting-for-readiness', 'supervisor-paused', 'running', 'completed', 'cancelled', 'deadline-exhausted',
+                'unchanged-evidence', 'attempt-limit', 'evidence-unavailable', 'launch-unavailable', 'supervisor-closed'])) : [] })) };
+        if (route === 'successors') {
+          const observation = project(row?.observation), coordinator = project(observation?.coordinator);
+          missionDiagnostics.latestSuccessors = {
+            state: closed(row?.state, ['observing', 'idle', 'running', 'closed', 'timed-out', 'unavailable']),
+            workerState: closed(observation?.workerState, ['connected', 'closing', 'exited', 'faulted']),
+            coordinatorState: closed(coordinator?.state, ['idle', 'running', 'waiting', 'held', 'timed-out', 'closing', 'closed', 'faulted']),
+            coordinatorReason: closed(coordinator?.reason, ['execution-guard-refused', 'signal-aborted', 'deadline-reached', 'coordinator-loop-failed',
+              'close-unresolved', 'ownership-release-failed', 'proposal-workers-ineligible', 'proposal-admission-unavailable']),
+            entries: entries.map(entry => ({ state: closed(entry?.state, ['intent-recorded', 'proposing', 'waiting-for-capacity', 'preparing',
+              'admitting', 'held', 'proposed', 'prepared', 'admitted', 'stopped']), reason: closed(entry?.reason,
+                ['proposal-output-unresolved', 'source-or-authority-unavailable', 'proposal-capacity-unavailable', 'successor-evidence-unavailable']) })) };
+        }
+        event({ sequence, route, stage: 'request-return', elapsedMs: finite(performance.now() - started) });
+      } catch { /* Diagnostic projection cannot replace a real successful return. */ }
+      return value;
+    } catch (error) {
+      try {
+        const row = project(error); event({ sequence, route, stage: 'request-error', elapsedMs: finite(performance.now() - started),
+          errorName: closed(row?.name, ['AbortError', 'TimeoutError', 'TypeError', 'SyntaxError', 'Error', 'MissionConsoleRequestError']),
+          errorCode: closed(row?.code, ['ABORT_ERR', 'ERR_INVALID_STATE', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'ENOENT', 'EACCES', 'EAGAIN', 'ENOMEM']),
+          causeCode: closed(project(row?.cause)?.code, ['UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
+            'UND_ERR_SOCKET', 'UND_ERR_ABORTED', 'UND_ERR_DESTROYED', 'UND_ERR_CLOSED',
+            'UND_ERR_REQ_CONTENT_LENGTH_MISMATCH', 'UND_ERR_RES_CONTENT_LENGTH_MISMATCH']) });
+      } catch { /* Always preserve the original rejection. */ }
+      throw error;
+    }
+  } };
+});
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
@@ -110,6 +173,19 @@ async function fixture() {
 describe.runIf(process.platform === 'darwin')('actual standing engineering mission', () => {
   it('reconciles scope one after owner restart, proposes and executes scope two on the same ledger, then honors stop', async () => {
     const f = await fixture(); const stop = new AbortController(); const phases: string[] = [];
+    const failureDiagnostics = (invocation: 'first' | 'second'): void => {
+      try {
+        let attempts: Array<Record<string, unknown>> | null = null;
+        try { attempts = resourcePoolStatus(f.root, f.pool, f.bindings, f.observations).attempts.slice(0, 16).map(row => ({
+          status: ['reserved', 'completed', 'failed', 'timed-out', 'cancelled', 'uncertain'].includes(row.status) ? row.status : 'unknown',
+          durationMs: typeof row.execution?.durationMs === 'number' && Number.isFinite(row.execution.durationMs) && row.execution.durationMs >= 0 &&
+            row.execution.durationMs <= 1800_000 ? row.execution.durationMs : null,
+          outputPresent: row.outputDigest !== null, finished: row.finishedAt !== null,
+        })); } catch { /* Missing diagnostics stay unknown; the assertion still owns failure. */ }
+        console.error('[mission-fixture-diagnostics] ' + JSON.stringify({ invocation, events: missionDiagnostics.events,
+          latestQueue: missionDiagnostics.latestQueue, latestSuccessors: missionDiagnostics.latestSuccessors, attempts }));
+      } catch { /* Never replace the original outcome assertion. */ }
+    };
     // This real two-scope mission can exceed the wrapper's five-minute silence
     // window. Report actual transitions, rather than a timer that hides stalls.
     let lastProgress = '';
@@ -122,12 +198,15 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     const first = await runResourceEngineeringMission(f.config, { signal: stop.signal, onProgress(value) {
       phases.push(`${value.scope}:${value.phase}`); if (value.scope === 1 && value.phase === 'verifying') stop.abort(); reportPhase(value);
     } });
+    if (first.state !== 'stopped' || first.scopesReserved !== 1 || first.deadlineAt !== f.config.deadlineAt) failureDiagnostics('first');
     expect(first, JSON.stringify({ first, phases, calls: f.calls, errors: f.errors })).toMatchObject({ state: 'stopped', scopesReserved: 1, deadlineAt: f.config.deadlineAt });
     expect(f.calls).toEqual({ generation: 2, successor: 1, mission: 0 });
     expect(readEngineeringMissionInvocations(f.config)).toMatchObject({ count: 1, unfinishedCount: 0,
       latest: { outcome: { state: 'stopped', reason: first.reason } } });
     const firstRows = readEngineeringMissionRecords(f.config); expect(firstRows.some(row => row.kind === 'settled')).toBe(true);
     const second = await runResourceEngineeringMission(f.config, { onProgress(value) { phases.push(`${value.scope}:${value.phase}`); reportPhase(value); } });
+    if (second.state !== 'completed' || second.reason !== 'stop-requested' || second.scopesReserved !== 2 ||
+      second.deadlineAt !== f.config.deadlineAt) failureDiagnostics('second');
     expect(second, JSON.stringify({ second, phases, calls: f.calls, errors: f.errors })).toMatchObject({ state: 'completed', reason: 'stop-requested', scopesReserved: 2, deadlineAt: f.config.deadlineAt });
     expect(second.tip).not.toBeNull(); expect(git(f.project, 'show', `${second.tip!.commit}:value.json`)).toBe('3');
     expect(git(f.project, 'rev-parse', 'HEAD')).toBe(f.revision); expect(git(f.project, 'status', '--porcelain=v1')).toBe('');
