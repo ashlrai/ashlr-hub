@@ -242,7 +242,7 @@ describe('the confirmation card', () => {
     expect(within(card).getByText('click "Send" in Mail')).toBeInTheDocument();
     expect(within(card).getByText('The control is labelled send.')).toBeInTheDocument();
     expect(within(card).getByText('1 more request is waiting.')).toBeInTheDocument();
-    expect(within(card).getByRole('button', { name: 'Deny' })).toHaveFocus();
+    await waitFor(() => expect(within(card).getByRole('button', { name: 'Deny' })).toHaveFocus());
     await user.click(within(card).getByRole('button', { name: 'Allow for chat' }));
     const next = await screen.findByRole('dialog', { name: 'Allow this action?' });
     // The second chat has no known title: its id is shown.
