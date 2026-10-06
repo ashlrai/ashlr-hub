@@ -612,6 +612,7 @@ describe('M30 CI workflow', () => {
     expect([...declaredFiles].sort()).toEqual([
       ...expectedFiles,
       'test/authority-codeowners-310b.test.ts',
+      ...Array<string>(2).fill('test/m515.release-publish-authority-split.test.ts'),
       ...Array<string>(4).fill('test/m342.dispatch-production-ledger.test.ts'),
     ].sort());
     expect(windowsPortabilityThree).toContain('--reporter=dot');
@@ -639,6 +640,7 @@ describe('M30 CI workflow', () => {
       detachedPostMergeVerificationTest,
       'test/npm-cli-launch.test.ts',
       'test/npm-cli-launch.test.ts',
+      'test/m515.release-publish-authority-split.test.ts',
     ].sort());
     expect(windowsEntries.match(/test\/m395\.effect-terminal-retention\.test\.ts/g)).toHaveLength(
       1,
@@ -737,7 +739,12 @@ describe('M30 CI workflow', () => {
   });
 
   it('adds NO deploy / publish / release step (nothing public)', () => {
-    expect(ciYml).not.toMatch(/\b(npm\s+publish|deploy|release)\b/i);
+    // This source-only test filename names the authority it audits; it is not an effect.
+    const effectText = ciYml.replaceAll(
+      'test/m515.release-publish-authority-split.test.ts',
+      'test/source-publication-contract.test.ts',
+    );
+    expect(effectText).not.toMatch(/\b(npm\s+publish|deploy|release)\b/i);
     expect(ciYml).not.toMatch(/vercel|netlify|gh-pages|pages-deploy/i);
   });
 

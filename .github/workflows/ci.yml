@@ -187,6 +187,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Catch source-only jq/publication contract drift before the Mac build.
+      # The complete assigned qualification still runs below.
+      - name: Check publication contracts (hermetic)
+        if: matrix.os == 'macos-latest'
+        run: >-
+          npm run test:ci -- --maxWorkers=1 --fileParallelism=false test/m515.release-publish-authority-split.test.ts
+
       # Reject generated ownership drift before expensive builds and tests.
       # Every platform still runs all of its assigned checks afterward.
       - name: Check generated authority ownership (hermetic)
@@ -357,6 +364,11 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
+      # Shard 2 owns this whole file; retain that coverage after this preflight.
+      - name: Check publication contracts (hermetic)
+        if: matrix.shard == 2
+        run: >-
+          npm run test:ci -- --maxWorkers=1 --fileParallelism=false test/m515.release-publish-authority-split.test.ts
       - name: Build
         run: npm run build
       - name: Test complete Mac general partition
