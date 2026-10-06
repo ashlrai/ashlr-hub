@@ -28,6 +28,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 - Avoid redundant private-directory permission writes and repeated dispatch
   readiness reads while preserving fresh checks immediately before launch.
+- Reuse a coherent campaign observation within each read while rechecking
+  source bytes on subsequent observations and before execution.
+- Isolate complete admission scenarios from competing local test shards and
+  report actual completed cases during long suites without extending deadlines.
 - Give Telegram Leader summaries readable labels and local dates while
   preserving exact action controls, literal user text and useful quantities.
 - Make generated Leader notes and action outcomes readable in desktop,

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   appendCampaignEvent, campaignDirectory, foldCampaignEvents, initUniverseCampaign, readCampaignEvents,
-  readUniverseCampaign, readUniverseCampaigns, requestUniverseCampaignControl, validateUniverseCampaignDefinition,
+  readUniverseCampaign, readUniverseCampaignProjection, readUniverseCampaigns, requestUniverseCampaignControl, validateUniverseCampaignDefinition,
 } from '../src/core/universe/campaign-store.js';
 import type { UniverseCampaignDefinition, UniverseSummary } from '../src/core/universe/types.js';
 
@@ -74,11 +74,29 @@ describe('strict Universe campaign definition and private store', () => {
     expect(readCampaignEvents(campaignDirectory(definition.id, { root }))).toHaveLength(1);
   });
 
+  it('returns one coherent campaign/Universe sample and rechecks source on each observation', () => {
+    const { root, definition } = fixture();
+    const expected = initUniverseCampaign(definition, { root });
+    const directory = campaignDirectory(definition.id, { root });
+    const before = readCampaignEvents(directory);
+    const observed = readUniverseCampaignProjection(definition.id, { root });
+    expect(observed.campaign).toEqual(expected);
+    expect(observed.universe).toEqual(state.universe);
+    expect(readUniverseCampaign(definition.id, { root })).toEqual(observed.campaign);
+    state.universe!.comparatorDigest = 'd'.repeat(64);
+    const changed = readUniverseCampaignProjection(definition.id, { root });
+    expect(changed.campaign).toMatchObject({ sourceState: 'degraded', reasons: ['Campaign pinned Universe identity changed'] });
+    expect(changed.universe!.comparatorDigest).toBe('d'.repeat(64));
+    expect(observed.universe!.comparatorDigest).toBe('c'.repeat(64));
+    expect(readCampaignEvents(directory)).toEqual(before);
+  });
+
   it('never initializes missing state from observation or controls', () => {
     const { root } = fixture();
     const absent = join(root, 'absent');
     expect(readUniverseCampaigns({ root: absent })).toEqual({ campaigns: [], sourceState: 'missing', reasons: [] });
     expect(() => readUniverseCampaign('missing', { root: absent })).toThrow();
+    expect(() => readUniverseCampaignProjection('missing', { root: absent })).toThrow();
     expect(() => requestUniverseCampaignControl('missing', 'stop', { root: absent })).toThrow();
     expect(existsSync(absent)).toBe(false);
   });
@@ -166,6 +184,7 @@ describe('strict Universe campaign definition and private store', () => {
     const summary = readUniverseCampaign(definition.id, { root });
     expect(summary).toMatchObject({ state: 'failed', sourceState: 'degraded', progress: { reportedTokens: null, usageComplete: false } });
     expect(summary.reasons.length).toBeGreaterThan(0);
+    expect(readUniverseCampaignProjection(definition.id, { root })).toEqual({ campaign: summary, universe: null });
     expect(() => initUniverseCampaign(definition, { root })).toThrow(/degraded/);
     expect(() => requestUniverseCampaignControl(definition.id, 'stop', { root })).toThrow(/degraded/);
     expect(readFileSync(join(directory, 'ledger', 'records', '00000000.json'), 'utf8')).toBe(first);

@@ -2,11 +2,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const wrapper = resolve(here, '..', 'scripts', 'test-ci.mjs');
+const progressReporter = pathToFileURL(resolve(here, '..', 'scripts', 'vitest-progress-reporter.mjs')).href;
 const roots: string[] = [];
 const IDLE_TIMEOUT_FIXTURE_MS = 1_000;
 const HARD_TIMEOUT_FIXTURE_MS = 4_000;
@@ -93,6 +94,58 @@ describe('test-ci watchdog', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('progress-5');
     expect(result.stderr).not.toContain('idle-timeout');
+  });
+
+  it('reports bounded actual completion counts without accessing titles or errors', () => {
+    const result = runFixture(`
+      import AshlrProgressReporter from ${JSON.stringify(progressReporter)};
+      let now = 0;
+      Object.defineProperty(performance, 'now', { value: () => now });
+      const reporter = new AshlrProgressReporter();
+      const module = { relativeModuleId: 'test/mission.test.ts', state: () => 'passed' };
+      const completed = (state) => ({ module, result: () => ({ state }),
+        get name() { throw new Error('Private title accessed'); },
+        get fullName() { throw new Error('Private full title accessed'); },
+        get errors() { throw new Error('Private error accessed'); } });
+      reporter.onTestModuleStart(module);
+      now = 30_000; reporter.onTestCaseResult(completed('pending'));
+      const first = completed('passed'); reporter.onTestCaseResult(first);
+      now = 45_000; reporter.onTestCaseResult(completed('passed'));
+      now = 60_000; reporter.onTestCaseResult(completed('failed'));
+      now = 90_000; reporter.onTestCaseResult(first);
+      reporter.onTestCaseResult(completed('skipped'));
+      now = 120_000; reporter.onTestCaseResult(completed('unknown'));
+      reporter.onTestModuleEnd(module);
+      now = 150_000; reporter.onTestCaseResult(completed('passed'));
+    `);
+
+    expect(result.status).toBe(0);
+    expect(result.error).toBeUndefined();
+    const lines = result.stderr.split(/\r?\n/).filter(line => line.includes('case-completed'));
+    expect(lines).toEqual([
+      '[test-ci-progress] case-completed state=passed mission.test.ts completed=1',
+      '[test-ci-progress] case-completed state=failed mission.test.ts completed=3',
+      '[test-ci-progress] case-completed state=skipped mission.test.ts completed=4',
+    ]);
+    expect(lines.join('\n')).not.toContain('test/');
+    expect(result.stderr).not.toContain('Private');
+  });
+
+  it('keeps pending-case notifications from concealing an idle child', () => {
+    const result = runFixture(`
+      import AshlrProgressReporter from ${JSON.stringify(progressReporter)};
+      const reporter = new AshlrProgressReporter();
+      const module = { relativeModuleId: 'test/pending.test.ts' };
+      reporter.onTestModuleStart(module);
+      Object.defineProperty(performance, 'now', { value: () => 300_000 });
+      reporter.onTestCaseResult({ module, result: () => ({ state: 'pending' }) });
+      setTimeout(() => {}, 2_000);
+    `, { idleMs: IDLE_TIMEOUT_FIXTURE_MS, hardMs: HARD_TIMEOUT_FIXTURE_MS });
+
+    expect(result.status).toBe(124);
+    expect(result.stderr).toContain(`idle-timeout after ${IDLE_TIMEOUT_FIXTURE_MS}ms without output`);
+    expect(result.stderr).not.toContain('case-completed');
+    expect(result.stderr).not.toContain('hard-runtime-cap reached');
   });
 
   it('reports liveness without treating its own heartbeat as child output', () => {

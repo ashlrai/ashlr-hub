@@ -23,6 +23,9 @@ const isolatedSuites = [
   'test/m446.external-skill-git-capture.test.ts',
   'test/resource-engineering-setup-acceptance.test.ts',
   'test/resource-engineering-supervisor-acceptance.test.ts',
+  // Keep all admission/replay/expiry cases and their real Git/delivery work in
+  // one isolated local home, preserving every existing bounded deadline.
+  'test/resource-engineering-supervisor-admission-acceptance.test.ts',
   // Preserve bounded HTTP admission checks without a competing local shard's
   // Git and private-store filesystem work consuming the request deadlines.
   'test/resource-console-engineering-acceptance.test.ts',
@@ -40,6 +43,7 @@ const childEnvironment = {
   ...process.env,
   ASHLR_ENGINEERING_SETUP_PHASE_TIMING: process.env.ASHLR_ENGINEERING_SETUP_PHASE_TIMING ?? '1',
   ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING: process.env.ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING ?? '1',
+  ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING: process.env.ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING ?? '1',
 };
 const children = new Map();
 let stopping = false;
