@@ -169,6 +169,11 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
   });
 
   it('settles a delivery-only post-intent cancellation without pretending the campaign was attempted', async () => {
+    // Cancellation at persisted intent is the contract; private ledger IO must
+    // not consume this synthetic campaign's unrelated wall/monotonic allowance.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-09T12:00:00.000Z'));
+    vi.spyOn(performance, 'now').mockReturnValue(100);
     const f = fixture(['a', 'b']); f.finish('a'); f.definition.tasks[1]!.dependsOn = ['a'];
     f.readiness.get('a')!.resourceRuntimeRequired = true;
     hooks.runtime.mockReturnValue({ status: 'invalid', checks: [{ code: 'runtime', status: 'failed' }] });
@@ -181,6 +186,7 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
       return next;
     });
     const result = await runUniversePortfolioController(f.definition, { ...f.options, deliveryPlan, signal: caller.signal, resourceRuntime: '/private/runtime.json' });
+    expect(caller.signal.aborted).toBe(true);
     expect(result).toMatchObject({ status: 'cancelled', sourceState: 'healthy', outcomes: [
       { campaignId: 'a', state: 'held', attempted: false, reasonCode: 'dispatch-not-started', deliveryDigest: null },
       { campaignId: 'b', state: 'held', attempted: false, reasonCode: 'dependency-held' },
