@@ -26,6 +26,7 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Fixed
 
+- Upgrade the bundled MCP SDK to 1.31.0, addressing GHSA-6qxp-vccf-f47h.
 - Avoid redundant private-directory permission writes and repeated dispatch
   readiness reads while preserving fresh checks immediately before launch.
 - Preserve cached macOS journal permission checks when the directory is

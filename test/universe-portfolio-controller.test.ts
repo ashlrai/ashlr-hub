@@ -335,12 +335,20 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
   });
 
   it('cancels contention waiting promptly without consuming intent or renewing restart allowance', async () => {
+    // This checks cancellation and preserved restart allowance, not host IO latency.
+    // Keep real wakeup timers and private lock IO; advance both behavior clocks before restart.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-09T12:00:00.000Z'));
+    let monotonicMs = 100;
+    vi.spyOn(performance, 'now').mockImplementation(() => monotonicMs);
     const f = fixture(); const controller = new AbortController();
     hooks.acquire.mockReturnValue({ state: 'contended', lock: null });
     const running = runUniversePortfolioController(f.definition, { ...f.options, signal: controller.signal });
     const before = f.events(); controller.abort();
     const cancelled = await running;
     expect(cancelled.status).toBe('cancelled'); expect(f.events()).toEqual(before);
+    vi.setSystemTime(new Date('2026-09-09T12:00:01.000Z'));
+    monotonicMs += 1_000;
     hooks.acquire.mockReturnValue({ state: 'acquired', lock: f.executionLock });
     const resumed = await runUniversePortfolioController(f.definition, f.options);
     expect(resumed).toMatchObject({ status: 'completed', deadlineAt: cancelled.deadlineAt, createdAt: cancelled.createdAt });
