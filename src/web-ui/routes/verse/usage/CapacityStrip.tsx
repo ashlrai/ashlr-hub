@@ -260,7 +260,8 @@ function CapacityRowView({
               </span>
             ) : null}
             {reserve !== null && row.credits !== null ? ' · ' : null}
-            {row.credits !== null ? <span>{row.credits}</span> : null}
+            {row.credits !== null ? <span title={row.creditBalance === null || row.creditBalance === undefined
+              ? undefined : `Exact native balance: ${row.creditBalance} credits.`}>{row.credits}</span> : null}
           </p>
         ) : null}
       </div>

@@ -228,7 +228,7 @@ describe('ResourcesDrawer — accounts', () => {
     await screen.findByRole('heading', { name: /^Personal Codex/ });
     const card = within(cardOf('Personal Codex'));
     expect(card.getByText('Credits available')).toBeInTheDocument();
-    expect(card.getAllByText('2500.0000 credits available').length).toBeGreaterThan(0);
+    expect(card.getAllByText('2,500 credits available').length).toBeGreaterThan(0);
     fireEvent.click(card.getByText('Usage details'));
     expect(card.getByText(/Estimated credit value: \$100.00/)).toBeInTheDocument();
     expect(card.getByText(/not actual purchase price or attributed spend/)).toBeInTheDocument();

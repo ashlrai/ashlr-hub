@@ -17,7 +17,7 @@
  * drawer's cloud read, so it adds no poll of its own for accounts.
  */
 import { codexCreditsAvailable } from '../../../../core/resources/codex-credits.js';
-import { estimatedCreditValue } from './codex-credit-value.js';
+import { estimatedCreditValue, formatNativeCreditUnits } from './codex-credit-value.js';
 import { useMemo, useState, type CSSProperties } from 'react';
 import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
 import { Tooltip } from '../../../components/primitives/Tooltip.js';
@@ -100,8 +100,9 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
     const priorValue = priorCredit ? estimatedCreditValue(priorCredit.reading.balance, priorCredit.planType) : null;
     let priorLabel: string | null = null;
     if (priorCredit) {
+      const formattedBalance = formatNativeCreditUnits(priorCredit.reading.balance);
       const units = priorCredit.reading.unlimited ? 'unlimited'
-        : priorCredit.reading.balance === null ? 'reported' : `${priorCredit.reading.balance} units`;
+        : formattedBalance === null ? 'reported' : `${formattedBalance} units`;
       priorLabel = codexCreditsAvailable(priorCredit.reading)
         ? `Credits ${priorValue === null ? units : `≈${priorValue}`} · last` : 'No credits reported · last';
     }
@@ -111,8 +112,10 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
     const creditHeld = row.engine === 'codex' && currentCredits && row.creditSpendControlReached === true;
     const creditSummary = creditLabel ? ` · ${creditLabel}${creditHeld ? ' · credit spending held' : ''}` : '';
     const creditDetail: string[] = priorCredit ? [`Credits recorded ${new Date(priorCredit.observedAt).toLocaleString()}`,
-      'Prior credit reading; current balance and availability are unconfirmed.'] : [];
-    if (row.credits !== null && currentCredits) creditDetail.push(row.credits, 'Credit units are independent of subscription usage; autonomous credit spending is not admitted.');
+      'Prior credit reading; current balance and availability are unconfirmed.',
+      ...(priorCredit.reading.balance === null ? [] : [`Exact prior native balance: ${priorCredit.reading.balance} credits.`])] : [];
+    if (row.credits !== null && currentCredits) creditDetail.push(row.credits,
+      ...(row.creditBalance === null || row.creditBalance === undefined ? [] : [`Exact native balance: ${row.creditBalance} credits.`]), 'Credit units are independent of subscription usage; autonomous credit spending is not admitted.');
     if (row.engine === 'codex' && currentCredits && row.creditState === 'none') creditDetail.push('Native provider reports no available credits.');
     if (priorValue !== null) creditDetail.push(`Prior estimated credit value ${priorValue} · personal-plan $0.04/credit reference; not attributed spend.`);
     if (creditValue !== null) creditDetail.push(`Estimated credit value ${creditValue} · personal-plan $0.04/credit reference; not attributed spend.`);

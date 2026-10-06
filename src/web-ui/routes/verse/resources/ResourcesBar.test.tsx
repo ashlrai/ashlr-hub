@@ -146,7 +146,6 @@ describe('the bar switch', () => {
   });
 });
 
-
 describe('Devin provider identity', () => {
   it('bundles the exact verified vendor geometry with a theme-aware fill and accessible name', () => {
     const asset = readFileSync(resolve(process.cwd(), 'site/assets/devin-mark.svg'), 'utf8');
@@ -234,10 +233,9 @@ describe('Devin tracked exposure in the bar', () => {
   });
 });
 
-
 describe('Codex credits are independent of the quota battery', () => {
   it('shows native credits and estimated value when the window is spent without filling the battery', () => {
-    const account = row({ engine: 'codex', plan: 'pro', cls: 'tight', credits: '2048.4196250000 credits available',
+    const account = row({ engine: 'codex', plan: 'pro', cls: 'tight', credits: '2,048.42 credits available',
       creditBalance: '2048.4196250000', connection: { connection: 'exhausted' } as CapacityRow['connection'],
       windows: [win({ usedPercent: 100, limitReached: true })] });
     const result = barRows([account], { healthRead: true, now: NOW })[0]!;
@@ -245,7 +243,8 @@ describe('Codex credits are independent of the quota battery', () => {
     expect(result.creditLabel).toBe('Credits ≈$81.94'); expect(result.level).toBe('out');
     expect(result.summary).toContain('Credits available');
     expect(result.summary).toContain('estimated credit value $81.94');
-    expect(result.detail).toContain('2048.4196250000 credits available');
+    expect(result.detail).toContain('2,048.42 credits available');
+    expect(result.detail).toContain('Exact native balance: 2048.4196250000 credits.');
     expect(result.detail.some((line) => line.includes('Estimated credit value $81.94'))).toBe(true);
     expect(result.detail.some((line) => line.includes('autonomous credit spending is not admitted'))).toBe(true);
   });
@@ -378,5 +377,39 @@ describe('visible Codex subscription and credit balances', () => {
     expect(tooltip.textContent).toContain('27% used');
     expect(tooltip.textContent).toContain('250 credits available');
     expect(tooltip.textContent).toContain('Estimated credit value $10.00');
+  });
+});
+
+describe('readable historical native credit units', () => {
+  it('uses reported instead of interpolating a malformed historical balance into native units', () => {
+    const projected = barRows([row({ engine: 'codex', lastReading: true, historicalCredits: {
+      observedAt: new Date(NOW - 30_000).toISOString(), expiresAt: new Date(NOW - 1).toISOString(), planType: 'pro',
+      reading: { hasCredits: true, unlimited: false, balance: '1e6' },
+    } })], { healthRead: true, now: NOW })[0]!;
+    expect(projected.creditLabel).toBe('Credits reported · last');
+    expect(projected.detail.join(' ')).toContain('current balance and availability are unconfirmed');
+    expect(projected.detail.join(' ')).not.toContain('Estimated credit value');
+    expect(projected.creditHeld).toBe(false);
+  });
+  it('keeps independent account balances, exact detail and historical status without inventing a dollar rate', () => {
+    const projected = barRows([
+      row({ seatId: 'codex-small', engine: 'codex', lastReading: true, historicalCredits: {
+        observedAt: new Date(NOW - 30_000).toISOString(), expiresAt: new Date(NOW - 1).toISOString(), planType: 'enterprise',
+        reading: { hasCredits: true, unlimited: false, balance: '0.000001' },
+      } }),
+      row({ seatId: 'codex-large', engine: 'codex', lastReading: true, historicalCredits: {
+        observedAt: new Date(NOW - 30_000).toISOString(), expiresAt: new Date(NOW - 1).toISOString(), planType: null,
+        reading: { hasCredits: true, unlimited: false, balance: '62497.7860000000' },
+      } }),
+    ], { healthRead: true, now: NOW });
+    expect(projected[0]!.creditLabel).toBe('Credits <0.01 units · last');
+    expect(projected[1]!.creditLabel).toBe('Credits 62,497.79 units · last');
+    expect(projected[0]!.detail).toContain('Exact prior native balance: 0.000001 credits.');
+    expect(projected[1]!.detail).toContain('Exact prior native balance: 62497.7860000000 credits.');
+    for (const value of projected) {
+      expect(value.detail.join(' ')).toContain('current balance and availability are unconfirmed');
+      expect(value.detail.join(' ')).not.toContain('Estimated credit value');
+      expect(value.creditHeld).toBe(false);
+    }
   });
 });

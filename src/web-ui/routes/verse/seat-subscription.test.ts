@@ -123,9 +123,9 @@ describe('seatSubscription — credits are not the window', () => {
     const view = seatSubscription(CODEX_CREDITS_SEAT);
     expect(view.cls).toBe('tight');
     expect(view.summary).toBe('primary window limit reached · credits available');
-    // Preserve native decimal units without rounding or currency inference.
-    expect(view.credits).toBe('2048.4196250000 credits available');
-    expect(view.creditsTitle).toBe('Native credit units; not dollars or subscription percentage.');
+    // Round only the label; retain exact native units separately without currency inference.
+    expect(view.credits).toBe('2,048.42 credits available');
+    expect(view.creditsTitle).toBe('Exact native balance: 2048.4196250000 credits. Not dollars or subscription percentage.');
   });
 
   it('reports the same window as blocked when the server says exhausted', () => {
@@ -297,9 +297,36 @@ describe('native Codex credit freshness and balance', () => {
     expect(seatSubscription({ ...seat, capacity: { ...seat.capacity!, creditsExpiresAt: undefined } }, now).credits).toBeNull();
     expect(seatSubscription({ ...seat, capacity: { ...seat.capacity!, creditsExpiresAt: new Date(now).toISOString() } }, now).credits).toBeNull();
     expect(seatSubscription({ ...seat, capacity: { ...seat.capacity!, creditsExpiresAt: new Date(now + 1).toISOString() } }, now).credits)
-      .toBe('2048.4196250000 credits available');
+      .toBe('2,048.42 credits available');
   });
   it.each([{ hasCredits: false, unlimited: false, balance: '12' }, { hasCredits: true, unlimited: false, balance: '0.0000' }])( 'does not label a false or zero balance available', (credits) => {
       expect(seatSubscription({ ...CODEX_CREDITS_SEAT, capacity: { ...CODEX_CREDITS_SEAT.capacity!, credits } }).credits).toBeNull();
     });
+});
+
+
+describe('native credit labels retain exact account evidence', () => {
+  const now = Date.parse('2026-09-20T18:32:30.000Z');
+  it.each([
+    ['412.8921985000', '412.89'], ['62497.7860000000', '62,497.79'],
+    ['0.000001', '<0.01'], ['9007199254740993.125', '9,007,199,254,740,993.13'],
+  ])('shortens only the visible %s balance', (balance, display) => {
+    const view = seatSubscription({ ...CODEX_CREDITS_SEAT, capacity: { ...CODEX_CREDITS_SEAT.capacity!,
+      creditsExpiresAt: new Date(now + 1).toISOString(),
+      credits: { hasCredits: true, unlimited: false, balance, spendControlReached: true },
+    } }, now);
+    expect(view.credits).toBe(`${display} credits available`);
+    expect(view.creditsTitle).toBe(`Exact native balance: ${balance} credits. Not dollars or subscription percentage.`);
+    expect(view.creditBalance).toBe(balance);
+    expect(view.creditSpendControlReached).toBe(true);
+    expect(view.creditState).toBe('held');
+  });
+  it.each([
+    [{ hasCredits: true, unlimited: true, balance: null }, 'credits unlimited'],
+    [{ hasCredits: true, unlimited: false, balance: null }, 'credits available'],
+  ])('preserves non-numeric native availability', (credits, label) => {
+    const view = seatSubscription({ ...CODEX_CREDITS_SEAT, capacity: { ...CODEX_CREDITS_SEAT.capacity!, credits,
+      creditsExpiresAt: new Date(now + 1).toISOString() } }, now);
+    expect(view.credits).toBe(label); expect(view.creditsTitle).toBeNull();
+  });
 });

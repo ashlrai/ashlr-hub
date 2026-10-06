@@ -75,8 +75,22 @@ describe('CapacityStrip', () => {
 
   it('shows credits as a separate fact, never folded into the window', () => {
     render(<CapacityStrip seats={[CODEX_CREDITS_SEAT]} />);
-    expect(screen.getByText('2048.4196250000 credits available')).toBeInTheDocument();
+    expect(screen.getByText('2,048.42 credits available')).toHaveAttribute('title', 'Exact native balance: 2048.4196250000 credits.');
     expect(screen.getByText('limit reached')).toBeInTheDocument();
+  });
+
+  it('keeps exact raw balances on separate account titles while shortening the visible units', () => {
+    const seats = ['412.8921985000', '62497.7860000000', '0.000001'].map((balance, index) => ({
+      ...CODEX_CREDITS_SEAT, id: `codex-readable-${index}`, accountId: `codex-readable-${index}`,
+      label: `Codex ${index}`, capacity: { ...CODEX_CREDITS_SEAT.capacity!,
+        credits: { hasCredits: true, unlimited: false, balance },
+      },
+    }));
+    render(<CapacityStrip seats={seats} />);
+    for (const [display, raw] of [['412.89', '412.8921985000'], ['62,497.79', '62497.7860000000'], ['<0.01', '0.000001']]) {
+      expect(screen.getByText(`${display} credits available`)).toHaveAttribute('title', `Exact native balance: ${raw} credits.`);
+    }
+    expect(screen.getAllByText('limit reached')).toHaveLength(3);
   });
 
   it('compact density: one line per seat, binding window only, no reset text', () => {
