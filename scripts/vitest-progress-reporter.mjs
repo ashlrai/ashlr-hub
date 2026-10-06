@@ -1,3 +1,5 @@
+import { performance } from 'node:perf_hooks';
+
 const MAX_MODULE_ID = 512;
 const CASE_PROGRESS_INTERVAL_MS = 30_000;
 
