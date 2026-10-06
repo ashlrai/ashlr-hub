@@ -35,6 +35,7 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
@@ -69,6 +70,9 @@ export interface TelegramSendOpts {
 
 export interface TelegramSendResult {
   ok: boolean;
+  /** Validated Bot API error metadata; descriptions/credential-bearing URLs stay internal. */
+  errorCode?: number;
+  retryAfterSeconds?: number;
   /** message_id of the FIRST chunk (the one a reply should target). */
   messageId?: number;
   /** message_id of every chunk that was delivered, in order. */
@@ -222,6 +226,14 @@ async function postJson(
         timeout: 10_000,
       };
       const req = request(options, (res) => {
+        res.on('error', () => resolve(null));
+        // A server error is ambiguous even if its body resembles an ordinary
+        // markup rejection. Drain it without authorizing another send.
+        if ((res.statusCode ?? 0) >= 500) {
+          res.resume();
+          resolve(null);
+          return;
+        }
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
         res.on('end', () => {
@@ -231,7 +243,6 @@ async function postJson(
             resolve(null);
           }
         });
-        res.on('error', () => resolve(null));
       });
       req.on('error', () => resolve(null));
       req.on('timeout', () => { req.destroy(); resolve(null); });
@@ -298,14 +309,149 @@ function buildKeyboard(opts: TelegramSendOpts | undefined): Record<string, strin
   return null;
 }
 
-function parseSendResponse(resp: unknown): { ok: boolean; messageId?: number; description?: string } {
-  if (!resp || typeof resp !== 'object') return { ok: false };
+interface ParsedSendResponse {
+  ok: boolean;
+  messageId?: number;
+  description?: string;
+  errorCode?: number;
+  retryAfterSeconds?: number;
+  /** Only an actual negative Bot API response may authorize a short retry. */
+  providerThrottle?: boolean;
+}
+
+function positiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function parseSendResponse(resp: unknown): ParsedSendResponse {
+  if (!resp || typeof resp !== 'object' || Array.isArray(resp)) return { ok: false };
   const r = resp as Record<string, unknown>;
   if (r['ok'] === true) {
     const result = r['result'] as Record<string, unknown> | undefined;
     return { ok: true, messageId: typeof result?.['message_id'] === 'number' ? (result['message_id'] as number) : undefined };
   }
-  return { ok: false, description: typeof r['description'] === 'string' ? (r['description'] as string) : undefined };
+  // Missing/malformed acknowledgements are ambiguous, never permission to repeat.
+  if (r['ok'] !== false) return { ok: false };
+  const errorCode = positiveSafeInteger(r['error_code']) ? r['error_code'] : undefined;
+  const parameters = r['parameters'];
+  const retry = parameters && typeof parameters === 'object' && !Array.isArray(parameters)
+    ? (parameters as Record<string, unknown>)['retry_after'] : undefined;
+  const retryAfterSeconds = positiveSafeInteger(retry) ? retry : undefined;
+  return {
+    ok: false,
+    ...(errorCode === 400 && typeof r['description'] === 'string' ? { description: r['description'] } : {}),
+    ...(errorCode !== undefined ? { errorCode } : {}),
+    ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
+    ...(errorCode === 429 && retryAfterSeconds !== undefined ? { providerThrottle: true } : {}),
+  };
+}
+
+const TELEGRAM_SEND_GAP_MS = 3_000;
+const TELEGRAM_SHORT_RETRY_MS = 3_000;
+const TELEGRAM_IDLE_LANE_MS = 60_000;
+interface TelegramSendClock {
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+}
+const defaultSendClock: TelegramSendClock = {
+  now: () => performance.now(),
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+let sendClock = defaultSendClock;
+let lastClockAt = 0;
+let nextPruneAt = 0;
+interface SendLane {
+  tail: Promise<void>;
+  queued: number;
+  lastAttemptAt?: number;
+  throttleUntil: number;
+  retryAfterSeconds?: number;
+  touchedAt: number;
+}
+const sendLanes = new Map<string, SendLane>();
+
+/** Explicit clock seam: fake transports still take the same pacing/retry path. */
+export function setTelegramSendClockForTests(clock: TelegramSendClock | null): void {
+  sendClock = clock ?? defaultSendClock;
+  lastClockAt = 0;
+  nextPruneAt = 0;
+  sendLanes.clear();
+}
+
+function sendNow(): number {
+  const now = sendClock.now();
+  if (!Number.isFinite(now) || now < 0) throw new Error('invalid Telegram send clock');
+  // Production uses a monotonic clock. Rollback in an injected clock cannot admit early.
+  lastClockAt = Math.max(lastClockAt, now);
+  return lastClockAt;
+}
+
+function getSendLane(cfg: AshlrConfig): SendLane {
+  const now = sendNow();
+  if (now >= nextPruneAt) {
+    nextPruneAt = now + TELEGRAM_IDLE_LANE_MS;
+    for (const [key, lane] of sendLanes) {
+      // Never discard an in-flight lane or an outstanding provider floor. This
+      // bounded-frequency idle pruning is not an account cap/durable cooldown.
+      if (lane.queued === 0 && now >= lane.throttleUntil && now - lane.touchedAt >= TELEGRAM_IDLE_LANE_MS) sendLanes.delete(key);
+    }
+  }
+  const key = createHash('sha256').update(JSON.stringify([resolveToken(cfg), resolveChatId(cfg)])).digest('hex');
+  let lane = sendLanes.get(key);
+  if (!lane) {
+    lane = { tail: Promise.resolve(), queued: 0, throttleUntil: 0, touchedAt: now };
+    sendLanes.set(key, lane);
+  }
+  return lane;
+}
+
+function heldThrottle(lane: SendLane, now: number): ParsedSendResponse {
+  const remaining = Number.isFinite(lane.throttleUntil) ? Math.ceil((lane.throttleUntil - now) / 1_000) : lane.retryAfterSeconds;
+  return { ok: false, errorCode: 429, ...(positiveSafeInteger(remaining) ? { retryAfterSeconds: remaining } : {}) };
+}
+
+async function pacedSend(cfg: AshlrConfig, body: Record<string, unknown>, shortRetry = false): Promise<ParsedSendResponse> {
+  const lane = getSendLane(cfg);
+  const prior = lane.tail;
+  let release!: () => void;
+  lane.tail = new Promise<void>((resolve) => { release = resolve; });
+  lane.queued++;
+  try {
+    await prior;
+    while (true) {
+      const now = sendNow();
+      const throttleWait = lane.throttleUntil - now;
+      // Long 429 never sleeps in bot intake. A local refusal is NOT a new Bot API
+      // rejection and cannot authorize an automatic retry by another caller.
+      if (throttleWait > 0 && (!shortRetry || throttleWait > TELEGRAM_SHORT_RETRY_MS)) return heldThrottle(lane, now);
+      const gapWait = lane.lastAttemptAt === undefined ? 0 : lane.lastAttemptAt + TELEGRAM_SEND_GAP_MS - now;
+      const wait = Math.max(0, throttleWait, gapWait);
+      if (wait === 0) break;
+      await sendClock.sleep(wait);
+    }
+    lane.lastAttemptAt = sendNow();
+    const response = parseSendResponse(await callApi(cfg, 'sendMessage', body));
+    if (response.providerThrottle && response.retryAfterSeconds !== undefined) {
+      const delay = response.retryAfterSeconds * 1_000;
+      const now = sendNow();
+      // An unrepresentably large valid floor remains held; overflow must never
+      // turn a throttled lane into permission to contact Telegram.
+      lane.throttleUntil = Number.isSafeInteger(delay) && Number.isSafeInteger(Math.ceil(now + delay)) ? now + delay : Infinity;
+      lane.retryAfterSeconds = response.retryAfterSeconds;
+    }
+    return response;
+  } finally {
+    lane.queued--;
+    lane.touchedAt = lastClockAt;
+    release();
+  }
+}
+
+function sendErrorMetadata(response: ParsedSendResponse): Pick<TelegramSendResult, 'errorCode' | 'retryAfterSeconds'> {
+  return {
+    ...(response.errorCode !== undefined ? { errorCode: response.errorCode } : {}),
+    ...(response.retryAfterSeconds !== undefined ? { retryAfterSeconds: response.retryAfterSeconds } : {}),
+  };
 }
 
 /**
@@ -327,6 +473,12 @@ export async function sendTelegramMessage(
 
   const token = resolveToken(cfg);
   const chatId = resolveChatId(cfg)!;
+  // Match lane identity to the request URL/body across pacing awaits, including
+  // an environment-derived token. This snapshot is not an authority assertion.
+  const sendCfg: AshlrConfig = {
+    ...cfg,
+    comms: { ...cfg.comms!, telegram: { ...cfg.comms?.telegram, botToken: token, chatId } },
+  };
 
   try {
     const chunks = splitTelegramText(String(text ?? ''), { html: opts?.html === true }).filter((c) => c.length > 0);
@@ -349,19 +501,29 @@ export async function sendTelegramMessage(
         body['reply_markup'] = { inline_keyboard: keyboard };
       }
 
-      let res = parseSendResponse(await callApi(cfg, 'sendMessage', body));
-      if (!res.ok && res.description && /pars|entit/i.test(res.description)) {
-        // Markup Telegram cannot parse: retry once as plain text (no parse_mode).
+      let rateRetryUsed = false;
+      const attempt = async (payload: Record<string, unknown>): Promise<ParsedSendResponse> => {
+        let response = await pacedSend(sendCfg, payload);
+        if (!rateRetryUsed && response.providerThrottle && response.retryAfterSeconds !== undefined && response.retryAfterSeconds * 1_000 <= TELEGRAM_SHORT_RETRY_MS) {
+          rateRetryUsed = true;
+          response = await pacedSend(sendCfg, payload, true);
+        }
+        return response;
+      };
+      let res = await attempt(body);
+      if (!res.ok && res.errorCode === 400 && res.description && /pars|entit/i.test(res.description)) {
+        // Explicit markup rejection: one plain fallback. Ambiguous responses,
+        // 429 and 5xx cannot enter this path or repeat a possibly accepted send.
         const plain: Record<string, unknown> = { ...body, text: telegramHtmlToPlain(chunk) };
         delete plain['parse_mode'];
-        res = parseSendResponse(await callApi(cfg, 'sendMessage', plain));
+        res = await attempt(plain);
       }
       if (!res.ok) {
         // First chunk failed → nothing landed. A later chunk failing still
         // counts as delivered (re-sending would duplicate what Mason has).
         return messageIds.length === 0 && i === 0
-          ? { ok: false }
-          : { ok: true, messageId: messageIds[0], messageIds, partial: true };
+          ? { ok: false, ...sendErrorMetadata(res) }
+          : { ok: true, messageId: messageIds[0], messageIds, partial: true, ...sendErrorMetadata(res) };
       }
       if (typeof res.messageId === 'number') messageIds.push(res.messageId);
     }

@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { setTelegramTransportForTests } from '../src/core/integrations/telegram.js';
+import { setTelegramSendClockForTests, setTelegramTransportForTests } from '../src/core/integrations/telegram.js';
 import { runCommsCycle } from '../src/core/comms/dispatch.js';
 import { lookupTelegramMessage } from '../src/core/comms/telegram-thread-map.js';
 import { writeLeaderMemo } from '../src/core/vision/leader-memo.js';
@@ -44,7 +44,16 @@ function memo(): LeaderMemo {
   };
 }
 
+let telegramNow = 0;
+
 beforeEach(() => {
+  telegramNow = 0;
+  // Exercise actual-attempt pacing with a virtual monotonic clock, not a
+  // fake-transport bypass or larger timeout.
+  setTelegramSendClockForTests({
+    now: () => telegramNow,
+    sleep: async (ms) => { telegramNow += ms; },
+  });
   home = mkdtempSync(join(tmpdir(), 'ashlr-tg314-real-'));
   process.env['HOME'] = home;
   calls.length = 0;
@@ -58,6 +67,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setTelegramTransportForTests(null);
+  setTelegramSendClockForTests(null);
   process.env['HOME'] = savedHome;
   rmSync(home, { recursive: true, force: true });
 });

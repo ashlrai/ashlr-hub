@@ -57,6 +57,7 @@ import {
   escapeTelegramHtml,
   sendTelegramMessage,
   setTelegramTransportForTests,
+  setTelegramSendClockForTests,
   splitTelegramText,
   TELEGRAM_MAX_MESSAGE,
   pollTelegramUpdates,
@@ -101,7 +102,7 @@ function fakeTransport(method: string, body: Record<string, unknown>): Promise<u
     if (failSends) return Promise.resolve({ ok: false, description: 'Forbidden: bot was blocked by the user' });
     if (rejectHtmlOnce && body['parse_mode'] === 'HTML') {
       rejectHtmlOnce = false;
-      return Promise.resolve({ ok: false, description: "Bad Request: can't parse entities: unsupported start tag" });
+      return Promise.resolve({ ok: false, error_code: 400, description: "Bad Request: can't parse entities: unsupported start tag" });
     }
     return Promise.resolve({ ok: true, result: { message_id: nextMessageId++ } });
   }
@@ -173,7 +174,16 @@ function leaderMsg(over: Record<string, unknown>): Record<string, unknown> {
 let home = '';
 const savedHome = process.env['HOME'];
 
+let telegramNow = 0;
+
 beforeEach(() => {
+  telegramNow = 0;
+  // Exercise actual-attempt pacing with a virtual monotonic clock, not a
+  // fake-transport bypass or larger timeout.
+  setTelegramSendClockForTests({
+    now: () => telegramNow,
+    sleep: async (ms) => { telegramNow += ms; },
+  });
   home = mkdtempSync(join(tmpdir(), 'ashlr-tg314-'));
   process.env['HOME'] = home;
   calls = [];
@@ -193,6 +203,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setTelegramTransportForTests(null);
+  setTelegramSendClockForTests(null);
   process.env['HOME'] = savedHome;
   rmSync(home, { recursive: true, force: true });
 });

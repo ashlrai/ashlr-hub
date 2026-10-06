@@ -37,7 +37,7 @@ vi.mock('../src/core/vision/leader-thread.js', () => ({
   }),
 }));
 
-import { setTelegramTransportForTests } from '../src/core/integrations/telegram.js';
+import { setTelegramSendClockForTests, setTelegramTransportForTests } from '../src/core/integrations/telegram.js';
 import { composeBrief, gatherBriefFacts, type BriefSources } from '../src/core/comms/leader-brief.js';
 import {
   dueBrief,
@@ -149,7 +149,16 @@ function lineDeps(over: Partial<LeaderLineDeps> = {}): Partial<LeaderLineDeps> {
   };
 }
 
+let telegramNow = 0;
+
 beforeEach(() => {
+  telegramNow = 0;
+  // Exercise actual-attempt pacing with a virtual monotonic clock, not a
+  // fake-transport bypass or larger timeout.
+  setTelegramSendClockForTests({
+    now: () => telegramNow,
+    sleep: async (ms) => { telegramNow += ms; },
+  });
   home = mkdtempSync(join(tmpdir(), 'ashlr-line315-'));
   process.env['HOME'] = home;
   calls = [];
@@ -166,6 +175,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setTelegramTransportForTests(null);
+  setTelegramSendClockForTests(null);
   setLeaderLineDepsForTest(null);
   process.env['HOME'] = savedHome;
   rmSync(home, { recursive: true, force: true });
