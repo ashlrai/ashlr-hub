@@ -34,6 +34,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   fresh balance is not reported. Current subscription usage remains separate,
   current zero replaces history, and historical balances never admit spending.
 - Update the example website's Oxfmt worker dependency to Tinypool 2.1.2.
+- Isolate cancellation and lock-expiry test clocks from filesystem setup speed,
+  preserving the actual I/O and cancellation, expiry and recovery assertions.
 
 ## [3.24.2] — 2026-10-05
 

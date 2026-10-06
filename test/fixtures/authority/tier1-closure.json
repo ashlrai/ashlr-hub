@@ -775,6 +775,7 @@
     "src/core/verse/credit-pools-api-types.ts",
     "src/core/verse/credit-pools-api.ts",
     "src/core/verse/devin-seats.ts",
+    "src/core/verse/display-standing-policy.ts",
     "src/core/verse/fleet-history-types.ts",
     "src/core/verse/fleet-history-worker-protocol.ts",
     "src/core/verse/fleet-history.ts",
