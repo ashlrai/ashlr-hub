@@ -83,7 +83,12 @@ for (const kind of ['changed bytes', 'deleted file', 'new file', 'mode change', 
     if (kind === 'special file bits') chmodSync(path, (lstatSync(path).mode & 0o777) | 0o4000);
     if (kind === 'special directory bits') {
       const directory = join(f.root, 'dist/api');
-      chmodSync(directory, (lstatSync(directory).mode & 0o777) | 0o2000);
+      const ordinaryMode = lstatSync(directory).mode & 0o777;
+      // Setgid can be stripped when a private temp dir inherits a group the
+      // owner does not belong to. The sticky bit is owner-permitted on POSIX.
+      chmodSync(directory, ordinaryMode | 0o1000);
+      assert.equal(lstatSync(directory).mode & 0o777, ordinaryMode);
+      assert.equal(lstatSync(directory).mode & 0o7000, 0o1000);
     }
     if (kind === 'symlink replacement') { rmSync(path); symlinkSync(join(f.root, 'package.json'), path); }
     let calls = 0;
