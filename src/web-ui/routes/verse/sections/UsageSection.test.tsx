@@ -41,7 +41,7 @@ const ACCOUNTS = {
       authentication: 'signed-in',
       planType: 'pro',
       windows: [{ id: 'codex', usedPercent: 100, resetsAt: '2026-09-25T23:06:56.000Z' }],
-      credits: { hasCredits: true, unlimited: false, balance: '2048.4196250000' },
+      credits: { hasCredits: true, unlimited: false, balance: '2048.4196250000', spendControlReached: false },
     },
     {
       id: 'codex-b',
@@ -244,7 +244,8 @@ describe('UsageSection — accounts', () => {
     expect(within(codex).queryByText('Window exhausted')).not.toBeInTheDocument();
     expect(within(codex).getByText('2,048.42')).toBeInTheDocument();
     expect(within(codex).getByText('pro plan')).toBeInTheDocument();
-    expect(within(codex).getByText(/spendable even when the window is full/)).toBeInTheDocument();
+    expect(within(codex).getByText(/provider reports credits available/)).toBeInTheDocument();
+    expect(within(codex).getByText(/automatic credit spending is not enabled/)).toBeInTheDocument();
   });
 
   it('renders Grok as an actionable signed-out state, not a zero meter', async () => {
