@@ -11,9 +11,12 @@ import { readUniverseCampaignReadiness } from '../src/core/universe/campaign-rea
 import { artifactDigest } from '../src/core/universe/artifacts.js';
 
 const roots: string[] = [];
-const WORKER = `import {readFileSync,writeFileSync} from 'node:fs';
+// Publish fixture readiness atomically so the supervising process never reads a partial PID.
+const WORKER = `import {readFileSync,renameSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
-writeFileSync(join(process.env.TMPDIR,'worker-pid.json'),JSON.stringify(process.pid));
+const pidFile=join(process.env.TMPDIR,'worker-pid.json');
+writeFileSync(pidFile+'.tmp',JSON.stringify(process.pid));
+renameSync(pidFile+'.tmp',pidFile);
 await new Promise(resolve=>setTimeout(resolve,Number(process.argv[2])));
 const value=JSON.parse(readFileSync('value.json','utf8'))+1;
 writeFileSync('value.json',JSON.stringify(value)+'\\n');`;
