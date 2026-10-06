@@ -215,7 +215,6 @@ describe('M30 CI workflow', () => {
         'test/m417.sandbox-cleanup-quiescence.test.ts',
         'test/m424.legacy-swarm-mutation-fence.test.ts',
         'test/m425.persistence-private-temp.test.ts',
-        'test/m426.sandbox-reservation-identity.test.ts',
         'test/sandbox-reservation-recovery.test.ts',
       ],
       [
@@ -465,6 +464,17 @@ describe('M30 CI workflow', () => {
         [...(expectedWindowsPartitions[index] ?? [])].sort(),
       );
     });
+    // M426 stays exhaustive in the dedicated native-alias step on Windows 2;
+    // its main partition no longer repeats that complete invocation.
+    const windowsTwoFiles = windowsMatrixEntries[1]!.match(
+      /test\/(?:[\w.-]+\/)*[\w.-]+\.test\.ts/g,
+    ) ?? [];
+    const windowsTwoAllFiles = [...windowsTwoFiles, ...nativeAliasFiles];
+    expect(windowsTwoAllFiles).toHaveLength(16);
+    expect(new Set(windowsTwoAllFiles).size).toBe(16);
+    expect(windowsTwoAllFiles.filter(
+      (file) => file === 'test/m426.sandbox-reservation-identity.test.ts',
+    )).toHaveLength(1);
     const windowsDeclaredFiles = windowsEntries.match(
       /test\/(?:[\w.-]+\/)*[\w.-]+\.test\.ts/g,
     ) ?? [];
@@ -515,7 +525,6 @@ describe('M30 CI workflow', () => {
       agentWorkTransitionsTest,
       hostMergeRevocationProtocolTest,
       detachedPostMergeVerificationTest,
-      'test/m426.sandbox-reservation-identity.test.ts',
       'test/npm-cli-launch.test.ts',
       'test/npm-cli-launch.test.ts',
     ].sort());
