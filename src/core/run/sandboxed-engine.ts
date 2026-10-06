@@ -395,6 +395,8 @@ const TRANSIENT_ABORT_RE =
 
 export function isTransientAbort(res: SpawnEngineResult, hasDiff: boolean): boolean {
   if (res.ok) return false;
+  // A provider-reported cancellation is not permission to contact it again.
+  if (res.error?.startsWith('native CLI cancellation:')) return false;
   if (hasDiff) return false;
   if (
     res.terminationReason === 'idle-stall' ||
@@ -1975,6 +1977,14 @@ export async function runEngineSandboxed(
     ...over,
   });
   const actionCounts: RunActionCounts = {};
+  const observeEngineEvent = (ev: import('./engines.js').RunEvent): void => {
+    if (ev.kind === 'tool_call') {
+      incrementRunActionCount(actionCounts, 'toolSteps');
+      setRunActionCount(actionCounts, 'totalSteps', (actionCounts.modelSteps ?? 0) + (actionCounts.toolSteps ?? 0));
+    }
+    const described = describeRunEventForStream(ev);
+    if (described) emitSinkEvent(streamSink, described);
+  };
   const runCancelled = (): boolean => opts.signal?.aborted === true ||
     (!opts.localShadowBinding && !selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission));
 
@@ -2539,7 +2549,7 @@ export async function runEngineSandboxed(
       const _spawnStart = Date.now();
       const devinSpawnsBefore = selectedDevinSpawns;
       res = selectedStandingClaude
-        ? await runSelectedClaude(goalWithContext,cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,(ev) => { const described=describeRunEventForStream(ev);if(described)emitSinkEvent(streamSink,described); })
+        ? await runSelectedClaude(goalWithContext,cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,observeEngineEvent)
         : await spawnEngine(cmd, spawnCfg, {
         ...(selectedDevinBinding ? { selectedOutcomeAdmission:() => selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission) && selectedDevinCurrent() }
           : opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
@@ -2550,10 +2560,7 @@ export async function runEngineSandboxed(
         ...(opts.signal ? { signal: opts.signal } : {}),
         // v333: forward per-line engine stdout into the durable file sink as
         // it arrives — see the comment on `streamSink` above.
-        onEvent: (ev) => {
-          const described = describeRunEventForStream(ev);
-          if (described) emitSinkEvent(streamSink, described);
-        },
+        onEvent: observeEngineEvent,
       });
       terminationDiagnostics = res.terminationDiagnostics;
       if ((selectedDevinBinding || (!autonomousRun && engineKey === DEVIN_CLI_ENGINE_ID && isDevinCliFreeModel(model))) && res.usage) {
@@ -2579,7 +2586,7 @@ export async function runEngineSandboxed(
       }
       usage.steps += invocationCount;
       setRunActionCount(actionCounts, 'modelSteps', usage.steps);
-      setRunActionCount(actionCounts, 'totalSteps', usage.steps);
+      setRunActionCount(actionCounts, 'totalSteps', usage.steps + (actionCounts.toolSteps ?? 0));
       const invocationDurationMs = Date.now() - _spawnStart;
       _spawnDurationMs += invocationDurationMs;
       if (res.usage) {
@@ -2989,7 +2996,7 @@ export async function runEngineSandboxed(
                   const devinSpawnsBefore = selectedDevinSpawns;
                   try {
                     r = selectedStandingClaude
-                      ? await runSelectedClaude(repairGoal,_v2g.perRunTimeoutMs ?? 180_000)
+                      ? await runSelectedClaude(repairGoal,_v2g.perRunTimeoutMs ?? 180_000,observeEngineEvent)
                       : await spawnEngine(repairCmd, cfg, {
                       ...(selectedDevinBinding ? { selectedOutcomeAdmission:() => selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission) &&
                         repairSpawn !== null && selectedDevinCurrent(repairSpawn) }
@@ -2997,6 +3004,7 @@ export async function runEngineSandboxed(
                       env:repairSpawn?.env ?? env,
                       ...(selectedDevinBinding ? { onSpawn: notifySelectedDevinSpawn } : {}),
                       timeoutMs:_v2g.perRunTimeoutMs ?? 180_000,
+                      onEvent: observeEngineEvent,
                       launcher:repairSpawn?.launcher ?? launcher ?? undefined,
                       ...(opts.signal ? { signal:opts.signal } : {}),
                     });
@@ -3023,7 +3031,7 @@ export async function runEngineSandboxed(
                   }
                   usage.steps += invocationCount;
                   setRunActionCount(actionCounts, 'modelSteps', usage.steps);
-                  setRunActionCount(actionCounts, 'totalSteps', usage.steps);
+                  setRunActionCount(actionCounts, 'totalSteps', usage.steps + (actionCounts.toolSteps ?? 0));
                   if (r.usage) {
                     hasReportedUsage = true;
                     usage.tokensIn += r.usage.tokensIn;

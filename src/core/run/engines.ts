@@ -30,7 +30,7 @@ import {
   applyLocusPreMutateGate,
   formatPreMutateBlockers,
 } from '../integrations/locus.js';
-import { resolveEngineSpec, compileArgv, applyGrokCliProfile, BUILTIN_ENGINE_REGISTRY, GROK_CLI_ENGINE_ID } from './engine-registry.js';
+import { resolveEngineSpec, compileArgv, applyGrokCliProfile, extractGrokStreamText, BUILTIN_ENGINE_REGISTRY, GROK_CLI_ENGINE_ID } from './engine-registry.js';
 // The local serving runtime owns "which llama-server, and what is it serving".
 // Resolving that here too would give dispatch and supervision two independent
 // answers to the same question — the exact failure docs/LOCAL-FLEET.md warns
@@ -623,10 +623,13 @@ function toolTargetPath(input: unknown): string | undefined {
 export interface EngineOutputNormaliser {
   /** Events for one stdout line (at least one; the first is the line's primary event). */
   line(line: string, ts: number): RunEvent[];
+  /** Recognized native terminal failure; never derived from model prose or tool results. */
+  terminalError(): string | null;
 }
 
 export function createEngineOutputNormaliser(cmd: Pick<EngineCommand, 'bin' | 'args'>): EngineOutputNormaliser {
   const family = engineStreamFamily(cmd);
+  let terminalError: string | null = null;
   const seenToolIds = new Set<string>();
   const pending = new Map<number, { id: string | null; name: string; json: string; input: unknown }>();
 
@@ -710,6 +713,7 @@ export function createEngineOutputNormaliser(cmd: Pick<EngineCommand, 'bin' | 'a
   };
 
   return {
+    terminalError: () => terminalError,
     line(line: string, ts: number): RunEvent[] {
       const trimmed = line.trim();
       const raw: RunEvent = { kind: 'raw', ts, text: trimmed, rawLine: line };
@@ -724,6 +728,13 @@ export function createEngineOutputNormaliser(cmd: Pick<EngineCommand, 'bin' | 'a
       }
 
       if (family === 'anthropic') {
+        if (ev['type'] === 'result') {
+          // Reuse the judge's native-result semantics per complete line: a long
+          // producer stream must not hide its final error behind a line cap.
+          const failure = extractGrokStreamText(line).error;
+          if (failure !== null && terminalError === null) terminalError = ev['stop_reason'] === 'cancelled'
+            ? `native CLI cancellation: ${failure}` : `native CLI result failed: ${failure}`;
+        }
         let derived: RunEvent[] | null = null;
         if (ev['type'] === 'stream_event' && isRecord(ev['event'])) derived = wire(ev['event'], ts, line);
         else if (ev['type'] === 'assistant' && isRecord(ev['message'])) derived = envelope(ev['message'], ts, line);
@@ -1248,7 +1259,10 @@ async function spawnEngineInner(
         settle({ ok: false, output: rawOutput, usage, error: errMsg, terminationReason });
       } else {
         revokeOwnedPgid();
-        settle({ ok: true, output: rawOutput, usage });
+        const nativeError = normaliser.terminalError();
+        settle(nativeError !== null
+          ? { ok: false, output: rawOutput, usage, error: nativeError, terminationReason: 'error-exit' }
+          : { ok: true, output: rawOutput, usage });
       }
     });
   });
