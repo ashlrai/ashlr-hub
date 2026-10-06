@@ -17,6 +17,10 @@ vi.mock('../src/core/fleet/status.js', () => ({
   buildFleetStatus: vi.fn(async () => ({ killed: false, queue: [] })),
 }));
 
+// Load the API graph during collection, after the hoisted mock, outside request-test deadlines.
+import { buildFleetStatus } from '../src/core/fleet/status.js';
+import { handleApi } from '../src/core/web/api.js';
+
 const roots: string[] = [];
 
 function fixture(): string {
@@ -190,9 +194,7 @@ describe('GET /api/fleet build identity', () => {
         provenance: 'git' as const,
       },
     };
-    const { buildFleetStatus } = await import('../src/core/fleet/status.js');
     vi.mocked(buildFleetStatus).mockResolvedValueOnce(canonicalFleet as never);
-    const { handleApi } = await import('../src/core/web/api.js');
     const req = { url: '/api/fleet', method: 'GET', headers: {} } as IncomingMessage;
     let body = '';
     const res = {
@@ -207,9 +209,7 @@ describe('GET /api/fleet build identity', () => {
 
   it('preserves legacy FleetStatus payloads without synthesizing identity', async () => {
     const legacyFleet = { killed: false, queue: [] };
-    const { buildFleetStatus } = await import('../src/core/fleet/status.js');
     vi.mocked(buildFleetStatus).mockResolvedValueOnce(legacyFleet as never);
-    const { handleApi } = await import('../src/core/web/api.js');
     const req = { url: '/api/fleet', method: 'GET', headers: {} } as IncomingMessage;
     let body = '';
     const res = {
