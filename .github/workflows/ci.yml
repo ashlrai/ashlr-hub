@@ -210,6 +210,7 @@ jobs:
           node --test .github/tests/ci-pack-smoke.test.mjs .github/tests/first-paint-built.test.mjs
           snapshot="$(node .github/scripts/ci-pack-smoke.mjs capture "$RUNNER_TEMP")"
           printf 'ASHLR_PACK_SMOKE_SNAPSHOT=%s\n' "$snapshot" >> "$GITHUB_ENV"
+          npm run check:first-paint:built
 
       # Surface UI regressions before the exhaustive backend partition. This
       # is the same complete web suite, run once in its existing Ubuntu job.
