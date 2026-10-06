@@ -422,9 +422,10 @@
   border-top: 4px solid transparent;
   border-bottom: 4px solid transparent;
   border-left: 5px solid currentColor;
+  transform: rotate(0deg);
   transition: transform var(--duration-fast) var(--ease-standard);
 }
-.twist[data-open] { transform: rotate(90deg); }
+.groupToggle[aria-expanded='true'] .twist { transform: rotate(90deg); }
 .list[hidden] { display: none; }
 
 /* ---- 3.10: row = session button + hover menu ----------------------------- */
