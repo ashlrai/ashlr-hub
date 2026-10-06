@@ -72,7 +72,7 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Update the example website's Oxfmt worker dependency to Tinypool 2.1.2.
 - Patch proxy-address handling and source-map parsing dependencies in the
   workbench and example website to their maintained security releases.
-- Isolate cancellation and lock-expiry test clocks from filesystem setup speed,
+- Isolate cancellation, capacity-wait and lock-expiry test clocks from filesystem setup speed,
   preserving the actual I/O and cancellation, expiry and recovery assertions.
 - Wait for Bash cancellation readiness and avoid incidental sleep children in
   the escalation fixture, retaining confirmed exit and the original deadlines.
