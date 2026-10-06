@@ -1310,7 +1310,11 @@ export async function mergeFleetPrPinned(input: PinnedMergeInput, deps: HostMerg
     const unresolved = reply.status === 0 || reply.status >= 500 ||
       (reply.status === 200 && body?.['merged'] !== false);
     state.merge.phase = unresolved ? 'consumed' : 'failed';
-    state.merge.error = githubMessage(reply);
+    // A new explicit decline is retryable; historical generic HTTP 200 errors
+    // remain ambiguous because those memos did not preserve merged:false.
+    state.merge.error = reply.status === 200 && body?.['merged'] === false
+      ? 'GitHub definitively declined merge (merged:false)'
+      : githubMessage(reply);
     persist(state);
     if (reply.status === 409) return fail('head-changed', `the PR head moved off ${pr.headSha.slice(0, 12)} (${githubMessage(reply)})`, false, true);
     if (reply.status === 405 || reply.status === 422) return fail('not-mergeable', githubMessage(reply), true, true);

@@ -472,6 +472,38 @@ describe('the SHA-pinned merge through the revocation protocol', () => {
     expect(unsent.fake.mergeCalls()).toHaveLength(0);
   });
 
+  it.each([false, null])('distinguishes explicit merged:%s from a malformed 200 before retrying', async (merged) => {
+    const h = harness();
+    const { state, head } = await openChange(h);
+    h.fake.greenRequired(head);
+    const transport = h.deps.transport;
+    let calls = 0;
+    let now = Date.now();
+    h.deps.nowMs = () => now;
+    h.deps.transport = (call) => {
+      if (call.method === 'PUT' && call.path.endsWith('/merge')) {
+        calls++;
+        if (calls === 1) return Promise.resolve({ status: 200, body: merged === false ? { merged: false } : null });
+      }
+      return transport(call);
+    };
+    expect(await mergeFleetPrPinned(pinnedInput(h, state), h.deps)).toMatchObject({ ok: false, code: 'github', mergeCalled: true });
+    expect(calls).toBe(1);
+    expect(h.fake.mergeCalls()).toHaveLength(0);
+    now++;
+    if (merged === false) {
+      expect(state.merge).toMatchObject({ phase: 'failed', error: 'GitHub definitively declined merge (merged:false)' });
+      expect(await mergeFleetPrPinned(pinnedInput(h, state), h.deps)).toMatchObject({ ok: true });
+      expect(calls).toBe(2);
+      expect(h.fake.mergeCalls()).toHaveLength(1);
+    } else {
+      expect(state.merge).toMatchObject({ phase: 'consumed', error: 'GitHub answered HTTP 200' });
+      expect(await mergeFleetPrPinned(pinnedInput(h, state), h.deps)).toMatchObject({ ok: false, code: 'protocol', mergeCalled: false });
+      expect(calls).toBe(1);
+      expect(h.fake.mergeCalls()).toHaveLength(0);
+    }
+  });
+
   it('GitHub itself refuses a merge whose required checks are not green (server-side enforcement)', async () => {
     const h = harness();
     const { state } = await openChange(h, 'red-1');
