@@ -22,6 +22,11 @@ vi.mock('../src/core/universe/campaign-store.js', async (importOriginal) => {
       actual.foldCampaignEvents(hooks.events); return structuredClone(hooks.events);
     },
     readUniverseCampaign: (...args: Parameters<typeof actual.readUniverseCampaign>) => hooks.realRecords ? actual.readUniverseCampaign(...args) : actual.projectCampaign(hooks.events, hooks.universe!),
+    readUniverseCampaignProjection: (...args: Parameters<typeof actual.readUniverseCampaignProjection>) => {
+      if (hooks.realRecords) return actual.readUniverseCampaignProjection(...args);
+      const universe = hooks.universe!;
+      return { campaign: actual.projectCampaign(hooks.events, universe), universe };
+    },
     campaignUniverse: () => hooks.universe!,
     appendCampaignEvent: (directory: string, input: CampaignEventInput) => {
       if (hooks.realRecords) return actual.appendCampaignEvent(directory, input);
