@@ -6,8 +6,8 @@
  * parse_mode=HTML, so any `<`, `>` or `&` in model- or user-authored text
  * either renders wrong or makes Telegram reject the whole send ("can't parse
  * entities"). Escaping has to happen exactly once, at the transport edge, and
- * the splitter has to measure the ESCAPED length (Telegram's 4096 limit
- * applies after entity expansion). Keeping these pure (no I/O, no config)
+ * the splitter conservatively bounds the ESCAPED wire length; Telegram's
+ * 4096 limit applies after entity parsing. Keeping these pure (no I/O, no config)
  * also lets tests that mock the transport still use the real formatter.
  */
 
@@ -30,10 +30,19 @@ const DISPLAY_LITERAL = /(https?:\/\/[^\s]+|```[\s\S]*?```|`[^`\r\n]*`|"[^"\r\n]
  * must not feed the result back into the thread, prompts or callback data.
  */
 export function leaderDisplayText(text: string, nowMs: number = Date.now()): string {
-  return text.split(DISPLAY_LITERAL).map((part, index) => {
+  const literalSpans = Array.from(text.matchAll(DISPLAY_LITERAL), (match) => [match.index, match.index + match[0].length] as const);
+  // Keep the complete action-line context when its summary contains a quote,
+  // filename or URL. Only remove a terminal metadata field outside literals:
+  // an action-shaped line inside a code fence is still code, not metadata.
+  const withoutActionIds = text.replace(DISPLAY_ID_PARENS, (match, start: string, summary: string, offset: number) => {
+    const idStart = offset + start.length + summary.length;
+    const idEnd = offset + match.length;
+    if (literalSpans.some(([from, to]) => idStart < to && idEnd > from)) return match;
+    return `${start}${summary}`;
+  });
+  return withoutActionIds.split(DISPLAY_LITERAL).map((part, index) => {
     if (index % 2 === 1) return part;
     return part
-      .replace(DISPLAY_ID_PARENS, '$1$2')
       .replace(DISPLAY_ID_LABEL, '$1')
       .replace(DISPLAY_ID_OUTCOME, '$1 action')
       .replace(DISPLAY_ID_ITEM, (_match, start: string, bullet: string, id: string) => {

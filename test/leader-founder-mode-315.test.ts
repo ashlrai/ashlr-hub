@@ -222,6 +222,31 @@ describe('persona — a founder-operator that never claims to be a real person',
     ].join('\n');
     expect(leaderDisplayText(literals, Date.parse(iso))).toBe(literals);
   });
+
+  it('hides terminal action metadata after literal summaries without changing those literals', () => {
+    const id = 'la-20260927140000-abcdef-0';
+    for (const summary of [
+      'Fix "billing"',
+      `Edit \`src/${id}.ts\``,
+      `Inspect https://example.test/${id}?tokens=12345`,
+      `Keep "Memo ${id}" in the filename`,
+    ]) {
+      const prefix = `• [B] ${summary} — scheduled`;
+      expect(leaderDisplayText(`${prefix} (${id})`)).toBe(prefix);
+      const advisory = ' — Jev suggests class C (advisory; the class above stands)';
+      expect(leaderDisplayText(`${prefix} (${id})${advisory}`)).toBe(`${prefix}${advisory}`);
+    }
+  });
+
+  it('does not mistake literal action-shaped lines or URL suffixes for terminal metadata', () => {
+    const id = 'la-20260927140000-abcdef-0';
+    const line = `• [B] Keep this — scheduled (${id})`;
+    for (const literal of [
+      `"${line}"`, `\`${line}\``, `\`\`\`\n${line}\n\`\`\``,
+      `• [B] Download https://example.test/file(${id})`,
+      `filename (${id})`,
+    ]) expect(leaderDisplayText(literal)).toBe(literal);
+  });
 });
 
 // ---------------------------------------------------------------------------
