@@ -175,6 +175,7 @@ describe('DiffPane', () => {
 describe('the patch grid and comments, from the keyboard', () => {
   async function openA(user: ReturnType<typeof userEvent.setup>) {
     const list = await screen.findByRole('listbox', { name: 'Changed files' });
+    await screen.findByRole('grid', { name: /Changes in notes\/new.md/ });
     list.focus();
     await user.keyboard('{ArrowDown}');
     return screen.findByRole('grid', { name: /Changes in src\/a.ts/ });
