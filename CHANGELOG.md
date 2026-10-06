@@ -39,12 +39,16 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   unanswered merge requests before retrying or crediting a fleet landing.
 - Tie project-group disclosure arrows to the button's expanded state.
 - Update the example website's Oxfmt worker dependency to Tinypool 2.1.2.
+- Patch proxy-address handling and source-map parsing dependencies in the
+  workbench and example website to their maintained security releases.
 - Isolate cancellation and lock-expiry test clocks from filesystem setup speed,
   preserving the actual I/O and cancellation, expiry and recovery assertions.
 - Wait for Bash cancellation readiness and avoid incidental sleep children in
   the escalation fixture, retaining confirmed exit and the original deadlines.
 - Publish supervision fixture readiness atomically, avoiding partial PID reads
   while retaining independent-worker cancellation and settlement coverage.
+- Load the build-identity API fixture during test collection so its request
+  assertions retain their existing deadlines independently of module loading.
 - Reuse the same CI job's verified build for packaging and run the Windows
   native-alias suite once, preserving every distinct platform test.
 
