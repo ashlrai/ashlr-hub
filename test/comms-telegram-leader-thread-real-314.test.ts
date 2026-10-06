@@ -80,10 +80,12 @@ describe('Telegram drain × real Leader thread', () => {
     const first = await runCommsCycle(cfg, fast);
     expect(first.sent).toBe(2);
     const [memoSend, questionSend] = sends();
-    expect(String(memoSend!.body['text'])).toMatch(new RegExp(`^Leader memo ${m.id}`));
+    expect(String(memoSend!.body['text'])).toMatch(/^Leader memo\n/);
+    expect(String(memoSend!.body['text'])).not.toContain(m.id);
     expect(String(memoSend!.body['text'])).toContain('Reviews &lt;slow&gt;');
     expect(JSON.stringify(memoSend!.body['reply_markup'])).toContain('lt:d:');
     expect(String(questionSend!.body['text'])).toContain('Keep codex lanes off this week?');
+    expect(lookupTelegramMessage(nextId - 2)).toMatchObject({ kind: 'memo', memoId: m.id });
     expect(lookupTelegramMessage(nextId - 1)).toMatchObject({ kind: 'question', questionId: `${m.id}:0` });
 
     const thread = listThread();
