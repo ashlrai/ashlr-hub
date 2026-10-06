@@ -42,7 +42,9 @@ describe('Historical startup usage display', () => {
     expect(resourceCreditHistory({ ...s, lastKnownUsage: history({ creditHistory: { ...creditHistory, observedAt: '2026-10-02T12:00:00.000Z' } }) }, NOW)).toBeNull();
     expect(resourceCreditHistory({ ...s, engine: 'claude' }, NOW)).toBeNull();
     const unknownPlan = buildCapacityRows([{ ...s, lastKnownUsage: history({ creditHistory: { ...creditHistory, planType: null } }) }], { now: NOW })[0]!;
-    expect(barRows([unknownPlan], { now: NOW, healthRead: false })[0]?.creditLabel).toBe('Credits 24999.50 units · last');
+    const unknownPlanDisplay = barRows([unknownPlan], { now: NOW, healthRead: false })[0]!;
+    expect(unknownPlanDisplay.creditLabel).toBe('Credits 24,999.5 units · last');
+    expect(unknownPlanDisplay.detail).toContain('Exact prior native balance: 24999.50 credits.');
   });
   it('roundtrips display-only Claude identity history without promoting current usage or credits', () => {
     const recorded = history({ identitySource: 'native-account-checked-display-identity' });
