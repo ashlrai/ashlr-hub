@@ -104,7 +104,12 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
   let rows = config.accounts.map(blank);
   let readingRevision = 0;
   const inFlight = new Map<number, Promise<void>>();
+  // Preserve the actual-contact witness after settlement, including joined work.
+  const contacted = new WeakSet<Promise<void>>();
   const lastAttempt = new Map<number, number>();
+  // Scheduling-only fallback when a due check is refused before native contact.
+  // Never replace the actual contact timestamp exposed by nextCheckAt.
+  const retryAfter = new Map<number, number>();
   const current = (account: ResourceConnectionConfig['accounts'][number]): boolean => {
     try { return options.accountCurrent === undefined || options.accountCurrent(account) === true; } catch { return false; }
   };
@@ -146,6 +151,8 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
       };
       try {
         lastAttempt.set(index, Date.now());
+        const work = inFlight.get(index);
+        if (work) contacted.add(work);
         const result = await operation(processGroupLifecycle);
         const status = record(result) ? Object.getOwnPropertyDescriptor(result, 'status') : undefined;
         if (!status || !('value' in status) || typeof status.value !== 'string' ||
@@ -304,7 +311,12 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
       const worker = async (): Promise<void> => {
         while (!abort.signal.aborted && next < config.accounts.length) {
           const index = next++;
-          await attempt(index).pending;
+          if (Date.now() < (retryAfter.get(index) ?? -Infinity)) continue;
+          const work = attempt(index);
+          await work.pending;
+          if (!work.cached && !contacted.has(work.pending)) {
+            retryAfter.set(index, Date.now() + config.intervalMs);
+          } else retryAfter.delete(index);
         }
       };
       await Promise.all(Array.from({ length: Math.min(2, config.accounts.length) }, worker));
@@ -312,10 +324,15 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
       refreshing = false;
       if (abort.signal.aborted) projectStopped();
       if (!closing && !abort.signal.aborted) {
-        // A 60s Codex observation can expire if we wait intervalMs AFTER a
-        // 20–30s full pass. Start-to-start cadence keeps it fresh when probes
-        // settle promptly; a positive pause prevents a tight loop on overrun.
-        const delay = Math.max(MIN_OVERDUE_CYCLE_PAUSE_MS, config.intervalMs - (Date.now() - startedAt));
+        // Contact can start late while waiting for a shared permit. Wake at
+        // the earliest account's own due time, so a skipped row does not wait
+        // another full cycle. Uncontacted rows retain the ordinary cadence;
+        // a positive pause still prevents a tight loop after an overrun.
+        const nextDueAt = config.accounts.reduce((earliest, _account, index) =>
+          Math.min(earliest, Math.max((lastAttempt.get(index) ?? startedAt) + config.intervalMs,
+            retryAfter.get(index) ?? -Infinity)), Infinity);
+        const delay = Math.max(MIN_OVERDUE_CYCLE_PAUSE_MS,
+          (Number.isFinite(nextDueAt) ? nextDueAt : startedAt + config.intervalMs) - Date.now());
         timer = setTimeout(() => { pending = cycle(); }, delay);
       }
     }

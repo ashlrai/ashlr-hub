@@ -52,6 +52,7 @@ describe('explicit connection configuration', () => {
     ['extra configuration field', (v: any) => { v.extra = true; }],
     ['short interval', (v: any) => { v.intervalMs = 29_999; }],
     ['long interval', (v: any) => { v.intervalMs = 3_600_001; }],
+    ['empty accounts', (v: any) => { v.accounts = []; }],
     ['sparse accounts', (v: any) => { v.accounts = Array(2); }],
     ['duplicate account', (v: any) => { v.accounts[1].id = v.accounts[0].id; }],
     ['relative command', (v: any) => { v.accounts[0].command[0] = 'codex'; }],
@@ -385,6 +386,109 @@ describe('native metadata monitoring', () => {
     expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'observed',
       observedAt: '2026-09-08T12:00:31.000Z', expiresAt: '2026-09-08T12:01:31.000Z' });
     await vi.advanceTimersByTimeAsync(1_000); // finish the second pass before close
+  });
+
+  it('wakes at the contact cadence after a shared permit delays the first account by 3s', async () => {
+    const coordinator = createNativeMetadataCoordinator({ maxConcurrent: 1 });
+    let release!: () => void;
+    const blocked = coordinator.run(() => new Promise<void>(resolve => { release = resolve; }));
+    await settle();
+    const contacts: number[] = [];
+    probes.codex.mockImplementation(async () => {
+      contacts.push(Date.now() - Date.parse(NOW));
+      if (contacts.length > 1) return { status: 'failed', reason: 'probe-timed-out' };
+      return { ...codex(), observation: { observedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(), windows: quota() } };
+    });
+    const handle = start({ config: config(['codex']), coordinator });
+    try {
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(contacts).toEqual([]);
+      release(); await blocked; await settle();
+      expect(contacts).toEqual([3_000]);
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(await handle.refreshAccount!('codex-0')).toMatchObject({ state: 'cached', reading: 'current',
+        nextCheckAt: '2026-09-08T12:00:33.000Z', expiresAt: '2026-09-08T12:01:03.000Z' });
+      expect(contacts).toEqual([3_000]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(contacts).toEqual([3_000, 33_000]);
+      expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'unavailable', authentication: 'unknown',
+        reason: 'probe-timed-out', expiresAt: '2026-09-08T12:01:03.000Z', windows: quota() });
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(contacts).toEqual([3_000, 33_000]);
+      expect(handle.snapshot().accounts[0]!.windows).toEqual(quota());
+      await vi.advanceTimersByTimeAsync(1);
+      expect(contacts).toEqual([3_000, 33_000, 63_000]);
+      expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'unavailable', authentication: 'unknown',
+        observedAt: null, expiresAt: null, windows: [] });
+      await handle.close();
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(contacts).toEqual([3_000, 33_000, 63_000]);
+    } finally {
+      release(); await blocked; await handle.close(); coordinator.dispose();
+    }
+  });
+
+  it('keeps ordinary retry cadence when a profile is refused before any native contact', async () => {
+    const handle = start({ config: config(['codex']), accountCurrent: () => false });
+    await settle();
+    expect(handle.readingRevision!()).toBe(1);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(handle.readingRevision!()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(handle.readingRevision!()).toBe(2);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(handle.readingRevision!()).toBe(3);
+    expect(probes.codex).not.toHaveBeenCalled();
+    expect(handle.snapshot().accounts[0]).toMatchObject({ reason: 'connection-account-changed', windows: [] });
+  });
+
+  it('keeps ordinary retry cadence after a previously contacted profile becomes noncurrent', async () => {
+    let current = true;
+    const handle = start({ config: config(['codex']), accountCurrent: () => current });
+    await settle();
+    expect(probes.codex).toHaveBeenCalledOnce();
+    expect(handle.readingRevision!()).toBe(1);
+    current = false;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(handle.readingRevision!()).toBe(2);
+    expect(handle.snapshot().accounts[0]).toMatchObject({ reason: 'connection-account-changed', windows: [] });
+    expect(await handle.refreshAccount!('codex-0')).toMatchObject({ state: 'held', reading: 'unknown',
+      nextCheckAt: '2026-09-08T12:00:30.000Z' });
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(handle.readingRevision!()).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(handle.readingRevision!()).toBe(3);
+    expect(probes.codex).toHaveBeenCalledOnce();
+  });
+
+  it('keeps ordinary retry cadence when a joined manual check is refused at its queued contact', async () => {
+    const coordinator = createNativeMetadataCoordinator({ maxConcurrent: 1 });
+    let current = true;
+    const handle = start({ config: config(['codex']), coordinator, accountCurrent: () => current });
+    await settle();
+    let release!: () => void;
+    const blocked = coordinator.run(() => new Promise<void>(resolve => { release = resolve; }));
+    await settle();
+    try {
+      await vi.advanceTimersByTimeAsync(29_999);
+      vi.setSystemTime(Date.parse(NOW) + 30_000);
+      const manual = handle.refreshAccount!('codex-0'); await settle();
+      await vi.advanceTimersByTimeAsync(1); // scheduled cycle joins the queued manual check
+      current = false;
+      release(); await blocked;
+      expect(await manual).toMatchObject({ state: 'held', reading: 'unknown',
+        nextCheckAt: '2026-09-08T12:00:30.000Z' });
+      await settle();
+      expect(handle.readingRevision!()).toBe(2);
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(handle.readingRevision!()).toBe(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(handle.readingRevision!()).toBe(3);
+      expect(probes.codex).toHaveBeenCalledOnce();
+    } finally {
+      release(); await blocked; await handle.close(); coordinator.dispose();
+    }
   });
 
   it('does not overlap an overrun under coordinator contention and reports expiry until recovery', async () => {
