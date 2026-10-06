@@ -26,6 +26,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Fixed
 
+- Keep default fleet status scoped to builtin resources instead of probing
+  unconfigured providers and local runtimes.
 - Split local exhaustive qualification into four smaller partitions with the
   same two active workers and all isolated suites. This aims to reduce the
   last-wave tail; full-run savings are not yet measured.

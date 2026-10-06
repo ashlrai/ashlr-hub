@@ -2179,6 +2179,7 @@ function backendResourceStatus(
 }
 
 async function attachBackendResources(backends: FleetBackendStatus[], cfg: AshlrConfig): Promise<void> {
+  if (backends.length === 0) return;
   const byBackend = new Map<EngineId, BackendResourceState>();
   let fallbackReason = 'no resource sensor reported this allowed backend';
   try {
@@ -2593,8 +2594,14 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
     }
     backends.push({ backend, dispatchesRecent, quota });
   }
+  // Use the same effective backend list as the displayed rows. The monitor's
+  // default inventory is broader and may probe unrelated accounts or runtimes.
+  const resourceConfig: AshlrConfig = {
+    ...cfg,
+    foundry: { ...cfg.foundry, allowedBackends: backends.map((row) => row.backend) },
+  };
   try {
-    await attachBackendResources(backends, cfg);
+    await attachBackendResources(backends, resourceConfig);
   } catch {
     // Optional observability only; backend rows remain useful without resources.
   }
@@ -4192,6 +4199,12 @@ export async function buildFleetStatus(cfg: AshlrConfig): Promise<FleetStatus> {
       maxChecks: 3,
       deps: {
         buildFleetStatus: async () => status,
+        getResourceSnapshot: async () => {
+          if (backends.length === 0) return { generatedAt: new Date().toISOString(), backends: [] };
+          const { getResourceSnapshot } = await import('../fabric/resource-monitor.js');
+          // Keep this later observation fresh under the monitor's existing cache.
+          return getResourceSnapshot(resourceConfig);
+        },
         runEcosystemDoctor: async (opts) => lightweightEcosystemReport(opts?.now, opts?.root),
         ...(guardHealth !== undefined ? { diagnoseGuardHealth: () => guardHealth } : {}),
       },

@@ -6894,6 +6894,129 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     });
   });
 
+  it('scopes default resource sensing to builtin without mutating configuration', async () => {
+    const monitor = await import('../src/core/fabric/resource-monitor.js');
+    const cfg = baseConfig();
+    const before = structuredClone(cfg);
+    const observedAt = new Date().toISOString();
+    const probe = vi.spyOn(monitor, 'getResourceSnapshot').mockResolvedValue({
+      generatedAt: observedAt,
+      backends: [{
+        backend: 'builtin', availability: 'open', usedPct: null, cap: null,
+        capUnit: null, capWindow: null, resetsAt: null, costPerMTokenOut: 0,
+        p50LatencyMs: null, snapshotAt: observedAt, reason: 'always available',
+        backoffUntilMs: null,
+      }],
+    });
+    try {
+      const status = await buildFleetStatus(cfg);
+      expect(probe).toHaveBeenCalledTimes(2);
+      expect(probe).toHaveBeenNthCalledWith(1, {
+        ...before, foundry: { allowedBackends: ['builtin'] },
+      });
+      expect(probe).toHaveBeenNthCalledWith(2, {
+        ...before, foundry: { allowedBackends: ['builtin'] },
+      });
+      expect(cfg).toEqual(before);
+      expect(cfg.foundry).toBeUndefined();
+      expect(status.backends.map((row) => row.backend)).toEqual(['builtin']);
+      expect(status.backends[0]?.resource).toMatchObject({
+        availability: 'open', reason: 'always available', snapshotAt: observedAt,
+      });
+      expect(status.autonomyDirection?.resources).toEqual({
+        posture: 'open', constrained: 0, depleted: 0,
+      });
+    } finally {
+      probe.mockRestore();
+    }
+  });
+
+  it('preserves explicit resource scope and unknown engine fallback without mutating configuration', async () => {
+    const monitor = await import('../src/core/fabric/resource-monitor.js');
+    const cfg = withFoundry({ allowedBackends: ['claude', 'opencode'], local: { maxConcurrent: 3 } });
+    const before = structuredClone(cfg);
+    const observedAt = new Date().toISOString();
+    const probe = vi.spyOn(monitor, 'getResourceSnapshot').mockResolvedValueOnce({
+      generatedAt: observedAt,
+      backends: [{
+        backend: 'claude', availability: 'exhausted', usedPct: 100, cap: 100,
+        capUnit: 'requests', capWindow: '5h', resetsAt: null, costPerMTokenOut: 0,
+        p50LatencyMs: null, snapshotAt: observedAt, reason: 'fixture exhausted subscription',
+        backoffUntilMs: null,
+      }],
+    }).mockResolvedValueOnce({
+      generatedAt: observedAt,
+      backends: [{
+        backend: 'claude', availability: 'unknown', usedPct: null, cap: null,
+        capUnit: null, capWindow: null, resetsAt: null, costPerMTokenOut: 0,
+        p50LatencyMs: null, snapshotAt: observedAt, reason: 'fixture later observation unavailable',
+        backoffUntilMs: null,
+      }],
+    });
+    try {
+      const status = await buildFleetStatus(cfg);
+      expect(probe).toHaveBeenCalledTimes(2);
+      expect(probe).toHaveBeenNthCalledWith(1, before);
+      expect(probe).toHaveBeenNthCalledWith(2, before);
+      expect(cfg).toEqual(before);
+      expect(status.backends.map((row) => row.backend)).toEqual(['claude', 'opencode']);
+      expect(status.backends[0]?.resource).toMatchObject({
+        availability: 'exhausted', usedPct: 100, snapshotAt: observedAt,
+      });
+      expect(status.backends[1]?.resource).toMatchObject({
+        availability: 'not-sensed', usedPct: null,
+        reason: 'no resource sensor reported this allowed backend',
+      });
+      expect(status.autonomyDirection?.resources).toEqual({
+        posture: 'unknown', constrained: 0, depleted: 0,
+      });
+    } finally {
+      probe.mockRestore();
+    }
+  });
+
+  it('does not sense ambient resources when the displayed backend list is empty', async () => {
+    const monitor = await import('../src/core/fabric/resource-monitor.js');
+    const cfg = withFoundry({ allowedBackends: [] });
+    const before = structuredClone(cfg);
+    const probe = vi.spyOn(monitor, 'getResourceSnapshot').mockRejectedValue(new Error('unexpected resource probe'));
+    try {
+      const status = await buildFleetStatus(cfg);
+      expect(probe).not.toHaveBeenCalled();
+      expect(status.backends).toEqual([]);
+      expect(status.autonomyDirection?.resources).toEqual({
+        posture: 'unknown', constrained: 0, depleted: 0,
+      });
+      expect(cfg).toEqual(before);
+    } finally {
+      probe.mockRestore();
+    }
+  });
+
+  it('retains unknown resource projection when the scoped snapshot rejects', async () => {
+    const monitor = await import('../src/core/fabric/resource-monitor.js');
+    const cfg = baseConfig();
+    const before = structuredClone(cfg);
+    const probe = vi.spyOn(monitor, 'getResourceSnapshot').mockRejectedValue(new Error('fixture unavailable'));
+    try {
+      const status = await buildFleetStatus(cfg);
+      expect(probe).toHaveBeenCalledTimes(2);
+      expect(probe).toHaveBeenNthCalledWith(1, {
+        ...before, foundry: { allowedBackends: ['builtin'] },
+      });
+      expect(probe).toHaveBeenNthCalledWith(2, {
+        ...before, foundry: { allowedBackends: ['builtin'] },
+      });
+      expect(status.backends[0]?.resource).toMatchObject({
+        availability: 'not-sensed', usedPct: null, reason: 'resource snapshot unavailable',
+      });
+      expect(status.autonomyDirection).toBeUndefined();
+      expect(cfg).toEqual(before);
+    } finally {
+      probe.mockRestore();
+    }
+  });
+
   it('reflects allowedBackends — defaults to [builtin] when no foundry', async () => {
     const cfg = baseConfig();
     const s = await buildFleetStatus(cfg);
