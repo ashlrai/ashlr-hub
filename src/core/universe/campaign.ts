@@ -125,8 +125,9 @@ async function runCampaignWithLease(id: string, options: CampaignOptions, lock: 
   if (dispatchId !== undefined && admissionEvents.some((event) => event.kind === 'started' && event.dispatchId === dispatchId)) {
     throw new CampaignExpectationError('Campaign dispatch identity cannot be reused');
   }
-  const admission = projectCampaign(admissionEvents,
-    campaignUniverse(foldCampaignEvents(admissionEvents).created, options));
+  // Reuse this one under-lease observation only until recovery first awaits.
+  const admissionUniverse = campaignUniverse(foldCampaignEvents(admissionEvents).created, options);
+  const admission = projectCampaign(admissionEvents, admissionUniverse);
   assertUniverseExecution(universePath(resolve(options.root ?? defaultUniverseRoot()), admission.definition.universeId), lock);
   assertExpectation(admission, options.expectedIdentity, true);
   let admissionDigest = options.expectedIdentity ? digest(canonical(admissionEvents)) : undefined;
@@ -159,7 +160,7 @@ async function runCampaignWithLease(id: string, options: CampaignOptions, lock: 
 
     // The common Universe lease excludes other runs while abandoned starts
     // are reconciled. Existing run IDs finalize interruption; they never replay.
-    const universe = campaignUniverse(summary, options);
+    const universe = admissionUniverse;
     for (const step of summary.steps) {
       const prior = universe.runs.find((run) => run.id === step.runId);
       if (prior && prior.finishedAt === null) {
