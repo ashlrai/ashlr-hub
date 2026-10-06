@@ -1,4 +1,4 @@
-import { campaignUniverse, readUniverseCampaign } from './campaign-store.js';
+import { readUniverseCampaignProjection } from './campaign-store.js';
 import { canonical } from './artifacts.js';
 import { hasVerifiedCampaignPassedSeedImprovement, hasVerifiedInitialCampaignRepair, hasVerifiedInitialCampaignSeedImprovement,
   type UniverseCampaignDeliveryTarget } from './campaign-delivery.js';
@@ -15,9 +15,9 @@ export function readCompletedCampaignDelivery(campaign: UniverseCampaignSummary,
     if (campaign.sourceState !== 'healthy' || campaign.state !== 'completed') return null;
     // Caller projections cannot erase a measured seed to bypass its delivery
     // floor. Interpret policy only from the exact current durable campaign.
-    if (canonical(readUniverseCampaign(campaign.definition.id, options)) !== canonical(campaign)) return null;
+    const { campaign: latest, universe } = readUniverseCampaignProjection(campaign.definition.id, options);
+    if (latest.sourceState !== 'healthy' || !universe || canonical(latest) !== canonical(campaign)) return null;
     const universeId = campaign.definition.universeId;
-    const universe = campaignUniverse(campaign, options);
     if (universe.sourceState !== 'healthy' || universe.manifestDigest !== campaign.manifestDigest ||
         universe.comparatorDigest !== campaign.comparatorDigest || universe.manifest.seed.revision !== target.baseCommit) return null;
     const deliveries = readUniverseDeliveries(universeId, options);

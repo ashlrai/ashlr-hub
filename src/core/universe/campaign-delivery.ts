@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { artifactDigest, canonical, defaultUniverseRoot, digest } from './artifacts.js';
 import { runUniverseCampaign, type UniverseCampaignExpectation } from './campaign.js';
-import { campaignDirectory, campaignUniverse, readCampaignEvents, readUniverseCampaign } from './campaign-store.js';
+import { campaignDirectory, campaignUniverse, readCampaignEvents, readUniverseCampaign, readUniverseCampaignProjection } from './campaign-store.js';
 import { verifiedCampaignPassedSeedImprovement, verifiedInitialCampaignRepair, verifiedInitialCampaignSeedImprovement } from './campaign-improvement.js';
 import { deliverUniverseEliteOwned, readUniverseDeliveries, validUniverseDeliveryBranch,
   type UniverseDeliveryReceipt } from './delivery.js';
@@ -92,9 +92,8 @@ function hasVerifiedCampaignComparison(universe: UniverseSummary, campaign: Univ
   if (!proof) return false;
   // Captured summaries cannot authorize a final effect after durable evidence
   // changes. The strict campaign decoder also validates the seed session link.
-  const latest = readUniverseCampaign(campaign.definition.id, options);
-  if (canonical(latest) !== canonical(campaign)) return false;
-  const current = campaignUniverse(latest, options);
+  const { campaign: latest, universe: current } = readUniverseCampaignProjection(campaign.definition.id, options);
+  if (latest.sourceState !== 'healthy' || !current || current.sourceState !== 'healthy' || canonical(latest) !== canonical(campaign)) return false;
   const currentTrial = current.runs.flatMap(run => run.trials).find(value => value.id === trial.id);
   if (!currentTrial || canonical(currentTrial) !== canonical(trial) ||
       canonical(verify(current, latest, currentTrial, seedDigest)) !== canonical(proof)) return false;

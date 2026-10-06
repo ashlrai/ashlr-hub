@@ -9,6 +9,8 @@ import { initUniverse, initUniverseCampaign, runUniverseCampaign, readUniverseCa
 import { readCompletedCampaignDelivery } from '../src/core/universe/campaign-delivery-recovery.js';
 import { projectUniverse } from '../src/core/universe/store.js';
 import * as deliveryGitModule from '../src/core/universe/delivery-git.js';
+import * as campaignStore from '../src/core/universe/campaign-store.js';
+import { hasVerifiedInitialCampaignRepair } from '../src/core/universe/campaign-delivery.js';
 
 
 // macOS-only: the campaign's real Universe run requires macOS sandbox-exec. Other hosts skip
@@ -99,6 +101,22 @@ describe('measured failed seed to first passing repair local delivery', () => {
     expect(result.delivery.receipt.trialId).toBe(f.repair.id);
     expect(readCompletedCampaignDelivery(before, f.delivery, { root: f.root })).toBeNull();
     expect(readCompletedCampaignDelivery(before, delivery, { root: f.root })).toEqual(result.delivery.receipt);
+    const observed = campaignStore.readUniverseCampaignProjection('campaign', { root: f.root });
+    expect(observed.universe).not.toBeNull();
+    if (!observed.universe) throw new Error('Expected healthy delivered Universe');
+    expect(hasVerifiedInitialCampaignRepair(observed.universe, before, f.repair, f.baseline.artifact!.digest, { root: f.root })).toBe(true);
+    const pairedRead = vi.spyOn(campaignStore, 'readUniverseCampaignProjection');
+    try {
+      for (const sample of [
+        { campaign: observed.campaign, universe: null },
+        { campaign: observed.campaign, universe: { ...observed.universe, sourceState: 'degraded' as const } },
+        { campaign: { ...observed.campaign, reason: 'Changed durable campaign' }, universe: observed.universe },
+      ]) {
+        pairedRead.mockReturnValue(sample);
+        expect(readCompletedCampaignDelivery(before, delivery, { root: f.root })).toBeNull();
+        expect(hasVerifiedInitialCampaignRepair(observed.universe, before, f.repair, f.baseline.artifact!.digest, { root: f.root })).toBe(false);
+      }
+    } finally { pairedRead.mockRestore(); }
     expect(await deliverCompletedUniverseCampaign('campaign', { root: f.root, delivery })).toEqual(result);
     await expect(deliverCompletedUniverseCampaign('campaign', { root: f.root, delivery: f.delivery })).rejects.toThrow();
     expect(readUniverseCampaign('campaign', { root: f.root })).toEqual(before);
