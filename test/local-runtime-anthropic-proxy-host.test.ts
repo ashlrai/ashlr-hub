@@ -9,7 +9,7 @@
  * comes back.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   ANTHROPIC_PROXY_HOST_FLAG,
@@ -22,7 +22,7 @@ import {
   buildAnthropicProxyShim,
 } from '../src/core/local-runtime/llama/proxy-launchd.js';
 import type { AnthropicProxyAgentSpec } from '../src/core/local-runtime/llama/proxy-launchd.js';
-import { startAnthropicProxyHost } from '../src/core/local-runtime/llama/anthropic-proxy-host.js';
+import { requestAttributionLogger, startAnthropicProxyHost } from '../src/core/local-runtime/llama/anthropic-proxy-host.js';
 
 /** The real on-disk URL of the invocation module, for the dev/tsx branch. */
 const REAL_MODULE_URL = pathToFileURL(
@@ -217,5 +217,46 @@ describe('startAnthropicProxyHost', () => {
         else process.env[key] = value;
       }
     }
+  });
+});
+
+
+describe('requestAttributionLogger', () => {
+  const record = {
+    requestBytes: 99, forwardedBytes: 101, parsed: 1 as const, capped: 0 as const,
+    systemSerializedChars: 30, messagesSerializedChars: 40, toolsSerializedChars: 0,
+    systemBlockCount: 1, messageCount: 1, toolDefinitionCount: 0,
+  };
+
+  it('is off by default and requires exactly the explicit opt-in value', () => {
+    for (const value of [undefined, '', 'true', '0']) {
+      expect(requestAttributionLogger({ ASHLR_LOCAL_RUNTIME_REQUEST_ATTRIBUTION: value }))
+        .toBeUndefined();
+    }
+  });
+
+  it('writes a bounded numeric whitelist and drops untyped content fields', () => {
+    const output = { destroyed: false, writableNeedDrain: false, write: vi.fn((_line: string) => true) };
+    const log = requestAttributionLogger({ ASHLR_LOCAL_RUNTIME_REQUEST_ATTRIBUTION: '1' }, output);
+    log?.({ ...record, content: 'private prompt', headers: 'private credentials' } as typeof record);
+    const line = output.write.mock.calls[0]?.[0] as unknown as string;
+    expect(line.length).toBeLessThan(1024);
+    expect(line).toBe(`[ashlr request-attribution] ${JSON.stringify(record)}\n`);
+    log?.({ ...record, requestBytes: Number.POSITIVE_INFINITY, messageCount: -1 });
+    expect(output.write.mock.calls[1]?.[0]).toContain('"requestBytes":null');
+    expect(output.write.mock.calls[1]?.[0]).toContain('"messageCount":null');
+  });
+
+  it('drops records under backpressure or closed output and contains write failures', () => {
+    const output = { destroyed: false, writableNeedDrain: true, write: vi.fn((_line: string) => true) };
+    const log = requestAttributionLogger({ ASHLR_LOCAL_RUNTIME_REQUEST_ATTRIBUTION: '1' }, output);
+    log?.(record);
+    output.writableNeedDrain = false;
+    output.destroyed = true;
+    log?.(record);
+    expect(output.write).not.toHaveBeenCalled();
+    output.destroyed = false;
+    output.write.mockImplementation(() => { throw new Error('closed log'); });
+    expect(() => log?.(record)).not.toThrow();
   });
 });

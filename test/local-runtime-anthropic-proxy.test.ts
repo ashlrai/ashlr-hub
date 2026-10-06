@@ -26,7 +26,7 @@
  *   - close() actually releases the port and is idempotent.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, request as httpRequest } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { connect } from 'node:net';
@@ -44,6 +44,8 @@ import {
   startAnthropicProxy,
   stopAnthropicProxy,
   type AnthropicProxyHandle,
+  type AnthropicProxyOptions,
+  type AnthropicRequestAttribution,
 } from '../src/core/local-runtime/llama/anthropic-proxy.js';
 
 // ---------------------------------------------------------------------------
@@ -184,7 +186,10 @@ afterEach(async () => {
 });
 
 /** Bring up a stub llama-server and a proxy pointed at it. */
-async function fixture(handler?: UpstreamHandler): Promise<{
+async function fixture(
+  handler?: UpstreamHandler,
+  options: Pick<AnthropicProxyOptions, 'onRequestAttribution' | 'maxNormalisedBodyBytes'> = {},
+): Promise<{
   upstream: Upstream;
   proxy: AnthropicProxyHandle;
 }> {
@@ -193,6 +198,7 @@ async function fixture(handler?: UpstreamHandler): Promise<{
     host: '127.0.0.1',
     port: 0,
     upstreamOrigin: upstream.origin,
+    ...options,
   });
   started.upstream = upstream;
   started.proxy = proxy;
@@ -200,6 +206,94 @@ async function fixture(handler?: UpstreamHandler): Promise<{
 }
 
 // ---------------------------------------------------------------------------
+
+describe('anthropic proxy — numeric request attribution', () => {
+  it.each([{ system: 'private system 🌍' },
+    { system: [{ type: 'text', text: 'private system 🌍' }] }])(
+    'measures final model-facing serialized characters with one parse', ({ system }) => {
+      const original = {
+        system,
+        messages: [{ role: 'system', content: 'folded secret' },
+          { role: 'user', content: 'private user 🌍' }],
+        tools: [{ name: 'private_tool', description: 'private description',
+          input_schema: { type: 'object', properties: { secret: { type: 'string' } } } }],
+      };
+      const raw = Buffer.from(JSON.stringify(original));
+      const seen: AnthropicRequestAttribution[] = [];
+      const parse = vi.spyOn(JSON, 'parse');
+      let forwarded: Buffer;
+      try {
+        forwarded = normaliseMessagesBody(raw, undefined, (record) => seen.push(record));
+        expect(parse).toHaveBeenCalledTimes(1);
+      } finally {
+        parse.mockRestore();
+      }
+      const body = JSON.parse(forwarded.toString('utf8')) as typeof original;
+      expect(seen).toEqual([{
+        requestBytes: raw.length, forwardedBytes: forwarded.length, parsed: 1, capped: 0,
+        systemSerializedChars: JSON.stringify(body.system).length,
+        messagesSerializedChars: JSON.stringify(body.messages).length,
+        toolsSerializedChars: JSON.stringify(body.tools).length,
+        systemBlockCount: Array.isArray(body.system) ? body.system.length : 1,
+        messageCount: body.messages.length, toolDefinitionCount: 1,
+      }]);
+      expect(forwarded.length).toBeGreaterThan(forwarded.toString('utf8').length);
+      expect(JSON.stringify(seen)).not.toMatch(/private|secret|folded/);
+    },
+  );
+
+  it('preserves verbatim whitespace and reports absent versus unmeasured fields', () => {
+    const seen: AnthropicRequestAttribution[] = [];
+    const raw = Buffer.from('{ "messages": [] }');
+    expect(normaliseMessagesBody(raw, undefined, (record) => seen.push(record))).toBe(raw);
+    expect(seen[0]).toMatchObject({ parsed: 1, systemSerializedChars: 0,
+      toolsSerializedChars: 0, messageCount: 0, toolDefinitionCount: 0 });
+    for (const value of ['{oops', 'null', '[]']) {
+      const malformed = Buffer.from(value);
+      expect(normaliseMessagesBody(malformed, undefined, (record) => seen.push(record))).toBe(malformed);
+      expect(seen.at(-1)).toMatchObject({ parsed: 0, systemSerializedChars: null,
+        messagesSerializedChars: null, toolsSerializedChars: null, messageCount: null });
+    }
+  });
+
+  it('does not undo normalization when a synchronous or async observer fails', async () => {
+    const raw = Buffer.from(JSON.stringify(CLAUDE_CODE_BODY));
+    expect(normaliseMessagesBody(raw, undefined, () => { throw new Error('diagnostic'); }))
+      .toEqual(normaliseMessagesBody(raw));
+    expect(normaliseMessagesBody(raw, undefined, async () => { throw new Error('async diagnostic'); }))
+      .toEqual(normaliseMessagesBody(raw));
+    await Promise.resolve();
+  });
+
+  it('observes only messages POSTs and never changes request or response bytes', async () => {
+    const records: AnthropicRequestAttribution[] = [];
+    const { upstream, proxy } = await fixture(undefined, {
+      onRequestAttribution: (record) => records.push(record),
+    });
+    const raw = '{ "messages": [{"role":"user","content":"secret"}] }';
+    const reply = await call(proxy, '/v1/messages', { method: 'POST', body: raw });
+    expect(upstream.seen[0]?.body.toString()).toBe(raw);
+    expect(reply.body).toBe('{"ok":true}');
+    expect(records).toHaveLength(1);
+    await call(proxy, '/other', { method: 'POST', body: raw });
+    expect(records).toHaveLength(1);
+  });
+
+  it('reports capped traffic as unmeasured while forwarding every byte', async () => {
+    const records: AnthropicRequestAttribution[] = [];
+    const { upstream, proxy } = await fixture(undefined, {
+      maxNormalisedBodyBytes: 8, onRequestAttribution: (record) => records.push(record),
+    });
+    const raw = JSON.stringify(CLAUDE_CODE_BODY);
+    await call(proxy, '/v1/messages', { method: 'POST', body: raw });
+    expect(upstream.seen[0]?.body.toString()).toBe(raw);
+    expect(records).toEqual([{
+      requestBytes: Buffer.byteLength(raw), forwardedBytes: Buffer.byteLength(raw),
+      parsed: 0, capped: 1, systemSerializedChars: null, messagesSerializedChars: null,
+      toolsSerializedChars: null, systemBlockCount: null, messageCount: null, toolDefinitionCount: null,
+    }]);
+  });
+});
 
 describe('anthropic proxy — normalisation on /v1/messages', () => {
   it('hoists the system turn Claude Code puts second, before llama-server sees it', async () => {
@@ -328,7 +422,7 @@ describe('anthropic proxy — everything else is a pipe', () => {
 });
 
 describe('anthropic proxy — streaming', () => {
-  it('delivers a chunk to the client while the upstream is still writing', async () => {
+  it.each([false, true])('streams causally with request attribution enabled=%s', async (observe) => {
     // A CAUSAL proof rather than a timing one. The stub will not write its
     // second frame until the client says it received the first, so a proxy
     // that buffers the body deadlocks and this test fails on the deadline
@@ -344,7 +438,7 @@ describe('anthropic proxy — streaming', () => {
       await withDeadline(clientGotFirst.promise, 4_000, 'the client to receive frame 1');
       res.write('event: message_stop\ndata: {"type":"message_stop"}\n\n');
       res.end();
-    });
+    }, observe ? { onRequestAttribution: () => { throw new Error('diagnostic'); } } : {});
 
     const frames: string[] = [];
     const finished = deferred<void>();

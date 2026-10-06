@@ -120,6 +120,21 @@ export interface AnthropicProxyHandle {
   close(): Promise<void>;
 }
 
+/** Numeric-only, per-request diagnostics. Character sizes are serialized JSON UTF-16
+ * code units, not tokens; wire sizes are UTF-8 bytes. Null means unmeasured. */
+export interface AnthropicRequestAttribution {
+  requestBytes: number;
+  forwardedBytes: number;
+  parsed: 0 | 1;
+  capped: 0 | 1;
+  systemSerializedChars: number | null;
+  messagesSerializedChars: number | null;
+  toolsSerializedChars: number | null;
+  systemBlockCount: number | null;
+  messageCount: number | null;
+  toolDefinitionCount: number | null;
+}
+
 export interface AnthropicProxyOptions {
   /** Config the ports, bind host and loopback opt-in are resolved from. */
   cfg?: AshlrConfig;
@@ -137,6 +152,8 @@ export interface AnthropicProxyOptions {
    * knows is broken until the day it runs.
    */
   maxNormalisedBodyBytes?: number;
+  /** Optional diagnostics only. Errors are contained; no request objects escape. */
+  onRequestAttribution?: (metadata: AnthropicRequestAttribution) => void | Promise<void>;
 }
 
 /** Copy headers minus this hop's own, so framing is re-decided downstream. */
@@ -172,6 +189,41 @@ export function isMessagesPost(method: string | undefined, url: string | undefin
   return ((url ?? '').split('?')[0] ?? '') === ANTHROPIC_MESSAGES_PATH;
 }
 
+function reportRequestAttribution(
+  observer: AnthropicProxyOptions['onRequestAttribution'],
+  requestBytes: number,
+  forwardedBytes: number,
+  body: Record<string, unknown> | null,
+  capped: 0 | 1 = 0,
+): void {
+  if (!observer) return;
+  try {
+    const chars = (key: string): number | null => {
+      if (body === null) return null;
+      return body[key] === undefined ? 0 : JSON.stringify(body[key]).length;
+    };
+    const count = (key: string): number | null => {
+      if (body === null) return null;
+      if (body[key] === undefined) return 0;
+      return Array.isArray(body[key]) ? body[key].length : null;
+    };
+    // Construct a fixed primitive-only record: never expose content, names,
+    // headers, paths, credentials or the parsed object to an observer.
+    const pending = observer({
+      requestBytes, forwardedBytes, parsed: body === null ? 0 : 1, capped,
+      systemSerializedChars: chars('system'),
+      messagesSerializedChars: chars('messages'),
+      toolsSerializedChars: chars('tools'),
+      systemBlockCount: typeof body?.['system'] === 'string' ? 1 : count('system'),
+      messageCount: count('messages'),
+      toolDefinitionCount: count('tools'),
+    });
+    if (pending) void pending.catch(() => {});
+  } catch {
+    // Diagnostic serialization/logging must never change traffic or readiness.
+  }
+}
+
 /**
  * Apply the shim to a raw body.
  *
@@ -184,14 +236,19 @@ export function isMessagesPost(method: string | undefined, url: string | undefin
 export function normaliseMessagesBody(
   raw: Buffer,
   defaults: LocalAgentRequestDefaults = NO_LOCAL_AGENT_DEFAULTS,
+  observer?: AnthropicProxyOptions['onRequestAttribution'],
 ): Buffer {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw.toString('utf8')) as unknown;
   } catch {
+    reportRequestAttribution(observer, raw.length, raw.length, null);
     return raw;
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return raw;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    reportRequestAttribution(observer, raw.length, raw.length, null);
+    return raw;
+  }
 
   try {
     const normalised = normaliseAnthropicRequest(parsed as Record<string, unknown>);
@@ -202,9 +259,13 @@ export function normaliseMessagesBody(
     // The shim returns the same object reference when there was nothing to
     // move. Re-serialising then would rewrite key order and whitespace for no
     // reason, so identity is the signal to forward the original bytes.
-    if (withDefaults === parsed) return raw;
-    return Buffer.from(JSON.stringify(withDefaults), 'utf8');
+    const forwarded = withDefaults === parsed
+      ? raw
+      : Buffer.from(JSON.stringify(withDefaults), 'utf8');
+    reportRequestAttribution(observer, raw.length, forwarded.length, withDefaults);
+    return forwarded;
   } catch {
+    reportRequestAttribution(observer, raw.length, raw.length, null);
     return raw;
   }
 }
@@ -353,12 +414,12 @@ export async function startAnthropicProxy(
     req.on('error', () => passthrough?.destroy());
 
     req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
       if (passthrough !== null) {
         passthrough.write(chunk);
         return;
       }
       chunks.push(chunk);
-      size += chunk.length;
       if (size <= maxBodyBytes) return;
 
       // Over the cap. Degrade to an unnormalised pipe rather than failing: the
@@ -373,9 +434,12 @@ export async function startAnthropicProxy(
     req.on('end', () => {
       if (passthrough !== null) {
         passthrough.end();
+        reportRequestAttribution(options.onRequestAttribution, size, size, null, 1);
         return;
       }
-      const body = normaliseMessagesBody(Buffer.concat(chunks), agentDefaults);
+      const body = normaliseMessagesBody(
+        Buffer.concat(chunks), agentDefaults, options.onRequestAttribution,
+      );
       // Re-frame from what we are ACTUALLY sending. The shim can change the
       // body's length in either direction, and a stale content-length is a
       // truncated prompt or a hung request rather than a visible error.
