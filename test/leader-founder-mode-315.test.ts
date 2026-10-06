@@ -62,6 +62,7 @@ import {
   type ImprovementCandidate,
 } from '../src/core/vision/leader-drive.js';
 import type { LeaderRunDeps } from '../src/core/vision/leader.js';
+import { leaderDisplayText } from '../src/core/integrations/telegram-format.js';
 import { fakeLedger, makeApplyDeps, makePolicy, useTmpHome, type FakeLedger } from './helpers/leader-310b-fakes.js';
 
 const home = useTmpHome();
@@ -181,6 +182,45 @@ describe('persona — a founder-operator that never claims to be a real person',
     expect(fitTelegram('one\n\ntwo', 6)).toEqual({ text: 'one\n\ntwo', truncated: false });
     expect(wantsDetail('explain the bottleneck in detail')).toBe(true);
     expect(wantsDetail('ship it')).toBe(false);
+  });
+
+  it('discloses a clipped single line and keeps complete emoji at the boundary', () => {
+    const full = `${'a'.repeat(398)}😀 tail`;
+    const fit = fitTelegram(full);
+    expect(fit.truncated).toBe(true);
+    expect(fit.text).toBe(`${'a'.repeat(398)}…\n… (say "more" for the rest)`);
+    expect(fit.text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(fitTelegram('😀😀', 6, 4)).toEqual({ text: '😀😀', truncated: false });
+  });
+
+  it('shows readable Leader labels and dates without erasing useful quantities', () => {
+    const memo = 'lm-20260927140000-abcdef';
+    const action = 'la-20260927140000-abcdef-0';
+    const iso = '2026-09-27T14:00:00.000Z';
+    const raw = `Leader memo ${memo}\n• [B] Budget 1,018.63 credits, $0.50, 12,345 tokens, v3.24.2 — scheduled (${action})\nNext ${iso}`;
+    const display = leaderDisplayText(raw, Date.parse(iso));
+    expect(display).toMatch(/^Leader memo\n/);
+    expect(display).not.toContain(memo);
+    expect(display).not.toContain(action);
+    expect(display).not.toContain(iso);
+    expect(display).toContain('Next today ');
+    expect(display).toContain('1,018.63 credits, $0.50, 12,345 tokens, v3.24.2');
+    expect(leaderDisplayText(`Approved ${action}: recorded`)).toBe('Approved action: recorded');
+    expect(leaderDisplayText(`• ${memo} — Merge PR #543`)).toBe('• memo — Merge PR #543');
+  });
+
+  it('leaves exact URLs, filenames, code and quoted task text intact', () => {
+    const id = 'lm-20260927140000-abcdef';
+    const iso = '2026-09-27T14:00:00.000Z';
+    const literals = [
+      `https://example.test/${id}?at=${iso}`,
+      `src/${id}.ts`, `file(${id}).ts`, `filename (${id})`, `logs/${iso}.txt`,
+      `\`Leader memo ${id} at ${iso}\``,
+      `\`\`\`\nMemo ${id}\n${iso}\n\`\`\``,
+      `"Memo ${id} at ${iso}, 12345678901234567890"`,
+      'Invoice 12345678901234567890; credit balance 2499.91; 2026-09-27',
+    ].join('\n');
+    expect(leaderDisplayText(literals, Date.parse(iso))).toBe(literals);
   });
 });
 

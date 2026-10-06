@@ -359,12 +359,13 @@ describe('Leader thread over Telegram', () => {
   });
 
   it("mirrors Mason's Verse messages for context; never echoes his own Telegram messages", async () => {
+    const literal = `Memo ${MEMO_ID} at 2026-09-26T06:30:00.000Z; 2499.91 credits, 12345678901234567890`;
     thread.outbound = [
-      { ...leaderMsg({ id: 'v-1', text: 'ship billing first' }), from: 'mason', channel: 'verse' },
+      { ...leaderMsg({ id: 'v-1', text: literal }), from: 'mason', channel: 'verse' },
       { ...leaderMsg({ id: 't-own', text: 'already on the phone' }), from: 'mason', channel: 'telegram' },
     ];
     await runCommsCycle(cfg(), fastCycle);
-    expect(texts()).toEqual(['You (in Verse):\nship billing first']);
+    expect(texts()).toEqual([`You (in Verse):\n${literal}`]);
     expect(thread.delivered).toEqual([
       { id: 'v-1', channel: 'telegram', ok: true },
       { id: 't-own', channel: 'telegram', ok: true },
@@ -477,7 +478,8 @@ describe('Leader memo buttons', () => {
     expect(out).toContain('Vetoed: memo vetoed, 1 action undone');
     expect(thread.approveLeaderAction).toHaveBeenCalledWith(ACTION_ESCALATED, expect.objectContaining({ channel: 'telegram' }));
     const approved = out.find((t) => t.startsWith('Approved'))!;
-    expect(approved).toContain(ACTION_ESCALATED);
+    expect(approved).toMatch(/^Approved action:/);
+    expect(approved).not.toContain(ACTION_ESCALATED);
     expect(approved).toContain('Recorded — outside the grant');
     // The Leader's acknowledgement rode in that reply: marked delivered, never sent twice.
     expect(thread.delivered).toContainEqual({ id: 'lt-20260926070000-bbbbbb', channel: 'telegram', ok: true });
@@ -494,7 +496,7 @@ describe('Leader memo buttons', () => {
     })];
     await runCommsCycle(cfg(), fastCycle);
     const [s] = sends();
-    expect(s!.body['text']).toBe(`Leader memo ${MEMO_ID}\nBottleneck: review queue`);
+    expect(s!.body['text']).toBe('Leader memo\nBottleneck: review queue');
     const data = keyboardData(s!);
     expect(data.map((d) => d.slice(0, 5))).toEqual(['lt:a:', 'lt:v:', 'lt:d:']);
     expect(lookupTelegramMessage(1000)).toMatchObject({ kind: 'memo', memoId: MEMO_ID, actionIds: [ACTION_ESCALATED] });
@@ -549,7 +551,9 @@ describe('slash commands and keywords', () => {
     expect(texts()[0]!.length).toBeLessThanOrEqual(TELEGRAM_MAX_MESSAGE);
     expect(texts()[1]).toMatch(/Autonomy: off — next step: `ashlr authority setup`/);
     expect(texts()[2]).toMatch(/No standing directives/);
-    expect(texts()[3]).toContain(MEMO_ID);
+    expect(texts()[3]).toMatch(/^Leader memo — /);
+    expect(texts()[3]).not.toContain(MEMO_ID);
+    expect(lookupTelegramMessage(1003)).toMatchObject({ kind: 'memo', memoId: MEMO_ID });
     expect(keyboardData(s[3]!).some((d) => d.startsWith('lt:d:'))).toBe(true);
     expect(texts()[4]).toContain('Unknown command <code>/bogus</code>');
     expect(texts()[5]).toBe(texts()[0]);

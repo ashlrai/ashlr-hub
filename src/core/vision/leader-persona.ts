@@ -110,7 +110,19 @@ export function fitTelegram(text: string, maxLines: number = LEADER_TELEGRAM_MAX
       truncated = true;
       break;
     }
-    kept.push(line.length > maxLineChars ? `${line.slice(0, maxLineChars - 1)}…` : line);
+    if (line.length > maxLineChars) {
+      // A clipped line loses content just like a dropped tail; preserve the
+      // full answer for "more" and never leave half an emoji on the phone.
+      let prefix = '';
+      for (const ch of line) {
+        if (prefix.length + ch.length > maxLineChars - 1) break;
+        prefix += ch;
+      }
+      kept.push(`${prefix}…`);
+      truncated = true;
+    } else {
+      kept.push(line);
+    }
     count += 1;
   }
   while (kept.length > 0 && kept[kept.length - 1] === '') kept.pop();

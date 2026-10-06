@@ -47,7 +47,7 @@ import {
   type TelegramSendOpts,
   type TelegramSendResult,
 } from '../integrations/telegram.js';
-import { escapeTelegramHtml } from '../integrations/telegram-format.js';
+import { escapeTelegramHtml, leaderDisplayText } from '../integrations/telegram-format.js';
 import { scrubSecrets } from '../util/scrub.js';
 import type { CommsRequest } from './requests.js';
 import {
@@ -197,7 +197,7 @@ export async function sendReportViaTelegram(req: CommsRequest, cfg: AshlrConfig)
     );
   }
   const text = isMemo
-    ? `${scrubSecrets(req.text)}\n\nReply to this message to talk to the Leader about it.`
+    ? `${leaderDisplayText(scrubSecrets(req.text))}\n\nReply to this message to talk to the Leader about it.`
     : scrubSecrets(req.text);
   const res = await sendTelegramMessage(text, opts, cfg);
   if (res.ok) {
@@ -214,7 +214,7 @@ export async function sendReportViaTelegram(req: CommsRequest, cfg: AshlrConfig)
 /** How a Leader-thread message reads on the phone (plain text; escaped at the transport). */
 export function formatThreadMessage(msg: LeaderThreadMessage): string {
   // 3.15: the Leader always speaks as itself (leader-persona.ts); Mason's own words are shown as written.
-  const body = scrubSecrets(msg.from === 'mason' ? (msg.text ?? '') : guardPersonaText(msg.text ?? '')).trim();
+  const body = scrubSecrets(msg.from === 'mason' ? (msg.text ?? '') : leaderDisplayText(guardPersonaText(msg.text ?? ''))).trim();
   // Mason's own words from another surface (e.g. Verse), mirrored so the
   // Leader's reply on Telegram has its context.
   if (msg.from === 'mason') return `You (in ${msg.channel === 'verse' ? 'Verse' : String(msg.channel)}):\n${body}`;
@@ -222,9 +222,11 @@ export function formatThreadMessage(msg: LeaderThreadMessage): string {
     case 'question':
       return `Leader asks:\n${body}\n\n(Reply to this message to answer.)`;
     case 'memo': {
-      // The thread's memo summary already opens with "Memo <id>". Phone-sized:
+      // Only the display loses IDs; the exact memo/action targets remain in
+      // the thread map and buttons. Phone-sized:
       // the Details button carries the full memo.
-      const text = /^Memo /.test(body) ? `Leader ${body.replace(/^Memo /, 'memo ')}` : `Leader memo${msg.memoId ? ` ${msg.memoId}` : ''}\n${body}`;
+      const text = (/^Memo(?: |\n|$)/.test(body) ? `Leader ${body.replace(/^Memo/, 'memo')}` : `Leader memo\n${body}`)
+        .replace('Approve or veto any of them by id.', 'Use Approve / Veto, or reply to this message.');
       return fitTelegram(text, LEADER_TELEGRAM_MAX_LINES + 2).text.replace('… (say "more" for the rest)', '… (tap Details for the full memo)');
     }
     case 'action':
@@ -466,7 +468,7 @@ async function memoDetails(memoId: string): Promise<string> {
     const memo = readLeaderMemo(memoId);
     if (!memo) return 'That Leader memo is no longer on file.';
     const { leaderMemoText } = await import('./handlers.js');
-    return scrubSecrets(leaderMemoText(memo));
+    return leaderDisplayText(scrubSecrets(leaderMemoText(memo)));
   } catch {
     return 'Could not read that Leader memo.';
   }
@@ -476,16 +478,16 @@ async function actionDetails(actionIds: string[]): Promise<string> {
   try {
     const { findStoredAction } = await import('../vision/leader-apply.js');
     const lines: string[] = [];
-    for (const id of actionIds.slice(0, MAX_ACTIONS_PER_TAP)) {
+    for (const [index, id] of actionIds.slice(0, MAX_ACTIONS_PER_TAP).entries()) {
       const stored = findStoredAction(id);
       if (!stored) {
-        lines.push(`${id}: no longer on file`);
+        lines.push(`Action ${index + 1}: no longer on file`);
         continue;
       }
       const a = stored.action;
-      lines.push(`${a.id} [class ${a.class}] ${a.status}: ${a.summary}`, `  why: ${a.why}`);
+      lines.push(`Action ${index + 1} [class ${a.class}] ${a.status}: ${a.summary}`, `  why: ${a.why}`);
     }
-    return scrubSecrets(lines.join('\n')) || 'No details on file.';
+    return leaderDisplayText(scrubSecrets(lines.join('\n'))) || 'No details on file.';
   } catch {
     return 'Could not read those Leader actions.';
   }
@@ -559,10 +561,10 @@ export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig):
           const res = await mod.approveLeaderAction(id, { channel: 'telegram', cfg });
           const r = resultMessage(res, 'approved');
           const leaderSays = res?.thread?.reply?.text;
-          lines.push(`${r.ok ? 'Approved' : 'Not approved'} ${id}: ${leaderSays && leaderSays.trim() ? leaderSays : r.message}`);
+          lines.push(`${r.ok ? 'Approved' : 'Not approved'} action: ${leaderDisplayText(leaderSays && leaderSays.trim() ? leaderSays : r.message)}`);
           if (res?.thread?.reply?.id) ackIds.push(res.thread.reply.id);
         } catch (err) {
-          lines.push(`Not approved ${id}: ${errorText(err)}`);
+          lines.push(`Not approved action: ${errorText(err)}`);
         }
       }
       const sent = await replyTo(event, scrubSecrets(lines.join('\n')), cfg);
@@ -582,7 +584,7 @@ export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig):
     } else {
       for (const id of actionIds) {
         const r = await apply.vetoLeaderAction(deps, id, 'Vetoed from Telegram');
-        lines.push(r.ok ? `Vetoed: ${r.message}` : `Could not veto ${id}: ${r.message}`);
+        lines.push(r.ok ? `Vetoed: ${r.message}` : `Could not veto action: ${r.message}`);
       }
     }
     await replyTo(event, scrubSecrets(lines.join('\n') || 'Nothing to veto.'), cfg);
@@ -611,8 +613,8 @@ const TELEGRAM_HELP_SECTIONS = [
   ]],
   ['Decisions', [
     ['approve <id> / veto <id>', 'or reply "approve" / "veto" to an action message'],
-    ['/directives', 'your standing directives'],
-    ['/settings', 'Leader lanes, router tuning and standards'],
+    ['/directives', 'your standing directives to the Leader'],
+    ['/settings', 'the Leader\'s settings and standards'],
   ]],
   ['Messages', [
     ['more', 'expand the last long reply'],
@@ -620,7 +622,7 @@ const TELEGRAM_HELP_SECTIONS = [
     ['/help', 'this guide'],
   ]],
 ] as const;
-const TELEGRAM_HELP_BUTTONS = 'Buttons: Approve applies a scheduled class-B action or records a class-C approval; Veto undoes the memo\'s actions; Details opens the full memo.';
+const TELEGRAM_HELP_BUTTONS = 'Buttons: Approve (apply a scheduled class-B action now, or record your approval of a class-C ask); Veto undoes the memo\'s actions; Details opens the full memo.';
 
 /** Plain help stays available to CLI/test consumers; Telegram uses source-built HTML. */
 export const TELEGRAM_HELP_TEXT = [
@@ -679,9 +681,9 @@ export async function buildStatusText(nowMs: number = Date.now()): Promise<strin
     const { buildLeaderState } = await import('../vision/leader.js');
     const s = buildLeaderState(nowMs);
     const last = s.lastRun ? `last run ${ago(s.lastRun.at, nowMs)} (${s.lastRun.outcome})` : 'no run yet';
-    const next = s.nextRunAt ? `, next ${s.nextRunAt.slice(0, 16).replace('T', ' ')}` : '';
+    const next = s.nextRunAt ? `, next ${leaderDisplayText(s.nextRunAt, nowMs)}` : '';
     lines.push(`Leader: ${last}${next}`);
-    if (s.latest) lines.push(`Latest memo: ${s.latest.id} (${ago(s.latest.at, nowMs)})`);
+    if (s.latest) lines.push(`Latest memo: ${ago(s.latest.at, nowMs)}`);
   } catch { /* skip */ }
   return lines.join('\n');
 }
@@ -695,7 +697,7 @@ async function sendLatestMemo(event: InboundEvent, cfg: AshlrConfig): Promise<vo
       await replyTo(event, 'No Leader memo yet. Message the Leader with /leader <text>, or just type.', cfg);
       return;
     }
-    const parts = [`Leader memo ${memo.id} — ${memo.at.slice(0, 16).replace('T', ' ')}${memo.dryRun ? ' (dry run)' : ''}`];
+    const parts = [`Leader memo — ${leaderDisplayText(memo.at)}${memo.dryRun ? ' (dry run)' : ''}`];
     if (memo.bottleneck) parts.push(`Bottleneck: ${clip(memo.bottleneck.statement, 300)}`);
     if (memo.move) parts.push(`Move: ${clip(memo.move.statement, 300)}`);
     if (memo.questionsForMason.length > 0) parts.push(`Question: ${clip(memo.questionsForMason[0]!, 300)}`);
@@ -704,7 +706,7 @@ async function sendLatestMemo(event: InboundEvent, cfg: AshlrConfig): Promise<vo
       { memoId: memo.id, ...(facts?.approvable.length ? { actionIds: facts.approvable } : {}) },
       { approve: (facts?.approvable.length ?? 0) > 0, veto: (facts?.live ?? 0) > 0 },
     );
-    const res = await sendTelegramMessage(scrubSecrets(parts.join('\n')), {
+    const res = await sendTelegramMessage(leaderDisplayText(scrubSecrets(parts.join('\n'))), {
       keyboard,
       ...(typeof event.messageId === 'number' ? { replyToMessageId: event.messageId } : {}),
     }, cfg);
@@ -756,7 +758,7 @@ async function settingsText(): Promise<string> {
       lines.push(`  codex lanes: ${d.codexEnabled === null ? 'default (off)' : d.codexEnabled ? 'on' : 'off'}`);
       const tuning = d.routerTuning ? Object.entries(d.routerTuning).map(([k, v]) => `${k}=${String(v)}`).join(', ') : '';
       lines.push(`  router tuning: ${tuning || 'none'}`);
-      lines.push(`  updated ${d.updatedAt.slice(0, 16).replace('T', ' ')}`);
+      lines.push(`  updated ${leaderDisplayText(d.updatedAt)}`);
     }
     const standards = readStandards().filter((s) => !s.retiredAt);
     lines.push('', `Standards (${standards.length})`);
