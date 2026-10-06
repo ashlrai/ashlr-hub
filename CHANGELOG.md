@@ -15,6 +15,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 - Show native Devin chat context readings when the official CLI reports them,
   while retaining unknown values when no reading is available.
+- Add opt-in local request size and context-structure diagnostics without
+  recording prompt contents or changing provider token reporting.
 
 ### Fixed
 
@@ -33,9 +35,14 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Keep separately dated Codex credit history in the resource sidebar when a
   fresh balance is not reported. Current subscription usage remains separate,
   current zero replaces history, and historical balances never admit spending.
+- Tie project-group disclosure arrows to the button's expanded state.
 - Update the example website's Oxfmt worker dependency to Tinypool 2.1.2.
 - Isolate cancellation and lock-expiry test clocks from filesystem setup speed,
   preserving the actual I/O and cancellation, expiry and recovery assertions.
+- Wait for Bash cancellation readiness and avoid incidental sleep children in
+  the escalation fixture, retaining confirmed exit and the original deadlines.
+- Reuse the same CI job's verified build for packaging and run the Windows
+  native-alias suite once, preserving every distinct platform test.
 
 ## [3.24.2] — 2026-10-05
 
