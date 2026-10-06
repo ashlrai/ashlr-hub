@@ -190,6 +190,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-core.test.ts', // real Git snapshots and confined experiment subprocesses
   'test/universe-delivery.test.ts', // real Git object/ref delivery and private receipts
   'test/universe-delivery-git-entries.test.ts', // bounded real Git blob loading and read-only inventory verification
+  'test/universe-delivery-git-write.test.ts', // verified real Git blob reuse and bounded writes with unchanged refs/index
   'test/universe-delivery-git-precommit.test.ts', // prepared real Git transaction guards and create-only ref outcomes
   'test/universe-delivery-kill.test.ts', // global stop under real prepared Git ref locks
   'test/universe-integration-delivery.test.ts', // private delivery evidence and fault-injected local Git publication
