@@ -17,7 +17,7 @@ import { formatRelative } from '../autonomy/format.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { requestLeaderFocus } from './leader-focus.js';
 import { leaderThreadQuery } from './thread-data.js';
-import { CHANNEL_LABEL, latestLeaderMessage, previewText } from './thread-model.js';
+import { CHANNEL_LABEL, displayThreadText, latestLeaderMessage, previewText } from './thread-model.js';
 import styles from './leader-line.module.css';
 
 export const LEADER_LINE_POLL_MS = 30_000;
@@ -35,7 +35,7 @@ export function LeaderLine() {
             Leader · {CHANNEL_LABEL[latest.channel]} · {formatRelative(latest.at)}
           </span>
           {/* Model text: one plain line (Markdown marks dropped), never HTML. */}
-          <span className={styles.text} title={latest.text}>{previewText(latest.text)}</span>
+          <span className={styles.text} title={displayThreadText(latest)}>{previewText(displayThreadText(latest))}</span>
         </p>
       ) : null}
       <button type="button" className={styles.ask} onClick={() => requestLeaderFocus({ kind: 'composer' })}>

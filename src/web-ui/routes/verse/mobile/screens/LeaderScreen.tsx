@@ -34,7 +34,7 @@ import {
   sendLeaderMessage,
   THREAD_PAGE_SIZE,
 } from '../../leader/thread-data.js';
-import { answeredQuestions, CHANNEL_LABEL, clockTime, groupThread, mergeThread, previewText, type ThreadRow } from '../../leader/thread-model.js';
+import { answeredQuestions, CHANNEL_LABEL, clockTime, displayThreadText, groupThread, mergeThread, previewText, type ThreadRow } from '../../leader/thread-model.js';
 import { OPERATOR_DIRECTIVE_MAX, type DirectiveChip, type LeaderThreadKind, type LeaderThreadMessage } from '../../leader/thread-types.js';
 import { isApprovable } from '../../mind/leader-model.js';
 import { usePollWhileVisible } from '../../shell/section-visibility.js';
@@ -177,7 +177,7 @@ function Bubble({ message, ctx }: { message: LeaderThreadMessage; ctx: ThreadPro
       {badge ? <Badge tone={badge.tone}>{badge.label}</Badge> : null}
       {question ? <span className={styles.replyTo}>Re: {previewText(question.text, 90)}</span> : null}
       {/* Untrusted text: plain, line breaks kept, never HTML. */}
-      <p className={styles.text}>{message.text}</p>
+      <p className={styles.text}>{displayThreadText(message)}</p>
       {isQuestion ? (
         answer ? (
           <span className={styles.answered}>Answered</span>
@@ -214,7 +214,7 @@ function Thread(props: ThreadProps) {
     <div className={styles.thread}>
       {props.rows.map((row) => {
         if (row.type === 'day') return <p key={row.key} className={styles.day}>{row.label}</p>;
-        if (row.type === 'system') return <p key={row.key} className={styles.system}>{row.entry.message.text}</p>;
+        if (row.type === 'system') return <p key={row.key} className={styles.system}>{displayThreadText(row.entry.message)}</p>;
         const who = row.from === 'leader' ? 'Leader' : 'You';
         return (
           <section key={row.key} className={styles.group} data-from={row.from} aria-label={`${who}, ${clockTime(row.at)}`}>

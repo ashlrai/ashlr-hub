@@ -83,9 +83,9 @@ describe('⌘K', () => {
   });
 });
 
-function LeaderCardHarness() {
+function LeaderCardHarness({ seatNames }: { seatNames?: ReadonlyMap<string, string> } = {}) {
   const actions = useSurfaceActions();
-  return <LeaderCard read={{ value: leaderState('live'), available: true, reason: null }} loading={false} actions={actions} />;
+  return <LeaderCard read={{ value: leaderState('live'), available: true, reason: null }} loading={false} actions={actions} seatNames={seatNames} />;
 }
 
 describe('Command’s Leader card', () => {
@@ -234,5 +234,28 @@ describe('Mind', () => {
     await within(panel).findByText('No conversation yet');
     expect(within(panel).getByRole('textbox', { name: 'Message the Leader' })).toBeEnabled();
     await waitFor(() => expect(screen.getByTestId('autonomy-off')).toBeInTheDocument());
+  });
+});
+
+
+describe('Leader card display metadata', () => {
+  it('uses the already-read account label and readable generated preview/title, without rewriting the thread', async () => {
+    const raw = 'Memo lm-20261005153000-abcdef';
+    const message = msg({ id: 'generated-preview', kind: 'memo', text: raw });
+    stubSurfaceFetch({ routes: { '/api/verse/leader/thread': { messages: [message] } } });
+    render(<LeaderCardHarness seatNames={new Map([['grok-a', 'Personal Grok 2']])} />);
+    const preview = await screen.findByLabelText("The Leader's latest message");
+    expect(preview).toHaveTextContent('Memo');
+    expect(preview).not.toHaveTextContent('lm-20261005153000-abcdef');
+    expect(within(preview).getByTitle('Memo')).toBeInTheDocument();
+    expect(screen.getByText(/Memo .*Personal Grok 2/)).toBeInTheDocument();
+    expect(message.text).toBe(raw);
+  });
+
+  it.each([undefined, new Map([['grok-a', '   ']])])('shows an honest missing account label rather than its machine key', async (seatNames) => {
+    stubSurfaceFetch({ routes: { '/api/verse/leader/thread': null } });
+    render(<LeaderCardHarness seatNames={seatNames} />);
+    expect(await screen.findByText(/Memo .*Account unavailable/)).toBeInTheDocument();
+    expect(screen.getByText(/Memo .*Account unavailable/)).not.toHaveTextContent('grok-a');
   });
 });

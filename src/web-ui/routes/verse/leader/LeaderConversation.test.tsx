@@ -443,3 +443,40 @@ describe('LeaderConversation — focus requests', () => {
     expect(screen.queryByText('Answering: Keep Codex off?')).toBeNull();
   });
 });
+
+
+describe('generated Leader notes remain readable with exact action controls', () => {
+  it('projects the expanded memo note while preserving control IDs and human/question literals', async () => {
+    const memoId = 'lm-20261005153000-abcdef';
+    const actionId = 'la-20261005153000-abcdef-1';
+    const state = leaderState('live');
+    state.latest!.id = memoId;
+    state.actions[1]!.id = actionId;
+    state.actions[1]!.memoId = memoId;
+    state.latest!.actions = state.actions;
+    const raw = `Memo ${memoId}\n• [B] Read "file(${actionId}).ts" — scheduled (${actionId})\nApprove or veto any of them by id.`;
+    const net = stub({ leader: state, thread: [
+      msg({ id: 'memo-visible', kind: 'memo', memoId, actionIds: [actionId], text: raw }),
+      msg({ id: 'human-literal', from: 'mason', text: `Please keep Memo ${memoId} exactly.` }),
+      msg({ id: 'question-literal', kind: 'question', questionId: `${memoId}:0`, text: `Does Memo ${memoId} name the file?` }),
+      msg({ id: 'system-memo', kind: 'memo', channel: 'system', text: `Memo ${memoId}` }),
+    ] });
+    const log = await mount();
+    const card = await within(log).findByRole('article', { name: 'Leader memo' });
+    await userEvent.click(within(card).getByText('The Leader’s note'));
+    expect(within(card).getByText(/Review these actions before deciding\./)).toHaveTextContent('Review these actions before deciding.');
+    expect(within(card).getByText(/file\(/)).toHaveTextContent(`file(${actionId}).ts`);
+    expect(within(card).queryByText(`Memo ${memoId}`)).toBeNull();
+    expect(within(log).getByText(`Please keep Memo ${memoId} exactly.`)).toBeInTheDocument();
+    expect(within(log).getByText(`Does Memo ${memoId} name the file?`)).toBeInTheDocument();
+    const system = log.querySelector('[data-message-id="system-memo"]');
+    expect(system).toHaveTextContent('Memo');
+    expect(system).not.toHaveTextContent(memoId);
+    setMutationToken(TOKEN);
+    await userEvent.click(within(card).getByRole('button', { name: 'Approve: Raise Grok to 3 lanes' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Approve this action?' });
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(net.posts().some((call) => call.url === `/api/verse/leader/actions/${actionId}/approve`)).toBe(true));
+    expect(net.thread[0]!.text).toBe(raw);
+  });
+});

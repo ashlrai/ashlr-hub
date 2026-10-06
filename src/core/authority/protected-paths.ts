@@ -78,6 +78,8 @@ export interface ProtectedPathHit {
  *     adoption rests on — a fleet that could edit them could grade itself.
  */
 export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
+  // Pure display projection imported by existing Tier-1 Telegram prose helpers.
+  'src/core/vision/leader-display-text.ts',
   // Authority and daemon
   'src/core/authority/**',
   'src/core/daemon/activation-permit.ts',

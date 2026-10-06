@@ -17,6 +17,7 @@
  *
  * Framework-free; tested directly (thread-model.test.ts).
  */
+import { formatLeaderDisplayText } from '../../../../core/vision/leader-display-text.js';
 import {
   LEADER_THREAD_CHANNELS,
   LEADER_THREAD_KINDS,
@@ -314,6 +315,13 @@ export const CHANNEL_LABEL: Readonly<Record<LeaderThreadChannel, string>> = {
   cli: 'CLI',
   system: 'System',
 };
+
+/** Only source-generated memo/action prose is projected; human words and model conversation stay exact. */
+export function displayThreadText(message: Pick<LeaderThreadMessage, 'from' | 'kind' | 'text'>): string {
+  return message.from === 'leader' && (message.kind === 'memo' || message.kind === 'action')
+    ? formatLeaderDisplayText(message.text, undefined, message.kind === 'memo')
+    : message.text;
+}
 
 /** The newest message from the Leader (Command's preview line). */
 export function latestLeaderMessage(messages: readonly LeaderThreadMessage[]): LeaderThreadMessage | null {

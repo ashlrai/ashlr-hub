@@ -125,6 +125,7 @@
 /docs/**/*AUTHORITY* @masonwyatt23
 /docs/**/*authority* @masonwyatt23
 # tier1-authority-code: Tier-1 authority code: the fleet may never change the code that decides what the fleet may do
+/src/core/vision/leader-display-text.ts @masonwyatt23
 /src/core/authority/** @masonwyatt23
 /src/core/daemon/activation-permit.ts @masonwyatt23
 /src/core/daemon/tick-hooks.ts @masonwyatt23

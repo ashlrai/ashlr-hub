@@ -29,7 +29,7 @@ import { scrollToAnchor } from '../command/nav.js';
 import commandStyles from '../command/command.module.css';
 import { expectedDeltaText, memoActions } from '../mind/leader-model.js';
 import { LeaderComposer } from './LeaderComposer.js';
-import { CHANNEL_LABEL, clockTime, previewText, type PendingMessage, type ThreadEntry, type ThreadRow } from './thread-model.js';
+import { CHANNEL_LABEL, clockTime, displayThreadText, previewText, type PendingMessage, type ThreadEntry, type ThreadRow } from './thread-model.js';
 import type { LeaderThreadChannel, LeaderThreadMessage } from './thread-types.js';
 import styles from './leader.module.css';
 
@@ -141,7 +141,7 @@ function MemoCard({ message, ctx }: { message: LeaderThreadMessage; ctx: ThreadC
         </dl>
       ) : (
         <div className={styles.prose}>
-          <MessageMarkdown text={message.text} />
+          <MessageMarkdown text={displayThreadText(message)} />
         </div>
       )}
       {list.length ? (
@@ -160,7 +160,7 @@ function MemoCard({ message, ctx }: { message: LeaderThreadMessage; ctx: ThreadC
         <details className={styles.more}>
           <summary>The Leader’s note</summary>
           <div className={styles.prose}>
-            <MessageMarkdown text={message.text} />
+            <MessageMarkdown text={displayThreadText(message)} />
           </div>
         </details>
       ) : null}
@@ -205,7 +205,7 @@ function ActionNote({ message, ctx }: { message: LeaderThreadMessage; ctx: Threa
   return (
     <div className={styles.leaderText}>
       <div className={styles.prose}>
-        <MessageMarkdown text={message.text} />
+        <MessageMarkdown text={displayThreadText(message)} />
       </div>
       {list.length ? (
         <ul className={`${commandStyles.actionList} ${styles.memoActions}`} aria-label="Actions">
@@ -301,7 +301,7 @@ export function ThreadRows({ rows, ctx }: { rows: readonly ThreadRow[]; ctx: Thr
         if (row.type === 'system') {
           return (
             <p key={row.key} className={styles.system} data-message-id={row.entry.message.id}>
-              {row.entry.message.text} <time dateTime={row.entry.message.at}>{clockTime(row.entry.message.at)}</time>
+              {displayThreadText(row.entry.message)} <time dateTime={row.entry.message.at}>{clockTime(row.entry.message.at)}</time>
             </p>
           );
         }

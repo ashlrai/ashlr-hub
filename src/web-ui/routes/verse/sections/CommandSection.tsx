@@ -221,7 +221,7 @@ export function CommandSection() {
         <NeedsYouCard state={activity} actions={actions} fleetLine={fleetLine} seatNames={names} />
       </Cell>
       <Cell span={7}>
-        <LeaderCard read={leader.data} loading={leader.status === 'loading'} actions={actions} />
+        <LeaderCard read={leader.data} loading={leader.status === 'loading'} actions={actions} seatNames={names} />
       </Cell>
       {banner && kpisEmpty ? null : (
         <Cell span={12}>

@@ -227,3 +227,33 @@ describe('LeaderScreen — writes', () => {
     expect(stub.posts()[0]).toMatchObject({ method: 'POST', url: '/api/verse/leader/directives', body: { text: 'Quiet after 10pm' } });
   });
 });
+
+
+describe('LeaderScreen — generated display text', () => {
+  it('keeps phone memo/action prose readable and routes approval with the original ID', async () => {
+    const memoId = 'lm-20261005153000-abcdef';
+    const actionId = 'la-20261005153000-abcdef-1';
+    const raw = `Memo ${memoId}\n• [B] Read \`file(${actionId}).ts\` — scheduled (${actionId})\nApprove or veto any of them by id.`;
+    const state = leaderState('live');
+    state.actions[1]!.id = actionId;
+    const net = stubLeader({ leader: state, thread: [
+      msg({ id: 'readable-memo', kind: 'memo', memoId, actionIds: [actionId], text: raw }),
+      msg({ id: 'readable-action', kind: 'action', text: `Approved ${actionId}: recorded` }),
+      msg({ id: 'literal-question', kind: 'question', questionId: `${memoId}:0`, text: `Does Memo ${memoId} name the file?` }),
+      msg({ id: 'literal-human', from: 'mason', text: `Keep Memo ${memoId} exactly.` }),
+      msg({ id: 'readable-system', kind: 'memo', channel: 'system', text: `Memo ${memoId}` }),
+    ] });
+    renderMobile(<Harness />);
+    const note = await screen.findByText(/Review these actions before deciding\./);
+    expect(note).toHaveTextContent(`file(${actionId}).ts`);
+    expect(note).not.toHaveTextContent(`scheduled (${actionId})`);
+    expect(screen.getByText('Approved action: recorded')).toBeInTheDocument();
+    expect(screen.getByText(`Does Memo ${memoId} name the file?`)).toBeInTheDocument();
+    expect(screen.getByText(`Keep Memo ${memoId} exactly.`)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Approve now: Raise Grok to 3 lanes' }));
+    const sheet = await screen.findByRole('alertdialog', { name: 'Approve this action now?' });
+    await userEvent.click(within(sheet).getByRole('button', { name: 'Approve now' }));
+    await waitFor(() => expect(net.posts().some((call) => call.url === `/api/verse/leader/actions/${actionId}/approve`)).toBe(true));
+    expect(raw).toContain(memoId);
+  });
+});
