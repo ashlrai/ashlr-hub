@@ -24,12 +24,50 @@ Manual selections remain pinned. Local-only projects retain their local-only
 boundary. A failed handoff preserves the draft; it does not send a duplicate
 turn. Unknown project privacy is resolved before remote classification or work.
 
+### One conversation with the Manager
+
+In an existing chat, choose **Manager** in the **Auto seat** menu. **One
+conversation; Phantom plans, delegates and reviews across your resources.**
+Your project folders must each match one current enrolled repository. The
+Manager uses the resident fleet; choosing it does not activate a dormant fleet
+or authorize another account.
+
+Messages are saved in this conversation before their references reach the
+outcome. A confirmed send means **saved**, not launched or completed. You can
+send guidance while a native turn runs; that turn continues separately. If a
+response is uncertain, **Retry saved message** uses the original message
+identity and preserves a newer draft. The status line shows actual planning,
+review, queued, paused, failed, or unavailable state. **Pause manager** and
+**Resume manager** update the existing outcome.
+
+Finished Manager replies come from registered, persisted runs. Opening the
+chat or its visible status poll recovers missing replies after a restart.
+Expand **Manager · ‹model›** for the selected seat, run, stage, and complete
+actual source; the technical result protocol stays folded by default. The
+selected seat is routing provenance, not a separate billing-account receipt.
+
+This initial mode accepts text and project files. Uploaded chat attachments
+remain in your draft and require native routing. **Auto**, **Cheap-first**, and
+**Auto off** retain their existing behavior; choosing Manager is explicit.
+Switching routing modes does not pause an existing outcome; use **Pause
+manager**. Work still needs actual proposal, verification, and merge evidence to
+complete.
+
 ## Work for me
 
 In Fleet, select **New outcome**. Enter the desired result, select enrolled
 repositories, and describe how you will know it worked. The Leader refines a
 plan through its existing planning cadence. Independent ready tasks enter the
 same resident queue and resource router used by other fleet work.
+
+Expand a saved outcome and select **Enable manager** to use the shared frontier
+Manager for planning and review. Its status shows actual planning, reviewing,
+replanning, waiting or failure; the recorded route names the selected engine and
+model. Enablement uses your current outcome revision and existing fleet
+authority. If a response is uncertain, retry preserves the original command;
+**Use current manager revision** explicitly replaces a stale revision. Resume a
+paused outcome before enabling its Manager. Existing chat-linked Managers keep
+their conversation, and ordinary outcomes retain the Leader planning path.
 
 ```mermaid
 flowchart LR

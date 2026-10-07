@@ -17,9 +17,11 @@ export function normalizeOutcomeOperation(value: unknown): OutcomeOperation {
   const input = object(value);
   if (input.kind === 'read') { exactKeys(input, ['kind']); return { kind: 'read' }; }
   const kind = input.kind;
-  if (kind !== 'start' && kind !== 'edit' && kind !== 'pause' && kind !== 'resume') throw new Error('Invalid outcome action.');
+  if (kind !== 'start' && kind !== 'edit' && kind !== 'pause' && kind !== 'resume' && kind !== 'manager-configure' && kind !== 'manager-interject') throw new Error('Invalid outcome action.');
   const keys = ['kind', 'id', 'commandId', 'expectedRevision'];
   if (kind === 'start' || kind === 'edit') keys.push('scope');
+  if (kind === 'manager-configure') keys.push('mode', 'sessionId');
+  if (kind === 'manager-interject') keys.push('reference');
   exactKeys(input, keys);
   if (typeof input.id !== 'string' || !OUTCOME_ID_PATTERN.test(input.id) || !outcomeToken(input.commandId) ||
       !Number.isSafeInteger(input.expectedRevision) || Number(input.expectedRevision) < 0 ||
@@ -33,6 +35,19 @@ export function normalizeOutcomeOperation(value: unknown): OutcomeOperation {
     const expanded = { ...scope, targetRepos: Array.isArray(scope.targetRepos)
       ? scope.targetRepos.map(repo => typeof repo === 'string' ? expandHomePrefix(repo) : repo) : scope.targetRepos };
     return { ...command, kind, scope: normalizeOutcomeScope(expanded as unknown as OutcomeScope) };
+  }
+  if (kind === 'manager-configure') {
+    if (!['interactive', 'resident'].includes(String(input.mode)) ||
+        !(input.sessionId === null || outcomeToken(input.sessionId)) ||
+        input.mode === 'interactive' && input.sessionId === null) throw new Error('Invalid manager configuration.');
+    return { ...command, kind, mode: input.mode as 'interactive' | 'resident', sessionId: input.sessionId as string | null };
+  }
+  if (kind === 'manager-interject') {
+    const reference = object(input.reference); exactKeys(reference, ['sessionId', 'messageId', 'eventSeq']);
+    if (!outcomeToken(reference.sessionId) || !outcomeToken(reference.messageId) ||
+        !Number.isSafeInteger(reference.eventSeq) || Number(reference.eventSeq) < 1) throw new Error('Invalid saved manager message.');
+    return { ...command, kind, reference: { sessionId: reference.sessionId, messageId: reference.messageId,
+      eventSeq: Number(reference.eventSeq) } };
   }
   return { ...command, kind };
 }

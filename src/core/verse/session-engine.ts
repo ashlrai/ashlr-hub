@@ -1,3 +1,4 @@
+import { localSpeedBinding, type LocalSpeedBinding } from './local-throughput.js';
 /**
  * Verse session engine — owns session lifecycle, the durable store, and the
  * one-process-per-turn spawn (detached process group, SIGINT → grace → SIGKILL).
@@ -98,6 +99,7 @@ import {
 } from './context-math.js';
 import type { SeatReadiness } from './health-types.js';
 import { legacyModelOptionFallback } from './model-windows.js';
+import { isPersistedManagerEvent, readStoredManagerEvents } from './manager-conversation.js';
 import {
   argvMarkers,
   createProcessRegistry,
@@ -124,6 +126,8 @@ import {
   type VerseErrorCode as VerseEventErrorCode,
   type VerseEvent,
   type VerseModelOption,
+  type VerseManagerMessageReference,
+  type VerseManagerResultIdentity,
   type VerseRecoveryHow,
   type VerseSeat,
   type VerseSession,
@@ -143,6 +147,7 @@ import {
   controlOptionsFor,
   effectiveControls,
   initialControlsFor,
+  parseDefaultsUpdate,
   readControlDefaults,
   refusalFor,
   writeControlDefaults,
@@ -162,6 +167,7 @@ import {
   type VerseLiveStatus,
   type VerseQueueResponse,
   type VerseSessionControlDefaults,
+  type VerseSessionControlDefaultsResult,
   type VerseSessionControlDefaultsUpdate,
   type VerseSessionControlsResponse,
   type VerseSessionControlsUpdate,
@@ -293,6 +299,8 @@ export interface VerseEngineHandle {
   listSessions(): VerseSession[];
   getSession(id: string): VerseSession | null;
   getEvents(id: string, fromSeq?: number): VerseEvent[];
+  /** Whitelisted saved local configuration only; never returns a private launch record. */
+  getLocalSpeedBinding?(id: string): LocalSpeedBinding | null;
   /**
    * `opts` carries what the API resolved server-side (memory snapshot, handoff
    * provenance). Omitted by every pre-3.9 caller, whose records then carry no
@@ -333,6 +341,12 @@ export interface VerseEngineHandle {
    * `session.remote`. Optional so test fakes and older handles conform.
    */
   recordRemoteStatus?(id: string, status: VerseRemoteStatusInput): VerseSession;
+  /** Durable interjection only: never launches or increments a native turn. */
+  recordManagerMessage?(id: string, input: { outcomeId: string; messageId: string; text: string }): Promise<VerseManagerMessageReference>;
+  /** Reads the host-validated terminal stage; callers cannot supply reply text or a run ID. */
+  recordManagerResult?(id: string, input: { outcomeId: string; stageId: string }): Promise<VerseManagerResultIdentity | null>;
+  /** Fresh complete saved inventory, including archive; null means unknown, never no replies. */
+  getManagerResultStages?(id: string, outcomeId: string): string[] | null;
   deleteSession(id: string): void;
   renameSession(id: string, title: string): VerseSession;
   /**
@@ -363,7 +377,7 @@ export interface VerseEngineHandle {
    */
   setControls?(id: string, update: VerseSessionControlsUpdate): VerseSessionControlsResponse;
   getControlDefaults?(): VerseSessionControlDefaults;
-  setControlDefaults?(update: VerseSessionControlDefaultsUpdate): VerseSessionControlDefaults;
+  setControlDefaults?(update: VerseSessionControlDefaultsUpdate): VerseSessionControlDefaultsResult;
   /** What a running turn is doing right now; null when none runs. O(1), no I/O. */
   peekLiveStatus?(sessionId: string): VerseLiveStatus | null;
   /** Turn ends with seq > cursor, oldest first (last VERSE_TURN_END_BUFFER kept). */
@@ -467,6 +481,9 @@ export const VERSE_TURN_HOOK_TIMEOUT_MS = 15_000;
 export interface VerseEngineOptions {
   /** Store root. Default `~/.ashlr/verse`. */
   root?: string;
+  /** Host readers; tests may replace them without launching a provider or fabricating a saved run. */
+  managerSessionReader?: (input: { outcomeId: string; sessionId: string; roots: readonly string[] }) => boolean;
+  managerResultReader?: (input: { outcomeId: string; stageId: string; sessionId: string }) => (Omit<VerseManagerResultIdentity, 'outcomeId' | 'stageId'> & { text: string }) | null;
   /** 3.15 checkpoint hooks (see VerseTurnHooks). Default none. */
   turnHooks?: VerseTurnHooks | null;
   spawn?: typeof nodeSpawn;
@@ -2673,6 +2690,14 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       return cloneSession(session);
     },
 
+    getLocalSpeedBinding(id: string): LocalSpeedBinding | null {
+      const session = store.get(id);
+      if (!session || session.engine !== 'local') return null;
+      const launch = store.loadLaunch(id);
+      if (!isSeatLaunch(launch) || launch.seat.id !== session.seatId) return null;
+      return localSpeedBinding(launch.seat, session.model, launch);
+    },
+
     getEvents(id: string, fromSeq = 0): VerseEvent[] {
       require(id);
       return store.readEvents(id, fromSeq);
@@ -2753,12 +2778,18 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       const handoffFrom = resolveHandoffSource(req, opts);
 
       // V3.10: the operator's defaults for new chats (global, then this
-      // seat's), each dropped when this seat cannot honour it. Bypass is never
-      // inherited. Nothing set → no `controls` key, so the record is
+      // seat's), each dropped when this seat cannot honour it. Confirmed Full
+      // access is inherited; an explicit source Plan override remains Plan.
+      // Nothing set → no `controls` key, so the record is
       // byte-identical to a 3.9 one.
       const controls = initialControlsFor(readControlDefaults(root), seat, {
         claudeCliVersion: engine === 'claude' ? pinnedClaudeVersion(launch) : null,
       });
+
+      if (handoffFrom && store.get(handoffFrom.sessionId)?.controls?.permissionMode === 'plan' &&
+          refusalFor(controlOptionsFor(seat).permissionModes, 'plan', 'permission mode') === null) {
+        controls.permissionMode = 'plan';
+      }
 
       const title = req.title ? normaliseTitle(req.title) : '';
       const at = nowIso();
@@ -2918,6 +2949,88 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       return true;
     },
 
+    getManagerResultStages(id, outcomeId): string[] | null {
+      require(id);
+      if (!/^[a-z0-9](?:[a-z0-9._-]{0,78}[a-z0-9])?$/.test(outcomeId)) return null;
+      const events = readStoredManagerEvents(id, root);
+      return events ? events.flatMap(event => event.type === 'manager-result' && event.outcomeId === outcomeId ? [event.stageId] : []) : null;
+    },
+
+    async recordManagerMessage(id, input): Promise<VerseManagerMessageReference> {
+      if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
+      require(id);
+      if (!isObject(input) || Object.keys(input).length !== 3 ||
+          !isPersistedManagerEvent({ ...input, seq: 1, at: nowIso(), type: 'manager-message', turnId: null })) {
+        throw new VerseError('VERSE_INVALID', 'manager message is malformed');
+      }
+      const reader = opts.managerSessionReader ?? (await import('../daemon/outcome-manager.js')).readOutcomeManagerSession;
+      // Lazy loading may yield. Re-read the live chat and association immediately before persistence.
+      if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
+      const session = require(id);
+      if (!reader({ outcomeId: input.outcomeId, sessionId: id, roots: verseSessionRoots(session) })) {
+        throw new VerseError('VERSE_INVALID', 'manager outcome is not active for this chat and workspace');
+      }
+      const events = readStoredManagerEvents(id, root);
+      if (!events) throw new VerseError('VERSE_INVALID', 'manager chat history is unavailable');
+      const prior = events.find(event => event.type === 'manager-message' && event.messageId === input.messageId);
+      if (prior) {
+        if (prior.type !== 'manager-message' || prior.outcomeId !== input.outcomeId || prior.text !== input.text) {
+          throw new VerseError('VERSE_INVALID', 'manager message identity already names different content');
+        }
+        return { sessionId: id, messageId: prior.messageId, eventSeq: prior.seq };
+      }
+      // Unlike native stdout handling, a failed append is returned to the requester; no false acceptance.
+      const stored = store.appendEvent(id, { ...input, type: 'manager-message', turnId: null }, nowIso());
+      fanOut(id, stored);
+      if (reasoningTap) tapReasoning(id, stored);
+      return { sessionId: id, messageId: input.messageId, eventSeq: stored.seq };
+    },
+
+    async recordManagerResult(id, input): Promise<VerseManagerResultIdentity | null> {
+      if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
+      require(id);
+      if (!isObject(input) || Object.keys(input).length !== 2 ||
+          typeof input.outcomeId !== 'string' || !/^[a-z0-9](?:[a-z0-9._-]{0,78}[a-z0-9])?$/.test(input.outcomeId) ||
+          typeof input.stageId !== 'string' || !/^[a-f0-9]{64}$/.test(input.stageId)) {
+        throw new VerseError('VERSE_INVALID', 'manager result identity is malformed');
+      }
+      const helpers = opts.managerSessionReader && opts.managerResultReader ? null : await import('../daemon/outcome-manager.js');
+      if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
+      const session = require(id);
+      const roots = verseSessionRoots(session);
+      const association = opts.managerSessionReader
+        ? opts.managerSessionReader({ outcomeId: input.outcomeId, sessionId: id, roots })
+        : (() => {
+          const projection = helpers!.readOutcomeManagerSessionProjection(id, roots);
+          return projection.sourceState === 'healthy' && projection.association.outcomeId === input.outcomeId &&
+            projection.association.terminalStageIds.includes(input.stageId);
+        })();
+      if (!association) return null;
+      const result = (opts.managerResultReader ?? helpers!.readOutcomeManagerResult)({ ...input, sessionId: id });
+      if (!result) return null;
+      const event = { ...input, ...result, type: 'manager-result' as const, turnId: null };
+      if (!isPersistedManagerEvent({ ...event, seq: 1, at: nowIso() })) {
+        throw new VerseError('VERSE_INVALID', 'saved manager result is malformed');
+      }
+      const events = readStoredManagerEvents(id, root);
+      if (!events) throw new VerseError('VERSE_INVALID', 'manager chat history is unavailable');
+      const prior = events.find(candidate => candidate.type === 'manager-result' &&
+        candidate.outcomeId === input.outcomeId && candidate.stageId === input.stageId);
+      if (prior) {
+        const { seq: _seq, at: _at, ...saved } = prior;
+        if (Object.keys(saved).length !== Object.keys(event).length ||
+            Object.entries(event).some(([key, value]) => (saved as Record<string, unknown>)[key] !== value)) {
+          throw new VerseError('VERSE_INVALID', 'manager stage already names a different reply');
+        }
+      } else {
+        const stored = store.appendEvent(id, event, nowIso());
+        fanOut(id, stored);
+        if (reasoningTap) tapReasoning(id, stored);
+      }
+      const { text: _text, ...identity } = result;
+      return { ...input, ...identity };
+    },
+
     recordRemoteStatus(id: string, status: VerseRemoteStatusInput): VerseSession {
       const session = require(id);
       if (session.engine !== 'devin') throw new VerseError('VERSE_INVALID', 'only a Devin chat has a remote status');
@@ -3072,11 +3185,47 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       return readControlDefaults(root);
     },
 
-    setControlDefaults(update: VerseSessionControlDefaultsUpdate): VerseSessionControlDefaults {
-      if (isObject(update) && (update as { permissionMode?: unknown }).permissionMode === 'bypass') {
-        throw new VerseError('VERSE_INVALID', 'bypass is confirmed per chat and can never be a default');
+    setControlDefaults(update: VerseSessionControlDefaultsUpdate): VerseSessionControlDefaultsResult {
+      if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
+      if (!isObject(update)) throw new VerseError('VERSE_INVALID', 'update must be an object');
+      const parsed = parseDefaultsUpdate(update as Record<string, unknown>);
+      if (!parsed.ok) throw new VerseError('VERSE_INVALID', parsed.error);
+      const defaults = writeControlDefaults(root, parsed.update);
+      if (!parsed.update.applyExisting) return defaults;
+      const application: NonNullable<VerseSessionControlDefaultsResult['application']> = {
+        updated: 0, appliesNextTurn: 0, preservedPlan: 0, unchanged: 0, refusals: [],
+      };
+      for (const session of store.list()) {
+        if (parsed.update.seatId && session.seatId !== parsed.update.seatId) continue;
+        if (session.controls?.permissionMode === 'plan') { application.preservedPlan++; continue; }
+        if (session.controls?.permissionMode === 'bypass') { application.unchanged++; continue; }
+        let launch: VerseSeatLaunch;
+        try { launch = requireLaunch(session.id); }
+        catch { application.refusals.push({ sessionId: session.id, reason: 'unavailable' }); continue; }
+        if (refusalFor(controlOptionsFor(launch.seat).permissionModes, 'bypass', 'permission mode')) {
+          application.refusals.push({ sessionId: session.id, reason: 'unavailable' }); continue;
+        }
+        // Preserve the live reference: a running child's settlement also uses
+        // this object. Ordinary save() swallows disk failures, so only the
+        // strict atomic store write can prove this preference was saved.
+        const previousControls = session.controls;
+        const previousUpdatedAt = session.updatedAt;
+        session.controls = { ...session.controls, permissionMode: 'bypass' };
+        session.updatedAt = nowIso();
+        try { store.save(session); }
+        catch {
+          if (previousControls === undefined) delete session.controls;
+          else session.controls = previousControls;
+          session.updatedAt = previousUpdatedAt;
+          application.refusals.push({ sessionId: session.id, reason: 'persistence-failed' });
+          continue;
+        }
+        application.updated++;
+        if (isBusy(session.id)) application.appliesNextTurn++;
+        noteListing(session);
+        announce(session.id);
       }
-      return writeControlDefaults(root, update);
+      return { ...defaults, application };
     },
 
     peekLiveStatus(sessionId: string): VerseLiveStatus | null {

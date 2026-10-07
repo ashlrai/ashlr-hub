@@ -82,7 +82,7 @@ describe('MultiModelBar', () => {
     stubFetch();
     renderBar('what does this regex match?');
     expect(await screen.findByText('Qwen3 Coder (local) — quick explanation — free and private on this Mac.')).toBeInTheDocument();
-    expect(screen.getByText(/On this Mac · private · 66k ctx · 42.5 tok\/s/)).toBeInTheDocument();
+    expect(screen.getByText(/On this Mac · private · 66k ctx · 43 tok\/s · age unavailable/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Warm up' })).toBeInTheDocument();
     // Override: every other eligible seat is offered, with its note.
     const select = screen.getByRole('combobox', { name: 'Send this message to' });
@@ -257,4 +257,58 @@ describe('toAdvisorSeats', () => {
     expect(seats.map((s) => [s.seatId, s.local, s.private])).toEqual([['claude-main', false, false], [LOCAL_SEAT.id, true, true]]);
     expect(toAdvisorSeats([LOCAL_SEAT], []).map((s) => s.private)).toEqual([false]);
   });
+});
+
+
+describe('explicit Manager mode', () => {
+  it('opts in without a model choice, saves the message once, and never calls native routing or classification', async () => {
+    saveAutoPref('vs_1', 'manager'); const flow = stubFlow();
+    const posts: Record<string, unknown>[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).includes('/outcomes/session/')) return Response.json({ sourceState: 'unlinked', association: null });
+      if (String(url).includes('/outcomes/interactive')) {
+        const input = JSON.parse(String(init?.body)); posts.push(input);
+        return Response.json({ sourceState: 'healthy', association: { outcomeId: input.outcomeId, revision: 3, scopeRevision: 1, paused: false, terminalStageIds: [], manager: { sourceState: 'healthy', enabled: true, mode: 'interactive', sessionId: 'vs_1', conversationRevision: 1, running: null, next: null, latest: null } } }, { status: 202 });
+      }
+      return new Response('unused', { status: 404 });
+    }));
+    const { intercept } = renderBar('Improve this work');
+    expect(screen.getByRole('combobox', { name: 'Auto seat' })).toHaveDisplayValue('Manager');
+    await act(async () => { expect(await intercept('Improve this work')).toBe('handled'); });
+    expect(posts).toHaveLength(1); expect(posts[0]?.text).toBe('Improve this work');
+    expect(flow.send).not.toHaveBeenCalled(); expect(flow.handoff).not.toHaveBeenCalled(); expect(flow.create).not.toHaveBeenCalled();
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls.some(([url]) => String(url).includes('/multimodel/label'))).toBe(false);
+  });
+  it('keeps a failed manager send held with a retry control instead of native fallback', async () => {
+    saveAutoPref('vs_1', 'manager');
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => String(url).includes('/outcomes/session/')
+      ? Response.json({ sourceState: 'unlinked', association: null }) : new Response('unavailable', { status: 503 })));
+    const { intercept } = renderBar('Preserve this draft');
+    await act(async () => { expect(await intercept('Preserve this draft')).toBe('held'); });
+    expect(await screen.findByRole('button', { name: 'Retry saved message' })).toBeInTheDocument();
+  });
+});
+
+
+describe('local speed evidence readout', () => {
+  it('uses two significant figures and original age/scope without displaying runtime readiness', async () => {
+    const { localSpeedReadout, localSpeedCompactReadout, localWarmReadout } = await import('./local-speed-readout.js');
+    const badge = { ...CONTEXT.local[0]!, tokPerSec: 41.234567, tokPerSecObservedAt: '2026-10-07T00:00:00Z', tokPerSecScope: 'turn-end-to-end' as const };
+    expect(localSpeedCompactReadout(badge, '2026-10-07T02:00:00Z')).toBe('41 tok/s · 2 h ago');
+    expect(localSpeedReadout(badge, '2026-10-07T02:00:00Z')).toBe('41 tok/s · last turn, end to end · 2 h ago');
+    expect(localSpeedReadout({ ...badge, tokPerSecObservedAt: null }, '2026-10-07T02:00:00Z')).toContain('age unavailable');
+    expect(localSpeedReadout({ ...badge, tokPerSec: Infinity }, '2026-10-07T02:00:00Z')).toBe('speed not measured yet');
+    expect(localSpeedReadout({ ...badge, tokPerSecScope: 'warm-decode' }, '2026-10-07T00:00:20Z')).toContain('warm-up decode · just measured');
+    expect(localSpeedReadout({ ...badge, tokPerSecScope: 'warm-end-to-end' }, '2026-10-07T00:00:20Z')).toContain('warm-up, end to end');
+    expect(localWarmReadout({ seatId: 'local', ok: true, ms: 2000, loadMs: 1234.567, tokPerSec: 123.456, tokPerSecScope: 'warm-end-to-end', error: null })).toBe('Warm — 120 tok/s (end to end), loaded in 1.2 s.');
+  });
+});
+
+
+it('renders the new-chat local badge with the measured age and scope', async () => {
+  const { LocalSeatBadge } = await import('./LocalSeatBadge.js');
+  stubFetch({ ...CONTEXT, sampledAt: '2026-10-07T02:00:00Z', local: [{ ...CONTEXT.local[0]!, tokPerSec: 41.234567,
+    tokPerSecObservedAt: '2026-10-07T00:00:00Z', tokPerSecScope: 'warm-end-to-end' }] });
+  render(<LocalSeatBadge seatId={LOCAL_SEAT.id} projectPath="/repo" />);
+  expect(await screen.findByText('41 tok/s · warm-up, end to end · 2 h ago')).toBeInTheDocument();
 });

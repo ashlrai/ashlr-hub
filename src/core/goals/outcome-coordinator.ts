@@ -65,6 +65,34 @@ function recordTerminal(current: OutcomeState | null, terminal: OutcomeTerminal)
   return current;
 }
 
+/** Shared graph transformation for an atomic manager result and the existing plan port.
+ * Does not alter work terminal or protected merge completion semantics. */
+export function refineOutcomeState(current: OutcomeState, input: MissionGraphInput): OutcomeState | null {
+  const compiled = compileEcosystemMissionGraph({ ...input, objective: outcomeGraphObjective(current) }, current.scope.targetRepos);
+  if (!compiled.ok || compiled.graph.nodes.some(node => node.kind === 'work' &&
+      (!node.repo || !current.scope.targetRepos.includes(node.repo)))) return null;
+  const definitions = new Map(compiled.graph.nodes.map(node => [node.key, node]));
+  const ids = new Map<string, string>();
+  const nodes = { ...current.nodes };
+  const nextPlan = current.planRevision + 1;
+  const visit = (key: string): string => {
+    const known = ids.get(key);
+    if (known) return known;
+    const definition = definitions.get(key)!;
+    const dependencies = definition.dependsOn.map(visit).sort();
+    const semanticDigest = outcomeDigest({ definition, dependencies });
+    const id = outcomeDigest([current.id, current.scopeDigest, current.scopeRevision, semanticDigest]);
+    ids.set(key, id);
+    if (!nodes[id]) nodes[id] = { id, semanticDigest, basis: { scopeRevision: current.scopeRevision,
+      scopeDigest: current.scopeDigest, planRevision: nextPlan, graphDigest: compiled.graph.graphDigest,
+      definition, dependencies }, materialization: { goalId: `outcome-${id}`, milestoneId: `milestone-${id}`,
+      state: 'intent' }, attempts: [], humanApproval: null, completion: null };
+    return id;
+  };
+  const activeNodeIds = compiled.graph.nodes.map(node => visit(node.key)).sort();
+  return { ...current, planRevision: nextPlan, graphDigest: compiled.graph.graphDigest, graph: compiled.graph, activeNodeIds, nodes };
+}
+
 /** Durable coordination only. The parent Fleet runtime owns materialization, dispatch,
  * authentication, merge and recovery scheduling; this object never launches work. */
 export class OutcomeCoordinator {
@@ -109,29 +137,7 @@ export class OutcomeCoordinator {
           current.scope.targetRepos.some(repo => !inventory.repos.includes(repo))) return null;
       // The caller must supply the complete saved objective above. Only this host-owned
       // representation changes for the graph's bounded wire format.
-      const compiled = compileEcosystemMissionGraph({ ...input, objective: outcomeGraphObjective(current) }, current.scope.targetRepos);
-      if (!compiled.ok || compiled.graph.nodes.some(node => node.kind === 'work' &&
-          (!node.repo || !current.scope.targetRepos.includes(node.repo)))) return null;
-      const definitions = new Map(compiled.graph.nodes.map(node => [node.key, node]));
-      const ids = new Map<string, string>();
-      const nodes = { ...current.nodes };
-      const nextPlan = current.planRevision + 1;
-      const visit = (key: string): string => {
-        const known = ids.get(key);
-        if (known) return known;
-        const definition = definitions.get(key)!;
-        const dependencies = definition.dependsOn.map(visit).sort();
-        const semanticDigest = outcomeDigest({ definition, dependencies });
-        const id = outcomeDigest([current.id, current.scopeDigest, current.scopeRevision, semanticDigest]);
-        ids.set(key, id);
-        if (!nodes[id]) nodes[id] = { id, semanticDigest, basis: { scopeRevision: current.scopeRevision,
-          scopeDigest: current.scopeDigest, planRevision: nextPlan, graphDigest: compiled.graph.graphDigest,
-          definition, dependencies }, materialization: { goalId: `outcome-${id}`, milestoneId: `milestone-${id}`,
-          state: 'intent' }, attempts: [], humanApproval: null, completion: null };
-        return id;
-      };
-      const activeNodeIds = compiled.graph.nodes.map(node => visit(node.key)).sort();
-      return { ...current, planRevision: nextPlan, graphDigest: compiled.graph.graphDigest, graph: compiled.graph, activeNodeIds, nodes };
+      return refineOutcomeState(current, input);
     }, stillAuthorized);
   }
   linkMaterialization(command: OutcomeCommand, nodeId: string, goalId: string, milestoneId: string,

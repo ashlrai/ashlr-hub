@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import type { VerseEvent } from '../../data/api-types.js';
 import { ev, session } from './fixtures.test-support.js';
 import { appendInlineText, splitStreamingBlocks } from './MessageMarkdown.js';
-import { describeCompaction, Transcript } from './Transcript.js';
+import { describeCompaction, managerReplyText, Transcript } from './Transcript.js';
 import { useVerseLive } from './useVerseSession.js';
 import { useVerseTranscript } from './useVerseTranscript.js';
 import { cpuMs, median, openLastTurn, realisticLog, stamp } from './verse-perf.test-support.js';
@@ -635,5 +635,32 @@ describe('Transcript — 3.10.1 polish', () => {
     expect(user.firstElementChild).toHaveTextContent('what is in math.ts?');
     expect(user.className).toMatch(/user/);
     expect(screen.getByRole('log').querySelector('[data-kind="assistant"]')).toHaveTextContent('It exports add.');
+  });
+});
+
+describe('actual manager messages', () => {
+  it('keeps the human reply readable and the complete source and run attribution behind a closed disclosure', async () => {
+    const user = userEvent.setup();
+    const raw = 'I inspected the project.\n<phantom-manager-result>{"kind":"review","decision":"continue"}</phantom-manager-result>';
+    const transcript = buildTranscript([
+      { seq: 1, at: '2026-10-07T12:00:00Z', type: 'manager-message', turnId: null, outcomeId: 'chat-test', messageId: 'message-test', text: 'Improve this project' },
+      { seq: 2, at: '2026-10-07T12:00:01Z', type: 'manager-result', turnId: null, outcomeId: 'chat-test', stageId: 'a'.repeat(64),
+        runId: 'actual-run', attemptId: 'a'.repeat(64), seatId: 'selected-seat', model: 'frontier-model', engine: 'codex', resultDigest: 'b'.repeat(64), text: raw },
+    ]);
+    render(<Transcript transcript={transcript} loaded loadError={null} />);
+    expect(screen.getByText('To the manager')).toBeVisible();
+    const disclosure = screen.getByText('Manager · frontier-model').closest('details')!;
+    expect(disclosure.open).toBe(false);
+    expect(screen.getAllByText('I inspected the project.')[0]).toBeVisible();
+    expect(within(disclosure).getByText('actual-run')).not.toBeVisible();
+    await user.click(within(disclosure).getByText('Manager · frontier-model'));
+    expect(within(disclosure).getByText('actual-run')).toBeVisible();
+    expect(transcript.items.find(item => item.kind === 'assistant')?.text).toBe(raw);
+    expect(managerReplyText(raw)).toBe('I inspected the project.');
+  });
+  it('does not hide ambiguous multiple protocol blocks or ordinary provider replies', () => {
+    const block = '<phantom-manager-result>{}</phantom-manager-result>';
+    expect(managerReplyText('Hello')).toBe('Hello');
+    expect(managerReplyText(block + block)).toBe(block + block);
   });
 });

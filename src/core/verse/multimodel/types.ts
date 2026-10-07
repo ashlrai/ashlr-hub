@@ -223,10 +223,13 @@ export interface LocalModelBadge {
   /** Resident right now (warm), installed only, or not reported. */
   state: 'loaded' | 'available' | 'unknown';
   contextWindow: number | null;
-  /** Generation speed, tokens per second; null when never measured. */
+  /** Measured tokens per second; the scope below distinguishes decode from end-to-end speed. */
   tokPerSec: number | null;
-  /** `warm` = measured by the warm-up probe (pure generation); `turn` = a chat turn end to end (a floor). */
+  /** Legacy summary: `warm` is decode; `turn` is end to end. Prefer the exact scope when present. */
   tokPerSecSource: 'warm' | 'turn' | null;
+  /** Original measurement time and scope; absent on older servers. Never readiness evidence. */
+  tokPerSecObservedAt?: string | null;
+  tokPerSecScope?: 'warm-decode' | 'warm-end-to-end' | 'turn-end-to-end' | null;
   /** The endpoint is loopback: nothing leaves this Mac. */
   private: boolean;
   /** Can drive an agentic session (edit files); null = the runtime did not say. */
@@ -246,6 +249,7 @@ export interface LocalWarmResult {
   /** Load time the runtime reported (cold start), when it said. */
   loadMs: number | null;
   tokPerSec: number | null;
+  tokPerSecScope?: 'warm-decode' | 'warm-end-to-end' | null;
   error: string | null;
 }
 

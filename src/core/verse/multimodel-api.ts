@@ -41,6 +41,7 @@ import { verseSessionRoots, type VerseEvent, type VerseSeat, type VerseSession }
 import { getVerseEngine, type VerseApiContext } from './verse-api.js';
 import { aggregateOutcomes } from './multimodel/learning.js';
 import { labelPrompt, type LabelResult } from './multimodel/label.js';
+import { completedLocalTurnThroughput, localSpeedBinding, localSpeedKey, type LocalSpeedBinding } from './local-throughput.js';
 import { lastThroughput, recordThroughput, warmLocalModel, isLoopbackUrl, type WarmTarget } from './multimodel/local-warm.js';
 import { buildChatMeter } from './multimodel/meter.js';
 import type { ListPrice } from './multimodel/escalation.js';
@@ -80,6 +81,7 @@ export interface MultimodelApiDeps {
   store(): MultimodelStore;
   listSessions(): Promise<VerseSession[]>;
   getEvents(sessionId: string): Promise<VerseEvent[]>;
+  getLocalBinding(sessionId: string): Promise<LocalSpeedBinding | null>;
   /** Seat identity + live telemetry (capacity windows). */
   discovery(cfg: AshlrConfig): Promise<MultimodelDiscovery>;
   /** Fleet model ROI folded per engine (M322/M335). May answer {} while it computes. */
@@ -200,6 +202,7 @@ export const DEFAULT_MULTIMODEL_API_DEPS: MultimodelApiDeps = {
   })(),
   listSessions: async () => (await getVerseEngine()).listSessions(),
   getEvents: async (id) => (await getVerseEngine()).getEvents(id),
+  getLocalBinding: async (id) => (await getVerseEngine()).getLocalSpeedBinding?.(id) ?? null,
   discovery: defaultDiscovery,
   roi: defaultRoi,
   localOnlyReason: defaultLocalOnlyReason,
@@ -336,32 +339,18 @@ function engineOf(discovery: MultimodelDiscovery | null, seatId: string): string
 /** How many of a model's newest local chats are searched for a finished turn. */
 const THROUGHPUT_SCAN_SESSIONS = 3;
 
-async function turnThroughput(sessions: readonly VerseSession[], events: (id: string) => Promise<VerseEvent[]>, model: string): Promise<number | null> {
-  // The newest local chats on this model: output tokens over the last clean turn (end to end — a floor).
-  const newest = sessions
-    .filter((s) => s.engine === 'local' && s.model === model && s.turnCount > 0)
-    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
-    .slice(0, THROUGHPUT_SCAN_SESSIONS);
-  for (const session of newest) {
-    const tps = await sessionThroughput(session.id, events);
-    if (tps !== null) return tps;
-  }
-  return null;
-}
-
-function sessionThroughput(sessionId: string, events: (id: string) => Promise<VerseEvent[]>): Promise<number | null> {
-  return events(sessionId).then((list) => {
-    const out = new Map<string, number>();
-    for (const e of list) if (e.type === 'usage' && typeof e.usage?.outputTokens === 'number') out.set(e.turnId, e.usage.outputTokens);
-    for (let i = list.length - 1; i >= 0; i -= 1) {
-      const e = list[i]!;
-      if (e.type !== 'turn-done' || !e.ok) continue;
-      const tokens = out.get(e.turnId);
-      if (!tokens || !(e.durationMs > 0)) continue;
-      return Math.round((tokens / (e.durationMs / 1000)) * 10) / 10;
-    }
-    return null;
-  }, () => null);
+async function turnThroughput(deps: MultimodelApiDeps, sessions: readonly VerseSession[], binding: LocalSpeedBinding) {
+  const newest = sessions.filter(s => s.engine === 'local' && s.seatId === binding.seatId && s.model === binding.model && s.turnCount > 0)
+    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, THROUGHPUT_SCAN_SESSIONS);
+  const readings = await Promise.all(newest.map(async session => {
+    try {
+      const saved = await deps.getLocalBinding(session.id);
+      if (!saved || localSpeedKey(saved) !== localSpeedKey(binding)) return null;
+      const reading = completedLocalTurnThroughput(await deps.getEvents(session.id));
+      return reading?.contextWindow === binding.contextWindow ? reading : null;
+    } catch { return null; }
+  }));
+  return readings.filter(reading => reading !== null).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0] ?? null;
 }
 
 export async function localBadges(deps: MultimodelApiDeps, discovery: MultimodelDiscovery): Promise<LocalModelBadge[]> {
@@ -371,12 +360,13 @@ export async function localBadges(deps: MultimodelApiDeps, discovery: Multimodel
     const model = seat.models[0]?.id ?? seat.id.replace(/^local:/, '');
     const launch = discovery.launches.get(seat.id);
     const endpoint = launch?.anthropicBaseUrl ?? launch?.ollamaBaseUrl ?? '';
-    let reading = lastThroughput(model);
-    if (!reading) {
-      const tps = await turnThroughput(sessions, deps.getEvents, model);
-      if (tps !== null) {
-        reading = { tokPerSec: tps, source: 'turn', at: new Date(deps.now()).toISOString() };
-        recordThroughput(model, reading);
+    const binding = launch ? localSpeedBinding(seat, model, launch) : null;
+    let reading = binding ? lastThroughput(binding) : null;
+    if (binding) {
+      const latest = await turnThroughput(deps, sessions, binding);
+      if (latest && (!reading || Date.parse(latest.at) > Date.parse(reading.at))) {
+        reading = { tokPerSec: latest.tokPerSec, source: 'turn', scope: 'turn-end-to-end', at: latest.at };
+        recordThroughput(binding, reading);
       }
     }
     return {
@@ -386,6 +376,8 @@ export async function localBadges(deps: MultimodelApiDeps, discovery: Multimodel
       contextWindow: seat.contextWindow ?? seat.models[0]?.contextWindow ?? null,
       tokPerSec: reading?.tokPerSec ?? null,
       tokPerSecSource: reading?.source ?? null,
+      tokPerSecObservedAt: reading?.at ?? null,
+      tokPerSecScope: reading?.scope ?? null,
       private: endpoint !== '' && isLoopbackUrl(endpoint),
       supportsTools: null,
     };
@@ -559,7 +551,7 @@ export function createMultimodelApi(deps: MultimodelApiDeps = DEFAULT_MULTIMODEL
           return true;
         }
         const model = seat.models[0]?.id ?? seatId.replace(/^local:/, '');
-        const result = await deps.warm({ seatId, model, ollamaBaseUrl: launch.ollamaBaseUrl, anthropicBaseUrl: launch.anthropicBaseUrl ?? null });
+        const result = await deps.warm({ seatId, model, contextWindow: seat.contextWindow ?? seat.models[0]?.contextWindow ?? null, ollamaBaseUrl: launch.ollamaBaseUrl, anthropicBaseUrl: launch.anthropicBaseUrl ?? null });
         sendJson(res, 200, result);
         return true;
       }

@@ -1,5 +1,75 @@
 # Talking to the Leader (3.14+)
 
+## Release-backed articles (successor candidate)
+
+The opt-in `release-articles` maintenance lane follows Phantom's latest stable
+GitHub release. It uses fresh official GitHub and npm reads to bind the exact
+numeric repository and current name, release tag, commit and source tree,
+all 15 CI platform jobs and their required steps, dependency Audit, public
+asset metadata, and npm version/integrity. It does not download or execute
+release assets. Registry integrity and GitHub asset digests are metadata
+observations, not independent byte verification or build-adoption authority.
+
+```sh
+ashlr release-articles status --json
+ashlr release-articles enable ashlrai/ashlr-hub
+ashlr release-articles sync --json
+ashlr release-articles disable
+```
+
+Enablement permits this maintenance lane, not a new grant. A current autonomous
+standing grant with exact `ashlrai/ashlar-landing` merge scope, an enrolled
+checkout and Stop off is required before it queues an article in the existing
+fleet task store. The resident standing tick calls the same maintenance path;
+dry runs and disabled/missing configuration do not probe providers or create
+state. Disable stops future maintenance; already queued work remains under the
+normal fleet task and Stop controls. No new daemon, cron, credentials, paid
+artwork, newsletter or social messaging is installed.
+
+A proposed import contains only public identity/version data:
+
+```json
+{"v":1,"repository":"ashlrai/ashlr-hub","version":"3.24.3"}
+```
+
+Use `ashlr release-articles import proposed.json`, then
+`ashlr release-articles sync 3.24.3 --json` to observe that explicit version.
+Private operational indexes, saved PASS flags and extra keys are refused.
+After a repository rename, explicitly select its current exact name; redirects
+do not transfer a grant or activate the renamed label.
+
+The public article draft contains only validated public facts and citations.
+The content task reuses the company's authored-story, cover, RSS and SEO
+pipeline. Its canonical URL is `https://ashlr.ai/news/phantom-release-3-24-3`
+for version 3.24.3. It adds a small public evidence marker beneath
+`/research/phantom-releases/3.24.3/evidence.json` and cites it in the article.
+The marker binds `{v,releaseKey,factsDigest,canonical}`; it contains no private
+receipts, paths, account balances, prompts or tokens. Conceptual art must be
+labeled, and numerical benchmark claims need separate public measurements.
+
+| State | Meaning |
+|---|---|
+| `pending-public-verification` | Fresh official facts are missing or incomplete; no publication claim. |
+| `blocked-repository-authority` | Facts can be read, but the exact company repository is not currently authorized/enrolled. |
+| `queued` | A real normal fleet task exists; repository checks, PR controls and deployment still apply. |
+| `awaiting-production` | Coding work finished or an enqueue outcome is ambiguous; live publication is not confirmed. |
+| `published` | The canonical public page and matching public evidence marker were freshly observed. |
+
+A separate phm.dev teaser is queued only after the canonical company article
+is observed live and `ashlrai/phantom-secrets` has its own exact standing merge
+scope and enrollment. Its production observation is independent. Task
+completion never becomes a deployment receipt. A private locked manifest
+retains durable per-release/digest task identities even after finished tasks
+are pruned. Corrections reuse the canonical article URL, wait for an active
+producer and preserve its original publication date. An ambiguous crash is
+held for inspection rather than silently duplicating work.
+
+Rollback uses a normal reviewed source correction/removal and deployment;
+withdrawing a database story alone cannot remove an authored source article.
+This section documents successor source, not activation in the installed
+3.24.3 release. Actual publication and company scope activation remain separate
+operational steps after source qualification.
+
 The Leader is the fleet's planning agent. It reads deterministic digests of what
 the fleet did (history, the ledger, seat headroom, model outcomes, reasoning
 insights, lessons, its own hit-rate) and writes **memos**: the bottleneck, one

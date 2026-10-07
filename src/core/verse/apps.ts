@@ -35,6 +35,7 @@
  * whose first element is the bare command name.
  */
 import { randomBytes } from 'node:crypto';
+import { completedLocalTurnThroughput } from './local-throughput.js';
 import { execFile } from 'node:child_process';
 import {
   chmodSync,
@@ -266,22 +267,8 @@ export function lastLocalThroughput(
   } catch {
     return null;
   }
-  const outputByTurn = new Map<string, number>();
-  for (const event of events) {
-    if (event.type === 'usage' && typeof event.usage?.outputTokens === 'number') {
-      outputByTurn.set(event.turnId, event.usage.outputTokens);
-    }
-  }
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const event = events[i]!;
-    if (event.type !== 'turn-done' || !event.ok) continue;
-    const out = outputByTurn.get(event.turnId);
-    if (out === undefined || out <= 0 || !(event.durationMs > 0)) continue;
-    const tokPerSec = Math.round((out / (event.durationMs / 1000)) * 10) / 10;
-    if (!Number.isFinite(tokPerSec) || tokPerSec <= 0) continue;
-    return { model: session.model, tokPerSec, at: event.at };
-  }
-  return null;
+  const reading = completedLocalTurnThroughput(events);
+  return reading ? { model: session.model, tokPerSec: reading.tokPerSec, at: reading.at } : null;
 }
 
 /** POSIX single-quoting for a script line; nothing is ever interpolated unquoted. */
@@ -518,7 +505,7 @@ function runtimeRow(snapshot: AppsSnapshot, entry: AppCatalogEntry): VerseAppRow
       const parts = [formatCount(o.models.length, 'model', 'models')];
       if (o.resident.length > 0) parts.push(`${o.resident.length} loaded`);
       if (snapshot.throughput !== null) {
-        parts.push(`≈${snapshot.throughput.tokPerSec} tok/s end to end, last local turn`);
+        parts.push(`≈${new Intl.NumberFormat('en-US', { maximumSignificantDigits: 2 }).format(snapshot.throughput.tokPerSec)} tok/s end to end, last local turn`);
       }
       return { ...base, installed: true, version, health: health('ok', 'running'), detail: parts.join(' · ') };
     }

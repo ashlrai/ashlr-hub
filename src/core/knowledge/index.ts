@@ -24,6 +24,7 @@ import type { KnowledgeChunk } from '../types.js';
 import { activeEnrollmentLenses, listEnrolled, isEnrolled } from '../sandbox/policy.js';
 import { isMirrorPath } from '../fleet/mirrors.js';
 import { scrubSecrets as scrubSharedSecrets } from '../util/scrub.js';
+import { writePrivateFileAtomically } from '../verse/session-store.js';
 
 /**
  * 3.10: drop the fleet's own mirror clones from a DEFAULT scan set. A standing
@@ -255,21 +256,23 @@ function writeMeta(repoPath: string, meta: RepoMeta): void {
  * Collect all indexable source file paths under a repo directory.
  * Bounded by MAX_FILES_PER_REPO. Read-only — never modifies anything.
  */
-function collectFiles(repoPath: string): string[] {
+function collectFiles(repoPath: string): { files: string[]; complete: boolean } {
   const results: string[] = [];
+  let complete = true;
 
   function walk(dir: string): void {
-    if (results.length >= MAX_FILES_PER_REPO) return;
+    if (results.length >= MAX_FILES_PER_REPO) { complete = false; return; }
 
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
+      complete = false;
       return;
     }
 
     for (const entry of entries) {
-      if (results.length >= MAX_FILES_PER_REPO) break;
+      if (results.length >= MAX_FILES_PER_REPO) { complete = false; break; }
 
       const name = entry.name;
 
@@ -302,7 +305,7 @@ function collectFiles(repoPath: string): string[] {
   }
 
   walk(repoPath);
-  return results;
+  return { files: results, complete };
 }
 
 // ---------------------------------------------------------------------------
@@ -415,19 +418,11 @@ async function fetchEmbedding(
 
 /** Overwrite the repo's JSONL file with the provided chunks. */
 function writeChunks(repoPath: string, chunks: KnowledgeChunk[]): void {
-  try {
-    const file = chunksFile(repoPath);
-    const dir = path.dirname(file);
-    fs.mkdirSync(dir, { recursive: true });
-    if (chunks.length === 0) {
-      fs.writeFileSync(file, '', 'utf8');
-      return;
-    }
-    const lines = chunks.map((c) => JSON.stringify(c)).join('\n') + '\n';
-    fs.writeFileSync(file, lines, 'utf8');
-  } catch {
-    // best-effort
-  }
+  const file = chunksFile(repoPath);
+  const lines = chunks.length === 0 ? '' : chunks.map((c) => JSON.stringify(c)).join('\n') + '\n';
+  // Reuse the private store's exclusive-temp/fsync/rename publication. A
+  // failed write reaches buildKnowledge's per-repo catch, never advances meta.
+  writePrivateFileAtomically(path.dirname(file), file, lines);
 }
 
 // ---------------------------------------------------------------------------
@@ -634,7 +629,7 @@ export async function buildKnowledge(
 
 /**
  * Index a single enrolled repo. Returns the number of NEW chunks added.
- * Never throws.
+ * Storage failures reach buildKnowledge's per-repo catch.
  */
 async function indexRepo(
   repoPath: string,
@@ -648,7 +643,8 @@ async function indexRepo(
   const lastIndexedAt = meta?.lastIndexedAt ?? 0;
 
   // Collect all eligible files
-  const allFiles = collectFiles(repoPath);
+  const collection = collectFiles(repoPath);
+  const allFiles = collection.files;
 
   // Filter to only files modified since last index (incremental)
   const changedFiles = allFiles.filter((f) => {
@@ -660,23 +656,23 @@ async function indexRepo(
     }
   });
 
+  const existingChunks = loadChunks(repoPath);
+  const liveFiles = new Set(allFiles.map((f) => path.relative(repoPath, f)));
+
   if (changedFiles.length === 0) {
-    // Nothing changed — repo counts as indexed but adds 0 chunks
+    // Absence proves deletion only after a complete listing, never after an
+    // unreadable directory or a capped walk. Preserve survivor values/vectors
+    // and the incremental timestamp; deletion itself adds no new chunks.
+    if (collection.complete) {
+      const survivors = existingChunks.filter((c) => liveFiles.has(c.file));
+      if (survivors.length !== existingChunks.length) writeChunks(repoPath, survivors);
+    }
     return 0;
   }
 
-  // Load existing chunks (for files not being re-indexed)
-  const existingChunks = loadChunks(repoPath);
   const reindexedFiles = new Set(changedFiles.map((f) => path.relative(repoPath, f)));
-
-  // Live (currently-existing) repo-relative files, for deletion pruning.
-  const liveFiles = new Set(allFiles.map((f) => path.relative(repoPath, f)));
-
-  // Keep chunks from files that are NOT being re-indexed AND still exist on disk.
-  // (A deleted file is absent from collectFiles → not in reindexedFiles → would
-  // otherwise leave permanently-stale chunks that ask/graph cite forever.)
   const keptChunks = existingChunks.filter(
-    (c) => !reindexedFiles.has(c.file) && liveFiles.has(c.file),
+    (c) => !reindexedFiles.has(c.file) && (!collection.complete || liveFiles.has(c.file)),
   );
 
   let newChunks: KnowledgeChunk[] = [];
@@ -728,7 +724,9 @@ async function indexRepo(
     const oldestSkipped = Math.min(...skippedMtimes);
     nextIndexedAt = Math.min(nextIndexedAt, oldestSkipped - 1);
   }
-  writeMeta(repoPath, { repo: repoPath, lastIndexedAt: nextIndexedAt });
+  // An incomplete listing may omit changed files whose mtimes we never saw.
+  // Keep the prior timestamp so a later complete scan can still index them.
+  if (collection.complete) writeMeta(repoPath, { repo: repoPath, lastIndexedAt: nextIndexedAt });
 
   return newChunks.length;
 }

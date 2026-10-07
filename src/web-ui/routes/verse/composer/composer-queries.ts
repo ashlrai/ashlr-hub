@@ -25,6 +25,7 @@ import type {
   VerseQueueResponse,
   VerseSessionControlDefaults,
   VerseSessionControlDefaultsUpdate,
+  VerseSessionControlDefaultsResult,
   VerseSessionControlsResponse,
   VerseSessionControlsUpdate,
 } from '../../../../core/verse/workbench-types.js';
@@ -100,7 +101,7 @@ export function fetchControlDefaults(signal?: AbortSignal): Promise<VerseSession
   return getJson(VERSE_SESSION_CONTROL_DEFAULTS_PATH, signal);
 }
 
-export function updateControlDefaults(update: VerseSessionControlDefaultsUpdate): Promise<VerseSessionControlDefaults> {
+export function updateControlDefaults(update: VerseSessionControlDefaultsUpdate): Promise<VerseSessionControlDefaultsResult> {
   return post(VERSE_SESSION_CONTROL_DEFAULTS_PATH, update);
 }
 

@@ -16,9 +16,10 @@
  * not 127.0.0.1 / localhost / ::1 is refused before any request is made (the
  * same rule `verseSeatPermitted` applies to a local seat's turns).
  *
- * The last reading per model is kept in memory for the badges.
+ * Readings are keyed by exact local configuration and retain their measurement time.
  */
 import type { LocalWarmResult } from './types.js';
+import { localSpeedBinding, localSpeedKey, type LocalSpeedBinding } from '../local-throughput.js';
 
 export const LOCAL_WARM_TIMEOUT_MS = 90_000;
 /** How long a warmed model stays resident in Ollama. */
@@ -40,34 +41,33 @@ export interface Throughput {
   tokPerSec: number;
   source: 'warm' | 'turn';
   at: string;
+  scope: 'warm-decode' | 'warm-end-to-end' | 'turn-end-to-end';
 }
 
-const lastByModel = new Map<string, Throughput>();
+const lastByBinding = new Map<string, Throughput>();
 
-export function recordThroughput(model: string, reading: Throughput): void {
-  if (!Number.isFinite(reading.tokPerSec) || reading.tokPerSec <= 0) return;
-  lastByModel.set(model, reading);
+export function recordThroughput(binding: LocalSpeedBinding, reading: Throughput): void {
+  if (!Number.isFinite(reading.tokPerSec) || reading.tokPerSec <= 0 || !Number.isFinite(Date.parse(reading.at))) return;
+  const key = localSpeedKey(binding);
+  const previous = lastByBinding.get(key);
+  if (!previous || Date.parse(reading.at) >= Date.parse(previous.at)) lastByBinding.set(key, reading);
 }
 
-export function lastThroughput(model: string): Throughput | null {
-  return lastByModel.get(model) ?? null;
+export function lastThroughput(binding: LocalSpeedBinding): Throughput | null {
+  return lastByBinding.get(localSpeedKey(binding)) ?? null;
 }
 
-export function resetThroughputForTest(): void {
-  lastByModel.clear();
-}
+export function resetThroughputForTest(): void { lastByBinding.clear(); }
 
 export interface WarmTarget {
   seatId: string;
   model: string;
+  /** Configured context of the measured seat; absent means attribution is unknown. */
+  contextWindow?: number | null;
   /** Where the model is discovered (Ollama). */
   ollamaBaseUrl: string;
   /** Set when the seat dispatches through the llama-server proxy instead. */
   anthropicBaseUrl?: string | null;
-}
-
-function round1(n: number): number {
-  return Math.round(n * 10) / 10;
 }
 
 export async function warmLocalModel(
@@ -81,6 +81,9 @@ export async function warmLocalModel(
   const fail = (error: string, ms = 0): LocalWarmResult => ({ seatId: target.seatId, ok: false, ms, loadMs: null, tokPerSec: null, error });
   if (!isLoopbackUrl(base)) return fail('This local seat does not point at this Mac, so it is not warmed.');
 
+  const configuredBinding = localSpeedBinding({ id: target.seatId, engine: 'local', models: [{ id: target.model, contextWindow: target.contextWindow ?? null }], contextWindow: target.contextWindow ?? null }, target.model, target);
+  // Only the endpoint actually probed can contribute a reading for this dispatch configuration.
+  const binding = configuredBinding?.endpoint === base ? configuredBinding : null;
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), opts.timeoutMs ?? LOCAL_WARM_TIMEOUT_MS);
   const started = now();
@@ -98,20 +101,21 @@ export async function warmLocalModel(
         }),
         signal: abort.signal,
       });
-      const ms = now() - started;
-      if (!res.ok) return fail(`The runtime answered ${res.status}.`, ms);
+      if (!res.ok) return fail(`The runtime answered ${res.status}.`, now() - started);
       const body = (await res.json()) as Record<string, unknown>;
+      const ms = now() - started;
       const evalCount = Number(body['eval_count']);
       const evalNs = Number(body['eval_duration']);
       const loadNs = Number(body['load_duration']);
-      const tokPerSec = evalCount > 0 && evalNs > 0 ? round1(evalCount / (evalNs / 1e9)) : null;
-      if (tokPerSec !== null) recordThroughput(target.model, { tokPerSec, source: 'warm', at: new Date(now()).toISOString() });
+      const tokPerSec = Number.isFinite(evalCount) && Number.isFinite(evalNs) && evalCount > 0 && evalNs > 0 ? evalCount / (evalNs / 1e9) : null;
+      if (binding && tokPerSec !== null) recordThroughput(binding, { tokPerSec, source: 'warm', scope: 'warm-decode', at: new Date(now()).toISOString() });
       return {
         seatId: target.seatId,
         ok: true,
         ms,
-        loadMs: loadNs > 0 ? Math.round(loadNs / 1e6) : null,
+        loadMs: Number.isFinite(loadNs) && loadNs >= 0 ? loadNs / 1e6 : null,
         tokPerSec,
+        tokPerSecScope: tokPerSec === null ? null : 'warm-decode',
         error: null,
       };
     }
@@ -121,13 +125,13 @@ export async function warmLocalModel(
       body: JSON.stringify({ model: target.model, max_tokens: 24, messages: [{ role: 'user', content: WARM_PROMPT }] }),
       signal: abort.signal,
     });
-    const ms = now() - started;
-    if (!res.ok) return fail(`The runtime answered ${res.status}.`, ms);
+    if (!res.ok) return fail(`The runtime answered ${res.status}.`, now() - started);
     const body = (await res.json()) as { usage?: { output_tokens?: unknown } };
+    const ms = now() - started;
     const out = Number(body.usage?.output_tokens);
-    const tokPerSec = out > 0 && ms > 0 ? round1(out / (ms / 1000)) : null;
-    if (tokPerSec !== null) recordThroughput(target.model, { tokPerSec, source: 'turn', at: new Date(now()).toISOString() });
-    return { seatId: target.seatId, ok: true, ms, loadMs: null, tokPerSec, error: null };
+    const tokPerSec = Number.isFinite(out) && Number.isFinite(ms) && out > 0 && ms > 0 ? out / (ms / 1000) : null;
+    if (binding && tokPerSec !== null) recordThroughput(binding, { tokPerSec, source: 'turn', scope: 'warm-end-to-end', at: new Date(now()).toISOString() });
+    return { seatId: target.seatId, ok: true, ms, loadMs: null, tokPerSec, tokPerSecScope: tokPerSec === null ? null : 'warm-end-to-end', error: null };
   } catch {
     const ms = now() - started;
     return fail(abort.signal.aborted ? 'The model took too long to load.' : 'The local runtime is not reachable.', ms);

@@ -1,3 +1,5 @@
+import type { OutcomeManagerProjection } from '../goals/outcome-manager.js';
+import type { VerseManagerMessageReference } from './types.js';
 import type { OutcomeScope } from '../goals/outcome-types.js';
 
 export const OUTCOMES_PATH = '/api/verse/outcomes';
@@ -20,6 +22,7 @@ export interface OutcomeView {
   scope: OutcomeScope;
   status: OutcomeStatus;
   tasks: OutcomeTaskView[];
+  manager?: OutcomeManagerProjection;
 }
 export interface OutcomesRead {
   v: 1;
@@ -36,7 +39,9 @@ export type OutcomeOperation =
   | { kind: 'read' }
   | { kind: 'start'; id: string; commandId: string; expectedRevision: number; scope: OutcomeScope }
   | { kind: 'edit'; id: string; commandId: string; expectedRevision: number; scope: OutcomeScope }
-  | { kind: 'pause' | 'resume'; id: string; commandId: string; expectedRevision: number };
+  | { kind: 'pause' | 'resume'; id: string; commandId: string; expectedRevision: number }
+  | { kind: 'manager-configure'; id: string; commandId: string; expectedRevision: number; mode: 'interactive' | 'resident'; sessionId: string | null }
+  | { kind: 'manager-interject'; id: string; commandId: string; expectedRevision: number; reference: VerseManagerMessageReference };
 export type OutcomeOperationResult = OutcomesRead | {
   ok: true;
   disposition: 'recorded' | 'replayed';

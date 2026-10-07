@@ -54,7 +54,7 @@ import { codexCreditsAvailable, normalizeCodexCredits, type CodexCredits } from 
 import { describeResetAt } from '../../../core/verse/seat-readiness.js';
 import type { VerseEngine, VerseSeat } from '../../data/api-types.js';
 import { percentText } from './autonomy/format.js';
-import { formatNativeCreditUnits } from './resources/codex-credit-value.js';
+import { formatNativeCreditUnits, nativeCreditBalanceTitle } from './resources/codex-credit-value.js';
 import {
   SEAT_CAPACITY_WORD,
   seatCapacity,
@@ -232,8 +232,9 @@ function creditsPhrase(raw: SeatCapacityRecord['credits']): { phrase: string | n
   if (credits === null || !codexCreditsAvailable(credits)) return { phrase: null, title: null, reading: credits };
   if (credits.unlimited) return { phrase: 'credits unlimited', title: null, reading: credits };
   if (credits.balance === null) return { phrase: 'credits available', title: null, reading: credits };
+  const providerTitle = nativeCreditBalanceTitle(credits.balance);
   return { phrase: `${formatNativeCreditUnits(credits.balance)} credits available`,
-    title: `Exact native balance: ${credits.balance} credits. Not dollars or subscription percentage.`, reading: credits };
+    title: providerTitle === null ? null : `${providerTitle} Not dollars or subscription percentage.`, reading: credits };
 }
 
 function localView(seat: VerseSeat): SeatSubscriptionView {

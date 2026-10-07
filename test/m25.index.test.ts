@@ -29,7 +29,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as fs from 'node:fs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -592,6 +593,142 @@ describe('buildKnowledge — incremental (mtime)', () => {
     // Chunks are re-indexed (updated content is present)
     const chunks = loadChunks(tmpRepo);
     expect(chunks.length).toBeGreaterThan(0);
+  });
+});
+
+describe('buildKnowledge — deletion pruning after complete collection', () => {
+  async function indexedPair() {
+    policyMock.__setEnrolled([tmpRepo]);
+    plantFile(tmpRepo, 'stable.ts', 'export const survivor = 7;');
+    plantFile(tmpRepo, 'nested/deleted.ts', 'export const obsolete = 9;');
+    await buildKnowledge({ repos: [tmpRepo] });
+    const dir = path.join(knowledgeDir(), fs.readdirSync(knowledgeDir())[0]!);
+    const chunks = path.join(dir, 'chunks.jsonl');
+    const meta = path.join(dir, 'meta.json');
+    const stored = loadChunks(tmpRepo).map(chunk => ({ ...chunk, vector: [0.25, 0.75] }));
+    fs.writeFileSync(chunks, stored.map(chunk => JSON.stringify(chunk)).join('\n') + '\n');
+    fs.writeFileSync(meta, JSON.stringify({ repo: tmpRepo, lastIndexedAt: Date.now() + 10_000 }));
+    return { chunks, meta, stored };
+  }
+
+  it('prunes a deleted file without editing its survivor or advancing metadata', async () => {
+    const before = await indexedPair();
+    const metaBytes = fs.readFileSync(before.meta);
+    fs.rmSync(path.join(tmpRepo, 'nested/deleted.ts'));
+    expect(await buildKnowledge({ repos: [tmpRepo] })).toEqual({ repos: 1, chunks: 0 });
+    expect(loadChunks(tmpRepo)).toEqual(before.stored.filter(chunk => chunk.file === 'stable.ts'));
+    expect(fs.readFileSync(before.meta)).toEqual(metaBytes);
+  });
+
+  it('empties the index when every eligible source file was deleted', async () => {
+    const before = await indexedPair();
+    fs.rmSync(path.join(tmpRepo, 'stable.ts'));
+    fs.rmSync(path.join(tmpRepo, 'nested'), { recursive: true });
+    expect(await buildKnowledge({ repos: [tmpRepo] })).toEqual({ repos: 1, chunks: 0 });
+    expect(loadChunks(tmpRepo)).toEqual([]);
+    expect(fs.readFileSync(before.chunks, 'utf8')).toBe('');
+  });
+
+  it('does not rewrite an unchanged index or metadata', async () => {
+    const before = await indexedPair();
+    const chunkBytes = fs.readFileSync(before.chunks);
+    const metaBytes = fs.readFileSync(before.meta);
+    const rename = vi.spyOn(fs, 'renameSync');
+    syncBuiltinESMExports();
+    try {
+      await buildKnowledge({ repos: [tmpRepo] });
+      expect(rename).not.toHaveBeenCalled();
+      expect(fs.readFileSync(before.chunks)).toEqual(chunkBytes);
+      expect(fs.readFileSync(before.meta)).toEqual(metaBytes);
+    } finally { rename.mockRestore(); syncBuiltinESMExports(); }
+  });
+
+  it.each(['root', 'nested'])('retains original bytes after a failed %s directory listing', async level => {
+    const before = await indexedPair();
+    const chunkBytes = fs.readFileSync(before.chunks);
+    const metaBytes = fs.readFileSync(before.meta);
+    const failedPath = level === 'root' ? tmpRepo : path.join(tmpRepo, 'nested');
+    const original = fs.readdirSync;
+    const read = vi.spyOn(fs, 'readdirSync').mockImplementation(((...args: Parameters<typeof fs.readdirSync>) => {
+      if (args[0] === failedPath) throw new Error('fixture listing unavailable');
+      return original(...args);
+    }) as typeof fs.readdirSync);
+    try {
+      await buildKnowledge({ repos: [tmpRepo] });
+      expect(fs.readFileSync(before.chunks)).toEqual(chunkBytes);
+      expect(fs.readFileSync(before.meta)).toEqual(metaBytes);
+    } finally { read.mockRestore(); }
+  });
+
+  it('preserves unreadable-subtree chunks while updating a visible changed source', async () => {
+    const before = await indexedPair();
+    const metaBytes = fs.readFileSync(before.meta);
+    const stable = path.join(tmpRepo, 'stable.ts');
+    fs.writeFileSync(stable, 'export const visible = 12;');
+    const advanced = Date.now() + 20_000;
+    fs.utimesSync(stable, advanced / 1000, advanced / 1000);
+    const original = fs.readdirSync;
+    const read = vi.spyOn(fs, 'readdirSync').mockImplementation(((...args: Parameters<typeof fs.readdirSync>) => {
+      if (args[0] === path.join(tmpRepo, 'nested')) throw new Error('fixture subtree unavailable');
+      return original(...args);
+    }) as typeof fs.readdirSync);
+    try {
+      expect((await buildKnowledge({ repos: [tmpRepo] })).chunks).toBe(1);
+      expect(loadChunks(tmpRepo).filter(chunk => chunk.file === 'nested/deleted.ts'))
+        .toEqual(before.stored.filter(chunk => chunk.file === 'nested/deleted.ts'));
+      expect(loadChunks(tmpRepo).find(chunk => chunk.file === 'stable.ts')!.text).toContain('visible = 12');
+      expect(fs.readFileSync(before.meta)).toEqual(metaBytes);
+    } finally { read.mockRestore(); }
+  });
+
+  it('keeps original chunks and metadata when atomic publication fails', async () => {
+    const before = await indexedPair();
+    const chunkBytes = fs.readFileSync(before.chunks);
+    const metaBytes = fs.readFileSync(before.meta);
+    fs.rmSync(path.join(tmpRepo, 'nested/deleted.ts'));
+    const original = fs.renameSync;
+    const rename = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (to === before.chunks) throw new Error('fixture publication refused');
+      return original(from, to);
+    });
+    syncBuiltinESMExports();
+    try {
+      expect(await buildKnowledge({ repos: [tmpRepo] })).toEqual({ repos: 0, chunks: 0 });
+      expect(fs.readFileSync(before.chunks)).toEqual(chunkBytes);
+      expect(fs.readFileSync(before.meta)).toEqual(metaBytes);
+      expect(fs.readdirSync(path.dirname(before.chunks)).sort()).toEqual(['chunks.jsonl', 'meta.json']);
+    } finally { rename.mockRestore(); syncBuiltinESMExports(); }
+  });
+
+  it('retains an unseen indexed file when the file cap truncates a changed-file scan', async () => {
+    policyMock.__setEnrolled([tmpRepo]);
+    plantFile(tmpRepo, 'z-survivor.ts', 'export const unseen = 7;');
+    await buildKnowledge({ repos: [tmpRepo] });
+    const survivor = loadChunks(tmpRepo);
+    for (let i = 0; i < 500; i++) plantFile(tmpRepo, `a-${String(i).padStart(3, '0')}.ts`, 'export const fresh = 8;');
+    const original = fs.readdirSync;
+    const read = vi.spyOn(fs, 'readdirSync').mockImplementation(((...args: Parameters<typeof fs.readdirSync>) => {
+      const entries = original(...args);
+      return args[0] === tmpRepo ? [...entries].sort((a, b) => String(a.name).localeCompare(String(b.name))) : entries;
+    }) as typeof fs.readdirSync);
+    try {
+      const result = await buildKnowledge({ repos: [tmpRepo] });
+      expect(result.chunks).toBe(500);
+      expect(loadChunks(tmpRepo).filter(chunk => chunk.file === 'z-survivor.ts')).toEqual(survivor);
+    } finally { read.mockRestore(); }
+  });
+
+  it('still prunes deleted chunks while reindexing a changed source', async () => {
+    const before = await indexedPair();
+    fs.rmSync(path.join(tmpRepo, 'nested/deleted.ts'));
+    const stable = path.join(tmpRepo, 'stable.ts');
+    fs.writeFileSync(stable, 'export const changed = 11;');
+    const advanced = Date.now() + 20_000;
+    fs.utimesSync(stable, advanced / 1000, advanced / 1000);
+    expect((await buildKnowledge({ repos: [tmpRepo] })).chunks).toBe(1);
+    expect(loadChunks(tmpRepo).map(chunk => chunk.file)).toEqual(['stable.ts']);
+    expect(loadChunks(tmpRepo)[0]!.text).toContain('changed = 11');
+    expect(fs.readFileSync(before.chunks, 'utf8')).not.toContain('obsolete');
   });
 });
 

@@ -773,3 +773,19 @@ describe('warmVerseApps — the server-start warm-up', () => {
     await expect(warmVerseApps({} as AshlrConfig)).resolves.toBeUndefined();
   });
 });
+
+
+describe('completed local throughput source validity', () => {
+  it('retains raw measured precision and original time, and refuses cancelled/nonfinite readings', async () => {
+    const { completedLocalTurnThroughput } = await import('../src/core/verse/local-throughput.js');
+    const at = '2026-09-24T09:10:10.000Z';
+    const usage: VerseEvent = { seq: 1, at, type: 'usage', turnId: 't', usage: { outputTokens: 100, contextWindow: 65_536 } as never };
+    const done: VerseEvent = { seq: 2, at, type: 'turn-done', turnId: 't', ok: true, nativeSessionId: null, durationMs: 3_000 };
+    expect(completedLocalTurnThroughput([usage, { ...usage, seq: 2 }, { ...done, seq: 3 }])?.tokPerSec).toBe(200 / 3);
+    expect(completedLocalTurnThroughput([usage, done])).toEqual({ tokPerSec: 100 / 3, at, contextWindow: 65_536 });
+    expect(completedLocalTurnThroughput([usage, done, { seq: 3, at, type: 'cancelled', turnId: 't' }])).toBeNull();
+    expect(completedLocalTurnThroughput([usage, { ...done, durationMs: Infinity }])).toBeNull();
+    expect(completedLocalTurnThroughput([usage, { ...done, at: 'not a date' }])).toBeNull();
+    expect(completedLocalTurnThroughput([{ ...usage, usage: { ...usage.usage, outputTokens: Infinity } }, done])).toBeNull();
+  });
+});

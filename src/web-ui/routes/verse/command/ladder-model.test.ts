@@ -20,6 +20,21 @@ const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
 describe('ladderView', () => {
+  it('describes signed uncapped stages without exposing the numeric sentinel', () => {
+    const status = shadowStatus(NOW);
+    const current = status.ladder!.stages[0]!;
+    current.maxFiles = current.maxLines = current.maxMergesPerRepoPerDay = Number.MAX_SAFE_INTEGER;
+    const next = status.ladder!.stages[1]!;
+    next.merging = [...current.merging];
+    next.maxFiles = next.maxLines = Number.MAX_SAFE_INTEGER;
+    const view = ladderView(status)!;
+    expect(view.rungs[0]!.capLine).toBe('low risk · No file cap / no line cap · No daily merge cap');
+    expect(view.nextLine).toBe('2a: low risk, No file cap / no line cap');
+    expect(JSON.stringify(view)).not.toContain(String(Number.MAX_SAFE_INTEGER));
+    current.maxLines = 150;
+    expect(ladderView(status)!.rungs[0]!.capLine).toContain('No file cap / ≤ 150 lines');
+  });
+
   it('draws the just-activated state: Shadow · 1 of 8, nothing merges, 0/5 digests and 0/12 h', () => {
     const view = ladderView(shadowStatus(NOW))!;
     expect(view.stageName).toBe('Shadow');

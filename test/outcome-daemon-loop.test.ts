@@ -2,7 +2,7 @@
  * and standing capability/config reads are deterministic offline seams. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 const mocks = vi.hoisted(() => ({ config: vi.fn(), goal: vi.fn(), swarm: vi.fn(), bon: vi.fn(), backlog: vi.fn(), policy: vi.fn() }));
 vi.mock('../src/core/config.js', async original => ({ ...await original<typeof import('../src/core/config.js')>(), loadConfig: (...args: unknown[]) => mocks.config(...args) }));
@@ -18,6 +18,9 @@ vi.mock('../src/core/run/best-of-n.js', async original => ({ ...await original<t
 vi.mock('../src/core/portfolio/backlog.js', async original => ({ ...await original<typeof import('../src/core/portfolio/backlog.js')>(), buildBacklog: (...args: unknown[]) => mocks.backlog(...args) }));
 vi.mock('../src/core/fleet/automerge-pass.js', async original => ({ ...await original<typeof import('../src/core/fleet/automerge-pass.js')>(), runAutoMergePass: async () => ({ merged: 0, attempted: 0, judged: 0, judgePerPass: 0 }) }));
 import { tick } from '../src/core/daemon/loop.js';
+import { OutcomeManagerCoordinator } from '../src/core/goals/outcome-manager.js';
+import { saveRun } from '../src/core/run/orchestrator.js';
+import { prepareResourceNativeProfile, resolveNativeSeatLaunch } from '../src/core/resources/native-profile.js';
 import { OutcomeCoordinator } from '../src/core/goals/outcome-coordinator.js';
 import { OutcomeStore } from '../src/core/goals/outcome-store.js';
 import { outcomeDirectory, materializeOutcomeIntents } from '../src/core/goals/outcome-runtime.js';
@@ -202,5 +205,114 @@ describe('durable outcomes through the real resident tick', () => {
     writeFileSync(join(inboxDir(), `${proposal.id}.json`), JSON.stringify(proposal), { mode: 0o600 });
     await f.drive(); expect(f.coordinator.project().complete).toBe(true);
     expect(f.node().completion?.mergeIdentity).toContain('3'.repeat(40)); expect(mocks.goal).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+// The real prepared native launch contract requires the same execve-capable
+// platforms as resource-native-profile.test.ts; ordinary daemon cases stay portable.
+describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'function')('tool-capable shared manager through the real resident tick', () => {
+  async function managerFixture() {
+    const f = await fixture();
+    await f.drive(); // The ordinary no-diff worker remains a failure, never completed work.
+    const manager = new OutcomeManagerCoordinator(f.store);
+    const admission = { stillAuthorized: () => true, executionRepoAllowed: (target: string, execution: string) => target === execution,
+      routeAllowed: () => true, routeCurrent: () => true, sessionAllowed: () => false, messageExists: () => false, planAllowed: () => true };
+    expect(manager.configure(f.command(), { mode: 'resident', sessionId: null }, admission).ok).toBe(true);
+    expect(manager.project().next?.intent).toBe('replan');
+    mocks.policy.mockReturnValue({ switch: 'autonomous', repos: [{ nameWithOwner: 'fixture/outcome', maxRisk: 'medium' }],
+      engines: ['codex'], spend: { seats: { 'codex-personal': { enabled: true, roles: ['producer'] } } } });
+    f.hooks.route = () => ({ backend: 'codex', tier: 'frontier', model: 'frontier-test', hold: null, reason: 'offline exact manager route',
+      seatDecision: { seatId: 'codex-personal', candidates: ['codex-personal'], exclusions: [], why: 'offline', summary: 'offline', mode: 'balanced' } });
+    f.cfg.foundry = { ...f.cfg.foundry, allowedBackends: ['codex'], bestOfN: 3, models: { ...f.cfg.foundry?.models, codex: 'frontier-test' } };
+    const profiles = join(fx.ashlrDir, 'native-profiles'); mkdirSync(profiles, { recursive: true, mode: 0o700 });
+    const executable = join(fx.home, 'inert-native'); writeFileSync(executable, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
+    const profile = prepareResourceNativeProfile({ provider: 'codex', directory: join(profiles, 'codex-personal'), executable });
+    const accountsRoot = join(fx.ashlrDir, 'account-connections'); mkdirSync(accountsRoot, { mode: 0o700 });
+    writeFileSync(join(accountsRoot, 'connections.json'), JSON.stringify({ schemaVersion: 1, accounts: [
+      { id: 'codex-personal', provider: 'codex', command: profile.command },
+    ] }), { mode: 0o600 });
+    f.cfg.verse = { ...f.cfg.verse, accountsRoot };
+    expect(resolveNativeSeatLaunch({ accountsRoot, provider: 'codex', seatId: 'codex-personal' }).ok).toBe(true);
+    mocks.goal.mockClear();
+    return { ...f, manager, profile, accountsRoot, admission };
+  }
+  const managerText = () => '<phantom-manager-result>' + JSON.stringify({ kind: 'plan', title: 'Recover actual useful work', nodes: [{
+    key: 'recover', title: 'Recover useful implementation', objective: 'Implement actual fix', deliverable: 'Verified code',
+    riskClass: 'low', targetRepo: 'target-1', dependsOn: [], acceptance: ['A meaningful regression passes'],
+  }] }) + '</phantom-manager-result>';
+  function managerRun(id: string, goal = ''): RunState {
+    return { ...run(id, 'codex', goal), result: managerText(), engineModel: 'codex:frontier-test', engineTier: 'frontier',
+      trajectoryId: `run:${id}`, proposalOutcome: { kind: 'empty-diff', reason: 'Actual manager plan has no code diff' } };
+  }
+  function savedTerminal(f: Awaited<ReturnType<typeof managerFixture>>) {
+    const next = f.manager.project().next!;
+    const route = { engine: 'codex', seatId: 'codex-personal', model: 'frontier-test', tier: 'frontier' as const };
+    expect(f.manager.claimRun(f.command(), next, f.repo.dir, route, 'saved-manager', f.admission).ok).toBe(true);
+    saveRun(managerRun('saved-manager'));
+    expect(f.store.read().state!.manager!.stages.at(-1)?.state).toBe('running');
+    // Terminal metadata is not another contact; the exhausted live gate stays shut.
+    const contact = vi.fn(() => ({ allowed: false, reason: 'Subscription window is exhausted' }));
+    f.hooks.seatAllows = contact;
+    return contact;
+  }
+  it('launches one exact native frontier manager with tools and applies its saved plan without completing work', async () => {
+    const f = await managerFixture();
+    mocks.goal.mockImplementation(async (goal, _cfg, opts) => {
+      const stage = f.store.read().state!.manager!.stages.at(-1)!;
+      expect(opts).toMatchObject({ engine: 'codex', seatId: 'codex-personal', model: 'frontier-test', tools: true,
+        sandboxEngine: true, requireSandbox: true, workItemId: stage.workItemId, workItemGenerationId: stage.generationId });
+      expect(opts.selectedOutcomeAdmission()).toBe(true);
+      expect(stage.route).toEqual({ engine: 'codex', seatId: 'codex-personal', model: 'frontier-test', tier: 'frontier' });
+      expect(goal).toContain('tool-capable manager');
+      const result = managerRun(opts.runId, goal);
+      saveRun(result); return result;
+    });
+    await f.drive();
+    expect(mocks.goal).toHaveBeenCalledTimes(1); expect(mocks.bon).not.toHaveBeenCalled(); expect(mocks.swarm).not.toHaveBeenCalled();
+    const state = f.store.read().state!;
+    expect(state.manager!.stages.at(-1)).toMatchObject({ state: 'succeeded', resultKind: 'plan-applied' });
+    expect(state.nodes[state.activeNodeIds[0]!]!.basis.definition.key).toBe('recover');
+    expect(state.nodes[state.activeNodeIds[0]!]!.completion).toBeNull();
+    expect(state.nodes[state.activeNodeIds[0]!]!.attempts).toEqual([]);
+  });
+  it('does not contact a manager provider when selected account allowance is unavailable', async () => {
+    const f = await managerFixture(); f.hooks.seatAllows = () => ({ allowed: false, reason: 'Subscription window is exhausted' });
+    await f.drive(); expect(mocks.goal).not.toHaveBeenCalled(); expect(mocks.bon).not.toHaveBeenCalled();
+    expect(f.store.read().state!.manager!.stages).toEqual([]);
+  });
+  it('recovers a saved real terminal plan after usage is depleted without another provider contact', async () => {
+    const f = await managerFixture(); savedTerminal(f);
+    await f.drive();
+    expect(mocks.goal).not.toHaveBeenCalled(); expect(mocks.bon).not.toHaveBeenCalled(); expect(mocks.swarm).not.toHaveBeenCalled();
+    const state = f.store.read().state!;
+    expect(state.manager!.stages.at(-1)).toMatchObject({ state: 'succeeded', resultKind: 'plan-applied', terminalRunId: 'saved-manager' });
+    expect(state.nodes[state.activeNodeIds[0]!]!.basis.definition.key).toBe('recover');
+    expect(state.nodes[state.activeNodeIds[0]!]!.completion).toBeNull();
+  });
+  it('retains a removed-profile terminal as stale without applying its saved plan', async () => {
+    const f = await managerFixture(); savedTerminal(f); const before = f.store.read().state!;
+    rmSync(f.profile.directory, { recursive: true });
+    expect(resolveNativeSeatLaunch({ accountsRoot: f.accountsRoot, provider: 'codex', seatId: 'codex-personal' }).ok).toBe(false);
+    await f.drive();
+    expect(mocks.goal).not.toHaveBeenCalled(); expect(mocks.bon).not.toHaveBeenCalled(); expect(mocks.swarm).not.toHaveBeenCalled();
+    const state = f.store.read().state!;
+    expect(state.manager!.stages.at(-1)).toMatchObject({ state: 'stale', resultKind: null, terminalRunId: 'saved-manager' });
+    expect(state.graphDigest).toBe(before.graphDigest); expect(state.activeNodeIds).toEqual(before.activeNodeIds);
+  });
+  it('retains a disabled-engine terminal as stale even when its native profile still exists', async () => {
+    const f = await managerFixture(); savedTerminal(f); const before = f.store.read().state!;
+    f.cfg.foundry = { ...f.cfg.foundry, allowedBackends: ['builtin'] };
+    expect(resolveNativeSeatLaunch({ accountsRoot: f.accountsRoot, provider: 'codex', seatId: 'codex-personal' }).ok).toBe(true);
+    await f.drive(); expect(mocks.goal).not.toHaveBeenCalled();
+    const state = f.store.read().state!;
+    expect(state.manager!.stages.at(-1)).toMatchObject({ state: 'stale', resultKind: null, terminalRunId: 'saved-manager' });
+    expect(state.graphDigest).toBe(before.graphDigest); expect(state.activeNodeIds).toEqual(before.activeNodeIds);
+  });
+  it('does not replace a frontier manager with a local execution fallback', async () => {
+    const f = await managerFixture(); f.hooks.route = () => ({ backend: 'builtin', tier: 'local', model: null, hold: null,
+      reason: 'offline local route', seatDecision: null });
+    await f.drive(); expect(mocks.goal).not.toHaveBeenCalled(); expect(mocks.swarm).not.toHaveBeenCalled();
+    expect(f.store.read().state!.manager!.stages).toEqual([]);
   });
 });

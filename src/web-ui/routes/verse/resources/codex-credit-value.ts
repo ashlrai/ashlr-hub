@@ -15,6 +15,12 @@ export function formatNativeCreditUnits(balance: unknown): string | null {
   return decimalBalance(balance) === null ? null : formatDecimalMetric(balance);
 }
 
+/** Display metadata follows the same precision as visible units, never raw evidence. */
+export function nativeCreditBalanceTitle(balance: unknown): string | null {
+  const units = formatNativeCreditUnits(balance);
+  return units === null ? null : `Provider balance: ${units} credits.`;
+}
+
 export function estimatedCreditValue(balance: unknown, plan: string | null): string | null {
   if (!['free', 'go', 'plus', 'pro'].includes(plan ?? '')) return null;
   const parsed = decimalBalance(balance);

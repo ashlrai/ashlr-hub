@@ -640,8 +640,8 @@ export interface VerseSession {
  *  - `plan`         — the CLI plans and edits nothing.
  *  - `accept-edits` — the default: edits applied without asking.
  *  - `auto`         — the CLI's own auto mode.
- *  - `bypass`       — every check skipped. Shown red and confirmed PER CHAT:
- *                     never a default, never inherited by a new chat.
+ *  - `bypass`       — native tool approvals skipped. Confirmed per chat or through
+ *                     saved Full access defaults; host authority is separate.
  * Adapters map these to each CLI's spelling (claude `acceptEdits` /
  * `bypassPermissions`, grok `dontAsk`, …). An engine that cannot honour one
  * reports it unavailable WITH a reason rather than approximating it. The
@@ -677,8 +677,27 @@ export interface VerseMessagePlaybook {
   macro: string;
 }
 
+/** A private manager instruction is not a launched native provider turn. */
+export interface VerseManagerMessageReference {
+  sessionId: string;
+  messageId: string;
+  eventSeq: number;
+}
+export interface VerseManagerResultIdentity {
+  outcomeId: string;
+  stageId: string;
+  runId: string;
+  attemptId: string;
+  seatId: string;
+  model: string;
+  engine: string;
+  resultDigest: string;
+}
+
 /** Normalized event stream. `seq` is monotonic per session and is the SSE id. */
 export type VerseEvent =
+  | { seq: number; at: string; type: 'manager-message'; turnId: null; outcomeId: string; messageId: string; text: string }
+  | ({ seq: number; at: string; type: 'manager-result'; turnId: null; text: string } & VerseManagerResultIdentity)
   | { seq: number; at: string; type: 'user-message'; turnId: string; text: string; playbook?: VerseMessagePlaybook }
   | { seq: number; at: string; type: 'turn-started'; turnId: string; pid: number | null }
   | { seq: number; at: string; type: 'text-delta'; turnId: string; text: string }

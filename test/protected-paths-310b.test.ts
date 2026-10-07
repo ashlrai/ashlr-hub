@@ -204,10 +204,17 @@ describe('G1 — ashlr-hub Tier-1 (self repo only)', () => {
   });
 
   it('closure-snapshot roots are Tier-1 source minus HTTP API modules', () => {
+    for (const path of ['src/core/verse/manager-conversation.ts', 'src/core/verse/manager-session.ts']) {
+      expect(isTier1ClosureRoot(path)).toBe(true);
+      expect(matchProtectedPath(path, { selfRepo: true })?.ruleId).toBe('tier1-authority-code');
+    }
     expect(isTier1ClosureRoot('src/core/routing/router.ts')).toBe(true);
     expect(isTier1ClosureRoot('src/core/routing/budget-api.ts')).toBe(false);
     expect(isTier1ClosureRoot('src/core/verse/authority-api.ts')).toBe(false);
     expect(isTier1ClosureRoot('src/core/verse/session-engine.ts')).toBe(false);
+    expect(isTier1ClosureRoot('src/core/verse/manager-scope.ts')).toBe(true);
+    expect(isTier1SourcePath('src/core/verse/manager-scope-extra.ts')).toBe(false);
+    expect(isTier1ClosureRoot('src/core/daemon/outcome-manager-host.ts')).toBe(true);
     expect(isTier1SourcePath('src/core/authority/anything/deep.ts')).toBe(true);
   });
 

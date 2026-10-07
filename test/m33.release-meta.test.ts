@@ -39,24 +39,26 @@ describe('package.json publish shape', () => {
   it('is the public scoped package; provenance is never baked into publishConfig', () => {
     expect(pkg['name']).toBe('@ashlr/hub');
     expect(pkg['private']).toBeUndefined();
-    // e24a7dae removed `publishConfig.provenance: true` on purpose. GitHub
-    // Actions is disabled on this repository, and npm can only mint a
-    // provenance attestation from a supported CI provider, so the baked-in
+    // e24a7dae removed `publishConfig.provenance: true` on purpose.
+    // npm can only mint provenance from a supported CI provider. The baked-in
     // flag made EVERY local publish die with "Automatic provenance generation
     // not supported for provider: null". Exact shape, not just "no
     // provenance key": a re-added flag (or any other publish-time switch)
     // should be a deliberate edit to this test, not a silent regression.
     expect(pkg['publishConfig']).toEqual({ access: 'public' });
     // Provenance is requested per publish instead, and only where it can be
-    // honoured: the (currently disabled) release workflow passes
+    // honoured: the historical release workflow passes
     // `--provenance` on its own `npm publish` line — asserted in the release
     // workflow suite below.
-    // The tradeoff is documented rather than silent: a local publish carries
-    // no signed attestation and nothing replaces it.
+    // Manual npm publication has no npm CI provenance. A separately signed
+    // qualified build handoff proves its own inputs, not registry publication.
     const releasingLocally = readFileSync(join(REPO_ROOT, 'docs', 'RELEASING-LOCALLY.md'), 'utf8');
     expect(releasingLocally).toContain('publishConfig.provenance: true');
     expect(releasingLocally).toContain('Automatic provenance generation not supported for provider: null');
-    expect(releasingLocally.replace(/\s+/g, ' ')).toMatch(/no longer carry a signed attestation/);
+    const normalized = releasingLocally.replace(/\s+/g, ' ');
+    expect(normalized).toContain("Manual npm publication does not carry npm's CI provenance attestation.");
+    expect(normalized).toContain('The qualified CI handoff separately signs and verifies the tested source, build and original archive before local adoption;');
+    expect(normalized).toContain('it does not add npm provenance to the published package.');
   });
 
   it('gates publish behind the full verification suite', () => {

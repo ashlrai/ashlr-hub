@@ -168,7 +168,7 @@ export function searchSessions(input: VerseSearchInput): VerseSearchResponse {
     const sessionHits: VerseSearchHit[] = [];
 
     for (const event of events) {
-      if (event.type !== 'user-message' && event.type !== 'assistant-message') continue;
+      if (event.type !== 'user-message' && event.type !== 'assistant-message' && event.type !== 'manager-message' && event.type !== 'manager-result') continue;
       const text = typeof event.text === 'string' ? event.text : '';
       if (text.length === 0) continue;
       if (scannedChars >= VERSE_SEARCH_MAX_SCAN_CHARS) {
@@ -185,7 +185,7 @@ export function searchSessions(input: VerseSearchInput): VerseSearchResponse {
         termScore += 1 + Math.log(n);
       }
       if (!all) continue;
-      const kind = event.type === 'user-message' ? 'user' : 'assistant';
+      const kind = event.type === 'user-message' || event.type === 'manager-message' ? 'user' : 'assistant';
       const score = (termScore + titleBonus) * (kind === 'user' ? 1.1 : 1) * recencyWeight(event.at, nowMs);
       sessionHits.push({
         sessionId: session.id,

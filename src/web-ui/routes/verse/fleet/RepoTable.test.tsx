@@ -25,6 +25,14 @@ describe('mirrorsText', () => {
 });
 
 describe('RepoTable', () => {
+  it.each([false, true])('labels an uncapped repository without a numeric sentinel (compact %s)', (compact) => {
+    const live = fleetLive('live', NOW);
+    live.repos = [{ ...live.repos[0]!, mergesToday: 3, maxMergesPerDay: Number.MAX_SAFE_INTEGER }];
+    render(<RepoTable read={{ value: live, available: true, reason: null }} actions={actions} now={NOW} compact={compact} />);
+    expect(screen.getByText('3 / No volume cap')).toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(String(Number.MAX_SAFE_INTEGER)))).not.toBeInTheDocument();
+  });
+
   it('lists mirrors under the table, not as repo rows', () => {
     const live = { ...fleetLive('live', NOW), mirrors: { count: 2, repos: ['ashlrai/ashlr-hub', 'ashlrai/binshield'] } };
     render(<RepoTable read={{ value: live, available: true, reason: null }} actions={actions} now={NOW} compact={false} />);

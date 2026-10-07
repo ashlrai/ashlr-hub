@@ -39,6 +39,7 @@ import { budgetQuery } from '../budget/budget-queries.js';
 import { useSeatHealth } from '../health/useSeatHealth.js';
 import { usePollWhileVisible, useSectionVisible } from '../shell/section-visibility.js';
 import { useSeatsRefresh } from '../useSeatsRefresh.js';
+import { nativeCreditBalanceTitle } from '../resources/codex-credit-value.js';
 import { verseBootstrapQuery } from '../verse-queries.js';
 import {
   accountStatus,
@@ -260,8 +261,7 @@ function CapacityRowView({
               </span>
             ) : null}
             {reserve !== null && row.credits !== null ? ' · ' : null}
-            {row.credits !== null ? <span title={row.creditBalance === null || row.creditBalance === undefined
-              ? undefined : `Exact native balance: ${row.creditBalance} credits.`}>{row.credits}</span> : null}
+            {row.credits !== null ? <span title={nativeCreditBalanceTitle(row.creditBalance) ?? undefined}>{row.credits}</span> : null}
           </p>
         ) : null}
       </div>
@@ -376,7 +376,7 @@ export function useCapacityData(opts: { withBudget?: boolean; withHealth?: boole
   const bootstrap = useQuery(verseBootstrapQuery);
   useSeatsRefresh(visible);
   const health = useSeatHealth(visible && withHealth);
-  const budget = useQuery(budgetQuery);
+  const budget = useQuery(budgetQuery, { enabled: withBudget });
   const refetchBudget = useRefetch(budgetQuery);
   usePollWhileVisible(refetchBudget, CAPACITY_BUDGET_POLL_MS, { enabled: withBudget });
   const data = bootstrap.data as VerseBootstrap | undefined;

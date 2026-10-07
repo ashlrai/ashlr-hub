@@ -769,12 +769,21 @@ function formatAcus(n: number): string {
   return (Math.round(n * 10) / 10).toString();
 }
 
+/** Preserve the actual source; only the known manager protocol is disclosed separately. */
+export function managerReplyText(text: string): string {
+  const blocks = [...text.matchAll(/<phantom-manager-result>[\s\S]*?<\/phantom-manager-result>/g)];
+  if (blocks.length !== 1) return text;
+  const block = blocks[0]!;
+  return `${text.slice(0, block.index)}${text.slice(block.index! + block[0].length)}`.trim();
+}
+
 function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, explained: ReadonlySet<string>, reasoning: ReasoningDisplay, engine?: VerseEngine) {
   switch (item.kind) {
     case 'user':
       return (
         <li key={item.key} className={`${styles.item} ${styles.user}`} data-kind="user">
           <div className={styles.userText}>{item.text}</div>
+          {item.manager ? <span className={styles.playbookChip}>To the manager</span> : null}
           {item.playbook ? (
             <span className={styles.playbookChip} data-playbook={item.playbook.id}
               title={`This message ran the playbook ${item.playbook.name} (${item.playbook.macro}, version ${item.playbook.version}): the seat got its steps after your text.`}>
@@ -786,7 +795,16 @@ function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, e
     case 'assistant':
       return (
         <li key={item.key} className={`${styles.item} ${styles.assistant}`} data-kind="assistant" data-streaming={item.streaming || undefined}>
-          <MessageMarkdown text={item.text} streaming={item.streaming} />
+          <MessageMarkdown text={item.manager ? managerReplyText(item.text) : item.text} streaming={item.streaming} />
+          {item.manager ? (
+            <details className={styles.managerResult}>
+              <summary>Manager · {item.manager.model}</summary>
+              <div>Selected seat: {item.manager.seatId}</div>
+              <div>Run: <code>{item.manager.runId}</code></div>
+              <div>Stage: <code>{item.manager.stageId}</code></div>
+              <div className={styles.markdown}><pre>{item.text}</pre></div>
+            </details>
+          ) : null}
         </li>
       );
     case 'thinking':

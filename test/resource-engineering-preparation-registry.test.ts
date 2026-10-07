@@ -44,9 +44,12 @@ function fixture(registrationScope?: string) {
   const resourceRuntime = join(base, 'runtime.json');
   save(resourceRuntime, { schemaVersion: 1, root, workspace: transport, poolPath: poolFile, bindingsPath: bindingsFile, observationsPath: observationsFile });
   const projectsFile = join(base, 'projects.json'); save(projectsFile, { schemaVersion: 1, projects: [] });
+  // Preparation pins this executable but must never run it. Keep real Node on Windows.
+  const evaluator = process.platform === 'win32' ? process.execPath : join(base, 'never-executed-evaluator');
+  if (process.platform !== 'win32') writeFileSync(evaluator, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
   const recipe: ResourceEngineeringRecipe = { schemaVersion: 1, id: 'template', name: 'Pinned template', objective: 'Fixed objective', projectId: 'default',
     seedRevision: git(workspace, 'rev-parse', 'HEAD'), metric: { name: 'value', direction: 'maximize', minImprovement: 0 },
-    evaluation: { command: [process.execPath, 'evaluate.mjs'], timeoutMs: 1000 },
+    evaluation: { command: [evaluator, 'evaluate.mjs'], timeoutMs: 1000 },
     trialBudget: { maxTrials: 1, maxParallel: 1, maxDurationMs: 10_000, trialTimeoutMs: 5000 },
     campaignBudget: { maxGenerations: 1, maxDurationMs: 20_000, maxModelRequests: 1, maxStagnantGenerations: 1, maxReportedTokens: null },
     generation: { files: ['value.json'], contextFiles: ['evaluate.mjs'], allowedWorkerIds: ['worker'], maxOutputTokens: 128,

@@ -1,10 +1,13 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { passesMutationGate, readBody, sendJson } from '../web/api.js';
 import type { ApiModule } from './api-modules.js';
-import type { VerseApiContext } from './verse-api.js';
+import { getVerseEngine, type VerseApiContext } from './verse-api.js';
+import type { VerseEngineHandle } from './session-engine.js';
+import { isValidSessionId } from './session-store.js';
+import { reconcileOutcomeManagerSession, submitOutcomeManagerMessage, validManagerSubmit, type ManagerSessionDeps } from './manager-session.js';
 import { normalizeOutcomeOperation } from './outcomes-input.js';
 import { runOutcomeOperation } from './outcomes-io.js';
-import { OUTCOMES_PATH, OUTCOME_ID_PATTERN, type OutcomeOperation, type OutcomeOperationResult } from './outcomes-api-types.js';
+import { OUTCOMES_PATH, OUTCOME_ID_PATTERN, type OutcomeOperation } from './outcomes-api-types.js';
 
 const REFUSAL = {
   invalid: [400, 'Check the outcome fields and revision.'],
@@ -15,7 +18,7 @@ const REFUSAL = {
   unenrolled: [409, 'Choose exact currently enrolled repositories.'],
 } as const;
 
-export interface OutcomesApiDeps { run?: (operation: OutcomeOperation) => Promise<OutcomeOperationResult> }
+export interface OutcomesApiDeps extends ManagerSessionDeps { engine?: () => Promise<VerseEngineHandle> }
 
 export async function handleOutcomesApiWithDeps(
   ctx: VerseApiContext, req: IncomingMessage, res: ServerResponse, path: string, method: string, deps: OutcomesApiDeps = {},
@@ -32,6 +35,29 @@ export async function handleOutcomesApiWithDeps(
   try {
     if (new URL(req.url ?? path, 'http://localhost').search) throw new Error();
   } catch { sendJson(res, 400, { error: 'Outcomes do not accept query parameters.' }); return true; }
+  const suffixParts = path.slice(OUTCOMES_PATH.length + 1).split('/');
+  if (method === 'GET' && suffixParts.length === 2 && suffixParts[0] === 'session' && isValidSessionId(suffixParts[1]!)) {
+    try {
+      const engine = await (deps.engine ?? getVerseEngine)();
+      const result = await reconcileOutcomeManagerSession(engine, suffixParts[1]!, deps);
+      sendJson(res, 200, result);
+    } catch { sendJson(res, 503, { error: 'Manager conversation is unavailable. Refresh before retrying.' }); }
+    return true;
+  }
+  if (method === 'POST' && suffixParts.length === 1 && suffixParts[0] === 'interactive') {
+    let raw: string;
+    try { raw = await readBody(req, 96 * 1024); }
+    catch { sendJson(res, 413, { error: 'Manager message body too large.' }); return true; }
+    let input: unknown;
+    try { input = JSON.parse(raw); } catch { sendJson(res, 400, { error: 'Invalid manager message.' }); return true; }
+    if (!validManagerSubmit(input)) { sendJson(res, 400, { error: 'Invalid manager message.' }); return true; }
+    try {
+      const engine = await (deps.engine ?? getVerseEngine)();
+      const result = await submitOutcomeManagerMessage(engine, input, deps);
+      sendJson(res, 202, result);
+    } catch { sendJson(res, 409, { error: 'Manager message could not be confirmed. Refresh and retry with the same message; your draft is preserved.' }); }
+    return true;
+  }
   let operation: OutcomeOperation;
   if (method === 'GET') {
     if (path !== OUTCOMES_PATH) { sendJson(res, 404, { error: 'Outcome read not found.' }); return true; }
@@ -40,7 +66,7 @@ export async function handleOutcomesApiWithDeps(
     const suffix = path.slice(OUTCOMES_PATH.length + 1).split('/');
     const start = suffix.length === 1 && suffix[0] === 'start';
     const action = suffix[1];
-    if (!start && (suffix.length !== 2 || !OUTCOME_ID_PATTERN.test(suffix[0]!) || !['edit', 'pause', 'resume'].includes(action!))) {
+    if (!start && (suffix.length !== 2 || !OUTCOME_ID_PATTERN.test(suffix[0]!) || !['edit', 'pause', 'resume', 'manager-configure'].includes(action!))) {
       sendJson(res, 404, { error: 'Outcome action not found.' }); return true;
     }
     let raw: string;

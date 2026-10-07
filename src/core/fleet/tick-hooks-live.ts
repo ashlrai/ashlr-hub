@@ -294,6 +294,8 @@ export interface LiveHooksDeps {
   legacyRoute(item: WorkItem, cfg: AshlrConfig): RouteDecision;
   localFleetEngine(cfg: AshlrConfig): EngineId | null;
   readTasks(): TaskQueueRead;
+  /** Optional release-backed company content lane; absence never blocks fleet work. */
+  syncReleaseArticles?(signal?: AbortSignal): Promise<unknown>;
   releaseTasks(nowMs: number): number;
   recordTask(taskId: string, update: TaskDispatchUpdate, nowMs: number): unknown;
   enqueueInsights(insights: readonly ReasoningInsight[], repoOf: (label: string) => string | null, nowMs: number): number;
@@ -697,6 +699,7 @@ export function defaultLiveHooksDeps(): LiveHooksDeps {
     legacyRoute: (item, cfg) => routeBackend(item, cfg),
     localFleetEngine: (cfg) => (localFleetEnabled(cfg) ? LOCAL_FLEET_ENGINE : null),
     readTasks: () => readTaskQueue(),
+    syncReleaseArticles: async (signal) => (await import('../release-articles.js')).syncReleaseArticles(undefined, signal),
     releaseTasks: (nowMs) => releaseParkedTasks({ nowMs }),
     recordTask: (taskId, update, nowMs) => recordTaskDispatch(taskId, update, { nowMs }),
     enqueueInsights: (insights, repoOf, nowMs) => enqueueInsightTasks(insights, repoOf, { nowMs }),
@@ -1740,6 +1743,10 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       };
       let fleetItems: WorkItem[] = [];
       const taskAttempts = new Map<string, number>();
+      if (!hookCtx.dryRun && !hookCtx.signal?.aborted && deps.syncReleaseArticles) {
+        try { await deps.syncReleaseArticles(hookCtx.signal); }
+        catch { /* Content observation failure never blocks unrelated engineering. */ }
+      }
       try {
         const queue = deps.readTasks();
         if (queue.ok) {

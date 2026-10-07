@@ -433,7 +433,8 @@ jobs:
 
   native-macos-broker-foundation:
     name: Native macOS broker foundation (Rust 1.97.1)
-    needs: [mac-general, mac-isolated]
+    # Own checkout and fixtures: overlap Mac suites; artifact admission still
+    # requires this job and every complete Mac qualification lane to pass.
     runs-on: macos-latest
     steps:
       - name: Checkout

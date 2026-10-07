@@ -463,9 +463,12 @@ with the turn. `@` fuzzy-finds project files and `/` offers handoff, compact,
 new, plan, effort and model.
 
 The footer is one row. On the left: attach, dictation and the **permission
-mode** — Plan, Accept edits (the default), Auto, or Bypass, which is red and
-confirmed per chat. The labels are short and never cut off; the full name
-("Bypass permissions") is in the tooltip. On the right: the **seat chip**, the
+mode** — Plan, Accept edits (the legacy default), Auto, or Full access.
+Full access skips native tool approvals; confirm it per chat or save it as the
+default in Settings → Chat. Apply it to existing chats there without interrupting
+active work; explicit Plan overrides stay in Plan, and changes apply at the next
+native launch. The labels are short and never cut off; the full name
+("Full access") is in the tooltip. On the right: the **seat chip**, the
 **model** picker, **effort**, the context ring and **Send ⏎**. The seat chip
 names only the account ("Claude Max", or "Local"), so the model appears once, in
 its picker. Its tooltip shows plan, windows, resets, health and what autonomy
@@ -600,6 +603,25 @@ turns that cited it, filters and **Cite** into the message; **Reasoning**
 shows each turn's thinking in order. Past 40 turns the transcript keeps
 far-away turns as placeholders (the newest 10 and the running turn always
 render).
+
+### Manager conversation
+
+Choose **Manager** in the **Auto seat** menu for **One conversation; Phantom
+plans, delegates and reviews across your resources.** This is an explicit
+resident-fleet mode. It saves guidance in the existing chat and uses currently
+enrolled project targets; ordinary Auto routing and active native turns keep
+their existing behavior. The status line offers **Pause manager** and **Resume
+manager**. **Retry saved message** retains the original identity after an
+uncertain response.
+
+Actual registered run replies return to the chat and recover on reopening.
+Their **Manager · ‹model›** disclosure keeps complete source and run attribution
+available without displaying the technical protocol by default. This initial
+slice accepts text and project files; uploaded attachments stay in the draft
+for native routing. Saving a message does not authorize provider contact,
+activate the fleet, or prove work completion. See [Automatic
+work](AUTOMATIC-OUTCOMES.md#one-conversation-with-the-manager) for admission and
+recovery details. Full access defaults and explicit Plan behavior are unchanged.
 
 ### Every seat together (3.15)
 
@@ -1740,7 +1762,9 @@ launches the staged sidecar, so run steps 1–2 first.
   Switching either starts a new chat; **Continue in a fresh chat** carries a
   deterministic handoff note across. Beyond that note and the shared project
   memory, a session knows only what its own vendor conversation holds.
-- Permission modes are Plan, Accept edits (default), Auto and Bypass. Phantom does
+- Permission modes are Plan, Accept edits (legacy default), Auto and Full access.
+  Settings → Chat can save confirmed Full access defaults and apply them to existing
+  chats while preserving explicit Plan. Host permissions and release authority remain separate. Phantom does
   not surface per-tool approval prompts yet; use
   the CLI directly when you want to approve each tool call.
 - The Terminal pane needs the desktop app (Bun's pseudo-terminal). Under plain

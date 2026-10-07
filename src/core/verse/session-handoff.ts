@@ -288,8 +288,9 @@ function extract(session: VerseSession, events: readonly VerseEvent[]): Extracte
   for (const event of events) {
     switch (event.type) {
       case 'user-message':
+      case 'manager-message':
         if (typeof event.text === 'string' && event.text.trim().length > 0) {
-          turnCount += 1;
+          if (event.type === 'user-message') turnCount += 1;
           const summary = isHandoffSummaryRequest(event.text);
           // A new user turn supersedes any earlier summary: only the reply to
           // the LATEST message can describe where the session stands now.
@@ -301,9 +302,10 @@ function extract(session: VerseSession, events: readonly VerseEvent[]): Extracte
         }
         break;
       case 'assistant-message':
+      case 'manager-result':
         if (typeof event.text === 'string' && event.text.trim().length > 0) {
           lastAssistant = event.text;
-          if (inSummaryReply) summaryReply = event.text;
+          if (inSummaryReply && event.type === 'assistant-message') summaryReply = event.text;
         }
         break;
       case 'tool-use': {

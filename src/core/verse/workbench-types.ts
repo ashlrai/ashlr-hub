@@ -670,17 +670,33 @@ export interface VerseSessionControlsUpdate {
 
 /**
  * GET|POST /api/verse/session-controls/defaults — what a NEW chat starts with.
- * `bypass` is refused here: it is confirmed per chat, never inherited.
+ * Full access (`bypass`) is inherited only from explicitly confirmed defaults.
  */
 export interface VerseSessionControlDefaults {
   global: VerseSessionControls;
   seats: Record<string, VerseSessionControls>;
+  /** Saved operator preference; never a custody or release grant. */
+  fullAccessConfirmed?: true;
+}
+export interface VerseSessionControlDefaultsResult extends VerseSessionControlDefaults {
+  /** Present only after an explicit applyExisting request; never persisted in defaults. */
+  application?: {
+    updated: number;
+    appliesNextTurn: number;
+    preservedPlan: number;
+    unchanged: number;
+    refusals: Array<{ sessionId: string; reason: 'unavailable' | 'persistence-failed' }>;
+  };
 }
 export interface VerseSessionControlDefaultsUpdate {
   /** Absent = the global default. */
   seatId?: string;
   effort?: VerseEffort | null;
-  permissionMode?: Exclude<VersePermissionMode, 'bypass'>;
+  permissionMode?: VersePermissionMode;
+  /** Required when saving Full access. */
+  confirmBypass?: true;
+  /** Explicitly update existing chats in this scope, preserving their Plan overrides. */
+  applyExisting?: true;
 }
 
 /** POST /api/verse/attachments/:sessionId (body cap raised for this route only). */

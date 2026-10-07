@@ -311,6 +311,33 @@ describe('bypass', () => {
 // ---------------------------------------------------------------------------
 
 describe('queued follow-ups', () => {
+  it('switches a running chat between Manager send and native queue without losing its draft', async () => {
+    const user = userEvent.setup();
+    const p = props({ running: true });
+    await renderReady(p);
+    const choice = await screen.findByRole('combobox', { name: 'Auto seat' });
+    const box = screen.getByRole('textbox', { name: 'Message' });
+    await user.type(box, 'Keep this draft');
+    expect(screen.getByRole('button', { name: 'Queue this message — it sends when the turn ends' })).toBeEnabled();
+
+    await user.selectOptions(choice, 'manager');
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeEnabled();
+    expect(screen.getByText(/sends to the manager · the native turn continues separately/)).toBeInTheDocument();
+    // Draft edits re-register the same Manager interceptor without changing modes.
+    await user.type(box, ' for review');
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeEnabled();
+
+    await user.selectOptions(choice, 'off');
+    expect(screen.getByRole('button', { name: 'Queue this message — it sends when the turn ends' })).toBeEnabled();
+    await user.selectOptions(choice, 'manager');
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeEnabled();
+    expect(box).toHaveValue('Keep this draft for review');
+    expect(screen.getByRole('button', { name: 'Stop the running turn' })).toBeEnabled();
+    expect(server.posts(/queue|manager/)).toHaveLength(0);
+    expect(p.onSend).not.toHaveBeenCalled();
+    expect(p.onStop).not.toHaveBeenCalled();
+  });
+
   it('Enter while a turn runs queues the message on the server and clears the box', async () => {
     const user = userEvent.setup();
     const p = props({ running: true });
@@ -685,7 +712,7 @@ describe('footer — whole words', () => {
     ['plan', 'Plan', 'Plan'],
     ['accept-edits', 'Accept edits', 'Accept edits'],
     ['auto', 'Auto', 'Auto'],
-    ['bypass', 'Bypass', 'Bypass permissions'],
+    ['bypass', 'Full access', 'Bypass permissions'],
   ] as const)('mode %s shows "%s" in full; its name and tooltip carry "%s"', async (mode, shown, full) => {
     server = installServer({ controls: controlsView({ permissionMode: mode }) });
     await renderReady();

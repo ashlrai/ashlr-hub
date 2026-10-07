@@ -393,3 +393,34 @@ describe('Composer — V3.10 seat health block', () => {
     await waitFor(() => expect(screen.queryByText(/is signed out/)).not.toBeInTheDocument());
   });
 });
+
+
+describe('Composer manager interjections', () => {
+  it('sends a manager message while the native turn keeps running without enqueuing or stopping it', async () => {
+    const { saveAutoPref } = await import('./multimodel/useAutoSeat.js');
+    const { setMutationToken, clearMutationToken } = await import('../../data/auth-store.js');
+    const { seedVerseSession, resetVerseStore } = await import('./verse-store.js');
+    const { session } = await import('./fixtures.test-support.js');
+    const id = 'vs_manager_running'; localStorage.clear(); saveAutoPref(id, 'manager');
+    setMutationToken('a'.repeat(64)); seedVerseSession(id, session({ id, status: 'running' }), []);
+    const posts: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).includes('/outcomes/session/')) return Response.json({ sourceState: 'unlinked', association: null });
+      if (String(url).includes('/outcomes/interactive')) {
+        posts.push(String(url)); const input = JSON.parse(String(init?.body));
+        return Response.json({ sourceState: 'healthy', association: { outcomeId: input.outcomeId, revision: 3, scopeRevision: 1, paused: false, terminalStageIds: [], manager: { sourceState: 'healthy', enabled: true, mode: 'interactive', sessionId: id, conversationRevision: 1, running: null, next: null, latest: null } } }, { status: 202 });
+      }
+      return new Response('unsupported', { status: 404 });
+    }));
+    try {
+      const p = props({ sessionId: id, running: true }); render(<Composer {...p} />);
+      expect(await screen.findByRole('combobox', { name: 'Auto seat' })).toHaveDisplayValue('Manager');
+      const user = userEvent.setup(); await user.type(screen.getByRole('textbox', { name: 'Message' }), 'Guide this work');
+      await user.click(screen.getByRole('button', { name: 'Send message' }));
+      await waitFor(() => expect(posts).toHaveLength(1));
+      await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message' })).toHaveValue(''));
+      expect(p.onSend).not.toHaveBeenCalled(); expect(p.onStop).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: /Stop the running turn/ })).toBeInTheDocument();
+    } finally { clearMutationToken(); resetVerseStore(); vi.unstubAllGlobals(); localStorage.clear(); }
+  });
+});

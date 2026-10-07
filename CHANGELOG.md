@@ -9,6 +9,53 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.25.0] — 2026-10-07
+
+### Added
+
+- Add an explicit Manager mode to interactive chats and a shared resident
+  manager for autonomous outcomes. One native frontier agent plans and reviews;
+  independent work runs through the existing fleet queue and selected accounts.
+- Save manager messages, plans and actual run results with restart and archive
+  recovery. Pause/resume controls and retries preserve uncertain messages and
+  drafts. A plan remains separate from verified implementation and merge.
+- Default newly launched supported sessions to the confirmed full-access
+  preference. Existing sessions, Plan mode and host execution boundaries retain
+  their existing behavior.
+- Maintain release-backed article tasks from verified public release facts.
+  Publication requires the target repository's current enrollment and signed
+  authority; an attempted task does not count as a published article.
+
+### Fixed
+
+- Resolve the manager's exact default model before route admission and check
+  current native account profiles when recovering saved results. Exhausted
+  allowance blocks new contacts without discarding valid terminal evidence.
+- Round native credit-balance tooltips while retaining exact accounting readings,
+  and describe uncapped fleet volume settings without large sentinel numbers.
+- Refresh pending Devin consumption from the server cache every five seconds
+  during the sidebar's first minute, then return to its normal cadence. Hidden
+  windows stop polling, and an open Resources drawer owns the refresh instead.
+- Keep local speed readings tied to their saved model, endpoint and context,
+  preserve measurement age, and distinguish decode from end-to-end timing.
+  Sum actual per-call output tokens across a completed turn and round only the
+  display. Avoid redundant composer updates when routing mode stays unchanged.
+- Honor account-level budget-read opt-outs. Prune deleted knowledge chunks only
+  after complete scans; partial or failed listings preserve the existing index.
+- Bound native fleet startup output capture and clear the busy state if worker
+  creation fails. Bind custody credential reads to one unique existing item and
+  preserve precise macOS failure diagnostics without exposing credentials.
+- Validate release-article storage owners, modes and path identities on Linux
+  as well as platform ACLs. Refuse replaced manifests and changed ancestors
+  without treating a disrupted read as healthy missing configuration.
+- Reuse incoming chat event validation to reduce startup code. Run independent
+  native broker CI checks alongside Mac suites, retaining all required jobs and
+  complete qualification before artifact admission.
+- Use tiny evaluator files in inspection-only POSIX test fixtures, preserving
+  real Node execution tests, fresh evidence checks and Windows behavior.
+- Expose release-article commands in help and shell completions. Check existing
+  CLI discovery and release metadata contracts in the fast release preflight.
+
 ## [3.24.4] — 2026-10-07
 
 ### Added

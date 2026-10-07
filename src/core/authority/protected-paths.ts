@@ -113,6 +113,10 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/fleet/maintainer-pr-runner.ts',
   'src/core/fleet/maintainer-cargo-dependencies.ts',
   'src/cli/maintainer-verify.ts',
+  // Release claim eligibility and the opt-in signed company content task lane.
+  'src/core/release-public-facts.ts',
+  'src/core/release-articles.ts',
+  'src/cli/release-articles.ts',
   // 3.13: signs provenance for cloud PRs it ingests into the standing pass
   'src/core/fleet/cloud-intake.ts',
   'src/core/fleet/post-merge-watch.ts',
@@ -141,6 +145,11 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/goals/outcome-*.ts',
   'src/core/vision/leader-outcomes.ts',
   'src/core/verse/outcomes-*.ts',
+  // Exact current primary→enrolled-mirror association for manager conversation scope.
+  'src/core/verse/manager-scope.ts',
+  // Private message evidence and sidecar admission/reconciliation belong to the same host boundary.
+  'src/core/verse/manager-conversation.ts',
+  'src/core/verse/manager-session.ts',
   'src/core/vision/leader-preferences.ts',
   // Sandbox, policy and routing
   'src/core/sandbox/**',

@@ -6,7 +6,7 @@
  *   - the ARGV SNAPSHOT for every engine × effort × permission mode — the
  *     default (accept-edits, no effort) is byte-identical to the 3.9 argv;
  *   - request parsing: unknown keys, bypass needs `confirmBypass`, defaults
- *     can never hold bypass;
+ *     require explicit confirmation before saving Full access;
  *   - the defaults file (0600) and what a new chat inherits;
  *   - attachments on disk (0700 dir, 0600 file, ≤ 8 MB, exact directory),
  *     the follow-up queue (max 3, hold/release, persisted 0600) and the `@`
@@ -31,6 +31,7 @@ import { createFileIndex, fuzzyScore, rankFiles } from '../src/core/verse/file-i
 import type { VerseSeatLaunch } from '../src/core/verse/session-engine.js';
 import {
   claudePermissionArgs,
+  devinCliPermissionArgs,
   controlOptionsFor,
   effectiveControls,
   initialControlsFor,
@@ -331,8 +332,8 @@ describe('request parsing', () => {
       .toEqual({ ok: true, update: { permissionMode: 'bypass', confirmBypass: true } });
   });
 
-  it('defaults can never hold bypass', () => {
-    expect(parseDefaultsUpdate({ permissionMode: 'bypass' })).toMatchObject({ ok: false, error: expect.stringContaining('per chat') });
+  it('Full access defaults require explicit confirmation', () => {
+    expect(parseDefaultsUpdate({ permissionMode: 'bypass' })).toMatchObject({ ok: false, error: expect.stringContaining('confirm') });
     expect(parseDefaultsUpdate({ seatId: 'claude-a', permissionMode: 'plan' })).toEqual({ ok: true, update: { seatId: 'claude-a', permissionMode: 'plan' } });
     expect(parseDefaultsUpdate({ seatId: '../x', effort: 'low' })).toMatchObject({ ok: false });
   });
@@ -372,6 +373,27 @@ describe('defaults for new chats', () => {
     expect(readControlDefaults(root).global).toEqual({});
   });
 
+  it('persists confirmed Full access and inherits it only with the marker', () => {
+    expect(parseDefaultsUpdate({ permissionMode: 'bypass', confirmBypass: true, applyExisting: true })).toEqual({ ok: true, update: { permissionMode: 'bypass', confirmBypass: true, applyExisting: true } });
+    expect(parseDefaultsUpdate({ permissionMode: 'bypass', confirmBypass: 'yes' }).ok).toBe(false);
+    expect(parseDefaultsUpdate({ permissionMode: 'plan', applyExisting: true }).ok).toBe(false);
+    expect(parseDefaultsUpdate({ permissionMode: 'bypass', confirmBypass: true, fullAccessConfirmed: true }).ok).toBe(false);
+    writeControlDefaults(root, { permissionMode: 'bypass', confirmBypass: true });
+    const saved = readControlDefaults(root);
+    expect(saved).toEqual({ global: { permissionMode: 'bypass' }, seats: {}, fullAccessConfirmed: true });
+    for (const seat of Object.values(SEATS)) expect(initialControlsFor(saved, seat)).toEqual({ permissionMode: 'bypass' });
+    expect(initialControlsFor({ global: { permissionMode: 'bypass' }, seats: {} }, SEATS.codex)).toEqual({});
+    const devin = initialControlsFor(saved, { id: 'devin-cli', engine: 'devin', models: [] });
+    expect(devin).toEqual({ permissionMode: 'bypass' });
+    expect(devinCliPermissionArgs({ controls: devin })).toEqual(['--permission-mode', 'dangerous']);
+    writeControlDefaults(root, { seatId: SEATS.codex.id, permissionMode: 'plan' });
+    expect(initialControlsFor(readControlDefaults(root), SEATS.codex)).toEqual({ permissionMode: 'plan' });
+    writeControlDefaults(root, { effort: 'high' });
+    expect(readControlDefaults(root).fullAccessConfirmed).toBe(true);
+    writeControlDefaults(root, { permissionMode: 'accept-edits' });
+    expect(readControlDefaults(root).fullAccessConfirmed).toBeUndefined();
+  });
+
   it('never reads bypass back out of a hand-edited file', () => {
     writeFileSync(join(root, 'control-defaults.json'), JSON.stringify({ global: { permissionMode: 'bypass', effort: 'low' }, seats: { x: { permissionMode: 'bypass' } } }), { mode: 0o600 });
     expect(readControlDefaults(root)).toEqual({ global: { effort: 'low' }, seats: {} });
@@ -407,6 +429,8 @@ describe('defaults for new chats', () => {
     JSON.stringify({ global: {}, seats: { good: { effort: 'low' }, bad: [] } }),
     JSON.stringify({ global: {}, seats: { good: { effort: 'low' } }, future: true }),
     JSON.stringify({ global: {}, seats: [] }),
+    JSON.stringify({ global: { permissionMode: 'bypass' }, seats: {}, fullAccessConfirmed: false }),
+    JSON.stringify({ global: {}, seats: {}, fullAccessConfirmed: true }),
     JSON.stringify({ global: {}, seats: { '../escape': {} } }),
     JSON.stringify({ global: { permissionMode: 'bypass' }, seats: {} }),
     Buffer.from([0x7b, 0xff, 0x7d]),
@@ -468,7 +492,7 @@ describe('defaults for new chats', () => {
   });
 
   it('refuses invalid direct updates before creating any defaults file', () => {
-    expect(() => writeControlDefaults(root, { permissionMode: 'bypass' } as never)).toThrow(/never be a default/);
+    expect(() => writeControlDefaults(root, { permissionMode: 'bypass' } as never)).toThrow(/confirm/);
     expect(() => writeControlDefaults(root, { effort: 'invalid' } as never)).toThrow(/effort/);
     expect(existsSync(join(root, 'control-defaults.json'))).toBe(false);
   });

@@ -15,7 +15,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -223,8 +223,8 @@ describe('session controls', () => {
     expect(flagValue(h.children[1]!.argv, '--model')).toBe('claude-opus-5-5');
   });
 
-  it('new chats start from the saved defaults, never from bypass', () => {
-    expect(() => h.engine.setControlDefaults!({ permissionMode: 'bypass' as 'plan' })).toThrow(/per chat/);
+  it('new chats start from saved defaults and unconfirmed bypass is refused', () => {
+    expect(() => h.engine.setControlDefaults!({ permissionMode: 'bypass' as 'plan' })).toThrow(/confirm/);
     h.engine.setControlDefaults!({ permissionMode: 'plan' });
     h.engine.setControlDefaults!({ seatId: 'claude-a', effort: 'max' });
     const id = create();
@@ -233,6 +233,66 @@ describe('session controls', () => {
     // Grok takes plan but not "max".
     const grok = create('grok');
     expect(h.engine.getSession(grok)!.controls).toEqual({ permissionMode: 'plan' });
+  });
+});
+
+describe('saved Full access application', () => {
+  it('new routed/handoff chats inherit confirmed defaults, while a source Plan stays Plan', () => {
+    h.engine.setControlDefaults!({ permissionMode: 'bypass', confirmBypass: true });
+    const source = create();
+    for (const engine of ['claude', 'codex', 'grok'] as const) {
+      const routed = h.engine.createSession({ seatId: SEATS[engine].id, projectPath: project, handoffFromSessionId: source }, launchFor(engine));
+      expect(routed.controls).toEqual({ permissionMode: 'bypass' });
+      expect(routed.accountId).toBe(SEATS[engine].accountId);
+    }
+    h.engine.setControls!(source, { permissionMode: 'plan' });
+    const next = h.engine.createSession({ seatId: SEATS.codex.id, projectPath: project, handoffFromSessionId: source }, launchFor('codex'));
+    expect(next.controls).toEqual({ permissionMode: 'plan' });
+    expect(h.children).toHaveLength(0);
+  });
+
+  it('applies only the requested seat, preserves Plan/effort and current argv, and survives settlement/restart', async () => {
+    const running = create();
+    const plan = create();
+    const other = create('grok');
+    h.engine.setControls!(plan, { permissionMode: 'plan' });
+    h.engine.setControls!(running, { effort: 'high' });
+    h.engine.sendTurn(running, 'first');
+    const first = h.children[0]!;
+    const result = h.engine.setControlDefaults!({ seatId: SEATS.claude.id, permissionMode: 'bypass', confirmBypass: true, applyExisting: true });
+    expect(result.application).toEqual({ updated: 1, appliesNextTurn: 1, preservedPlan: 1, unchanged: 0, refusals: [] });
+    expect(flagValue(first.argv, '--permission-mode')).toBe('acceptEdits');
+    expect(h.children).toHaveLength(1);
+    expect(h.engine.getSession(running)!.controls).toEqual({ effort: 'high', permissionMode: 'bypass' });
+    expect(h.engine.getSession(plan)!.controls).toEqual({ permissionMode: 'plan' });
+    expect(h.engine.getSession(other)!.controls).toBeUndefined();
+    await first.finish(0, OK_LINES);
+    h.engine.sendTurn(running, 'second');
+    expect(flagValue(h.children[1]!.argv, '--permission-mode')).toBe('bypassPermissions');
+    await h.children[1]!.finish(0, OK_LINES);
+    const bytes = JSON.parse(readFileSync(join(h.root, 'sessions', `${running}.json`), 'utf8'));
+    expect(bytes.controls).toEqual({ effort: 'high', permissionMode: 'bypass' });
+    h.engine.close();
+    h = makeHarness();
+    expect(h.engine.getSession(running)!.controls).toEqual({ effort: 'high', permissionMode: 'bypass' });
+    expect(create()).toBeTruthy();
+    expect(h.engine.listSessions().every(session => session.accountId === SEATS[session.engine as 'claude' | 'codex' | 'grok'].accountId)).toBe(true);
+  });
+
+  it('reports a real atomic persistence failure and restores the live session instead of claiming success', () => {
+    const failed = create();
+    const good = create();
+    const before = h.engine.getSession(failed)!;
+    const path = join(h.root, 'sessions', `${failed}.json`);
+    renameSync(path, `${path}.before`);
+    mkdirSync(path); // Atomic rename onto an actual directory must fail on every platform.
+    const result = h.engine.setControlDefaults!({ permissionMode: 'bypass', confirmBypass: true, applyExisting: true });
+    expect(result.application).toEqual({ updated: 1, appliesNextTurn: 0, preservedPlan: 0, unchanged: 0, refusals: [{ sessionId: failed, reason: 'persistence-failed' }] });
+    expect(h.engine.getSession(failed)!.controls).toEqual(before.controls);
+    expect(h.engine.getSession(failed)!.updatedAt).toBe(before.updatedAt);
+    expect(h.engine.getSession(good)!.controls).toEqual({ permissionMode: 'bypass' });
+    expect(JSON.parse(readFileSync(`${path}.before`, 'utf8')).controls).toEqual(before.controls);
+    expect(h.children).toHaveLength(0);
   });
 });
 

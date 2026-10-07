@@ -1,8 +1,11 @@
 # Releasing locally
 
-The complete local prepublish suite is required before publishing a tarball.
-Hosted pull-request CI and dependency checks also run; inspect their exact-SHA
-results before merging. The separate automated desktop-release workflow remains
+Every release requires complete source qualification. Use the
+[qualified CI build handoff](RELEASING.md#qualified-ci-build-handoff) to reuse
+the exact tested JavaScript build and original npm archive. If that evidence is
+unavailable, expired or rejected, run the complete local prepublish suite before
+publishing. Inspect hosted pull-request CI and dependency checks for the exact
+source revision before merging. The separate automated desktop-release workflow remains
 disabled during the Linux quarantine. This procedure builds, installs and
 publishes a locally signed macOS release without relying on that workflow.
 
@@ -14,13 +17,24 @@ off, every publish failed:
 
     npm error Automatic provenance generation not supported for provider: null
 
-That setting is now removed. It is a real tradeoff, stated plainly: published
-packages no longer carry a signed attestation tying them to a commit. Consumers
-cannot cryptographically verify the tarball was built from this source. Nothing
-else replaces that. This is a limitation of the current manual publication path even when hosted
-pull-request checks pass.
+That setting is now removed. Manual npm publication does not carry npm's CI
+provenance attestation. The qualified CI handoff separately signs and verifies
+the tested source, build and original archive before local adoption; it does
+not add npm provenance to the published package. Record both boundaries when
+reporting a release.
 
-## The fast path
+## Reuse a qualified CI build
+
+Run `npm run check:release` before expensive qualification. After every required
+exact-source CI and audit check passes, follow the
+[qualified CI build handoff](RELEASING.md#qualified-ci-build-handoff) to verify
+and adopt the trusted signed bundle in a clean checkout. Retain its original npm
+archive for publication; do not repack the installed or locally shipped copy.
+Native compilation, signing, rollback checks, installation and live acceptance
+remain separate. This avoids repeating successful source qualification; it does
+not treat a saved receipt or an unfinished CI run as a passing gate.
+
+## Local qualification fallback
 
 Run these commands in order from the final clean release commit. Each stops on
 its own failure. A tarball publish does **not** run `prepublishOnly` on npm 11,
@@ -36,11 +50,13 @@ npm publish <tarball> --access public   # the path ship:local printed; see Publi
 ```
 
 Run `npm run check:release` before an expensive build or pushing release changes.
-It runs the three existing whole publication and documentation contract modules
-against source files, using the hermetic test runner; it does not require built
-`dist` output or provider credentials. Versioned installer links and release
-policy mismatches fail here early. This focused check does not replace the
-complete `prepublishOnly` suite, exact-source hosted checks or artifact acceptance.
+It runs five existing whole publication, documentation and CLI discovery contract
+modules against source files, using the hermetic test runner; it does not require
+built `dist` output or provider credentials. Versioned installer links, release
+policy mismatches and missing help or completions fail here early. This focused
+check does not replace complete
+source qualification, exact-source hosted checks or artifact acceptance. Use
+`prepublishOnly` for the local qualification fallback.
 
 `ship:local --native` does not compile Rust. It skips the native replacement
 when `desktop/src-tauri/target/release/ashlr-desktop` is missing or older than
@@ -142,7 +158,10 @@ behind their choices.
 
 ## Before you publish
 
-`npm run prepublishOnly` runs the complete release checks. `npm run gate` provides focused development feedback and does not replace them. For diagnosis, these are the static checks:
+`npm run prepublishOnly` runs the complete local release checks. The qualified
+CI handoff is the alternative source-qualification path described above;
+`npm run gate` provides focused development feedback and does not replace
+complete qualification. For diagnosis, these are the static checks:
 
 ```sh
 npm run build        # must exit 0 — see "the build used to be broken" below

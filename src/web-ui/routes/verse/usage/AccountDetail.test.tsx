@@ -65,12 +65,15 @@ describe('AccountDetail', () => {
       : spendControlReached === false ? /provider reports credits available/ : /spending control is unconfirmed/;
     const view = render(<AccountCard card={model} />);
     expect(screen.getByText(copy)).toBeInTheDocument();
-    expect(screen.getByTitle('3626.2145675')).toHaveTextContent('3,600');
+    expect(screen.getByTitle('Provider balance: 3,600 credits.')).toHaveTextContent('3,600');
+    expect(model.credits!.balance).toBe('3626.2145675');
+    expect(model.credits!.balanceValue).toBe(3626.2145675);
     expect(screen.getByRole('meter', { name: /Codex A primary used/ })).toHaveAttribute('aria-valuenow', '100');
     view.unmount();
     detail(model);
     expect(screen.getByText(copy)).toBeInTheDocument();
-    expect(screen.getByTitle('3626.2145675')).toHaveTextContent('3,600');
+    expect(screen.getByTitle('Provider balance: 3,600 credits.')).toHaveTextContent('3,600');
+    expect(model.credits!.balance).toBe('3626.2145675');
     expect(screen.queryByText(/spendable even when the window is full/)).not.toBeInTheDocument();
   });
 
