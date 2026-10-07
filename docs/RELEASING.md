@@ -12,7 +12,7 @@
 > The source version is `@ashlr/hub@3.25.1` (release candidate). Verify its exact-source checks,
 > registry version and dist-tags, GitHub release assets and installed runtime
 > independently before reporting those delivery layers as complete. The
-> published 3.24.4 release remains the current distribution until the candidate
+> published 3.25.0 release remains the current distribution until the candidate
 > completes those gates. The frozen
 > `release.yml` and `promote.yml`
 > procedures below describe the historical 3.3.2 lane, not a publishing path

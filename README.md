@@ -18,15 +18,15 @@
 
 ## Install
 
-Phantom 3.24.4:
+Phantom 3.25.0:
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.4/ashlr-hub-3.24.4.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.0/ashlr-hub-3.25.0.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
 ashlr verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 On an Apple silicon Mac, download the
-[v3.24.4 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.4/Ashlr_3.24.4_aarch64.dmg).
+[v3.25.0 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.0/Ashlr_3.25.0_aarch64.dmg).
 It is locally signed, not Apple notarized; macOS may require **Open Anyway** on
 first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
@@ -74,7 +74,11 @@ See [Automatic work](docs/AUTOMATIC-OUTCOMES.md) for chat routing, editable outc
 
 <a id="whats-in-verse-324"></a>
 
-### What's in Phantom 3.24
+### What's in Phantom 3.25
+
+Choose **Manager** in a chat’s **Auto seat** menu, or **Enable manager** on a
+saved Fleet outcome, for planning, delegation and review under the fleet’s
+current authority. [Read the Manager guide](docs/AUTOMATIC-OUTCOMES.md#one-conversation-with-the-manager).
 
 **See what is running, what was measured and what still needs permission.**
 The desktop can request that the host stay awake during observed local chat and
@@ -209,7 +213,7 @@ separate Node.js install to run.
 
 ### Install
 
-Use the [v3.24.4 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.24.4)
+Use the [v3.25.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.0)
 for the versioned arm64 DMG. It is locally signed, not Apple Developer ID notarized,
 so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
@@ -297,7 +301,7 @@ The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.4/ashlr-hub-3.24.4.tgz
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.0/ashlr-hub-3.25.0.tgz
 ashlr --version
 ashlr verse                 # start the server and open http://127.0.0.1:7777/verse/
 ```

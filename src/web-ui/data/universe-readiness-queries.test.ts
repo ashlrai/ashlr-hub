@@ -7,11 +7,40 @@ const report = () => ({ schemaVersion: 1, readinessScope: 'recorded-campaign-evi
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('selected recorded campaign query', () => {
-  it('uses only the campaign ID in its authenticated GET and propagates cancellation', async () => {
-    const fetch = vi.fn(async () => new Response(JSON.stringify(report()))); vi.stubGlobal('fetch', fetch);
+  it('uses only the campaign ID in its authenticated GET with an owned read lifetime', async () => {
+    let transportSignal!: AbortSignal;
+    const fetch = vi.fn(async (_path: string, init: RequestInit) => {
+      transportSignal = init.signal!;
+      return new Response(JSON.stringify(report()));
+    });
+    vi.stubGlobal('fetch', fetch);
     const signal = new AbortController().signal;
     await expect(universeCampaignReadinessQuery('search', 'compiler').fetch(signal)).resolves.toEqual(report());
-    expect(fetch).toHaveBeenCalledExactlyOnceWith('/api/universe/campaign-readiness?campaignId=search', expect.objectContaining({ method: 'GET', credentials: 'same-origin', signal }));
+    expect(transportSignal).toBeInstanceOf(AbortSignal);
+    expect(transportSignal).not.toBe(signal);
+    expect(transportSignal.aborted).toBe(false);
+    expect(fetch).toHaveBeenCalledExactlyOnceWith('/api/universe/campaign-readiness?campaignId=search', expect.objectContaining({ method: 'GET', credentials: 'same-origin', signal: transportSignal }));
+  });
+
+  it('propagates caller cancellation to the pending campaign GET with the exact reason', async () => {
+    let transportSignal!: AbortSignal;
+    const fetch = vi.fn((_path: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      transportSignal = init.signal!;
+      transportSignal.addEventListener('abort', () => reject(transportSignal.reason), { once: true });
+    }));
+    vi.stubGlobal('fetch', fetch);
+    const caller = new AbortController();
+    const reason = new Error('campaign read cancelled');
+    const reading = universeCampaignReadinessQuery('search', 'compiler').fetch(caller.signal);
+    expect(transportSignal).toBeInstanceOf(AbortSignal);
+    expect(transportSignal).not.toBe(caller.signal);
+    expect(transportSignal.aborted).toBe(false);
+    const rejected = expect(reading).rejects.toBe(reason);
+    caller.abort(reason);
+    await rejected;
+    expect(transportSignal.aborted).toBe(true);
+    expect(transportSignal.reason).toBe(reason);
+    expect(fetch).toHaveBeenCalledExactlyOnceWith('/api/universe/campaign-readiness?campaignId=search', expect.objectContaining({ method: 'GET', credentials: 'same-origin', signal: transportSignal }));
   });
 
   it('keeps ambiguous hyphen-separated pairs in distinct caches', () => {
