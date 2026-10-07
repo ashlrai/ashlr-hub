@@ -159,6 +159,7 @@ describe('leaderMemoToCloudBacklog', () => {
     expect(item.prompt).toContain('- 8 known failures\n- 3 reverts this week');
     expect(item.prompt).toContain("The Leader's move against it: Fix the recovery fixtures first");
     expect(item.prompt).toMatch(/Verify each claim against the code/);
+    expect(item.prompt).toContain("Phantom's Leader");
   });
 
   it('takes priority from the action class (A → 1, B → 2)', () => {

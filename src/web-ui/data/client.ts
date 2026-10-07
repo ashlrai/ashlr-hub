@@ -6,6 +6,14 @@
 import { getReadClientProof, reportSessionExpired } from './auth-store.js';
 import { isRemoteMobileMode } from './remote-mode.js';
 
+/** Covers the console's two coherent 60s worker reads plus transport/body slack. */
+export const METADATA_JSON_READ_TIMEOUT_MS = 150_000;
+
+/** AbortError keeps optional metadata reads' existing cancellation/warm-data contract. */
+export class MetadataReadTimeoutError extends DOMException {
+  constructor() { super('The read timed out. Try again.', 'AbortError'); }
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -60,14 +68,37 @@ export class DispatchDisabledError extends ApiError {
  */
 export function readFailureReason(err: unknown): string {
   if (err instanceof ApiError) return err.detail ?? `The server answered HTTP ${err.status}.`;
+  if (err instanceof MetadataReadTimeoutError) return err.message;
   // fetch() rejects with a TypeError when the request never got an answer.
   if (err instanceof TypeError) return 'The server did not answer.';
   return 'The request failed.';
 }
 
-/** GET an authenticated read route. 401 reports session-expired and throws. */
+const loadRemote = () => import('./remote-session.js');
+
+/** GET lifetime belongs to this shared read, including its local/phone JSON body. */
 export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
-  if (isRemoteMobileMode()) return (await import('./remote-session.js')).remoteApiGet<T>(path, signal);
+  const controller = new AbortController();
+  const cancel = () => controller.abort(signal!.reason);
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener('abort', cancel, { once: true });
+  const timer = setTimeout(() => controller.abort(new MetadataReadTimeoutError()), METADATA_JSON_READ_TIMEOUT_MS);
+  try {
+    if (controller.signal.aborted) throw controller.signal.reason;
+    const value = await readApiJson<T>(path, controller.signal);
+    if (controller.signal.aborted) throw controller.signal.reason;
+    return value;
+  } catch (error) {
+    throw controller.signal.aborted ? controller.signal.reason : error;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', cancel);
+  }
+}
+
+/** 401 reports session-expired; the outer lifetime awaits the complete body. */
+async function readApiJson<T>(path: string, signal: AbortSignal): Promise<T> {
+  if (isRemoteMobileMode()) return await (await loadRemote()).remoteApiGet<T>(path, signal);
   const res = await fetch(path, {
     method: 'GET',
     credentials: 'same-origin',
@@ -87,72 +118,33 @@ export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> 
   return (await res.json()) as T;
 }
 
-/**
- * POST a mutating route with the raw mutation token. `mutationToken` must
- * come from the caller (data/mutations.ts pulls it from auth-store) — this
- * function does not read auth-store itself so it stays trivially testable.
- */
-export async function apiPost<T>(
-  path: string,
-  body: unknown,
-  mutationToken: string,
-  signal?: AbortSignal,
-): Promise<T> {
-  if (isRemoteMobileMode()) return (await import('./remote-session.js')).remoteMutate<T>('POST', path, body);
-  const res = await fetch(path, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-ashlr-token': mutationToken,
-    },
-    body: JSON.stringify(body ?? {}),
-    signal,
-  });
-  if (res.status === 401) {
-    throw new ApiError('Mutation token was rejected.', 401, path);
-  }
-  if (!res.ok) {
-    const { detail, code } = await readRefusal(res);
-    // Only a CODELESS 404 is the dispatch gate (see DispatchDisabledError).
-    // An unknown sub-path on an older server is codeless too and lands here
-    // as well — the two are indistinguishable by design, so callers that
-    // word this error must not assert which one it was.
-    if (res.status === 404 && code === null) {
-      throw new DispatchDisabledError(path);
-    }
-    throw new ApiError(
-      `POST ${path} failed (HTTP ${res.status})${detail ? `: ${detail}` : ''}.`,
-      res.status,
-      path,
-      detail || null,
-      code,
-    );
-  }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
+/** POST uses the caller's mutation token; read authority never supplies it. */
+export function apiPost<T>(path: string, body: unknown, mutationToken: string, signal?: AbortSignal): Promise<T> {
+  return mutateJson<T>('POST', path, body, mutationToken, signal);
 }
 
-/**
- * DELETE a mutating route with the raw mutation token — apiPost's twin, with
- * the same refusal reading (a codeless 404 is the dispatch gate). Used where
- * a route retires a thing by id (`DELETE /api/verse/leader/directives/<id>`).
- */
-export async function apiDelete<T>(path: string, mutationToken: string, signal?: AbortSignal): Promise<T> {
-  if (isRemoteMobileMode()) return (await import('./remote-session.js')).remoteMutate<T>('DELETE', path, {});
+/** DELETE retains its empty-body/text-response contract. */
+export function apiDelete<T>(path: string, mutationToken: string, signal?: AbortSignal): Promise<T> {
+  return mutateJson<T>('DELETE', path, {}, mutationToken, signal);
+}
+
+async function mutateJson<T>(method: 'POST' | 'DELETE', path: string, body: unknown, token: string, signal?: AbortSignal): Promise<T> {
+  if (isRemoteMobileMode()) return (await loadRemote()).remoteMutate<T>(method, path, body);
+  const post = method === 'POST';
   const res = await fetch(path, {
-    method: 'DELETE',
-    credentials: 'same-origin',
-    headers: { 'x-ashlr-token': mutationToken },
-    signal,
+    method, credentials: 'same-origin',
+    headers: post ? { 'Content-Type': 'application/json', 'x-ashlr-token': token } : { 'x-ashlr-token': token },
+    ...(post ? { body: JSON.stringify(body ?? {}) } : {}), signal,
   });
   if (res.status === 401) throw new ApiError('Mutation token was rejected.', 401, path);
   if (!res.ok) {
     const { detail, code } = await readRefusal(res);
+    // A codeless 404 is the dispatch gate; coded route refusals stay ApiError.
     if (res.status === 404 && code === null) throw new DispatchDisabledError(path);
-    throw new ApiError(`DELETE ${path} failed (HTTP ${res.status})${detail ? `: ${detail}` : ''}.`, res.status, path, detail || null, code);
+    throw new ApiError(`${method} ${path} failed (HTTP ${res.status})${detail ? `: ${detail}` : ''}.`, res.status, path, detail || null, code);
   }
   if (res.status === 204) return undefined as T;
+  if (post) return (await res.json()) as T;
   const text = await res.text();
   return (text ? JSON.parse(text) : undefined) as T;
 }

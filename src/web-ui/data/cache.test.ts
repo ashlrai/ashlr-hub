@@ -1,3 +1,4 @@
+import { apiGet, METADATA_JSON_READ_TIMEOUT_MS } from './client.js';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import {
   runQuery,
@@ -424,5 +425,61 @@ describe('cache — evict keeps subscribers', () => {
     expect(getQuerySnapshot('k').status).toBe('idle');
     expect(getQuerySnapshot('k').data).toBeUndefined();
     unsubscribe();
+  });
+});
+
+
+describe('cache — finite HTTP metadata lifetime', () => {
+  it('retains warm data on timeout and a detached sibling does not cancel the shared read', async () => {
+    vi.useFakeTimers();
+    evictAll();
+    try {
+      await runQuery('finite', async () => ({ pid: 123 }));
+      let passed!: AbortSignal;
+      let attempt = 0;
+      vi.stubGlobal('fetch', vi.fn((_path: string, init: RequestInit) => {
+        passed = init.signal!;
+        if (++attempt > 1) return Promise.resolve(Response.json({ pid: 456 }));
+        return new Promise<Response>((_resolve, reject) => passed.addEventListener('abort', () => reject(passed.reason), { once: true }));
+      }));
+      const first = vi.fn(); const sibling = vi.fn();
+      const detach = subscribeQuery('finite', first);
+      const detachSibling = subscribeQuery('finite', sibling);
+      const read = runQuery('finite', () => apiGet('/api/verse/control'));
+      detach();
+      expect(passed.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(METADATA_JSON_READ_TIMEOUT_MS);
+      await read;
+      expect(getQuerySnapshot('finite')).toMatchObject({ data: { pid: 123 }, status: 'error' });
+      expect(getQuerySnapshot('finite').error).toMatchObject({ message: 'AbortError: The read timed out. Try again.' });
+      expect(sibling).toHaveBeenCalled();
+      await refetchQuery('finite', () => apiGet('/api/verse/control'), true);
+      expect(getQuerySnapshot('finite')).toMatchObject({ data: { pid: 456 }, status: 'success', error: undefined });
+      detachSibling();
+    } finally { evictAll(); vi.useRealTimers(); vi.unstubAllGlobals(); }
+  });
+
+  it('does not release a slot on a timeout until a noncooperating fetch actually settles', async () => {
+    vi.useFakeTimers();
+    evictAll();
+    try {
+      const finish: ((value: Response) => void)[] = [];
+      vi.stubGlobal('fetch', vi.fn((path: string) => path === '/healthy'
+        ? Promise.resolve(Response.json('fresh'))
+        : new Promise<Response>(resolve => { finish.push(resolve); })));
+      const pending = Array.from({ length: 4 }, (_, i) => runQuery(`stalled-${i}`, () => apiGet(`/stalled-${i}`)));
+      const queued = runQuery('healthy', () => apiGet('/healthy'));
+      await vi.advanceTimersByTimeAsync(METADATA_JSON_READ_TIMEOUT_MS);
+      expect(queryGateStats()).toMatchObject({ active: 4, queued: 1, peak: 4 });
+      finish.shift()!(Response.json('late'));
+      await queued;
+      expect(getQuerySnapshot('stalled-0')).toMatchObject({ status: 'error', data: undefined });
+      expect(getQuerySnapshot('stalled-0').error).toMatchObject({ message: 'AbortError: The read timed out. Try again.' });
+      expect(getQuerySnapshot('healthy').data).toBe('fresh');
+      expect(queryGateStats().peak).toBe(4);
+      finish.forEach(resolve => resolve(Response.json('late')));
+      await Promise.all(pending);
+      expect(queryGateStats().active).toBe(0);
+    } finally { evictAll(); vi.useRealTimers(); vi.unstubAllGlobals(); }
   });
 });

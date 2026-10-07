@@ -181,7 +181,7 @@ describe('web UI fallback (no desktop browser contract)', () => {
     const [sid, text] = h.insert.mock.calls[0]!;
     expect(sid).toBe('s-1');
     expect(text).toContain('http://localhost:5173/');
-    expect(text).toContain('need the Ashlr desktop app');
+    expect(text).toContain('need the Phantom desktop app');
     expect(h.api.attach).not.toHaveBeenCalled();
   });
 

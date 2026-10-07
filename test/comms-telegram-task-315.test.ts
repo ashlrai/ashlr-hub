@@ -62,5 +62,6 @@ describe('/task', () => {
 
   it('is listed in /help', () => {
     expect(TELEGRAM_HELP_TEXT).toMatch(/\/task <owner\/repo>/);
+    expect(TELEGRAM_HELP_TEXT).toContain('Talk to Phantom’s Leader:');
   });
 });

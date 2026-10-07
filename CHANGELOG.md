@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to ashlr-hub are documented in this file.
+All notable changes to Phantom are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions map to milestone series: **2.1.0** = v2.1 "Harden & Prove" (H1–H8),
@@ -13,6 +13,18 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Fixed
 
+- Use Phantom in new Telegram messages, Leader prompts, desktop guidance and
+  phone passkey display names. Preserve saved conversations, provider names,
+  repository identifiers and compatible CLI, route and data identities.
+- Add an explicit Telegram profile preview and update command. Apply requires
+  the previewed bot ID, changes only differing default-locale display fields,
+  and verifies fresh readback without sending messages or changing credentials.
+- Give authenticated metadata reads a finite lifetime, including their JSON
+  response bodies. Preserve cached data, caller cancellation and mutation
+  behavior while reporting stalled reads as retryable failures.
+- Share the phone client import and local mutation refusal handling, preserving
+  method, body and response contracts. Desktop and phone startup bundles stay
+  within their existing size budgets.
 - Refuse new Devin session creation when local task accounting is incomplete.
   Show unknown accounting and explain unconfirmed legacy exposure instead of
   treating unreadable records as zero. Separate the local budget, reported use

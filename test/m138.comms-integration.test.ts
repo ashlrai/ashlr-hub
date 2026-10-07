@@ -41,7 +41,7 @@ async function deliverPendingReports(): Promise<{ sent: number; resolved: number
   for (const r of pending) markReportDelivered(r.id);
   return { sent: pending.length, resolved: pending.length };
 }
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -56,6 +56,7 @@ const {
   mockBuildOversightSnapshot,
   mockRunCommsCycle,
   mockLoadConfig,
+  mockLoadConfigReadOnlyStrict,
   mockLeaderTick,
   mockBuildLeaderState,
 } = vi.hoisted(() => ({
@@ -68,6 +69,7 @@ const {
   mockBuildOversightSnapshot: vi.fn(),
   mockRunCommsCycle: vi.fn().mockResolvedValue({ sent: 1, resolved: 0 }),
   mockLoadConfig: vi.fn(),
+  mockLoadConfigReadOnlyStrict: vi.fn(),
 }));
 
 // ---------------------------------------------------------------------------
@@ -176,6 +178,7 @@ vi.mock('../src/core/comms/dispatch.js', async (importOriginal) => {
 // ---------------------------------------------------------------------------
 vi.mock('../src/core/config.js', () => ({
   loadConfig: mockLoadConfig,
+  loadConfigReadOnlyStrict: mockLoadConfigReadOnlyStrict,
 }));
 
 // ---------------------------------------------------------------------------
@@ -184,6 +187,7 @@ vi.mock('../src/core/config.js', () => ({
 import { registerCommsHandlers } from '../src/core/comms/handlers.js';
 import { postRequest, listRequests } from '../src/core/comms/requests.js';
 import { cmdComms } from '../src/cli/comms.js';
+import { setTelegramTransportForTests, TELEGRAM_PHANTOM_BRAND } from '../src/core/integrations/telegram.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import type { StrategicBriefing } from '../src/core/vision/strategist.js';
 import type { OversightSnapshot } from '../src/core/fleet/oversight-export.js';
@@ -277,9 +281,11 @@ beforeEach(() => {
   mockBuildOversightSnapshot.mockClear();
   mockRunCommsCycle.mockResolvedValue({ sent: 1, resolved: 0 });
   mockLoadConfig.mockResolvedValue(cfgEnabled());
+  mockLoadConfigReadOnlyStrict.mockReset();
 });
 
 afterEach(() => {
+  setTelegramTransportForTests(null);
   vi.clearAllMocks();
   if (_prevHome === undefined) delete process.env.HOME;
   else process.env.HOME = _prevHome;
@@ -543,5 +549,79 @@ describe('comms ask-vision', () => {
     const exitCode = await cmdComms(['ask-vision']);
     expect(exitCode).toBe(1);
     expect(mockLeaderTick).not.toHaveBeenCalled();
+  });
+});
+
+describe('comms telegram-brand explicit operator command', () => {
+  const botId = 123456789;
+  function setup(target = false) {
+    const values = { name: target ? TELEGRAM_PHANTOM_BRAND.name : 'Ashlr',
+      description: target ? TELEGRAM_PHANTOM_BRAND.description : 'Old description',
+      short_description: target ? TELEGRAM_PHANTOM_BRAND.shortDescription : 'Old short description' };
+    mockLoadConfigReadOnlyStrict.mockReturnValue(makeCfg({ comms: { enabled: true, channel: 'telegram',
+      telegram: { botToken: 'fake-private-brand-token', chatId: 'fake-private-chat' } } }));
+    const calls: string[] = [];
+    setTelegramTransportForTests(async (method, body) => {
+      calls.push(method);
+      if (method === 'getMe') return { ok: true, result: { id: botId, is_bot: true, username: 'test_phantom_bot' } };
+      if (method.startsWith('getMy')) return { ok: true, result: { ...values } };
+      const key = method === 'setMyName' ? 'name' : method === 'setMyDescription' ? 'description' : 'short_description';
+      values[key] = String(body[key]); return { ok: true, result: true };
+    });
+    return calls;
+  }
+  it('defaults to read-only preview and never loads writable config or runs the comms cycle', async () => {
+    const calls = setup(); const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      mockLoadConfig.mockClear(); mockRunCommsCycle.mockClear();
+      expect(await cmdComms(['telegram-brand', '--json'])).toBe(0);
+      const result = JSON.parse(log.mock.calls.at(-1)![0] as string);
+      expect(result).toMatchObject({ mode: 'preview', status: 'preview', botId });
+      expect(calls).toEqual(['getMe', 'getMyName', 'getMyDescription', 'getMyShortDescription']);
+      expect(mockLoadConfigReadOnlyStrict).toHaveBeenCalledTimes(1); expect(mockLoadConfig).not.toHaveBeenCalled();
+      expect(mockRunCommsCycle).not.toHaveBeenCalled(); expect(existsSync(join(_tmpHome, '.ashlr', 'comms'))).toBe(false);
+      expect(JSON.stringify(log.mock.calls)).not.toContain('fake-private');
+    } finally { log.mockRestore(); }
+  });
+  it.each([['--apply'], ['--apply', '--preview', '--expected-bot-id', '123'], ['--locale', 'en'],
+    ['--expected-bot-id', '123'], ['--apply', '--expected-bot-id', '0'], ['--apply', '--expected-bot-id', '1e3'],
+    ['--apply', '--expected-bot-id', '9007199254740992'], ['--json', '--json'], ['--token', 'fake-private']])('rejects unsafe/unsupported flags before config or contact: %s', async (...flags) => {
+    const calls = setup(); const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await cmdComms(['telegram-brand', ...flags])).toBe(2);
+      expect(mockLoadConfigReadOnlyStrict).not.toHaveBeenCalled(); expect(calls).toEqual([]);
+      expect(JSON.stringify(error.mock.calls)).not.toContain('fake-private');
+    } finally { error.mockRestore(); }
+  });
+  it('applies only through explicit expected bot ID and outputs verified safe facts', async () => {
+    const calls = setup(); const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(await cmdComms(['telegram-brand', '--apply', '--expected-bot-id', String(botId), '--json'])).toBe(0);
+      expect(JSON.parse(log.mock.calls.at(-1)![0] as string)).toMatchObject({ mode: 'apply', status: 'verified', botId });
+      expect(calls.filter((method) => method.startsWith('set'))).toEqual(['setMyName', 'setMyDescription', 'setMyShortDescription']);
+      expect(calls).not.toContain('sendMessage'); expect(calls).not.toContain('getUpdates');
+    } finally { log.mockRestore(); }
+  });
+  it('returns nonzero on partial/unknown readback and never prints token-bearing errors', async () => {
+    setup(); setTelegramTransportForTests(async (method) => {
+      if (method === 'getMe') return { ok: true, result: { id: botId, is_bot: true } };
+      if (method.startsWith('getMy')) return { ok: true, result: { name: 'Old', description: 'Old', short_description: 'Old' } };
+      throw new Error('fake-private-brand-token https://api.telegram.org/botfake-private-brand-token');
+    });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(await cmdComms(['telegram-brand', '--apply', '--expected-bot-id', String(botId), '--json'])).toBe(1);
+      expect(JSON.parse(log.mock.calls.at(-1)![0] as string).status).toBe('partial');
+      expect(JSON.stringify(log.mock.calls)).not.toContain('fake-private');
+    } finally { log.mockRestore(); }
+  });
+  it('refuses unreadable config without provider contact or unsafe exception details', async () => {
+    const calls = setup(); mockLoadConfigReadOnlyStrict.mockImplementation(() => { throw new Error('/private/home/fake-private-token'); });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(await cmdComms(['telegram-brand', '--json'])).toBe(1); expect(calls).toEqual([]);
+      expect(JSON.parse(log.mock.calls.at(-1)![0] as string)).toEqual({ status: 'blocked', reason: 'configuration-or-operation-unavailable' });
+      expect(JSON.stringify(log.mock.calls)).not.toContain('fake-private');
+    } finally { log.mockRestore(); }
   });
 });

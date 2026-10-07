@@ -230,7 +230,7 @@ export function createRemotePairing(
         invitations.delete(key);
         if (invite.expiresAt <= now()) return null;
         const opts = await webauthn.generateRegistrationOptions({
-          rpName: 'Ashlr Verse', rpID, userName: identity.email, userDisplayName: name,
+          rpName: 'Phantom', rpID, userName: identity.email, userDisplayName: name,
           // Stable, opaque WebAuthn user ID for this Access subject on this RP.
           userID: createHash('sha256').update(`${rpID}:${identity.subject}`).digest(),
           attestationType: 'none', supportedAlgorithmIDs: [-7, -257],

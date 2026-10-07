@@ -1,6 +1,6 @@
 /**
  * The Leader's self-improvement drive (3.15) — every day it picks the
- * highest-leverage improvements to Ashlr Verse and launches them through the
+ * highest-leverage improvements to Phantom and launches them through the
  * cheapest capable lane, within budgets, then reports what happened.
  *
  * WHERE IDEAS COME FROM (all local reads, deterministic):
@@ -101,7 +101,7 @@ function clip(text: string, max: number): string {
 }
 
 function brief(what: string, evidence: string): string {
-  return `In ${VERSE_REPO} (Ashlr Verse): ${what}\n\nEvidence: ${evidence}\n\nFirst verify the premise against the code; if it is already fixed, say so and stop. Otherwise deliver one focused change with tests that prove it, and say in the PR how you verified it.`;
+  return `In ${VERSE_REPO} (Phantom): ${what}\n\nEvidence: ${evidence}\n\nFirst verify the premise against the code; if it is already fixed, say so and stop. Otherwise deliver one focused change with tests that prove it, and say in the PR how you verified it.`;
 }
 
 /** The open gates of the competitive acceptance table: `| Gate | Evidence | Current boundary |`. */
@@ -459,7 +459,7 @@ export interface DriveRunResult {
 /** One-line-per-pick report in the Leader's voice. */
 export function driveReportText(selections: readonly DriveSelection[], actions: readonly LeaderAction[]): string {
   if (selections.length === 0) return 'Self-improvement: nothing clears the bar today. Backlog is clean.';
-  const lines = [`Self-improvement — ${selections.length} move${selections.length === 1 ? '' : 's'} on Ashlr Verse today:`];
+  const lines = [`Self-improvement — ${selections.length} move${selections.length === 1 ? '' : 's'} on Phantom today:`];
   selections.forEach((s, i) => {
     const a = actions[i];
     const state = !a ? 'not planned'

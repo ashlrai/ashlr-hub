@@ -151,7 +151,11 @@ describe('persona — a founder-operator that never claims to be a real person',
     }
     expect(LEADER_SYSTEM_PROMPT).toMatch(/Visionary/);
     expect(LEADER_SYSTEM_PROMPT).toMatch(/best part is no part/i);
-    expect(LEADER_SYSTEM_PROMPT).toMatch(/Ashlr Verse/);
+    expect(LEADER_SYSTEM_PROMPT).toContain('Phantom (repo ashlrai/ashlr-hub)');
+    for (const prompt of [LEADER_SYSTEM_PROMPT, LEADER_CONVERSATION_SYSTEM, LEADER_FOUNDER_VOICE]) {
+      expect(prompt).toContain('Phantom');
+      expect(prompt).not.toContain('Ashlr Verse');
+    }
     // The expanded vocabulary is documented to the model.
     for (const kind of ['cloud.launch', 'devin.launch', 'backlog.add', 'playbook.upsert', 'automation.upsert', 'directive.self']) {
       expect(LEADER_SYSTEM_PROMPT).toContain(kind);
@@ -655,7 +659,7 @@ describe('self-improvement drive — highest leverage, cheapest lane, bounded by
     expect(powers.launched).toEqual([]);
     expect(first.actions.every((a) => a.kind === 'cloud.launch' && a.status === 'scheduled')).toBe(true);
     const report = readDriveState().lastReport!;
-    expect(report.text).toMatch(/Self-improvement — 3 moves/);
+    expect(report.text).toMatch(/^Self-improvement — 3 moves on Phantom today:/);
     expect(report.actionIds).toEqual(first.actions.map(action => action.id));
     expect(report.postedAt).toBeNull();
 

@@ -337,7 +337,7 @@ describe('DevinResource', () => {
   it('the Devin CLI: distinguishes telemetry not imported by Ashlr from the cloud budget, even with no API key', async () => {
     overview = { generatedAt: 'x', status: status(), budget: budget(), tasks: [], cli: { state: 'ready', usage: 'not-reported' } };
     const { unmount } = mount();
-    const line = await screen.findByText(/Ashlr has not imported CLI session usage/);
+    const line = await screen.findByText(/Phantom has not imported CLI session usage/);
     expect(line.closest('[data-devin-cli]')!.getAttribute('data-devin-cli')).toBe('ready');
     expect(line.textContent).toContain('The tracked ACU budget covers cloud sessions.');
     expect(line.textContent).not.toContain('usage not reported by the CLI');
@@ -349,7 +349,7 @@ describe('DevinResource', () => {
       status: status({ enabled: false, connected: false, state: 'disabled', reason: 'Not set up.' }),
     };
     mount();
-    const loggedOut = await screen.findByText(/Ashlr has not imported CLI session usage/);
+    const loggedOut = await screen.findByText(/Phantom has not imported CLI session usage/);
     expect(loggedOut.textContent).toMatch(/logged out; run devin auth login/);
     expect(screen.queryByRole('meter')).toBeNull();
   });
@@ -377,7 +377,7 @@ describe('DevinResource', () => {
 
     overview = { generatedAt: 'x', status: status(), budget: budget(), tasks: [], cli: { state: 'ready', usage: 'not-reported' }, models: { freeFamilies: 'SWE-2' } };
     mount();
-    await screen.findByText(/Ashlr has not imported CLI session usage/);
+    await screen.findByText(/Phantom has not imported CLI session usage/);
     expect(screen.queryByText(/^Models:/)).toBeNull();
   });
 
@@ -385,7 +385,7 @@ describe('DevinResource', () => {
     overview = { generatedAt: 'x', status: status(), budget: budget(), tasks: [], cli: { state: 'missing', usage: 'not-reported' } };
     mount();
     await screen.findByText('Local budget · 34 ACUs of 50 ACUs left');
-    expect(screen.queryByText(/Ashlr has not imported CLI session usage/)).toBeNull();
+    expect(screen.queryByText(/Phantom has not imported CLI session usage/)).toBeNull();
   });
 
   it('paused: the pill and the budget\'s own reason', async () => {

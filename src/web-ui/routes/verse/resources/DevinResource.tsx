@@ -1,3 +1,4 @@
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 /**
  * routes/verse/resources/DevinResource.tsx — Devin in the Resources drawer
  * (⌘.) (3.15): connection status, ACUs used against the budget, sessions
@@ -265,7 +266,7 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
       {overview.cli && overview.cli.state !== 'missing' ? (
         // CLI session telemetry is not imported into this cloud-session budget.
         <p className={styles.fine} data-devin-cli={overview.cli.state}>
-          Devin (CLI){overview.cli.state === 'logged-out' ? <> — logged out; run <code>devin auth login</code></> : null}: Ashlr has not imported CLI session usage.
+          Devin (CLI){overview.cli.state === 'logged-out' ? <> — logged out; run <code>devin auth login</code></> : null}: {PRODUCT_NAME} has not imported CLI session usage.
           The tracked ACU budget covers cloud sessions.
         </p>
       ) : null}

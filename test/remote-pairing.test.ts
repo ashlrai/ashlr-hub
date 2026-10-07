@@ -104,6 +104,7 @@ describe('Mac-approved pairing and WebAuthn', () => {
     const invite = ceremony.mac.issueInvitation(SUBJECT, { read: true, act: true })!;
     expect(await ceremony.phone.claimInvitation(identity(OTHER), invite.code, 'Other')).toBeNull();
     const claim = await ceremony.phone.claimInvitation(identity(), invite.code, 'Mason’s phone');
+    expect(claim?.options.rp.name).toBe('Phantom');
     expect(claim?.options.rp.id).toBe('phone.example.com');
     expect(claim?.options.authenticatorSelection?.userVerification).toBe('required');
     expect(await ceremony.phone.claimInvitation(identity(), invite.code, 'Replay')).toBeNull();

@@ -1,3 +1,4 @@
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 /**
  * routes/verse/computer/ComputerControl.tsx — everything the operator sees of
  * computer use (desktop control by Verse's agents), mounted ONCE by VerseApp
@@ -527,7 +528,7 @@ export function OnboardingSheet({
     { kind: 'accessibility', name: 'Accessibility', why: 'to click, type and read controls', button: 'Open Accessibility settings' },
   ];
   return (
-    <Sheet titleId={titleId} title="Let Ashlr see and use this Mac" onEscape={onClose}>
+    <Sheet titleId={titleId} title={`Let ${PRODUCT_NAME} see and use this Mac`} onEscape={onClose}>
       <p className={styles.body}>Agents in Phantom need two macOS permissions before they can use the apps you grant them.</p>
       <ul className={styles.permissions}>
         {rows.map((row) => (
@@ -546,9 +547,9 @@ export function OnboardingSheet({
         ))}
       </ul>
       <ul className={styles.notes}>
-        <li>After you allow Screen Recording, macOS needs Ashlr to quit and relaunch before it takes effect.</li>
+        <li>After you allow Screen Recording, macOS needs {PRODUCT_NAME} to quit and relaunch before it takes effect.</li>
         <li>macOS asks again roughly once a month (“continue to allow?”). Say yes to keep computer use working.</li>
-        <li>A local rebuild of Ashlr signed with a different identity loses both permissions; allow them again.</li>
+        <li>A local rebuild of {PRODUCT_NAME} signed with a different identity loses both permissions; allow them again.</li>
       </ul>
       <div className={styles.actions}>
         <button type="button" className={styles.secondary} onClick={onClose}>

@@ -1,3 +1,4 @@
+import { apiGet, apiPost, apiDelete, MetadataReadTimeoutError, METADATA_JSON_READ_TIMEOUT_MS } from './client.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   authenticateRemoteDevice, canRemoteWrite, claimRemotePairing, clearRemoteSessionForTest, directCsrfWrite, probeRemoteSession, remotePairStatus,
@@ -225,4 +226,68 @@ describe('remote phone session', () => {
     expect(calls.slice(3)).toEqual(['/remote/session', '/remote/push/subscribe', '/remote/logout']);
     expect(canRemoteWrite()).toBe(false);
   });
+});
+
+
+it.each(['transport', 'success-body', 'refusal-body'])('bounds the complete delegated phone %s read without Hub headers', async (phase) => {
+  vi.useFakeTimers();
+  window.history.replaceState(null, '', '/verse/m/');
+  document.head.innerHTML = '<meta name="ashlr-remote-gateway" content="v1">';
+  try {
+    let passed!: AbortSignal;
+    const fetcher = vi.fn((_path: string, init: RequestInit) => {
+      passed = init.signal!;
+      const pending = () => new Promise((_resolve, reject) => passed.addEventListener('abort', () => reject(passed.reason), { once: true }));
+      if (phase === 'transport') return pending();
+      const response = Response.json({}, { status: phase === 'success-body' ? 200 : 503 });
+      response.json = pending;
+      return Promise.resolve(response);
+    });
+    vi.stubGlobal('fetch', fetcher);
+    const result = apiGet('/api/verse/bootstrap').catch(error => error);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(passed.aborted).toBe(false);
+    const init = fetcher.mock.calls[0]![1];
+    expect(init).toMatchObject({ credentials: 'same-origin', cache: 'no-store', redirect: 'manual' });
+    const headers = new Headers(init.headers);
+    expect(headers.has('x-ashlr-token')).toBe(false);
+    expect(headers.has('x-ashlr-read-client')).toBe(false);
+    await vi.advanceTimersByTimeAsync(METADATA_JSON_READ_TIMEOUT_MS);
+    expect(await result).toBeInstanceOf(MetadataReadTimeoutError);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+    document.head.innerHTML = '';
+    window.history.replaceState(null, '', '/');
+  }
+});
+
+
+it.each(['POST', 'DELETE'] as const)('preserves the phone %s operation body and cookie-only authority', async method => {
+  window.history.replaceState(null, '', '/verse/m/');
+  document.head.innerHTML = '<meta name="ashlr-remote-gateway" content="v1">';
+  const calls: Array<{ path: string; init: RequestInit }> = [];
+  vi.stubGlobal('fetch', vi.fn(async (path: string, init: RequestInit) => {
+    calls.push({ path, init });
+    if (path === '/remote/session') return Response.json({ ...ready, expiresAt: Date.now() + 60_000,
+      capabilities: { ...ready.capabilities, writes: true } });
+    if (path === '/remote/step-up/begin') return Response.json({ challengeId: 'challenge-1', options: { challenge: 'YQ', timeout: 60000 } });
+    if (path === '/remote/step-up/finish') return Response.json({ ok: true });
+    throw new Error(`unexpected fixture route ${path}`);
+  }));
+  try {
+    await probeRemoteSession();
+    const path = '/api/verse/agents/ag_12345678/plan'; const body = { plan: 'fixture' };
+    await expect(method === 'POST' ? apiPost(path, body, 'must-not-forward')
+      : apiDelete(path, 'must-not-forward')).resolves.toEqual({ ok: true });
+    const operation = { method, path, body: JSON.stringify(method === 'POST' ? body : {}) };
+    expect(JSON.parse(calls[1]!.init.body as string)).toEqual(operation);
+    expect(JSON.parse(calls[2]!.init.body as string)).toMatchObject(operation);
+    for (const call of calls) {
+      expect(call.init.credentials).toBe('same-origin');
+      expect(new Headers(call.init.headers).has('x-ashlr-token')).toBe(false);
+      expect(new Headers(call.init.headers).has('x-ashlr-read-client')).toBe(false);
+    }
+  } finally { document.head.innerHTML = ''; window.history.replaceState(null, '', '/'); }
 });

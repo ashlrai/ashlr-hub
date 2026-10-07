@@ -210,6 +210,138 @@ async function callApi(cfg: AshlrConfig, method: string, body: Record<string, un
   return postJson(apiUrl(cfg, method), body, resolveToken(cfg));
 }
 
+/** Explicit operator action only; ordinary sends/startup never update this profile. */
+export const TELEGRAM_PHANTOM_BRAND = Object.freeze({
+  name: 'Phantom',
+  description: 'Phantom by AshlrAI brings your engineering agents together. Follow fleet progress, answer the Leader, and guide work from Telegram.',
+  shortDescription: 'Phantom by AshlrAI — your engineering fleet, wherever you are.',
+});
+
+type BrandField = keyof typeof TELEGRAM_PHANTOM_BRAND;
+type BrandFieldState = 'different' | 'unchanged' | 'verified' | 'failed' | 'unconfirmed' | 'not-attempted';
+interface BrandError {
+  stage: 'configuration' | 'identity' | BrandField;
+  reason: 'not-configured' | 'invalid-bot-id' | 'bot-mismatch' | 'malformed-response' | 'rejected' | 'unavailable' | 'readback-different';
+  errorCode?: number;
+  retryAfterSeconds?: number;
+}
+export interface TelegramBrandResult {
+  mode: 'preview' | 'apply';
+  status: 'preview' | 'verified' | 'partial' | 'blocked' | 'unknown';
+  botId: number | null;
+  username: string | null;
+  fields: Record<BrandField, { desired: string; state: BrandFieldState }>;
+  errors: BrandError[];
+  checkedAt: string;
+}
+
+const BRAND_FIELDS = [
+  { key: 'name', getter: 'getMyName', setter: 'setMyName', parameter: 'name', limit: 64 },
+  { key: 'description', getter: 'getMyDescription', setter: 'setMyDescription', parameter: 'description', limit: 512 },
+  { key: 'shortDescription', getter: 'getMyShortDescription', setter: 'setMyShortDescription', parameter: 'short_description', limit: 120 },
+] as const;
+
+function brandObject(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown> : null;
+}
+
+/** Provider descriptions/URLs/profile prose never enter the public result. */
+function brandFailure(value: unknown, stage: BrandError['stage']): BrandError {
+  const response = brandObject(value);
+  if (!response) return { stage, reason: 'unavailable' };
+  if (response['ok'] !== false) return { stage, reason: 'malformed-response' };
+  const parsed = parseSendResponse(response);
+  return { stage, reason: 'rejected',
+    ...(parsed.errorCode !== undefined ? { errorCode: parsed.errorCode } : {}),
+    ...(parsed.retryAfterSeconds !== undefined ? { retryAfterSeconds: parsed.retryAfterSeconds } : {}) };
+}
+
+async function observeTelegramBrand(cfg: AshlrConfig, expectedBotId?: number): Promise<{
+  botId: number | null; username: string | null; values: Partial<Record<BrandField, string>>; errors: BrandError[];
+}> {
+  const observation = { botId: null as number | null, username: null as string | null,
+    values: {} as Partial<Record<BrandField, string>>, errors: [] as BrandError[] };
+  const raw = await callApi(cfg, 'getMe', {}), response = brandObject(raw), bot = brandObject(response?.['result']);
+  if (response?.['ok'] !== true || !bot || !positiveSafeInteger(bot['id']) || bot['is_bot'] !== true) {
+    observation.errors.push(brandFailure(raw, 'identity'));
+    return observation;
+  }
+  observation.botId = bot['id'];
+  // Username is public identity, but malformed/arbitrary free text is not echoed.
+  if (typeof bot['username'] === 'string' && /^[a-zA-Z0-9_]{5,32}$/.test(bot['username'])) observation.username = bot['username'];
+  if (expectedBotId !== undefined && observation.botId !== expectedBotId) {
+    observation.errors.push({ stage: 'identity', reason: 'bot-mismatch' });
+    return observation;
+  }
+  const responses = await Promise.all(BRAND_FIELDS.map((field) => callApi(cfg, field.getter, { language_code: '' })));
+  BRAND_FIELDS.forEach((field, index) => {
+    const value = responses[index], envelope = brandObject(value), result = brandObject(envelope?.['result']);
+    const text = result?.[field.parameter];
+    if (envelope?.['ok'] !== true || typeof text !== 'string' || [...text].length > field.limit) {
+      observation.errors.push(brandFailure(value, field.key));
+    } else observation.values[field.key] = text;
+  });
+  return observation;
+}
+
+/** Preview is read-only. Apply binds the same configured bot, writes only differing
+ * default-locale fields, then verifies fresh facts. Telegram has no multi-field CAS;
+ * failures never authorize a retry/rollback or an automatic startup migration. */
+export async function syncTelegramDisplayBrand(
+  cfg: AshlrConfig, opts: { apply?: boolean; expectedBotId?: number } = {},
+): Promise<TelegramBrandResult> {
+  const result: TelegramBrandResult = { mode: opts.apply ? 'apply' : 'preview', status: 'unknown', botId: null, username: null,
+    fields: { name: { desired: TELEGRAM_PHANTOM_BRAND.name, state: 'not-attempted' },
+      description: { desired: TELEGRAM_PHANTOM_BRAND.description, state: 'not-attempted' },
+      shortDescription: { desired: TELEGRAM_PHANTOM_BRAND.shortDescription, state: 'not-attempted' } },
+    errors: [], checkedAt: new Date().toISOString() };
+  if (opts.apply && !positiveSafeInteger(opts.expectedBotId)) {
+    result.status = 'blocked'; result.errors.push({ stage: 'identity', reason: 'invalid-bot-id' }); return result;
+  }
+  // Copy only this transport's configuration; pin the resolved env token before awaits.
+  const token = resolveToken(cfg);
+  const snapshot: AshlrConfig = { ...cfg, comms: { ...cfg.comms, telegram: { ...cfg.comms?.telegram, botToken: token } } };
+  if (!telegramEnabled(snapshot)) {
+    result.status = 'blocked'; result.errors.push({ stage: 'configuration', reason: 'not-configured' }); return result;
+  }
+  const before = await observeTelegramBrand(snapshot, opts.apply ? opts.expectedBotId : undefined);
+  result.botId = before.botId; result.username = before.username; result.errors.push(...before.errors);
+  for (const field of BRAND_FIELDS) {
+    const observed = before.values[field.key];
+    if (observed !== undefined) result.fields[field.key].state = observed === TELEGRAM_PHANTOM_BRAND[field.key] ? 'unchanged' : 'different';
+  }
+  if (before.errors.length) {
+    if (before.errors.some((error) => error.reason === 'bot-mismatch')) result.status = 'blocked';
+    result.checkedAt = new Date().toISOString(); return result;
+  }
+  if (!opts.apply) { result.status = 'preview'; result.checkedAt = new Date().toISOString(); return result; }
+  let attempted = false;
+  for (const field of BRAND_FIELDS) {
+    if (result.fields[field.key].state === 'unchanged') continue;
+    attempted = true;
+    const raw = await callApi(snapshot, field.setter, { [field.parameter]: TELEGRAM_PHANTOM_BRAND[field.key], language_code: '' });
+    const response = brandObject(raw);
+    if (response?.['ok'] !== true || response['result'] !== true) {
+      result.fields[field.key].state = 'failed'; result.errors.push(brandFailure(raw, field.key)); break;
+    }
+    result.fields[field.key].state = 'unconfirmed';
+  }
+  const after = await observeTelegramBrand(snapshot, before.botId!);
+  result.errors.push(...after.errors);
+  const identityMatches = after.botId === before.botId && !after.errors.some((error) => error.stage === 'identity');
+  for (const field of BRAND_FIELDS) {
+    const observed = identityMatches ? after.values[field.key] : undefined;
+    if (observed === TELEGRAM_PHANTOM_BRAND[field.key]) result.fields[field.key].state = 'verified';
+    else if (observed === undefined || result.fields[field.key].state === 'unchanged' || result.fields[field.key].state === 'unconfirmed') {
+      result.fields[field.key].state = 'unconfirmed';
+    } else if (result.fields[field.key].state === 'different') result.fields[field.key].state = 'not-attempted';
+    if (observed !== undefined && observed !== TELEGRAM_PHANTOM_BRAND[field.key]) result.errors.push({ stage: field.key, reason: 'readback-different' });
+  }
+  result.status = BRAND_FIELDS.every((field) => result.fields[field.key].state === 'verified') ? 'verified' : attempted ? 'partial' : 'unknown';
+  result.checkedAt = new Date().toISOString(); return result;
+}
+
 /** Make an HTTPS POST with JSON body. Returns parsed response body or null on error. */
 async function postJson(
   url: string,

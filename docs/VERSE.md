@@ -927,6 +927,18 @@ Explicit caller-supplied launch limits still apply. Jev may add an advisory note
 an action deserves a stricter class; the class the policy set always stands.
 Details: [LEADER.md](LEADER.md#founder-mode-315).
 
+**Telegram bot display profile.** `ashlr comms telegram-brand --json` previews
+the configured bot's name and descriptions against Phantom's fixed display
+copy, without changing them. To apply it, use
+`ashlr comms telegram-brand --apply --expected-bot-id <id> --json` with the exact
+bot ID from that preview. The command changes only differing default-locale
+name/description fields and checks fresh readback. It never changes the token,
+username, commands, webhook or chat messages. Dedicated localized profiles may
+still show their own names. A partial or unconfirmed result is not success;
+an explicit rerun rechecks current facts and skips fields already matching.
+No profile updates run at startup. Telegram does not offer an atomic update
+across all three fields. See the [Telegram Bot API](https://core.telegram.org/bots/api#setmyname).
+
 ### Learning, reasoning data and experiments
 
 Reasoning from every chat and fleet run is stored as data, scrubbed of secrets
