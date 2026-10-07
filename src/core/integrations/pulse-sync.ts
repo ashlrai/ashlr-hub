@@ -832,7 +832,17 @@ export async function runPulseSync(
   if (!pulseSyncEnabled(cfg)) return disabled;
 
   const tickTs = opts?.tickTs ?? new Date().toISOString();
-  const gate = await underPulseAuthority(opts?.signal, async () => true);
+  // Reuse the initial gate's exact authority for the first remote effect.
+  // A separate no-op acquisition would persist and release the same global
+  // fence immediately before tick export acquired it again. Later command
+  // phases still release it before any proposal-lock acquisition.
+  const gate = await underPulseAuthority(opts?.signal, (authority, effectiveSignal) =>
+    emitFleetEventWithAuthority(
+      cfg,
+      { event: 'tick', refId: tickTs, outcome: 'tick' },
+      authority,
+      effectiveSignal,
+    ));
   if (!gate.granted) {
     const reason = gate.reason ?? 'fence-unavailable';
     return {
@@ -849,11 +859,7 @@ export async function runPulseSync(
   try {
     // Each phase obtains only the authority it needs. In particular, command
     // polling never carries outward authority into a proposal-lock acquisition.
-    const tickEmitted = await emitFleetEvent(
-      cfg,
-      { event: 'tick', refId: tickTs, outcome: 'tick' },
-      { signal: opts?.signal },
-    );
+    const tickEmitted = gate.value === true;
     if (aborted(opts?.signal)) {
       return { ...disabled, enabled: true, detail: 'pulse-sync aborted after tick export' };
     }

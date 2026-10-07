@@ -4,6 +4,31 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+
+const enrollmentTiming = vi.hoisted(() => ({
+  active: false,
+  acquisitions: 0,
+  fsyncs: 0,
+  phases: [] as Array<{ phase: string; atMs: number; fsyncs: number }>,
+  startedAt: 0,
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, fsyncSync: (...args: Parameters<typeof actual.fsyncSync>) => {
+    if (enrollmentTiming.active) enrollmentTiming.fsyncs += 1;
+    return actual.fsyncSync(...args);
+  } };
+});
+
+vi.mock('../src/core/sandbox/mutation-fence.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/sandbox/mutation-fence.js')>();
+  return { ...actual, acquireOutwardMutationFence: (...args: Parameters<typeof actual.acquireOutwardMutationFence>) => {
+    if (enrollmentTiming.active) enrollmentTiming.acquisitions += 1;
+    return actual.acquireOutwardMutationFence(...args);
+  } };
+});
+
 const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
@@ -65,6 +90,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  enrollmentTiming.active = false;
   privateStorageHarness.useSemanticAdapter = false;
   vi.unstubAllGlobals();
   delete process.env.PULSE_URL;
@@ -124,12 +150,39 @@ describe('M418 Pulse outward-mutation quiescence', () => {
     expect(setKill(true, { waitMs: 500 })).toMatchObject({ ok: true, quiesced: true });
   });
 
+  it('holds initial tick authority until KILL drains it and starts no command poll', async () => {
+    const started = Promise.withResolvers<void>();
+    const response = Promise.withResolvers<Response>();
+    const fetchMock = vi.fn(() => {
+      started.resolve();
+      return response.promise;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const running = runPulseSync(cfg, { tickTs: '2026-07-14T12:00:00.000Z', shipDeps: false });
+    await started.promise;
+    expect(setKill(true, { waitMs: 60 })).toMatchObject({ ok: false, quiesced: false });
+    response.resolve(new Response('{}', { status: 200 }));
+    const result = await running;
+    expect(result.tickEmitted).toBe(false);
+    expect(result.commands).toEqual([]);
+    expect(result.detail).toMatch(/blocked by global KILL/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(setKill(true, { waitMs: 500 })).toMatchObject({ ok: true, quiesced: true });
+  });
+
   it('enrolls promptly with borrowed authority and keeps the outer Pulse fence held', async () => {
     const repo = join(home, 'remote-enroll');
     let outerFenceHeldDuringWriteback = false;
     const writes: Array<Record<string, unknown>> = [];
     const fetchMock = vi.fn((input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
+      if (enrollmentTiming.active) {
+        const endpoint = new URL(url);
+        const phase = endpoint.pathname.endsWith('/traces') ? 'tick'
+          : endpoint.searchParams.get('status') ?? JSON.parse(String(init?.body))['status'];
+        enrollmentTiming.phases.push({ phase, atMs: performance.now() - enrollmentTiming.startedAt, fsyncs: enrollmentTiming.fsyncs });
+      }
       if (url.endsWith('/api/otlp/v1/traces')) {
         return Promise.resolve(new Response('{}', { status: 200 }));
       }
@@ -154,12 +207,25 @@ describe('M418 Pulse outward-mutation quiescence', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
+    enrollmentTiming.acquisitions = 0;
+    enrollmentTiming.fsyncs = 0;
+    enrollmentTiming.phases = [];
+    enrollmentTiming.active = true;
     const startedAt = performance.now();
+    enrollmentTiming.startedAt = startedAt;
     const result = await runPulseSync(cfg, {
       tickTs: '2026-07-14T12:00:00.000Z',
       shipDeps: false,
     });
     const elapsedMs = performance.now() - startedAt;
+    enrollmentTiming.active = false;
+    const limitMs = process.platform === 'win32' ? 2_000 : 1_000;
+    if (elapsedMs >= limitMs) {
+      console.error('[M418 enrollment timing]', JSON.stringify({
+        platform: process.platform, elapsedMs, acquisitions: enrollmentTiming.acquisitions,
+        fsyncs: enrollmentTiming.fsyncs, phases: enrollmentTiming.phases,
+      }));
+    }
 
     expect(result.commands).toEqual([
       expect.objectContaining({ id: 'm418-enroll', outcome: 'done' }),
@@ -170,11 +236,10 @@ describe('M418 Pulse outward-mutation quiescence', () => {
       expect.objectContaining({ status: 'done' }),
     ]);
     expect(outerFenceHeldDuringWriteback).toBe(true);
-    // Windows hosted runners can schedule this otherwise synchronous-enough
-    // fixture behind slow filesystem work from neighbouring portability tests.
-    // Keep the same bounded liveness check without misclassifying scheduler
-    // contention as a Pulse fence failure.
-    expect(elapsedMs).toBeLessThan(process.platform === 'win32' ? 2_000 : 1_000);
+    // Six successful phase acquisitions plus the deliberate losing contender:
+    // initial gate/tick share one authority, and enrollment borrows its own.
+    expect(enrollmentTiming.acquisitions).toBe(7);
+    expect(elapsedMs).toBeLessThan(limitMs);
   });
 
   it('aborts the active HTTP effect and starts no later sync write', async () => {

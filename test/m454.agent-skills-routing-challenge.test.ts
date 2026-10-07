@@ -575,6 +575,7 @@ describe('M454 pinned upstream routing challenge', () => {
       'schema',
       'CHANGELOG.md',
       'docs/README.md',
+      'docs/PHANTOM-BRAND.md',
       'docs/QUICKSTART.md',
       'docs/AUTOMATIC-OUTCOMES.md',
       'docs/VERSE.md',
