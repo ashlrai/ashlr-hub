@@ -57,7 +57,10 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -215,22 +218,63 @@ pub fn handle_event(app: &AppHandle, payload: &str) {
         eprintln!("[ashlr-desktop] ignoring a malformed shell-fleet request");
         return;
     };
-    if BUSY.swap(true, Ordering::SeqCst) {
-        send(
-            app,
-            event(
-                &req,
-                Phase::Failed,
-                "Another fleet operation is already open — finish or cancel it first.",
-            ),
-        );
+    let app = app.clone();
+    let req = Arc::new(req);
+    let worker_app = app.clone();
+    let worker_req = req.clone();
+    launch_worker(
+        &BUSY,
+        move || run(&worker_app, &worker_req),
+        move |failure| send(&app, event(&req, Phase::Failed, failure.message())),
+        |work| {
+            thread::Builder::new()
+                .name("ashlr-fleet-operation".to_string())
+                .spawn(work)
+                .map(|_| ())
+        },
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerFailure {
+    Busy,
+    Spawn,
+}
+impl WorkerFailure {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Busy => "Another fleet operation is already open — finish or cancel it first.",
+            Self::Spawn => "The desktop app could not start the fleet operation. Try again.",
+        }
+    }
+}
+struct BusyGuard(&'static AtomicBool);
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+/// The operation owns the busy lease through normal completion and failed
+/// spawn. Release builds still abort on panic; this does not claim recovery.
+fn launch_worker(
+    busy: &'static AtomicBool,
+    work: impl FnOnce() + Send + 'static,
+    report: impl Fn(WorkerFailure) + Send + Sync + 'static,
+    spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+) {
+    if busy.swap(true, Ordering::SeqCst) {
+        report(WorkerFailure::Busy);
         return;
     }
-    let app = app.clone();
-    thread::spawn(move || {
-        run(&app, &req);
-        BUSY.store(false, Ordering::SeqCst);
+    let guard = BusyGuard(busy);
+    let report = Arc::new(report);
+    let worker = Box::new(move || {
+        let _guard = guard;
+        work();
     });
+    if spawn(worker).is_err() {
+        report(WorkerFailure::Spawn);
+    }
 }
 
 fn run(app: &AppHandle, req: &FleetRequest) {
@@ -357,9 +401,11 @@ pub fn resolve_cli(home: &Path) -> Result<Cli, String> {
         PROBE_TIMEOUT,
     );
     if let Ok(result) = &out {
-        if let Some((bin, path_env)) = parse_cli_probe(&result.stdout) {
-            if bin.is_file() {
-                return Ok(Cli { bin, path_env });
+        if result.code == Some(0) && !result.timed_out {
+            if let Some((bin, path_env)) = parse_cli_probe(&result.stdout) {
+                if bin.is_file() {
+                    return Ok(Cli { bin, path_env });
+                }
             }
         }
     }
@@ -384,57 +430,124 @@ pub struct ChildResult {
     pub timed_out: bool,
 }
 
+// Native fleet operations are macOS-only. Unix nonblocking pipes let the
+// existing deadline bound capture too, even if a descendant retains a pipe.
+// There are no detached reader threads or inherited-pipe joins to outlive it.
+#[cfg(unix)]
+struct ChildGuard {
+    child: std::process::Child,
+    finished: bool,
+}
+#[cfg(unix)]
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+#[cfg(unix)]
+fn nonblocking(pipe: &impl std::os::fd::AsRawFd) -> Result<(), String> {
+    let fd = pipe.as_raw_fd();
+    // SAFETY: the pipe owns this live descriptor throughout both fcntl calls.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err("The CLI output capture could not be initialized.".to_string());
+    }
+    Ok(())
+}
+#[cfg(unix)]
+fn drain_pipe(pipe: &mut Option<impl Read>, output: &mut Vec<u8>) -> Result<(), String> {
+    let Some(reader) = pipe.as_mut() else {
+        return Ok(());
+    };
+    let mut chunk = [0u8; 8192];
+    // Bound each drain pass so an always-writing child cannot starve the
+    // deadline or the other pipe. Keep the existing 4 MiB capture ceiling.
+    for _ in 0..8 {
+        match reader.read(&mut chunk) {
+            Ok(0) => {
+                *pipe = None;
+                return Ok(());
+            }
+            Ok(count) => {
+                let kept = count.min((4 * 1024 * 1024usize).saturating_sub(output.len()));
+                output.extend_from_slice(&chunk[..kept]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err("The CLI output could not be captured.".to_string()),
+        }
+    }
+    Ok(())
+}
 fn run_child(
     cmd: &mut Command,
     env: &[(String, String)],
     timeout: Duration,
 ) -> Result<ChildResult, String> {
-    cmd.env_clear();
-    for (k, v) in env {
-        cmd.env(k, v);
+    // This native launch boundary refuses non-Unix platforms rather than
+    // introducing a different launcher or an unbounded fallback capture.
+    #[cfg(not(unix))]
+    {
+        let _ = (cmd, env, timeout);
+        Err("Fleet operations need macOS.".to_string())
     }
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("could not start: {e}"))?;
-    let mut out_pipe = child.stdout.take();
-    let mut err_pipe = child.stderr.take();
-    let out_reader = thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = out_pipe.as_mut() {
-            let _ = p.take(4 * 1024 * 1024).read_to_end(&mut buf);
+    #[cfg(unix)]
+    {
+        cmd.env_clear();
+        for (k, v) in env {
+            cmd.env(k, v);
         }
-        buf
-    });
-    let err_reader = thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(p) = err_pipe.as_mut() {
-            let _ = p.take(4 * 1024 * 1024).read_to_end(&mut buf);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut guard = ChildGuard {
+            child: cmd.spawn().map_err(|e| format!("could not start: {e}"))?,
+            finished: false,
+        };
+        let mut out = guard.child.stdout.take();
+        let mut err = guard.child.stderr.take();
+        if let Some(pipe) = &out {
+            nonblocking(pipe)?;
         }
-        buf
-    });
-    let deadline = Instant::now() + timeout;
-    let mut timed_out = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() >= deadline => {
-                timed_out = true;
-                let _ = child.kill();
-                break child.wait().ok();
+        if let Some(pipe) = &err {
+            nonblocking(pipe)?;
+        }
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let deadline = Instant::now() + timeout;
+        let mut status = None;
+        let timed_out = loop {
+            drain_pipe(&mut out, &mut stdout)?;
+            drain_pipe(&mut err, &mut stderr)?;
+            if !guard.finished {
+                status = guard
+                    .child
+                    .try_wait()
+                    .map_err(|_| "The CLI process status could not be read.".to_string())?;
+                guard.finished = status.is_some();
             }
-            Ok(None) => thread::sleep(Duration::from_millis(100)),
-            Err(_) => break None,
-        }
-    };
-    let stdout = String::from_utf8_lossy(&out_reader.join().unwrap_or_default()).into_owned();
-    let stderr = String::from_utf8_lossy(&err_reader.join().unwrap_or_default()).into_owned();
-    Ok(ChildResult {
-        code: status.and_then(|s| s.code()),
-        stdout,
-        stderr,
-        timed_out,
-    })
+            if guard.finished && out.is_none() && err.is_none() {
+                break false;
+            }
+            if Instant::now() >= deadline {
+                break true;
+            }
+            thread::sleep(
+                Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        };
+        // Dropping owned pipes closes capture at the deadline, including when
+        // a grandchild kept them open. Only our still-running child is killed.
+        Ok(ChildResult {
+            code: status.and_then(|s| s.code()),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            timed_out,
+        })
+    }
 }
 
 /// PURE: the last `max` bytes of `text`, on a char boundary.
@@ -656,13 +769,21 @@ fn resident_start(app: &AppHandle, req: &FleetRequest) {
         event(
             req,
             Phase::Confirming,
-            "Checking the grant and the release…",
+            "Locating the installed command-line tool…",
         ),
     );
     let cli = match resolve_cli(&home) {
         Ok(cli) => cli,
         Err(message) => return send(app, event(req, Phase::Failed, message)),
     };
+    send(
+        app,
+        event(
+            req,
+            Phase::Confirming,
+            "Reading the resident grant and release status…",
+        ),
+    );
     let status = run_child(
         Command::new(&cli.bin).args(["authority", "resident", "status", "--json"]),
         &base_env(&home, &cli.path_env),
@@ -671,6 +792,7 @@ fn resident_start(app: &AppHandle, req: &FleetRequest) {
     let plan = match status
         .as_ref()
         .ok()
+        .filter(|r| r.code == Some(0) && !r.timed_out)
         .and_then(|r| parse_resident_status(&r.stdout))
     {
         Some(plan) => plan,
@@ -691,6 +813,14 @@ fn resident_start(app: &AppHandle, req: &FleetRequest) {
         return send(app, failed);
     }
     let (title, body) = resident_dialog_text(req.op, &cli.bin, &plan);
+    send(
+        app,
+        event(
+            req,
+            Phase::Confirming,
+            "Waiting for you to confirm in the native dialog…",
+        ),
+    );
     let confirmed = app
         .dialog()
         .message(body)
@@ -722,7 +852,7 @@ fn resident_start(app: &AppHandle, req: &FleetRequest) {
             &base_env(&home, &cli.path_env),
             RESIDENT_TIMEOUT,
         ) {
-            Ok(r) if r.code == Some(0) => {}
+            Ok(r) if r.code == Some(0) && !r.timed_out => {}
             Ok(r) => {
                 let mut failed = event(
                     req,
@@ -778,7 +908,7 @@ fn finish(
         timeout,
     );
     let mut done = match &result {
-        Ok(r) if r.code == Some(0) => event(req, Phase::Done, ok_message),
+        Ok(r) if r.code == Some(0) && !r.timed_out => event(req, Phase::Done, ok_message),
         Ok(r) if r.timed_out => event(req, Phase::Failed, "The ashlr CLI did not finish in time."),
         Ok(_) => event(
             req,
@@ -1003,7 +1133,9 @@ fn custody_install(app: &AppHandle, req: &FleetRequest) {
         CUSTODY_TIMEOUT,
     );
     let mut done = match &result {
-        Ok(r) if r.code == Some(0) => event(req, Phase::Done, "The custody helper is installed."),
+        Ok(r) if r.code == Some(0) && !r.timed_out => {
+            event(req, Phase::Done, "The custody helper is installed.")
+        }
         // osascript's "User canceled." is error -128.
         Ok(r) if r.stderr.contains("-128") => event(
             req,
@@ -1031,6 +1163,130 @@ fn custody_install(app: &AppHandle, req: &FleetRequest) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finished_worker_releases_busy_and_allows_the_next_operation() {
+        let busy = Box::leak(Box::new(AtomicBool::new(false)));
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for _ in 0..2 {
+            let count = executions.clone();
+            launch_worker(
+                busy,
+                move || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                },
+                |_| panic!("normal completion is not a worker failure"),
+                |work| {
+                    thread::Builder::new().spawn(work)?.join().unwrap();
+                    Ok(())
+                },
+            );
+            assert!(!busy.load(Ordering::SeqCst));
+        }
+        assert_eq!(executions.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn failed_worker_spawn_releases_busy_without_running_work() {
+        let busy = Box::leak(Box::new(AtomicBool::new(false)));
+        let (tx, rx) = std::sync::mpsc::channel();
+        launch_worker(
+            busy,
+            || panic!("must not run"),
+            move |failure| {
+                tx.send(failure).unwrap();
+            },
+            |_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "private spawn error",
+                ))
+            },
+        );
+        assert_eq!(rx.recv().unwrap(), WorkerFailure::Spawn);
+        assert!(!busy.load(Ordering::SeqCst));
+        assert!(!WorkerFailure::Spawn.message().contains("private"));
+    }
+
+    #[test]
+    fn occupied_worker_is_refused_without_releasing_another_operations_lease() {
+        let busy = Box::leak(Box::new(AtomicBool::new(true)));
+        let (tx, rx) = std::sync::mpsc::channel();
+        launch_worker(
+            busy,
+            || panic!("must not run"),
+            move |failure| {
+                tx.send(failure).unwrap();
+            },
+            |_| panic!("must not spawn"),
+        );
+        assert_eq!(rx.recv().unwrap(), WorkerFailure::Busy);
+        assert!(busy.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn capture_deadline_covers_pipes_retained_after_direct_child_exits() {
+        let result = run_child(
+            Command::new("/bin/sh").args([
+                "-c",
+                "(/bin/sleep 1) & printf complete; printf diagnostic >&2",
+            ]),
+            &[],
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        assert_eq!(result.code, Some(0));
+        assert_eq!(result.stdout, "complete");
+        assert_eq!(result.stderr, "diagnostic");
+        assert!(
+            result.timed_out,
+            "retained pipes cannot turn a deadline into completion"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn capture_reads_both_large_pipes_without_deadlocking_and_caps_memory() {
+        let result = run_child(
+            Command::new("/bin/sh").args([
+                "-c",
+                "/usr/bin/head -c 4195328 /dev/zero; /usr/bin/head -c 131072 /dev/zero >&2",
+            ]),
+            &[],
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(result.code, Some(0));
+        assert!(!result.timed_out);
+        assert_eq!(result.stdout.len(), 4 * 1024 * 1024);
+        assert_eq!(result.stderr.len(), 131072);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn capture_timeout_terminates_owned_child_and_preserves_partial_output() {
+        let result = run_child(
+            Command::new("/bin/sh").args(["-c", "printf partial; exec /bin/sleep 5"]),
+            &[],
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        assert!(result.timed_out);
+        assert_eq!(result.stdout, "partial");
+        assert_eq!(result.code, None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn capture_spawn_failure_is_a_failure_without_waiting() {
+        assert!(run_child(
+            &mut Command::new("/nonexistent/phantom-test-child"),
+            &[],
+            Duration::from_millis(100)
+        )
+        .is_err());
+    }
 
     #[test]
     fn parses_only_known_ops_and_fields() {
