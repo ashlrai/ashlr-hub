@@ -50,7 +50,7 @@ function installBridge(initial: DesktopState) {
   };
 }
 
-interface Defaults { global: Record<string, string>; seats: Record<string, Record<string, string>> }
+interface Defaults { global: Record<string, string>; seats: Record<string, Record<string, string>>; fullAccessConfirmed?: true }
 
 function serverWith(defaults: Defaults | number) {
   const posts: unknown[] = [];
@@ -58,13 +58,14 @@ function serverWith(defaults: Defaults | number) {
     const path = typeof input === 'string' ? input : input.toString();
     if (path === '/api/verse/session-controls/defaults') {
       if ((init?.method ?? 'GET') === 'POST') {
-        const body = JSON.parse(String(init?.body)) as Record<string, string | null>;
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
         posts.push(body);
         if (typeof defaults === 'number') return new Response('{}', { status: defaults });
-        if (body['permissionMode']) defaults.global['permissionMode'] = body['permissionMode'];
+        if (typeof body['permissionMode'] === 'string') defaults.global['permissionMode'] = body['permissionMode'];
+        if (body['permissionMode'] === 'bypass' && body['confirmBypass'] === true) defaults.fullAccessConfirmed = true;
         if (body['effort'] === null) delete defaults.global['effort'];
-        else if (body['effort']) defaults.global['effort'] = body['effort'];
-        return new Response(JSON.stringify(defaults), { status: 200, headers: { 'content-type': 'application/json' } });
+        else if (typeof body['effort'] === 'string') defaults.global['effort'] = body['effort'];
+        return new Response(JSON.stringify({ ...defaults, ...(body['applyExisting'] === true ? { application: { updated: 3, appliesNextTurn: 1, preservedPlan: 2, unchanged: 0, refusals: [{ sessionId: 'fixture', reason: 'persistence-failed' }] } } : {}) }), { status: 200, headers: { 'content-type': 'application/json' } });
       }
       if (typeof defaults === 'number') return new Response(JSON.stringify({ error: 'nope' }), { status: defaults });
       return new Response(JSON.stringify(defaults), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -111,17 +112,85 @@ describe('Settings ▸ Chat', () => {
     expect(within(chat).getByText(/No reasoning in the transcript/)).toBeInTheDocument();
   });
 
-  it('shows the server’s new-chat defaults and never offers Bypass as one', async () => {
+  it('shows server defaults and offers explicit Full access without changing them', async () => {
     serverWith({ global: { permissionMode: 'plan', effort: 'high' }, seats: { 'codex-b': { effort: 'low' } } });
     renderSettings();
     const chat = panel('Chat');
     const group = await within(chat).findByRole('radiogroup', { name: 'New chats start in' });
     expect(within(group).getByRole('radio', { name: 'Plan' })).toBeChecked();
-    expect(within(group).queryByRole('radio', { name: /Bypass/ })).not.toBeInTheDocument();
+    expect(within(group).getByRole('radio', { name: 'Full access' })).not.toBeChecked();
     const effort = within(chat).getByRole('combobox', { name: /Reasoning effort for new chats/ });
     expect(effort).toHaveValue('high');
     expect(within(effort).queryByRole('option', { name: /Bypass/ })).not.toBeInTheDocument();
     expect(within(chat).getByText(/One seat has its own default, which wins/)).toBeInTheDocument();
+  });
+
+  it('saves confirmed Full access and separately applies it with accurate partial/next-launch feedback', async () => {
+    const { posts } = serverWith({ global: {}, seats: {} });
+    setMutationToken(TOKEN);
+    const user = userEvent.setup();
+    renderSettings();
+    const group = await within(panel('Chat')).findByRole('radiogroup', { name: 'New chats start in' });
+    await user.click(within(group).getByRole('radio', { name: 'Full access' }));
+    await waitFor(() => expect(posts).toEqual([{ permissionMode: 'bypass', confirmBypass: true }]));
+    expect(within(group).getByRole('radio', { name: 'Full access' })).toBeChecked();
+    expect(screen.getByText(/Explicit Plan overrides stay in Plan/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Apply to existing chats' }));
+    await waitFor(() => expect(posts[1]).toEqual({ permissionMode: 'bypass', confirmBypass: true, applyExisting: true }));
+    expect(await within(panel('Chat')).findByRole('status')).toHaveTextContent('3 chats updated; 1 apply from the next launch. 2 Plan overrides preserved. 1 couldn’t be saved or were unavailable.');
+  });
+
+  it('disables profile/application controls while the explicit application is pending', async () => {
+    const defaults = { global: { permissionMode: 'bypass' }, seats: {}, fullAccessConfirmed: true };
+    let resolve!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST') return new Promise<Response>(done => { resolve = done; });
+      return new Response(JSON.stringify(defaults), { status: 200, headers: { 'content-type': 'application/json' } });
+    }));
+    setMutationToken(TOKEN);
+    const user = userEvent.setup();
+    renderSettings();
+    await user.click(await screen.findByRole('button', { name: 'Apply to existing chats' }));
+    expect(screen.getByRole('button', { name: 'Saving…' })).toBeDisabled();
+    const group = within(panel('Chat')).getByRole('radiogroup', { name: 'New chats start in' });
+    for (const mode of within(group).getAllByRole('radio')) expect(mode).toBeDisabled();
+    await act(async () => { resolve(new Response(JSON.stringify({ ...defaults, application: { updated: 0, appliesNextTurn: 0, preservedPlan: 1, unchanged: 0, refusals: [] } }), { status: 200, headers: { 'content-type': 'application/json' } })); });
+    expect(await screen.findByRole('button', { name: 'Apply to existing chats' })).toBeEnabled();
+    expect(within(panel('Chat')).getByRole('status')).toHaveTextContent('0 chats updated');
+  });
+
+  it('an unconfirmed read cannot display Full access as the saved choice', async () => {
+    serverWith({ global: { permissionMode: 'bypass' }, seats: {} });
+    renderSettings();
+    const group = await within(panel('Chat')).findByRole('radiogroup', { name: 'New chats start in' });
+    expect(within(group).getByRole('radio', { name: 'Accept edits' })).toBeChecked();
+    expect(screen.queryByRole('button', { name: 'Apply to existing chats' })).not.toBeInTheDocument();
+  });
+
+  it('a server response without confirmation does not claim the profile was saved', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify({ global: init?.method === 'POST' ? { permissionMode: 'bypass' } : {}, seats: {} }), { status: 200, headers: { 'content-type': 'application/json' } })));
+    setMutationToken(TOKEN);
+    const user = userEvent.setup();
+    renderSettings();
+    const group = await within(panel('Chat')).findByRole('radiogroup', { name: 'New chats start in' });
+    await user.click(within(group).getByRole('radio', { name: 'Full access' }));
+    expect(await within(panel('Chat')).findByRole('alert')).toHaveTextContent('This server did not confirm Full access');
+    expect(within(group).getByRole('radio', { name: 'Accept edits' })).toBeChecked();
+    expect(screen.queryByRole('button', { name: 'Apply to existing chats' })).not.toBeInTheDocument();
+  });
+
+  it('dismissed authentication never saves the Full access profile or applies it', async () => {
+    const { posts } = serverWith({ global: {}, seats: {} });
+    const user = userEvent.setup();
+    renderSettings();
+    const group = await within(panel('Chat')).findByRole('radiogroup', { name: 'New chats start in' });
+    await user.click(within(group).getByRole('radio', { name: 'Full access' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toHaveTextContent('without native tool approval prompts');
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(posts).toEqual([]);
+    expect(within(group).getByRole('radio', { name: 'Accept edits' })).toBeChecked();
   });
 
   it('asks for the token before writing a default, and writes nothing when it is dismissed', async () => {

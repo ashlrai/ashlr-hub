@@ -143,6 +143,7 @@ import {
   controlOptionsFor,
   effectiveControls,
   initialControlsFor,
+  parseDefaultsUpdate,
   readControlDefaults,
   refusalFor,
   writeControlDefaults,
@@ -162,6 +163,7 @@ import {
   type VerseLiveStatus,
   type VerseQueueResponse,
   type VerseSessionControlDefaults,
+  type VerseSessionControlDefaultsResult,
   type VerseSessionControlDefaultsUpdate,
   type VerseSessionControlsResponse,
   type VerseSessionControlsUpdate,
@@ -363,7 +365,7 @@ export interface VerseEngineHandle {
    */
   setControls?(id: string, update: VerseSessionControlsUpdate): VerseSessionControlsResponse;
   getControlDefaults?(): VerseSessionControlDefaults;
-  setControlDefaults?(update: VerseSessionControlDefaultsUpdate): VerseSessionControlDefaults;
+  setControlDefaults?(update: VerseSessionControlDefaultsUpdate): VerseSessionControlDefaultsResult;
   /** What a running turn is doing right now; null when none runs. O(1), no I/O. */
   peekLiveStatus?(sessionId: string): VerseLiveStatus | null;
   /** Turn ends with seq > cursor, oldest first (last VERSE_TURN_END_BUFFER kept). */
@@ -2753,12 +2755,18 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       const handoffFrom = resolveHandoffSource(req, opts);
 
       // V3.10: the operator's defaults for new chats (global, then this
-      // seat's), each dropped when this seat cannot honour it. Bypass is never
-      // inherited. Nothing set → no `controls` key, so the record is
+      // seat's), each dropped when this seat cannot honour it. Confirmed Full
+      // access is inherited; an explicit source Plan override remains Plan.
+      // Nothing set → no `controls` key, so the record is
       // byte-identical to a 3.9 one.
       const controls = initialControlsFor(readControlDefaults(root), seat, {
         claudeCliVersion: engine === 'claude' ? pinnedClaudeVersion(launch) : null,
       });
+
+      if (handoffFrom && store.get(handoffFrom.sessionId)?.controls?.permissionMode === 'plan' &&
+          refusalFor(controlOptionsFor(seat).permissionModes, 'plan', 'permission mode') === null) {
+        controls.permissionMode = 'plan';
+      }
 
       const title = req.title ? normaliseTitle(req.title) : '';
       const at = nowIso();
@@ -3072,11 +3080,47 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       return readControlDefaults(root);
     },
 
-    setControlDefaults(update: VerseSessionControlDefaultsUpdate): VerseSessionControlDefaults {
-      if (isObject(update) && (update as { permissionMode?: unknown }).permissionMode === 'bypass') {
-        throw new VerseError('VERSE_INVALID', 'bypass is confirmed per chat and can never be a default');
+    setControlDefaults(update: VerseSessionControlDefaultsUpdate): VerseSessionControlDefaultsResult {
+      if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
+      if (!isObject(update)) throw new VerseError('VERSE_INVALID', 'update must be an object');
+      const parsed = parseDefaultsUpdate(update as Record<string, unknown>);
+      if (!parsed.ok) throw new VerseError('VERSE_INVALID', parsed.error);
+      const defaults = writeControlDefaults(root, parsed.update);
+      if (!parsed.update.applyExisting) return defaults;
+      const application: NonNullable<VerseSessionControlDefaultsResult['application']> = {
+        updated: 0, appliesNextTurn: 0, preservedPlan: 0, unchanged: 0, refusals: [],
+      };
+      for (const session of store.list()) {
+        if (parsed.update.seatId && session.seatId !== parsed.update.seatId) continue;
+        if (session.controls?.permissionMode === 'plan') { application.preservedPlan++; continue; }
+        if (session.controls?.permissionMode === 'bypass') { application.unchanged++; continue; }
+        let launch: VerseSeatLaunch;
+        try { launch = requireLaunch(session.id); }
+        catch { application.refusals.push({ sessionId: session.id, reason: 'unavailable' }); continue; }
+        if (refusalFor(controlOptionsFor(launch.seat).permissionModes, 'bypass', 'permission mode')) {
+          application.refusals.push({ sessionId: session.id, reason: 'unavailable' }); continue;
+        }
+        // Preserve the live reference: a running child's settlement also uses
+        // this object. Ordinary save() swallows disk failures, so only the
+        // strict atomic store write can prove this preference was saved.
+        const previousControls = session.controls;
+        const previousUpdatedAt = session.updatedAt;
+        session.controls = { ...session.controls, permissionMode: 'bypass' };
+        session.updatedAt = nowIso();
+        try { store.save(session); }
+        catch {
+          if (previousControls === undefined) delete session.controls;
+          else session.controls = previousControls;
+          session.updatedAt = previousUpdatedAt;
+          application.refusals.push({ sessionId: session.id, reason: 'persistence-failed' });
+          continue;
+        }
+        application.updated++;
+        if (isBusy(session.id)) application.appliesNextTurn++;
+        noteListing(session);
+        announce(session.id);
       }
-      return writeControlDefaults(root, update);
+      return { ...defaults, application };
     },
 
     peekLiveStatus(sessionId: string): VerseLiveStatus | null {

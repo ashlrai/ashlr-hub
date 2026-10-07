@@ -3,7 +3,7 @@
  * "Route contracts", `handleSessionControlsApi`; unit C3).
  *
  *   GET  /api/verse/session-controls/defaults            → VerseSessionControlDefaults
- *   POST /api/verse/session-controls/defaults            {seatId?, effort?, permissionMode?} (never bypass)
+ *   POST /api/verse/session-controls/defaults            {seatId?, effort?, permissionMode?, confirmBypass?, applyExisting?}
  *   GET  /api/verse/session-controls/:id                 → VerseSessionControlsResponse
  *   POST /api/verse/session-controls/:id                 {model?, effort?, permissionMode?, confirmBypass?}
  *   GET  /api/verse/attachments/:id                      → { sessionId, items: VerseAttachment[] }

@@ -640,8 +640,8 @@ export interface VerseSession {
  *  - `plan`         — the CLI plans and edits nothing.
  *  - `accept-edits` — the default: edits applied without asking.
  *  - `auto`         — the CLI's own auto mode.
- *  - `bypass`       — every check skipped. Shown red and confirmed PER CHAT:
- *                     never a default, never inherited by a new chat.
+ *  - `bypass`       — native tool approvals skipped. Confirmed per chat or through
+ *                     saved Full access defaults; host authority is separate.
  * Adapters map these to each CLI's spelling (claude `acceptEdits` /
  * `bypassPermissions`, grok `dontAsk`, …). An engine that cannot honour one
  * reports it unavailable WITH a reason rather than approximating it. The

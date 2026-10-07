@@ -28,8 +28,8 @@
  *      byte-identically, which the argv snapshot test pins.
  *
  *   3. WHAT A NEW CHAT STARTS WITH. `<root>/control-defaults.json` (0600),
- *      global plus per seat. Bypass is refused there: it is confirmed PER CHAT
- *      and never inherited (types.ts VERSE_PERMISSION_MODES).
+ *      global plus per seat. Full access is saved only after confirmation and
+ *      inherited only with its exact persisted preference marker.
  *
  * An engine that cannot honour a mode reports it unavailable rather than
  * approximating it — with one deliberate, documented mapping: grok's
@@ -68,7 +68,7 @@ export const PERMISSION_MODE_LABELS: Readonly<Record<VersePermissionMode, string
   plan: 'Plan',
   'accept-edits': 'Accept edits',
   auto: 'Auto',
-  bypass: 'Bypass permissions',
+  bypass: 'Full access',
 };
 
 export const EFFORT_LABELS: Readonly<Record<VerseEffort, string>> = {
@@ -251,7 +251,7 @@ export function controlOptionsFor(seat: Pick<VerseSeat, 'models' | 'engine'>, ct
 // ---------------------------------------------------------------------------
 
 const UPDATE_KEYS = new Set(['model', 'effort', 'permissionMode', 'confirmBypass']);
-const DEFAULTS_UPDATE_KEYS = new Set(['seatId', 'effort', 'permissionMode']);
+const DEFAULTS_UPDATE_KEYS = new Set(['seatId', 'effort', 'permissionMode', 'confirmBypass', 'applyExisting']);
 
 export type ParsedControlsUpdate =
   | { ok: true; update: VerseSessionControlsUpdate }
@@ -320,13 +320,23 @@ export function parseDefaultsUpdate(body: Record<string, unknown>): ParsedDefaul
     update.effort = body['effort'];
   }
   if (body['permissionMode'] !== undefined) {
-    if (body['permissionMode'] === 'bypass') {
-      return { ok: false, error: 'bypass is confirmed per chat and can never be a default' };
-    }
     if (!isVersePermissionMode(body['permissionMode'])) {
-      return { ok: false, error: `permissionMode must be one of: plan, accept-edits, auto` };
+      return { ok: false, error: `permissionMode must be one of: ${VERSE_PERMISSION_MODES.join(', ')}` };
     }
-    update.permissionMode = body['permissionMode'] as Exclude<VersePermissionMode, 'bypass'>;
+    update.permissionMode = body['permissionMode'];
+  }
+  if (body['confirmBypass'] !== undefined && body['confirmBypass'] !== true) {
+    return { ok: false, error: 'confirmBypass must be true when present' };
+  }
+  if (update.permissionMode === 'bypass' && body['confirmBypass'] !== true) {
+    return { ok: false, error: 'Full access skips native tool approvals; confirm this default (confirmBypass: true)' };
+  }
+  if (body['confirmBypass'] === true) update.confirmBypass = true;
+  if (body['applyExisting'] !== undefined) {
+    if (body['applyExisting'] !== true || update.permissionMode !== 'bypass' || update.confirmBypass !== true) {
+      return { ok: false, error: 'applyExisting requires confirmed Full access (permissionMode: bypass, confirmBypass: true)' };
+    }
+    update.applyExisting = true;
   }
   if (update.effort === undefined && update.permissionMode === undefined) {
     return { ok: false, error: 'nothing to change: send effort or permissionMode' };
@@ -471,12 +481,12 @@ export const CONTROL_DEFAULTS_MAX_BYTES = 1024 * 1024;
 const DEFAULT_SEAT_ID = /^[\w.:@-]{1,200}$/;
 const DEFAULTS_UNAVAILABLE = 'Control defaults unavailable, unsafe, oversized, or malformed; no changes saved';
 
-function cleanControls(value: unknown, forWrite: boolean): VerseSessionControls {
+function cleanControls(value: unknown, forWrite: boolean, confirmed: boolean): VerseSessionControls {
   if (!isVerseSessionControls(value)) throw new Error(DEFAULTS_UNAVAILABLE);
   const controls = value as VerseSessionControls;
-  // Hand-edited bypass never becomes inherited authority. A partial update
+  // Unconfirmed legacy bypass never becomes an inherited preference. A partial update
   // must refuse it rather than silently erase the operator's stored bytes.
-  if (controls.permissionMode === 'bypass') {
+  if (controls.permissionMode === 'bypass' && !confirmed) {
     if (forWrite) throw new Error(DEFAULTS_UNAVAILABLE);
     return controls.effort === undefined ? {} : { effort: controls.effort };
   }
@@ -524,15 +534,19 @@ function loadControlDefaults(root: string, forWrite: boolean): VerseSessionContr
     const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length)));
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
     const record = parsed as Record<string, unknown>;
-    if (Object.keys(record).some(key => key !== 'global' && key !== 'seats') ||
+    if (Object.keys(record).some(key => key !== 'global' && key !== 'seats' && key !== 'fullAccessConfirmed') ||
+        (record.fullAccessConfirmed !== undefined && record.fullAccessConfirmed !== true) ||
         record.seats === null || typeof record.seats !== 'object' || Array.isArray(record.seats)) throw new Error();
     const entries = Object.entries(record.seats as Record<string, unknown>).map(([seatId, value]) => {
       if (!DEFAULT_SEAT_ID.test(seatId)) throw new Error();
-      return [seatId, cleanControls(value, forWrite)] as const;
+      return [seatId, cleanControls(value, forWrite, record.fullAccessConfirmed === true)] as const;
     });
     // Object.fromEntries retains prototype-like IDs as own data properties.
     const seats = Object.fromEntries(entries.filter(([, controls]) => forWrite || Object.keys(controls).length > 0));
-    return { global: cleanControls(record.global, forWrite), seats };
+    const global = cleanControls(record.global, forWrite, record.fullAccessConfirmed === true);
+    if (record.fullAccessConfirmed === true && global.permissionMode !== 'bypass' &&
+        !Object.values(seats).some(controls => controls.permissionMode === 'bypass')) throw new Error();
+    return { global, seats, ...(record.fullAccessConfirmed === true ? { fullAccessConfirmed: true as const } : {}) };
   } catch { throw new Error(DEFAULTS_UNAVAILABLE); }
   finally { if (fd !== undefined) closeSync(fd); }
 }
@@ -567,6 +581,9 @@ export function writeControlDefaults(root: string, update: VerseSessionControlDe
   } else {
     next.global = target;
   }
+  if (next.global.permissionMode === 'bypass' || Object.values(next.seats).some(controls => controls.permissionMode === 'bypass')) {
+    next.fullAccessConfirmed = true;
+  }
   const content = `${JSON.stringify(next, null, 2)}\n`;
   if (Buffer.byteLength(content) > CONTROL_DEFAULTS_MAX_BYTES) throw new Error(DEFAULTS_UNAVAILABLE);
   writePrivateFileAtomically(root, join(root, CONTROL_DEFAULTS_FILE), content);
@@ -587,7 +604,7 @@ export function initialControlsFor(
   const options = controlOptionsFor(seat, ctx);
   const out: VerseSessionControls = {};
   if (merged.effort && refusalFor(options.efforts, merged.effort, 'effort') === null) out.effort = merged.effort;
-  if (merged.permissionMode && merged.permissionMode !== 'bypass'
+  if (merged.permissionMode && (merged.permissionMode !== 'bypass' || defaults.fullAccessConfirmed === true)
     && merged.permissionMode !== VERSE_DEFAULT_PERMISSION_MODE
     && refusalFor(options.permissionModes, merged.permissionMode, 'permission mode') === null) {
     out.permissionMode = merged.permissionMode;

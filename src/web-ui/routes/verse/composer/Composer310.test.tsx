@@ -685,7 +685,7 @@ describe('footer — whole words', () => {
     ['plan', 'Plan', 'Plan'],
     ['accept-edits', 'Accept edits', 'Accept edits'],
     ['auto', 'Auto', 'Auto'],
-    ['bypass', 'Bypass', 'Bypass permissions'],
+    ['bypass', 'Full access', 'Bypass permissions'],
   ] as const)('mode %s shows "%s" in full; its name and tooltip carry "%s"', async (mode, shown, full) => {
     server = installServer({ controls: controlsView({ permissionMode: mode }) });
     await renderReady();

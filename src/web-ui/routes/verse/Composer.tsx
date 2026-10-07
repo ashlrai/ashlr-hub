@@ -203,7 +203,7 @@ const PERMISSION_SHORT: Record<VersePermissionMode, string> = {
   plan: 'Plan',
   'accept-edits': 'Accept edits',
   auto: 'Auto',
-  bypass: 'Bypass',
+  bypass: 'Full access',
 };
 
 /** Effort, once "Effort:" folds away: three rising bars (same geometry rules as ModeIcon). */

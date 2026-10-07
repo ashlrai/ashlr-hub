@@ -13,14 +13,14 @@
  *                        seat cannot honour (initialControlsFor), so a global
  *                        "max" never breaks a local chat; the row says so.
  *
- * Bypass is never offered: it is confirmed per chat and can never be a
- * default (the server refuses it, and the list here does not contain it).
+ * Full access is an explicitly confirmed saved default. Applying it to
+ * existing chats is a separate action, preserving explicit Plan overrides.
  * Writes need the mutation token — asked for through the same token dialog
  * the composer uses, with a reason naming the change.
  */
 import { useCallback, useEffect, useId, useState } from 'react';
 import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
-import { Segmented, Select } from '../../../components/primitives/index.js';
+import { Button, Segmented, Select } from '../../../components/primitives/index.js';
 import { ApiError } from '../../../data/client.js';
 import { VERSE_EFFORTS, type VerseEffort, type VersePermissionMode, type VerseSessionControls } from '../../../../core/verse/types.js';
 import type { VerseSessionControlDefaults, VerseSessionControlDefaultsUpdate } from '../../../../core/verse/workbench-types.js';
@@ -42,15 +42,16 @@ const DESCRIPTION: Readonly<Record<ReasoningDisplay, string>> = {
   hidden: 'No reasoning in the transcript. The live status still says it is thinking, so a long think never looks like a hang.',
 };
 
-type DefaultMode = Exclude<VersePermissionMode, 'bypass'>;
+type DefaultMode = VersePermissionMode;
 
 /** Picker order and words match the composer's permission menu (C3). */
-export const DEFAULT_MODES: readonly DefaultMode[] = ['plan', 'accept-edits', 'auto'];
-const MODE_LABEL: Readonly<Record<DefaultMode, string>> = { plan: 'Plan', 'accept-edits': 'Accept edits', auto: 'Auto' };
+export const DEFAULT_MODES: readonly DefaultMode[] = ['plan', 'accept-edits', 'auto', 'bypass'];
+const MODE_LABEL: Readonly<Record<DefaultMode, string>> = { plan: 'Plan', 'accept-edits': 'Accept edits', auto: 'Auto', bypass: 'Full access' };
 const MODE_DESCRIPTION: Readonly<Record<DefaultMode, string>> = {
   plan: 'New chats plan and edit nothing until you switch them.',
   'accept-edits': 'New chats apply edits without asking — the default.',
   auto: 'New chats run in the CLI’s own auto mode.',
+  bypass: 'New chats use full native tool access without asking. Explicit Plan overrides and host permissions still apply.',
 };
 const EFFORT_LABEL: Readonly<Record<VerseEffort, string>> = {
   minimal: 'Minimal',
@@ -92,7 +93,13 @@ export function narrowControlDefaults(raw: unknown): VerseSessionControlDefaults
   };
   const seats: Record<string, VerseSessionControls> = {};
   if (isRecord(raw['seats'])) for (const [id, value] of Object.entries(raw['seats'])) seats[id] = clean(value);
-  return { global: clean(raw['global']), seats };
+  const confirmed = raw['fullAccessConfirmed'] === true;
+  const global = clean(raw['global']);
+  if (!confirmed) {
+    if (global.permissionMode === 'bypass') delete global.permissionMode;
+    for (const controls of Object.values(seats)) if (controls.permissionMode === 'bypass') delete controls.permissionMode;
+  }
+  return { global, seats, ...(confirmed ? { fullAccessConfirmed: true as const } : {}) };
 }
 
 function loadFailure(err: unknown): string {
@@ -107,6 +114,7 @@ function NewChatDefaults() {
   const [load, setLoad] = useState<Load>({ state: 'loading' });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [applicationNote, setApplicationNote] = useState<string | null>(null);
   const gate = useTokenGate();
   const modeLabelId = useId();
   const effortId = useId();
@@ -128,13 +136,27 @@ function NewChatDefaults() {
 
   const save = useCallback(async (update: VerseSessionControlDefaultsUpdate, reason: string) => {
     setError(null);
+    setApplicationNote(null);
     setSaving(true);
     try {
       const next = await gate.run(reason, () => updateControlDefaults(update));
       // null = the token prompt was dismissed: nothing changed, nothing to say.
       if (next) {
         const defaults = narrowControlDefaults(next);
+        if (update.permissionMode === 'bypass' && (defaults?.fullAccessConfirmed !== true || defaults.global.permissionMode !== 'bypass')) {
+          setError('This server did not confirm Full access. The displayed preference was not changed.');
+          return;
+        }
         if (defaults) setLoad({ state: 'ready', defaults });
+        if (update.applyExisting) {
+          const applied = next.application;
+          const counts = applied ? [applied.updated, applied.appliesNextTurn, applied.preservedPlan, applied.unchanged] : [];
+          if (applied && counts.every(value => Number.isSafeInteger(value) && value >= 0) && Array.isArray(applied.refusals) && applied.appliesNextTurn <= applied.updated) {
+            setApplicationNote(`${applied.updated} chats updated; ${applied.appliesNextTurn} apply from the next launch. ${applied.preservedPlan} Plan overrides preserved. ${applied.refusals.length} couldn’t be saved or were unavailable.`);
+          } else {
+            setError('Full access saved, but this server did not report existing-chat application. Check each chat before relying on it.');
+          }
+        }
       }
     } catch (err) {
       setError(describeContextError(err));
@@ -151,7 +173,7 @@ function NewChatDefaults() {
   }
 
   const global = load.defaults.global;
-  const mode: DefaultMode = global.permissionMode && global.permissionMode !== 'bypass' ? global.permissionMode : 'accept-edits';
+  const mode: DefaultMode = global.permissionMode ?? 'accept-edits';
   const effort = global.effort ?? null;
   const seatOverrides = Object.keys(load.defaults.seats).length;
 
@@ -163,11 +185,16 @@ function NewChatDefaults() {
           size="sm"
           value={mode}
           onChange={(next) => {
-            if (next !== mode) void save({ permissionMode: next }, `Start new chats in ${MODE_LABEL[next]}.`);
+            if (next !== mode) void save({ permissionMode: next, ...(next === 'bypass' ? { confirmBypass: true as const } : {}) }, `Start new chats in ${MODE_LABEL[next]}${next === 'bypass' ? ' without native tool approval prompts' : ''}.`);
           }}
           options={DEFAULT_MODES.map((value) => ({ value, label: MODE_LABEL[value], disabled: saving }))}
         />
       </SettingRow>
+      {mode === 'bypass' ? <SettingRow label="Existing chats" description="Apply Full access without interrupting active work. Explicit Plan overrides stay in Plan; changes take effect at the next native launch.">
+        <Button size="sm" variant="subtle" disabled={saving} onClick={() => {
+          void save({ permissionMode: 'bypass', confirmBypass: true, applyExisting: true }, 'Apply Full access to existing chats, preserving Plan overrides.');
+        }}>{saving ? 'Saving…' : 'Apply to existing chats'}</Button>
+      </SettingRow> : null}
       <SettingRow
         label="Reasoning effort for new chats"
         description={
@@ -195,6 +222,7 @@ function NewChatDefaults() {
           ))}
         </Select>
       </SettingRow>
+      {applicationNote ? <p className={styles.panelNote} role="status">{applicationNote}</p> : null}
       {error ? <p className={styles.panelNote} role="alert">{error}</p> : null}
       <MutationTokenDialog {...gate.dialog} />
     </>

@@ -136,7 +136,17 @@ describe('session-controls routes', () => {
     expect(ok!.json['controls']).toMatchObject({ permissionMode: 'bypass' });
   });
 
-  it('defaults: GET and POST, never bypass', async () => {
+  it('confirmed defaults application returns saved evidence without dispatching a turn', async () => {
+    expect((await call('POST', '/api/verse/session-controls/defaults', { permissionMode: 'bypass', confirmBypass: true, applyExisting: true, fullAccessConfirmed: true }))!.status).toBe(400);
+    const response = await call('POST', '/api/verse/session-controls/defaults', { permissionMode: 'bypass', confirmBypass: true, applyExisting: true });
+    expect(response!.status).toBe(200);
+    expect(response!.json).toMatchObject({ global: { permissionMode: 'bypass' }, fullAccessConfirmed: true, application: { updated: 1, appliesNextTurn: 0, preservedPlan: 0, unchanged: 0, refusals: [] } });
+    expect((await call('GET', '/api/verse/session-controls/defaults'))!.json).toEqual({ global: { permissionMode: 'bypass' }, seats: {}, fullAccessConfirmed: true });
+    expect((await call('GET', `/api/verse/session-controls/${sessionId}`))!.json).toMatchObject({ controls: { permissionMode: 'bypass' } });
+    expect(children).toHaveLength(0);
+  });
+
+  it('defaults: GET and POST require confirmation before saved Full access', async () => {
     expect((await call('GET', '/api/verse/session-controls/defaults'))!.json).toEqual({ global: {}, seats: {} });
     expect((await call('POST', '/api/verse/session-controls/defaults', { permissionMode: 'bypass' }))!.status).toBe(400);
     const saved = await call('POST', '/api/verse/session-controls/defaults', { seatId: 'claude-a', effort: 'low' });

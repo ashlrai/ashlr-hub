@@ -2,8 +2,8 @@
  * routes/verse/composer/BypassConfirmDialog.tsx — the per-chat confirmation
  * in front of Bypass permissions (SPEC-310C §0.6; unit C3).
  *
- * Bypass turns off every permission check the CLI has. It is never a
- * default, never inherited by a new chat, and never one keystroke away: this
+ * Full access skips native tool approvals. It can also be configured as a
+ * confirmed default in Settings; this per-chat action is never one keystroke away: the
  * dialog opens with focus on CANCEL, so Enter-Enter from the picker keeps the
  * chat as it was. Only the explicit red button sends `confirmBypass: true`
  * (the server refuses bypass without it).
@@ -30,7 +30,7 @@ export function BypassConfirmDialog({ open, chatLabel, running, onCancel, onConf
     <Dialog open={open} onClose={onCancel} titleId={titleId} title="Bypass permissions for this chat?" initialFocusRef={cancel}
       description={<>The agent in <strong>{chatLabel}</strong> will run every command and edit every file without asking — including outside the project.</>}>
       <ul className={styles.bypassList}>
-        <li>Applies to this chat only{running ? ', from the next turn' : ''}. New chats never inherit it.</li>
+        <li>Applies to this chat only{running ? ', from the next turn' : ''}. New chats use the saved default in Settings.</li>
         <li>Switch back any time from the Permission menu{shortcutLabel('composer.permission') ? <> (<kbd>{shortcutLabel('composer.permission')}</kbd>)</> : null}.</li>
         <li>Use it in a sandbox or a throwaway worktree, not on work you can’t lose.</li>
       </ul>
