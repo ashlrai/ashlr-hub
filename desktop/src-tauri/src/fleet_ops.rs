@@ -833,7 +833,7 @@ pub fn validate_checkout(raw: &str) -> Result<Checkout, String> {
         return Err("tools/custody is missing from that checkout.".to_string());
     }
     if !is_hub_checkout(&root) {
-        return Err("That folder is not an ashlrai/ashlr-hub checkout.".to_string());
+        return Err("That folder is not a supported Phantom source checkout.".to_string());
     }
     let bytes = std::fs::read(&script)
         .map_err(|_| "scripts/install-custody.sh could not be read.".to_string())?;
@@ -846,14 +846,51 @@ pub fn validate_checkout(raw: &str) -> Result<Checkout, String> {
     })
 }
 
-/// PURE (given the text): does a git config name the ashlr-hub remote?
+/// A checkout hint only: neither reviewed name substitutes for GitHub numeric proof.
+fn is_hub_remote(remote: &str) -> bool {
+    let remote = remote.trim().to_ascii_lowercase();
+    let path = [
+        "https://github.com/",
+        "ssh://git@github.com/",
+        "git@github.com:",
+    ]
+    .iter()
+    .find_map(|prefix| remote.strip_prefix(prefix));
+    let Some(path) = path else { return false };
+    let path = path.strip_suffix('/').unwrap_or(path);
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    matches!(path, "ashlrai/ashlr-hub" | "ashlrai/phantom")
+}
+
+/// PURE: require exactly one supported origin, never a URL in an unrelated section.
 pub fn config_names_hub(config: &str) -> bool {
-    config.lines().any(|line| {
-        let line = line.trim();
-        line.starts_with("url")
-            && (line.contains("ashlrai/ashlr-hub.git")
-                || line.trim_end().ends_with("ashlrai/ashlr-hub"))
-    })
+    let mut in_origin = false;
+    let mut origin = None;
+    for raw in config.lines() {
+        let line = raw.trim();
+        if line.starts_with('[') {
+            in_origin = line
+                .strip_prefix("[remote")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .is_some_and(|rest| {
+                    rest.chars().next().is_some_and(char::is_whitespace)
+                        && rest.trim_start() == "\"origin\""
+                });
+            continue;
+        }
+        if !in_origin {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            if key.trim() == "url" {
+                if origin.is_some() {
+                    return false;
+                }
+                origin = Some(value.trim());
+            }
+        }
+    }
+    origin.is_some_and(is_hub_remote)
 }
 
 fn is_hub_checkout(root: &Path) -> bool {
@@ -1069,6 +1106,51 @@ mod tests {
         assert!(!config_names_hub(
             "[remote \"origin\"]\n\turl = https://github.com/evil/ashlr-hub-fork\n"
         ));
+    }
+
+    #[test]
+    fn renamed_hub_requires_a_supported_unique_origin() {
+        for remote in [
+            "https://github.com/ashlrai/phantom.git",
+            "ssh://git@github.com/ashlrai/phantom.git/",
+            "git@github.com:ASHLRAI/PHANTOM",
+        ] {
+            assert!(config_names_hub(&format!(
+                "[remote \"origin\"]\nurl = {remote}\n"
+            )));
+        }
+        for remote in [
+            "https://evilgithub.com/ashlrai/phantom.git",
+            "https://github.com.evil/ashlrai/ashlr-hub.git",
+            "https://evil.test/github.com/ashlrai/ashlr-hub.git",
+            "https://user:password@github.com/ashlrai/phantom.git",
+            "https://git@github.com/ashlrai/phantom.git",
+            "ssh://root@github.com/ashlrai/phantom",
+            "https://github.com:443/ashlrai/phantom",
+            "http://github.com/ashlrai/phantom",
+            "https://github.com/ashlrai/phantom?x=y",
+            "https://github.com/ashlrai/phantom#main",
+            "https://github.com/ashlrai/phantom/extra",
+            "https://github.com/someone/phantom",
+            "https://github.com/ashlrai/phantom-secrets",
+        ] {
+            assert!(!config_names_hub(&format!(
+                "[remote \"origin\"]\nurl = {remote}\n"
+            )));
+        }
+        assert!(config_names_hub(
+            "[remote  \"origin\"]\nurl = git@github.com:ashlrai/phantom\n"
+        ));
+        assert!(config_names_hub(
+            "[remote\t\"origin\"]\nurl = git@github.com:ashlrai/phantom\n"
+        ));
+        assert!(!config_names_hub(
+            "[remote \"upstream\"]\nurl = git@github.com:ashlrai/phantom\n"
+        ));
+        assert!(!config_names_hub(
+            "[remote \"origin\"]\nurl.fake = git@github.com:ashlrai/phantom\n"
+        ));
+        assert!(!config_names_hub("[remote \"origin\"]\nurl = git@github.com:ashlrai/phantom\nurl = https://evil.test/repo\n"));
     }
 
     #[test]

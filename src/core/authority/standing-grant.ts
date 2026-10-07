@@ -37,6 +37,7 @@ import {
   type RepoEnforcement,
   type RepoStage,
 } from '../fleet/fleet-types.js';
+import { isHubRepositoryLabel } from './repository-binding.js';
 import { canonicalJson } from './canonical-json.js';
 import { ELITE_DIRECT_ONE_LINE, ELITE_DIRECT_STAGE_ID, grantHasEliteDirect } from './elite-models.js';
 import { draftEnforcementFor, reapprovalDowngrades, type ServerEnforcementState } from './server-enforcement.js';
@@ -744,7 +745,7 @@ export function buildDefaultGrantPayload(input: GrantDraftInput): StandingGrantV
     const key = candidate.nameWithOwner.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    const plan = DEFAULT_REPO_PLAN[repoName(candidate.nameWithOwner)];
+    const plan = DEFAULT_REPO_PLAN[isHubRepositoryLabel(candidate.nameWithOwner) ? 'ashlr-hub' : repoName(candidate.nameWithOwner)];
     const local = candidate.visibility === 'private'
       || draftEnforcementFor(candidate.serverEnforcement ? { state: candidate.serverEnforcement } : null) === 'local';
     const canMerge = plan !== undefined && !(plan.needsVerify && candidate.hasVerify !== true);
