@@ -596,6 +596,12 @@ const loadMaintainerVerifyCmd = lazyCmd(
   'verify-pr requires the host-owned maintainer verifier.',
 );
 
+const loadReleaseArticlesCmd = lazyCmd(
+  () => import('./release-articles.js'),
+  (m) => m.cmdReleaseArticles as Cmd,
+  'release-articles requires the release-backed content maintenance module.',
+);
+
 // ─── H7 command loaders ─────────────────────────────────────────────
 // preflight + onboard, matching the reflect/health/seams/verify-safety/audit
 // loaders — see docs/contracts/CONTRACT-H7.md.
@@ -2208,6 +2214,12 @@ async function main(): Promise<void> {
       case 'verify-pr': {
         const cmdMaintainerVerify = await loadMaintainerVerifyCmd();
         process.exitCode = await cmdMaintainerVerify(rest);
+        break;
+      }
+
+      case 'release-articles': {
+        const cmdReleaseArticles = await loadReleaseArticlesCmd();
+        process.exitCode = await cmdReleaseArticles(rest);
         break;
       }
 

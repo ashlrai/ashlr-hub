@@ -220,6 +220,25 @@ beforeEach(() => {
 
 const hookCtx = { nowMs: NOW, cfg: CFG, dryRun: false, capabilityKind: 'resident-standing' as const };
 
+describe('release-backed content maintenance integration', () => {
+  it('runs maintenance before reading tasks and skips dry-run observations', async () => {
+    const local = harness(); const events: string[] = [];
+    local.deps.syncReleaseArticles = async () => { events.push('maintenance'); };
+    local.deps.readTasks = () => { events.push('tasks'); return { ok: true, tasks: [] }; };
+    await createLiveTickHooks({ deps: local.deps }).beforeTick(hookCtx);
+    expect(events).toEqual(['maintenance', 'tasks']); events.length = 0;
+    await createLiveTickHooks({ deps: local.deps }).beforeTick({ ...hookCtx, dryRun: true });
+    expect(events).toEqual(['tasks']);
+  });
+  it('maintenance failure leaves the existing engineering task read available', async () => {
+    const local = harness(); let reads = 0;
+    local.deps.syncReleaseArticles = async () => { throw new Error('public verification unavailable'); };
+    local.deps.readTasks = () => { reads++; return { ok: true, tasks: [] }; };
+    await createLiveTickHooks({ deps: local.deps }).beforeTick(hookCtx);
+    expect(reads).toBe(1);
+  });
+});
+
 function item(over: Partial<WorkItem> = {}): WorkItem {
   return { id: 'item-1', repo: PATH, source: 'todo', title: 'Fix the parser', detail: 'd', value: 3, effort: 3, score: 1, tags: [], ts: NOW_ISO, ...over };
 }

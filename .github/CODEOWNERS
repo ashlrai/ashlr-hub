@@ -150,6 +150,9 @@
 /src/core/fleet/maintainer-pr-runner.ts @masonwyatt23
 /src/core/fleet/maintainer-cargo-dependencies.ts @masonwyatt23
 /src/cli/maintainer-verify.ts @masonwyatt23
+/src/core/release-public-facts.ts @masonwyatt23
+/src/core/release-articles.ts @masonwyatt23
+/src/cli/release-articles.ts @masonwyatt23
 /src/core/fleet/cloud-intake.ts @masonwyatt23
 /src/core/fleet/post-merge-watch.ts @masonwyatt23
 /src/core/fleet/quarantine.ts @masonwyatt23
@@ -717,6 +720,7 @@
 /test/proposal-spans.test.ts @masonwyatt23
 /test/protected-paths-310b.test.ts @masonwyatt23
 /test/red-team-routing-310.test.ts @masonwyatt23
+/test/release-articles.test.ts @masonwyatt23
 /test/repo-holds-310b.test.ts @masonwyatt23
 /test/reset-aware-scheduling.test.ts @masonwyatt23
 /test/reset-spending-park-delay.test.ts @masonwyatt23

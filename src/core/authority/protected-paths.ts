@@ -113,6 +113,10 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/fleet/maintainer-pr-runner.ts',
   'src/core/fleet/maintainer-cargo-dependencies.ts',
   'src/cli/maintainer-verify.ts',
+  // Release claim eligibility and the opt-in signed company content task lane.
+  'src/core/release-public-facts.ts',
+  'src/core/release-articles.ts',
+  'src/cli/release-articles.ts',
   // 3.13: signs provenance for cloud PRs it ingests into the standing pass
   'src/core/fleet/cloud-intake.ts',
   'src/core/fleet/post-merge-watch.ts',
