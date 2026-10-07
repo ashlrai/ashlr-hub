@@ -36,11 +36,18 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Refresh pending Devin consumption from the server cache every five seconds
   during the sidebar's first minute, then return to its normal cadence. Hidden
   windows stop polling, and an open Resources drawer owns the refresh instead.
+- Keep local speed readings tied to their saved model, endpoint and context,
+  preserve measurement age, and distinguish decode from end-to-end timing.
+  Sum actual per-call output tokens across a completed turn and round only the
+  display. Avoid redundant composer updates when routing mode stays unchanged.
 - Honor account-level budget-read opt-outs. Prune deleted knowledge chunks only
   after complete scans; partial or failed listings preserve the existing index.
 - Bound native fleet startup output capture and clear the busy state if worker
   creation fails. Bind custody credential reads to one unique existing item and
   preserve precise macOS failure diagnostics without exposing credentials.
+- Validate release-article storage owners, modes and path identities on Linux
+  as well as platform ACLs. Refuse replaced manifests and changed ancestors
+  without treating a disrupted read as healthy missing configuration.
 - Reuse incoming chat event validation to reduce startup code. Run independent
   native broker CI checks alongside Mac suites, retaining all required jobs and
   complete qualification before artifact admission.
