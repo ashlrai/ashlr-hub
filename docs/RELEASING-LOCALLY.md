@@ -50,10 +50,11 @@ npm publish <tarball> --access public   # the path ship:local printed; see Publi
 ```
 
 Run `npm run check:release` before an expensive build or pushing release changes.
-It runs the three existing whole publication and documentation contract modules
-against source files, using the hermetic test runner; it does not require built
-`dist` output or provider credentials. Versioned installer links and release
-policy mismatches fail here early. This focused check does not replace complete
+It runs five existing whole publication, documentation and CLI discovery contract
+modules against source files, using the hermetic test runner; it does not require
+built `dist` output or provider credentials. Versioned installer links, release
+policy mismatches and missing help or completions fail here early. This focused
+check does not replace complete
 source qualification, exact-source hosted checks or artifact acceptance. Use
 `prepublishOnly` for the local qualification fallback.
 
