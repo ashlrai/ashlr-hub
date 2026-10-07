@@ -553,4 +553,4 @@
 .retryControls { font: inherit; color: var(--accent-500); border: 0; background: none; cursor: pointer; padding: 0; text-decoration: underline; text-underline-offset: 3px; }
 .retryControls:disabled { cursor: default; opacity: 0.5; }
 .retryControls:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 3px; border-radius: var(--radius-sm); }
-.actionLoading { min-height: 72px; display: grid; align-content: center; gap: var(--space-2); color: var(--text-tertiary); font-size: var(--text-sm-size); }
+.actionLoading { min-height: calc(var(--control-h-xs) * 3); display: grid; align-content: center; gap: var(--space-2); color: var(--text-tertiary); font-size: var(--text-sm-size); }
