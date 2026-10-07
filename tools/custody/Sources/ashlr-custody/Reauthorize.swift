@@ -93,15 +93,7 @@ enum ExistingSecretReauthorization {
   /// match-all covers the default legacy search list: no first-match repair.
   static func items(_ account: ReauthorizationAccount) throws -> [SecKeychainItem] {
     guard SecKeychainSetUserInteractionAllowed(false) == errSecSuccess else { throw refuse() }
-    let query: [String: Any] = [
-      kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: SecretStore.service,
-      kSecAttrAccount as String: account.rawValue,
-      kSecUseDataProtectionKeychain as String: false,
-      kSecAttrSynchronizable as String: false,
-      kSecReturnRef as String: true,
-      kSecMatchLimit as String: kSecMatchLimitAll,
-    ]
+    let query = CustodyLegacySecretQuery.references(service: SecretStore.service, account: account.rawValue)
     var result: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &result)
     if status == errSecItemNotFound { return [] }

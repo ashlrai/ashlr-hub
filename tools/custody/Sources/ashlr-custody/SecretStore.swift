@@ -10,6 +10,7 @@
 // profile, which an ad-hoc or Developer-ID-signed CLI does not have.
 
 import CustodyCore
+import CustodySecurity
 import Foundation
 import Security
 
@@ -30,15 +31,12 @@ enum SecretStore {
 
   /// Never let a Keychain dialog appear from a non-interactive call: a token
   /// request at 3 a.m. must fail loudly instead of waiting on a prompt.
-  static func disableInteraction() {
-    SecKeychainSetUserInteractionAllowed(false)
+  static func disableInteraction() throws {
+    try CustodyLegacySecretQuery.requireInteractionDisabled(SecKeychainSetUserInteractionAllowed(false))
   }
 
-  static func failure(_ status: OSStatus, _ action: String) -> CustodyFailure {
-    if status == errSecInteractionNotAllowed || status == errSecAuthFailed {
-      return CustodyFailure("keystore", "the Keychain would not release the item without a prompt — run the installed helper's reauthorize github-app or reauthorize claude-token yourself for the affected existing item", exit: .keystore)
-    }
-    return CustodyFailure("keystore", "Keychain \(action) failed (OSStatus \(status))", exit: .keystore)
+  static func failure(_ status: OSStatus, _ action: CustodyLegacySecretQuery.Operation) -> CustodyFailure {
+    CustodyLegacySecretQuery.failure(status, action)
   }
 
   static func store(_ account: Account, data: Data) throws {
@@ -56,42 +54,42 @@ enum SecretStore {
       kSecAttrAccount as String: account.rawValue,
     ]
     let deleted = SecItemDelete(match as CFDictionary)
-    guard deleted == errSecSuccess || deleted == errSecItemNotFound else { throw failure(deleted, "replace") }
+    guard deleted == errSecSuccess || deleted == errSecItemNotFound else { throw failure(deleted, .replace) }
     var add = match
     add[kSecValueData as String] = data
     add[kSecAttrLabel as String] = account.label
     add[kSecAttrAccess as String] = access
     let status = SecItemAdd(add as CFDictionary, nil)
-    guard status == errSecSuccess else { throw failure(status, "store") }
+    guard status == errSecSuccess else { throw failure(status, .store) }
   }
 
   static func read(_ account: Account) throws -> Data? {
-    let query: [String: Any] = [
-      kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: service,
-      kSecAttrAccount as String: account.rawValue,
-      kSecReturnData as String: true,
-      kSecMatchLimit as String: kSecMatchLimitOne,
-    ]
-    var out: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &out)
-    if status == errSecItemNotFound { return nil }
-    guard status == errSecSuccess, let data = out as? Data else { throw failure(status, "read") }
-    return data
+    try CustodyLegacySecretQuery.read(
+      disableInteraction: { SecKeychainSetUserInteractionAllowed(false) },
+      findItems: {
+        let query = CustodyLegacySecretQuery.references(service: service, account: account.rawValue)
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return [] as [SecKeychainItem] }
+        guard status == errSecSuccess else { throw failure(status, .find) }
+        return try CustodyLegacySecretQuery.checkedReferences(result)
+      },
+      readData: { item in
+        let query = CustodyLegacySecretQuery.data(service: service, account: account.rawValue, item: item)
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess else { throw failure(status, .read) }
+        return try CustodyLegacySecretQuery.checkedData(result)
+      }
+    )
   }
 
-  /// Presence only — attributes, never the secret, so no ACL decision is made.
+  /// Unique presence only — attributes, never the secret or decrypt permission.
   static func exists(_ account: Account) -> Bool? {
-    let query: [String: Any] = [
-      kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: service,
-      kSecAttrAccount as String: account.rawValue,
-      kSecReturnAttributes as String: true,
-      kSecMatchLimit as String: kSecMatchLimitOne,
-    ]
+    let query = CustodyLegacySecretQuery.attributes(service: service, account: account.rawValue)
     var out: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &out)
-    if status == errSecSuccess { return true }
+    if status == errSecSuccess { return CustodyLegacySecretQuery.presence(out) }
     if status == errSecItemNotFound { return false }
     return nil
   }

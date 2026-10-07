@@ -55,7 +55,7 @@ enum Runner {
       IO.out(line.text)
 
     case .status:
-      SecretStore.disableInteraction()
+      try SecretStore.disableInteraction()
       var line = JSONLine()
       line.integer("v", 1)
       line.string("version", CustodyCLI.version)
@@ -139,7 +139,6 @@ enum Runner {
       try ExistingSecretReauthorization.run(account)
 
     case let .ghToken(repo):
-      SecretStore.disableInteraction()
       guard let stored = try SecretStore.read(.githubApp) else {
         throw CustodyFailure("not-stored", "no GitHub App key stored; run `ashlr authority github-app` (or store-github-app)", exit: .missing)
       }
@@ -154,7 +153,6 @@ enum Runner {
       IO.out(line.text)
 
     case .claudeToken:
-      SecretStore.disableInteraction()
       guard let stored = try SecretStore.read(.claudeToken), let token = String(data: stored, encoding: .utf8) else {
         throw CustodyFailure("not-stored", "no Claude token stored; run `claude setup-token`, then store-claude-token", exit: .missing)
       }
