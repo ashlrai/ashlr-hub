@@ -56,7 +56,6 @@ use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
     ShellExt,
 };
-use tauri_plugin_updater::UpdaterExt;
 
 mod activity_watch;
 mod app_menu;
@@ -65,6 +64,7 @@ mod browser_pane;
 mod computer;
 mod desktop_prefs;
 mod fleet_ops;
+mod native_update_runtime;
 mod health_watch;
 mod hotkey;
 mod launch_state;
@@ -1503,41 +1503,6 @@ fn start_health_watch(handle: AppHandle) {
 
 // ── auto-update ──────────────────────────────────────────────────────────────
 
-/// Fire-and-forget update check on launch.
-///
-/// Intentionally best-effort: any error (network offline, no signing key
-/// configured, invalid pubkey placeholder, no new version) is logged to stderr
-/// and silently dropped. It never blocks the app start or causes a panic.
-fn check_for_updates(handle: AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        let updater = match handle.updater() {
-            Ok(u) => u,
-            Err(e) => {
-                eprintln!("[ashlr-desktop] updater not available: {e}");
-                return;
-            }
-        };
-
-        match updater.check().await {
-            Ok(Some(update)) => {
-                eprintln!(
-                    "[ashlr-desktop] update available: {} → downloading…",
-                    update.version
-                );
-                let _ = handle.emit("ashlr-update-available", &update.version);
-                if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
-                    eprintln!("[ashlr-desktop] update install failed: {e}");
-                } else {
-                    eprintln!("[ashlr-desktop] update installed — restart to apply");
-                    let _ = handle.emit("ashlr-update-installed", ());
-                }
-            }
-            Ok(None) => eprintln!("[ashlr-desktop] already on latest version"),
-            Err(e) => eprintln!("[ashlr-desktop] update check skipped: {e}"),
-        }
-    });
-}
-
 // ── app setup ────────────────────────────────────────────────────────────────
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -1745,7 +1710,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     start_activity_watch(handle.clone());
 
     // ── background update check (non-blocking, non-fatal) ────────────────────
-    check_for_updates(app.handle().clone());
+    native_update_runtime::start(app.handle(), prefs.automatic_updates);
 
     Ok(())
 }
@@ -2253,12 +2218,17 @@ fn apply_prefs_event(handle: &AppHandle, payload: &str) {
     let Some(state) = handle.try_state::<AppState>() else {
         return;
     };
-    let prefs = {
+    let (prefs, saved) = {
         let mut guard = lock(&state.prefs);
-        *guard = guard.apply(patch);
-        *guard
+        let previous = *guard;
+        let candidate = guard.apply(patch);
+        let saved = desktop_prefs::store(&candidate);
+        *guard = desktop_prefs::retained_preferences(previous, candidate, patch, saved);
+        (*guard, saved)
     };
-    desktop_prefs::store(&prefs);
+    if patch.automatic_updates.is_some() {
+        native_update_runtime::preference(handle, prefs.automatic_updates, saved);
+    }
     if let Some(manager) = lock(&state.power).as_mut() {
         manager.set_automatic(prefs.automatic_awake, Instant::now());
     }
@@ -2423,6 +2393,7 @@ fn main() {
                 }
             }
             reap_sidecar(handle);
+            native_update_runtime::normal_quit(handle);
         }
         // Clicking the Dock icon while the window is closed to the tray: bring
         // it back, the way every Mac app does.

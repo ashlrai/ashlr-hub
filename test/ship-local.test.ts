@@ -4,7 +4,7 @@
  * Every machine fact comes from an injected io, so nothing here reads or writes the real
  * ~/.local, /Applications or launchd, and no command is executed: the fake io records calls.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -651,6 +651,36 @@ describe('identity-bound Phantom native migration', () => {
     expect(f.calls.some((c) => c[0] === '/usr/bin/open' && c[1] === APP_PATH)).toBe(true);
     expect(f.calls.some((c) => c[0] === 'cleanup' && c[1]?.endsWith('retired-bundle'))).toBe(true);
     expect(f.calls.some((c) => c[0] === 'cleanup' && c[1]?.endsWith('.zip'))).toBe(false);
+  });
+  it('keeps authenticated update bytes unchanged and never prepares, rewrites or signs them', async () => {
+    const f = appIo(); const selected = selectLocalApp(HASH, f.io); const original = f.io.exec;
+    const exec = (cmd: string, argv: string[]) => cmd === '/usr/bin/plutil' && argv[0] === '-extract' && ['CFBundleName', 'CFBundleDisplayName'].includes(argv[1]!)
+      ? {status: 0, stdout: 'Phantom'} : original(cmd, argv);
+    const prepare = vi.fn(); const beforeSwitch = vi.fn();
+    await installLocalApp({...nativeInput(selected), preserveSigned: true, prepare, beforeSwitch}, {...f.io, exec});
+    expect(prepare).not.toHaveBeenCalled(); expect(beforeSwitch).toHaveBeenCalledOnce();
+    expect(f.calls.some(call => call[0] === '/usr/bin/codesign' && call.includes('--force'))).toBe(false);
+    expect(f.calls.some(call => call[0] === '/usr/bin/plutil' && call.includes('-replace'))).toBe(false);
+    expect(f.bundles.get(APP_PATH)?.inventory).toBe(INVENTORY);
+  });
+  it('refuses signed display identity and fresh admission failures before changing the active app', async () => {
+    for (const display of ['Unrelated', 'Phantom']) {
+      const f = appIo(); const selected = selectLocalApp(HASH, f.io); const original = f.io.exec;
+      const exec = (cmd: string, argv: string[]) => cmd === '/usr/bin/plutil' && argv[0] === '-extract' && ['CFBundleName', 'CFBundleDisplayName'].includes(argv[1]!)
+        ? {status: 0, stdout: display} : original(cmd, argv);
+      await expect(installLocalApp({...nativeInput(selected), preserveSigned: true,
+        beforeSwitch: async () => {throw new Error('grant revoked');}}, {...f.io, exec})).rejects.toThrow();
+      expect(f.calls.some(call => call[0] === 'exclusive-rename')).toBe(false);
+      expect(f.bundles.has(LEGACY_APP_PATH)).toBe(true);
+    }
+  });
+  it('restores the original app when the final pointer guard refuses before pointer publication', async () => {
+    const f=appIo(),selected=selectLocalApp(HASH,f.io);const phases:string[]=[];const previous={target:'/owned/previous',ino:17};const current=previous;
+    const rollback=vi.fn(async()=>{if(JSON.stringify(current)!==JSON.stringify(previous))throw new Error('pointer recovery unknown');});
+    await expect(installLocalApp({...nativeInput(selected),beforeSwitch:async()=>{},commitPointer:async()=>{throw new Error('candidate changed during app checks');},rollbackPointer:rollback},
+      {...f.io,writeInstallJournal:(_owner:string,value:{phase:string})=>phases.push(value.phase)})).rejects.toThrow('candidate changed');
+    expect(rollback).toHaveBeenCalledOnce();expect(current).toEqual(previous);expect(phases.at(-1)).toBe('rolled-back');
+    expect(f.bundles.has(LEGACY_APP_PATH)).toBe(true);expect(f.bundles.has(APP_PATH)).toBe(false);
   });
   it('refuses a mismatched archive before changing the active app', async () => {
     const f = appIo(); const selected = selectLocalApp(HASH, f.io); f.badArchive();

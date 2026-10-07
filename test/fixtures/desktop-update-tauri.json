@@ -1,0 +1,8 @@
+{
+  "provenance": "Disposable test-only key; pinned Tauri CLI 2.11.4 signer. Not the commissioned publisher key.",
+  "signerVersion": "2.11.4",
+  "signerSha256": "830fa5a4900d33af4bed362b79c7509d2377be28eb1c1e51381cc2d3c5cd72a1",
+  "data": "Phantom test-only interoperability fixture\n",
+  "publicKey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZBNEFDQzg4QjQ1RkNDOTgKUldTWXpGKzBpTXhLK3NpY3RNMmdPNUxsbXlHMGF6aWVjbXdjYSs2b3FraVFuOENubnFUWTFqb0YK",
+  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTWXpGKzBpTXhLK3RaTjJrY1d2SUlYU3hEOVpFVmpCOUlvSWQxY2t0UVBGNDFtU2V4TDFQRnVSMmhJYWIrY3hVV2xENUxmOUNFMXZ4RktnNXZlZTJFQjVubFNESStDMlFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNDA4Mjg0CWZpbGU6VEVTVC1PTkxZLnR4dApRRy9OR2R6QkhsaVRrM2d1OVN1dWJmZzVOUHdVN2tEblVyY1J0YmdsZ3JEMndHSmFpckhnSmhpajdNQjJjMFk0Z2JiYnNjcVBiZHhlY1M5SzNNZG5BUT09Cg=="
+}

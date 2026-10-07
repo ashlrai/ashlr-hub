@@ -9,6 +9,26 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.25.2] — Unreleased
+
+### Added
+
+- Publisher-signed paired app/CLI updates with a fixed public trust anchor,
+  qualified release preparation and bounded private downloads.
+- A desktop update status panel with actual progress, clear holds and a
+  persistent automatic-updates preference.
+- Idle installation after prior Stop/drain and normal Quit, preserving settings
+  and accounts. Equal-surface active grants stay valid; changed authority holds
+  automatic installation. Installation does not restart the resident fleet.
+
+### Hardened
+
+- Reject mixed bytes, downgraded versions, unknown work, changed native parents
+  and replayed installation attempts. Recheck candidate bytes before switching
+  the app and CLI; independently verify installed bytes on the next launch.
+- Bind the updater and packaged installation helper to the authority surface.
+  Keep release-signing keys outside the repository and compiler environment.
+
 ## [3.25.1] — 2026-10-07
 
 ### Fixed

@@ -60,6 +60,37 @@ To update later, repeat steps 1–3 from the new clean release checkout.
 `ship:local` stages and verifies the complete bundle, retains a full compressed rollback archive, and coordinates `Phantom.app` with the current CLI release and missing `phm`/`ashlr` links. It uses the existing stable `Ashlr Local` signer. A live replacement is never killed or moved on a failed launch: recovery remains held until it is safely closed. Stop remains engaged and the resident is not restarted by installation.
 Nothing in `~/.ashlr` is removed; config, seats and window state survive.
 
+### Signed idle updates (implementation candidate)
+
+The next update implementation uses a separately signed release manifest binding
+one macOS arm64 app archive to its original qualified npm archive. It is not
+activated in the published 3.25.0 app or by the filename migration alone.
+
+In the updated desktop, the top bar shows native update status. Expand it to
+turn **Automatic updates** on or off, see verified download progress, or refresh
+status. Preparing a download is separate from installing it. Installation requires
+local work to be idle, the fleet stopped, and a normal **Quit**. Closing a window
+only hides the app and does not install an update. Unknown activity holds the
+update; the updater never stops work or clears Stop on your behalf.
+
+Automatic installation requires a current, active grant with the same authority
+surface. Changed authority, missing or expired grants hold installation for the
+existing manual approval workflow. Settings and accounts stay in their existing
+locations. Installation does not restart the resident fleet. On the next launch,
+Phantom independently checks installed app and CLI bytes before reporting an
+update as installed; a saved success receipt alone is insufficient.
+
+The desktop bridge exposes only `updates.getState()` and `updates.refresh()`
+(status observation), plus the boolean `automaticUpdates` preference. Native
+reports `ashlr:update-state` through its fixed callback. Page code cannot supply
+a download URL, signing key, stage path or installation command.
+
+Maintainers prepare paired releases with `scripts/finalize-desktop-update.mjs`.
+It requires fresh source, hosted qualification and independent Audit evidence,
+the pinned publisher toolchain, the existing Apple signing identity, and the
+private local release-signing key. The key is never packaged. This command
+prepares verified artifacts; publishing them remains a separate release step.
+
 ---
 
 ## What it does
@@ -996,29 +1027,19 @@ download claim.
 
 ---
 
-## Auto-update (Tauri updater plugin)
+## Release feed and update trust
 
-The app checks for updates on every launch via `tauri-plugin-updater`. It is
-**inert by default** — the build succeeds without any signing key and the check
-fails silently (no crash, no blocking).
+The source updater uses the reviewed [signed idle update flow](#signed-idle-updates-implementation-candidate).
+The fixed GitHub `releases/latest/download/latest.json` endpoint is discovery;
+its paired manifest and payloads must pass the commissioned publisher signature.
+The legacy immediate `download_and_install` path is removed. The disabled
+`release-desktop.yml` workflow stays disabled; adding secrets or pushing a
+`desktop-v*` tag does not commission this release path.
 
-To activate it:
-
-1. `cargo tauri signer generate` — save both keys.
-2. Replace the `plugins.updater.pubkey` placeholder in
-   `desktop/src-tauri/tauri.conf.json` with the public key (a long base64 string
-   starting `dW50cnVzdGVkIGNvbW1lbnQ6`).
-3. Add repository secrets `TAURI_SIGNING_PRIVATE_KEY` and
-   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-4. After quarantine clearance, push a `desktop-v*` tag. Do **not** do this while
-   workflow 301689703 is disabled.
-
-At runtime the check hits
-`https://github.com/ashlrai/ashlr-hub/releases/latest/download/latest.json`; an
-available, signature-verified update downloads in the background and emits
-`ashlr-update-installed`. The user restarts to apply it. Signature verification
-happens at runtime, not at build time, so the placeholder key never breaks a
-build.
+The published 3.25.0 desktop still has its earlier inert updater. Public keys are
+installed through the normal qualified app release, never accepted from a feed
+or staged archive. This phase does not change Developer ID/notarization or the
+Windows and Linux desktop publication policy.
 
 ---
 

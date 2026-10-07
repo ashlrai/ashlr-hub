@@ -14,7 +14,7 @@ function bridge(): DesktopBridge | undefined {
 // ===========================================================================
 
 /** Preferences Settings ▸ Desktop may change (desktop_prefs.rs `PrefsPatch`). */
-export type DesktopPreference = 'globalHotkey' | 'notifications' | 'automaticAwake';
+export type DesktopPreference = 'globalHotkey' | 'notifications' | 'automaticAwake' | 'automaticUpdates';
 
 /**
  * What the desktop app reports (desktop_prefs.rs `DesktopStateView`). Every
@@ -127,7 +127,7 @@ export function subscribeDesktopState(handler: (state: DesktopState) => void): (
  * from the value you asked for.
  */
 export function setDesktopPreference(name: DesktopPreference, value: boolean): boolean {
-  if (name !== 'globalHotkey' && name !== 'notifications' && name !== 'automaticAwake') return false;
+  if (name !== 'globalHotkey' && name !== 'notifications' && name !== 'automaticAwake' && name !== 'automaticUpdates') return false;
   if (typeof value !== 'boolean') return false;
   try {
     return bridge()?.setPreference?.(name, value) === true;

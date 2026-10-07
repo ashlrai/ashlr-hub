@@ -1,5 +1,10 @@
 /** Identity-bound local app migration. All effects are injected; never selects an app by display name. */
-import { basename, join } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
+import { createHash, randomBytes } from 'node:crypto';
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 import { spawnSync } from 'node:child_process';
 
 export const PHANTOM_APP_PATH = '/Applications/Phantom.app';
@@ -235,10 +240,17 @@ export async function installLocalApp(input, io) {
     if (input.sourceProof) sameApp(input.sourceProof, io);
     call(io, '/usr/bin/ditto', [source, staged]);
     if (input.sourceProof && io.appInventory(staged) !== input.sourceProof.inventory) fail('the copied source changed before staged preparation');
-    await prepare(staged);
-    call(io, '/usr/bin/plutil', ['-replace', 'CFBundleName', '-string', 'Phantom', join(staged, 'Contents', 'Info.plist')]);
-    call(io, '/usr/bin/plutil', ['-replace', 'CFBundleDisplayName', '-string', 'Phantom', join(staged, 'Contents', 'Info.plist')]);
-    call(io, '/usr/bin/codesign', ['--force', '--deep', '--sign', signer, '--entitlements', input.entitlements, staged]);
+    if (input.preserveSigned === true) {
+      // A publisher-authenticated update keeps the exact original app bytes.
+      // Local build installation retains its existing preparation/signing path.
+      for (const key of ['CFBundleName', 'CFBundleDisplayName']) if (call(io, '/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', join(staged, 'Contents', 'Info.plist')]).trim() !== 'Phantom') fail('the signed app display identity is unsupported');
+      if (io.appInventory(staged) !== input.sourceProof.inventory) fail('the signed staged app changed');
+    } else {
+      await prepare(staged);
+      call(io, '/usr/bin/plutil', ['-replace', 'CFBundleName', '-string', 'Phantom', join(staged, 'Contents', 'Info.plist')]);
+      call(io, '/usr/bin/plutil', ['-replace', 'CFBundleDisplayName', '-string', 'Phantom', join(staged, 'Contents', 'Info.plist')]);
+      call(io, '/usr/bin/codesign', ['--force', '--deep', '--sign', signer, '--entitlements', input.entitlements, staged]);
+    }
     verified = inspectLocalApp(staged, signer, io);
     if (input.native) for (const key of ['CFBundleShortVersionString', 'CFBundleVersion']) if (call(io, '/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', join(staged, 'Contents', 'Info.plist')]).trim() !== version) fail('the staged native version does not match the source');
     if (selected) {
@@ -255,6 +267,7 @@ export async function installLocalApp(input, io) {
     } else if (paths.some((path) => io.exists(path))) fail('an app appeared before installation');
     if (io.appInventory(staged) !== verified.inventory) fail('the verified staged app changed before installation');
     await requireLocalQuiescence(io); // last-contact guard after the potentially slow inventories
+    if (input.beforeSwitch) await input.beforeSwitch(); // fresh caller admission after slow inventories
     journal('verified');
     if (selected) { io.renameExclusive(selected.path, retired, selected); moved = true; }
     io.renameExclusive(staged, PHANTOM_APP_PATH, verified); installed = true;
@@ -305,4 +318,126 @@ export async function installLocalApp(input, io) {
     journal('rolled-back');
     throw error;
   }
+}
+
+
+export function createLocalAppTransactionIo({packageRoot, home = homedir(), Refusal = Error}) {
+  const repoRoot = packageRoot;
+  const stages = new Map();
+  const lstatExists = (path) => { try {lstatSync(path); return true;} catch (error) {if (error.code === 'ENOENT') return false; throw error;} };
+  const safeFile = (path, max = Infinity) => {
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const before = fstatSync(fd);
+      if (!before.isFile() || before.size > max) throw new Refusal('unsafe or oversized file');
+      const bytes = readFileSync(fd);
+      const after = fstatSync(fd);
+      if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw new Refusal('file changed during read');
+      return bytes;
+    } finally { closeSync(fd); }
+  };
+  const stageOwned = (owner) => {
+    const expected = stages.get(owner); const actual = lstatSync(owner);
+    if (!expected || actual.isSymbolicLink() || !actual.isDirectory() || actual.dev !== expected.dev || actual.ino !== expected.ino) throw new Refusal('installation stage identity changed');
+  };
+  const safeParents = (path) => {
+    for (let parent = dirname(path); parent !== home; parent = dirname(parent)) {
+      if (parent === dirname(parent) || !parent.startsWith(home + '/')) throw new Refusal('unsupported local installation path');
+      try {const stat = lstatSync(parent); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Refusal('unsafe local installation directory');} catch (error) {if (error.code !== 'ENOENT') throw error;}
+    }
+  };
+  const fileStat = (path) => { try { const stat = lstatSync(path); return { dev: stat.dev, ino: stat.ino, ctimeMs: stat.ctimeMs, birthtimeMs: stat.birthtimeMs, size: stat.size, isFile: stat.isFile(), isDirectory: stat.isDirectory(), isSymbolicLink: stat.isSymbolicLink() }; } catch (error) { if (error.code === 'ENOENT') return null; throw error; } };
+  const currentTarget = (path) => inspectCurrentPointer(path, {home: home, repoRoot, validateLocalPath: safeParents, lstat: fileStat, readLink: readlinkSync, readBoundedFile: (file, max) => safeFile(file, max).toString('utf8')});
+
+  return {
+    platform: process.platform,
+    home: home,
+    tmp: tmpdir(),
+    uid: typeof process.getuid === 'function' ? process.getuid() : 0,
+    now: new Date(),
+    repoRoot,
+    clock: () => Date.now(),
+    log: (line) => console.log(line),
+    sleep: (ms) => delay(ms),
+    readFile: (path) => readFileSync(path, 'utf8'),
+    writeFile: (path, text) => writeFileSync(path, text, { mode: 0o600 }),
+    mkdtemp: (prefix) => mkdtempSync(join(tmpdir(), prefix)),
+    removeDir: (dir) => {
+      // Only the signing scratch dir ensureSigningIdentity made (it held a private key).
+      if (!dir.startsWith(join(tmpdir(), 'ashlr-sign-'))) throw new Error(`refusing to remove ${dir}`);
+      rmSync(dir, { recursive: true, force: true });
+    },
+    lstat: fileStat,
+    readBoundedFile: (path, max) => safeFile(path, max).toString('utf8'),
+    exclusiveRenamePreflight: exclusiveRenameAvailable,
+    renameExclusive: renamePathExclusive,
+    readCurrentPointer: currentTarget,
+    validateLocalPath: safeParents,
+    readLink: (path) => {safeParents(path); return readlinkSync(path);},
+    linkTargetExists: (path) => { try { return statSync(path).isFile(); } catch {return false;} },
+    createAlias: (path, target) => { safeParents(path); mkdirSync(dirname(path), {recursive: true}); safeParents(path); symlinkSync(target, path); },
+    removeAlias: (path) => {safeParents(path); unlinkSync(path);},
+    switchCurrentPointer: (path, before, target) => switchLocalCurrentPointer(path, before, target, `${path}.phantom-${randomBytes(8).toString('hex')}`, {readCurrentPointer: currentTarget, createLink: symlinkSync, rename: renameSync, exists: lstatExists, unlink: unlinkSync}),
+    restoreCurrentPointer: (path, before, expected) => {
+      if (JSON.stringify(currentTarget(path)) !== JSON.stringify(expected)) throw new Refusal('current release changed; rollback held');
+      if (before === null) rmSync(path);
+      else { const temporary = `${path}.phantom-${randomBytes(8).toString('hex')}`; symlinkSync(before.target, temporary); try {renameSync(temporary, path);} finally { if (lstatExists(temporary)) unlinkSync(temporary); } }
+    },
+    appInventory: (path) => {
+      const hash = createHash('sha256');
+      const visit = (file) => {
+        const stat = lstatSync(file);
+        if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) throw new Refusal('unsafe app inventory entry');
+        hash.update(JSON.stringify([relative(path, file), stat.mode & 0o777, stat.isDirectory() ? 'directory' : 'file']));
+        if (stat.isDirectory()) for (const name of readdirSync(file).sort()) visit(join(file, name));
+        else hash.update(safeFile(file));
+        const after = lstatSync(file);
+        if (stat.dev !== after.dev || stat.ino !== after.ino || stat.mtimeMs !== after.mtimeMs || stat.ctimeMs !== after.ctimeMs) throw new Refusal('app changed during inventory');
+      };
+      visit(path); return hash.digest('hex');
+    },
+    makeInstallStage: () => { const dir = mkdtempSync('/Applications/.phantom-install-'); stages.set(dir, lstatSync(dir)); return dir; },
+    writeInstallJournal: (owner, value) => {
+      stageOwned(owner);
+      const fd = openSync(join(owner, 'transaction.json'), constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
+      try { writeFileSync(fd, JSON.stringify(value) + '\n'); fsyncSync(fd); } finally { closeSync(fd); }
+    },
+    removeInstallTree: (path, owner) => {
+      stageOwned(owner);
+      if (!owner.startsWith('/Applications/.phantom-install-') || dirname(path) !== owner || !['archive-check', 'retired-bundle'].includes(path.slice(owner.length + 1))) throw new Refusal('unsafe installation cleanup');
+      rmSync(path, { recursive: true, force: true });
+    },
+    executionLeaseCensus: async () => {
+      const module = await import(pathToFileURL(join(repoRoot, 'dist/core/sandbox/execution-leases.js')).href);
+      return module.censusExecutionLeases();
+    },
+    exists: (path) => { try { lstatSync(path); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } },
+    mtime: (path) => { try { return statSync(path).mtimeMs; } catch { return null; } },
+    list: (dir) => {
+      try {
+        return readdirSync(dir).map((name) => ({ name, mtimeMs: statSync(join(dir, name)).mtimeMs }));
+      } catch {
+        return [];
+      }
+    },
+    exec: (cmd, argv, opts = {}) => {
+      if (cmd === 'rm') {
+        // The only removal ship:local performs, and only of the repo's own build output.
+        const target = argv.at(-1);
+        if (target !== join(repoRoot, 'dist')) throw new Error(`refusing to remove ${target}`);
+        rmSync(target, { recursive: true, force: true });
+        return { status: 0, stdout: '' };
+      }
+      const res = spawnSync(cmd, argv, { cwd: opts.cwd ?? repoRoot, encoding: 'utf8', stdio: opts.stdio === 'inherit' ? 'inherit' : 'pipe' });
+      return { status: res.error ? 127 : res.status, stdout: res.stdout ?? '' };
+    },
+    fetchStatus: async (url) => {
+      try {
+        const res = await globalThis.fetch(url, { signal: globalThis.AbortSignal.timeout(3_000) });
+        return res.status;
+      } catch {
+        return null;
+      }
+    },
+  };
 }

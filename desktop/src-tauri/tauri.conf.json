@@ -1,9 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Phantom",
-  "version": "3.25.1",
+  "version": "3.25.2",
   "identifier": "ai.ashlr.desktop",
-
   "build": {
     "beforeDevCommand": "",
     "devUrl": "http://127.0.0.1:7777/verse/",
@@ -11,7 +10,6 @@
     "beforeBundleCommand": "node scripts/assert-desktop-bundle-policy.mjs && node scripts/dmg-preflight.mjs",
     "frontendDist": "../dist-placeholder"
   },
-
   "app": {
     "windows": [
       {
@@ -57,7 +55,6 @@
       "tooltip": "Phantom"
     }
   },
-
   "bundle": {
     "active": true,
     "targets": "all",
@@ -68,9 +65,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "shortDescription": "Phantom — local operator console for Claude, Codex, Grok and Ollama seats",
+    "shortDescription": "Phantom \u2014 local operator console for Claude, Codex, Grok and Ollama seats",
     "longDescription": "Phantom by AshlrAI is a local-first engineering agent workbench. This desktop app starts the bundled ashlr sidecar in Verse mode, hands the window its per-process read and mutation tokens, and shows the Verse operator console at http://127.0.0.1:7777/verse/ with a system tray icon for quick access.",
-    "copyright": "Copyright © 2024 Mason Wyatt / Evero Consulting",
+    "copyright": "Copyright \u00a9 2024 Mason Wyatt / Evero Consulting",
     "category": "DeveloperTool",
     "macOS": {
       "minimumSystemVersion": "10.15",
@@ -98,7 +95,6 @@
       "resources/public": "public"
     }
   },
-
   "plugins": {
     "shell": {
       "open": false
@@ -109,7 +105,7 @@
         "https://github.com/ashlrai/ashlr-hub/releases/latest/download/latest.json"
       ],
       "dialog": false,
-      "pubkey": "PLACEHOLDER — replace with the output of `cargo tauri signer generate` (the public key line). See desktop/README.md for instructions. Build succeeds with this placeholder; auto-update is inert until a real key + matching TAURI_SIGNING_PRIVATE_KEY secret are configured."
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFBNDI1NEZGRjRDODVCOEIKUldTTFc4ajAvMVJDcW1MQy84cHNXNUtPYTNDM0s1K2tDc1A2VUxCL1JwWHQzQzl6M3JqQ3I3SmwK"
     }
   }
 }

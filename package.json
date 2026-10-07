@@ -1,6 +1,6 @@
 {
   "name": "@ashlr/hub",
-  "version": "3.25.1",
+  "version": "3.25.2",
   "description": "Phantom by AshlrAI: the open-source engineering agent workbench for CLI accounts, local models and autonomous fleets.",
   "publishConfig": {
     "access": "public"
@@ -36,6 +36,7 @@
     "dist",
     "bin",
     "scripts/run-verify-command.mjs",
+    "scripts/local-app-transaction.mjs",
     "scripts/scorecard-history-worker.mjs",
     "scripts/evaluators/preparation-verification-activity.mjs",
     "scripts/evaluators/preparation-verification-activity.d.mts",

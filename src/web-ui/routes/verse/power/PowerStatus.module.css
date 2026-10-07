@@ -10,3 +10,8 @@
 
 .panel details { margin-top: 10px; }
 .panel details > summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
+
+.progress { width: 100%; height: 6px; margin-top: 12px; accent-color: var(--accent-500); }
+.refresh { margin-top: 12px; padding: 6px 10px; border: 1px solid var(--border-subtle); border-radius: 6px; background: var(--bg-surface); color: var(--text-primary); cursor: pointer; }
+.refresh:hover { background: var(--bg-hover); }
+.refresh:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 2px; }
