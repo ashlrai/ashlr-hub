@@ -183,7 +183,7 @@ describe('completions', () => {
       process.stdout.write = orig;
     }
     const script = chunks.join('');
-    expect(script).toContain('#compdef ashlr');
+    expect(script).toContain('#compdef ashlr phm\n');
     for (const cmd of TOP_LEVEL_COMMANDS) expect(script).toContain(`'${cmd}'`);
     expect(script).toContain("benchmark) _values 'subcommand' 'run' '--compare-reports' 'help' ;;");
     expect(script).toContain("fleet) _values 'subcommand'");
@@ -201,7 +201,7 @@ describe('completions', () => {
     } finally {
       process.stdout.write = orig;
     }
-    expect(chunks.join('')).toContain('complete -F _ashlr_completions ashlr');
+    expect(chunks.join('')).toContain('complete -F _ashlr_completions ashlr phm\n');
     expect(chunks.join('')).toContain('benchmark) COMPREPLY=( $(compgen -W "run --compare-reports help" -- "$cur") ) ;;');
     expect(chunks.join('')).toContain('runtime) COMPREPLY=( $(compgen -W "install status rollback run" -- "$cur") ) ;;');
   });

@@ -170,7 +170,7 @@ mod platform {
             );
             let reason = CFStringCreateWithCString(
                 std::ptr::null(),
-                b"Ashlr local agent work\0".as_ptr().cast(),
+                b"Phantom local agent work\0".as_ptr().cast(),
                 0x08000100,
             );
             if kind.is_null() || reason.is_null() {
@@ -229,7 +229,7 @@ mod platform {
         fn CloseHandle(handle: *mut c_void) -> i32;
     }
     pub fn acquire() -> Result<usize, &'static str> {
-        let mut text: Vec<u16> = "Ashlr local agent work\0".encode_utf16().collect();
+        let mut text: Vec<u16> = "Phantom local agent work\0".encode_utf16().collect();
         let reason = Reason {
             version: 0,
             flags: 1,

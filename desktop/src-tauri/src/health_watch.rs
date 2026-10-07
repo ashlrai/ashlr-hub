@@ -217,18 +217,20 @@ pub fn notification_text(alerts: &[Alert], now_ms: i64) -> Option<(String, Strin
     match alerts {
         [] => None,
         [alert] => {
-            let title = format!("Ashlr: {}", short_line(alert, now_ms));
+            let title = format!("Phantom: {}", short_line(alert, now_ms));
             let body = match alert.kind {
-                AlertKind::SignedOut => "Open Ashlr and choose Reconnect to sign in again.",
+                AlertKind::SignedOut => "Open Phantom and choose Reconnect to sign in again.",
                 AlertKind::Expiring => {
                     "Reconnect before it lapses so running work is not interrupted."
                 }
-                AlertKind::Exhausted => "Ashlr routes new work to seats that still have headroom.",
+                AlertKind::Exhausted => {
+                    "Phantom routes new work to seats that still have headroom."
+                }
             };
             Some((title, body.to_string()))
         }
         many => {
-            let title = format!("Ashlr: {} seats need attention", many.len());
+            let title = format!("Phantom: {} seats need attention", many.len());
             let mut body = many
                 .iter()
                 .map(|a| short_line(a, now_ms))
@@ -616,7 +618,7 @@ mod tests {
         .expect("text");
         assert_eq!(
             title,
-            "Ashlr: Claude (claude-a) is out of usage (resets in 2h 13m)"
+            "Phantom: Claude (claude-a) is out of usage (resets in 2h 13m)"
         );
         assert!(body.contains("headroom"));
 
@@ -628,7 +630,7 @@ mod tests {
             NOW,
         )
         .expect("text");
-        assert_eq!(title, "Ashlr: Codex (codex) is signed out");
+        assert_eq!(title, "Phantom: Codex (codex) is signed out");
         assert!(body.contains("Reconnect"));
     }
 
@@ -644,7 +646,7 @@ mod tests {
             NOW,
         )
         .expect("text");
-        assert_eq!(title, "Ashlr: Claude (claude-a) sign-in expires soon");
+        assert_eq!(title, "Phantom: Claude (claude-a) sign-in expires soon");
     }
 
     #[test]
@@ -657,7 +659,7 @@ mod tests {
             })
             .collect();
         let (title, body) = notification_text(&alerts, NOW).expect("text");
-        assert_eq!(title, "Ashlr: 3 seats need attention");
+        assert_eq!(title, "Phantom: 3 seats need attention");
         assert_eq!(
             body,
             "Grok (a) is signed out · Grok (b) is signed out · Grok (c) is signed out"
@@ -680,7 +682,7 @@ mod tests {
             NOW,
         )
         .expect("text");
-        assert_eq!(title, "Ashlr: doshellscriptrm-rf-- is signed out");
+        assert_eq!(title, "Phantom: doshellscriptrm-rf-- is signed out");
         assert_eq!(safe_label(""), "a seat");
         assert_eq!(safe_label(&"x".repeat(100)).len(), 40);
     }

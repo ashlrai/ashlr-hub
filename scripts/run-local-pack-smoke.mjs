@@ -24,6 +24,7 @@ function run(command, args, options = {}) {
   if (result.stderr) process.stderr.write(result.stderr);
   if (result.error) fail(`${command} could not start: ${result.error.message}`);
   if (result.status !== 0) fail(`${command} exited ${result.status ?? 'without a status'}`);
+  return result.stdout;
 }
 
 function runNpm(args, options) {
@@ -368,7 +369,14 @@ export function runLocalPackSmoke({ repo, workDir, output }) {
     ? join(installDir, 'node_modules', '.bin', 'ashlr.cmd')
     : join(installDir, 'node_modules', '.bin', 'ashlr');
   if (process.platform !== 'win32') chmodSync(bin, 0o755);
-  run(bin, ['help'], { cwd: installDir });
+  for (const alias of ['ashlr', 'phm']) {
+    const installedBin = join(installDir, 'node_modules', '.bin',
+      process.platform === 'win32' ? `${alias}.cmd` : alias);
+    run(installedBin, ['help'], { cwd: installDir });
+    if (run(installedBin, ['--version'], { cwd: installDir }).trim() !== pkg.version) {
+      fail(`${alias} version does not match the packed package`);
+    }
+  }
   run(process.execPath, ['--input-type=module', '-e',
     "const types = await import('@ashlr/hub/types'); if (!types) throw new Error('types surface broken');"],
   { cwd: installDir });

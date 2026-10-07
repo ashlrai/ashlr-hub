@@ -80,8 +80,8 @@ enum Runner {
         throw CustodyFailure("key-exists", "a custody key already exists; `init --rotate` replaces it (the old key is kept on disk, renamed)", exit: .exists)
       }
       let reason = rotate
-        ? "replace the Ashlr custody signing key (grants signed by the old key stay valid until Mason removes it from trust-roots.ts)"
-        : "create the Ashlr custody signing key"
+        ? "replace the Phantom custody signing key (grants signed by the old key stay valid until Mason removes it from trust-roots.ts)"
+        : "create the Phantom custody signing key"
       let context = try Presence.authenticate(reason: reason)
       let key = try EnclaveKey.create(context: context)
       let record = try KeyStore.save(key: key, rotate: rotate)

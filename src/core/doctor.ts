@@ -360,14 +360,14 @@ function checkAshlrInstalled(): DoctorCheck {
   const finder = process.platform === 'win32' ? 'where' : 'which';
   const out = runCmd(finder, ['ashlr']);
   if (out) {
-    return check('ashlr', 'ashlr installed', 'pass', out);
+    return check('ashlr', 'Phantom CLI installed (ashlr)', 'pass', out);
   }
   return check(
     'ashlr',
-    'ashlr installed',
+    'Phantom CLI installed (ashlr)',
     'fail',
     'ashlr not found on PATH',
-    'Run: npm install -g ashlr  (or ensure ~/.local/bin is on PATH)',
+    'Run: npm install -g @ashlr/hub  (or ensure ~/.local/bin is on PATH)',
   );
 }
 
@@ -634,7 +634,7 @@ function checkMcpPlugin(mcpRegistry: McpRegistry | null): DoctorCheck {
     if (ashlrServer) {
       return check(
         'mcp-plugin',
-        'ashlr MCP plugin registered',
+        'Phantom MCP plugin registered (ashlr)',
         'pass',
         `Found server "${ashlrServer.name}" in ${ashlrServer.source}`,
       );
@@ -663,7 +663,7 @@ function checkMcpPlugin(mcpRegistry: McpRegistry | null): DoctorCheck {
         if (found) {
           return check(
             'mcp-plugin',
-            'ashlr MCP plugin registered',
+            'Phantom MCP plugin registered (ashlr)',
             'pass',
             `Found server "${found}" in ${filePath}`,
           );
@@ -676,10 +676,10 @@ function checkMcpPlugin(mcpRegistry: McpRegistry | null): DoctorCheck {
 
   return check(
     'mcp-plugin',
-    'ashlr MCP plugin registered',
+    'Phantom MCP plugin registered (ashlr)',
     'warn',
     'ashlr MCP server not found in ~/.claude/settings.json, ~/.mcp.json, or ~/.claude.json',
-    'Add the ashlr MCP server via: ashlr init  or install the ashlr Claude Code plugin',
+    'Add the Phantom MCP server via: ashlr init  or install the compatible ashlr Claude Code plugin',
   );
 }
 
@@ -775,7 +775,7 @@ function checkAshlrToolsInstalled(toolsRegistry: ToolsRegistry | null): DoctorCh
     // Module not available (not yet built) — soft warn rather than fail.
     return check(
       'ashlr-tools-installed',
-      'Ashlr tools installed',
+      'Phantom tools installed',
       'warn',
       'Tools registry module not available',
       'run ashlr init to set up the ecosystem',
@@ -789,7 +789,7 @@ function checkAshlrToolsInstalled(toolsRegistry: ToolsRegistry | null): DoctorCh
   if (count >= 2) {
     return check(
       'ashlr-tools-installed',
-      'Ashlr tools installed',
+      'Phantom tools installed',
       'pass',
       detail,
     );
@@ -797,10 +797,10 @@ function checkAshlrToolsInstalled(toolsRegistry: ToolsRegistry | null): DoctorCh
 
   return check(
     'ashlr-tools-installed',
-    'Ashlr tools installed',
+    'Phantom tools installed',
     'warn',
     count === 0 ? `No ecosystem tools installed; ${count}/${total} installed` : detail,
-    'Install ashlr ecosystem tools (phantom, ashlrcode, aw, etc.)',
+    'Install Phantom ecosystem tools (phantom, ashlrcode, aw, etc.)',
   );
 }
 

@@ -270,6 +270,8 @@ const ALL_REPO_RULES: readonly ProtectedPathRule[] = [
       'scripts/release*', 'scripts/**/release*', 'scripts/build*', 'scripts/*authority*', 'scripts/install-custody*',
       // This verifier mints the one-use capability that can replace local build bytes.
       'scripts/hosted-build-artifact.mjs',
+      // These coordinate the owned native app, current release and rollback links.
+      'scripts/ship-local.mjs', 'scripts/local-app-transaction.mjs',
       'tools/custody/**', '**/*.plist', '**/*.entitlements', '**/src-tauri/capabilities/**',
       '**/src-tauri/tauri.conf.json', '**/src-tauri/tauri.*.conf.json',
     ],

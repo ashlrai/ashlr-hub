@@ -67,7 +67,7 @@ account-aware resource pools.
 
 Phantom was formerly Ashlr Verse. Names stay compatible. The repository is `ashlr-hub`, the package is
 `@ashlr/hub`, the command is `ashlr`, and experiments remain `ashlr universe`
-with the `@ashlr/hub/universe` SDK. Existing manifests, schemas and stores need no naming migration. The compatible native installation currently remains `Ashlr.app`; see [branding and compatibility](https://github.com/ashlrai/ashlr-hub/blob/master/docs/PHANTOM-BRAND.md).
+with the `@ashlr/hub/universe` SDK. Existing manifests, schemas and stores need no naming migration. Published 3.25.0 retains `Ashlr.app`; upcoming source uses the guarded `Phantom.app` migration; see [branding and compatibility](https://github.com/ashlrai/ashlr-hub/blob/master/docs/PHANTOM-BRAND.md).
 
 The user guide is [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
 See [Automatic work](docs/AUTOMATIC-OUTCOMES.md) for chat routing, editable outcomes and recovery.
@@ -227,7 +227,8 @@ npm ci
 npm run build:binary
 node desktop/scripts/prepare-sidecar.mjs
 (cd desktop && CI=true cargo tauri build)
-test -d /Applications/Ashlr.app || ditto desktop/src-tauri/target/release/bundle/macos/Ashlr.app /Applications/Ashlr.app
+ashlr authority stop --json
+# After the supported drain succeeds, quit the native app normally.
 npm run ship:local -- --native
 ```
 
@@ -299,6 +300,12 @@ check identity and quota, are in
 
 The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
+
+The next source candidate adds `phm` as the primary CLI command. Both `phm` and
+`ashlr` use the same workbench entrypoint; existing `ashlr` scripts keep working.
+The published 3.25.0 archive below uses `ashlr`. When building this source,
+`./install.sh` installs both aliases and refuses unrelated files or links.
+The separate Phantom Secrets command remains `phantom`.
 
 ```sh
 npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.0/ashlr-hub-3.25.0.tgz
@@ -391,7 +398,7 @@ and the share kept for you, or click it to open the drawer. **Hide resource bar*
 
 ```sh
 npm run gate          # minutes, not half an hour: static checks + the tests your change can reach
-npm run ship:local -- --native  # after a native build: install CLI and locally sign Ashlr.app
+npm run ship:local -- --native  # after a native build: guarded Phantom.app/current CLI migration; requires prior drain + normal Quit
 ```
 
 Then `npm publish` the tarball `ship:local` prints. `npm run gate:full` runs every suite. See

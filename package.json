@@ -29,7 +29,8 @@
   ],
   "type": "module",
   "bin": {
-    "ashlr": "bin/ashlr"
+    "ashlr": "bin/ashlr",
+    "phm": "bin/ashlr"
   },
   "files": [
     "dist",

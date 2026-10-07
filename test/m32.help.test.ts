@@ -137,10 +137,18 @@ describe('cmdHelp routing', () => {
   it('no args → grouped topic summary (not the full wall)', async () => {
     expect(await cmdHelp([])).toBe(0);
     const text = output();
+    expect(text).toContain('Phantom');
+    expect(text).toContain('phm, the CLI for agentic engineers (ashlr remains compatible)');
     expect(text).toContain('autonomy');
-    expect(text).toContain('ashlr help <topic>');
+    expect(text).toContain('phm help <topic>');
     // The summary must NOT include every command (that is --all's job).
     expect(text).not.toContain('onboard --rollback');
+  });
+
+  it('names Phantom in console help while retaining the compatible command and route', async () => {
+    expect(await cmdHelp(['web'])).toBe(0);
+    expect(output()).toContain('Open the Phantom console at /verse/');
+    expect(output()).toContain('verse [--port N] [--no-open]');
   });
 
   it('help <topic> → full table for that topic with examples', async () => {

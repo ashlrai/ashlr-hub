@@ -69,6 +69,7 @@ final class ReauthorizationTests: XCTestCase {
       XCTAssertEqual(effects.events, ["operator", "image", "lookup", "prepare:original-item", "authenticate",
                                       "operator", "image", "lookup", "acl-recheck", "apply:original-item",
                                       "operator", "image", "lookup", "verify:original-item"])
+      XCTAssertTrue(effects.reason.hasPrefix("Allow the currently installed Phantom custody helper"))
       XCTAssertTrue(effects.reason.contains(account.rawValue))
       XCTAssertTrue(effects.reason.contains("No credential or signing key will be replaced"))
     }

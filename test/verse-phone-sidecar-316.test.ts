@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { parseVerseArgs, verseStartupTokenFields } from '../src/cli/verse.js';
+import { describe, expect, it, vi } from 'vitest';
+import { cmdVerse, parseVerseArgs, verseStartupTokenFields } from '../src/cli/verse.js';
 
 describe('Verse desktop phone gateway startup handshake', () => {
   const remoteArgs = ['--port', '7777', '--no-open', '--json', '--remote-config', '/private/verse-remote.json'];
@@ -25,5 +25,19 @@ describe('Verse desktop phone gateway startup handshake', () => {
     expect(parseVerseArgs(['--desktop-token-handoff'])).toMatchObject({ code: 2 });
     expect(parseVerseArgs(['--remote-config', '/private/config.json', '--desktop-token-handoff'])).toMatchObject({ code: 2 });
     expect(parseVerseArgs(['--json', '--desktop-token-handoff'])).toMatchObject({ code: 2 });
+  });
+});
+
+describe('Phantom console CLI help', () => {
+  it('shows the product name without starting a server or changing the compatible invocation', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(await cmdVerse(['--help'])).toBe(0);
+      const output = log.mock.calls.map(args => args.join(' ')).join('\n');
+      expect(output).toContain('Open the Phantom console:');
+      expect(output).toContain('ashlr verse');
+      expect(output).toContain('/verse/');
+      expect(output).toContain('--remote-config FILE');
+    } finally { log.mockRestore(); }
   });
 });

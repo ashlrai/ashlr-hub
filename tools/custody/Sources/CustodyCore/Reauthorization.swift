@@ -7,7 +7,7 @@ public enum ReauthorizationAccount: String, Equatable, Sendable {
   case claudeToken = "claude-token"
 
   public var reason: String {
-    "Allow the currently installed Ashlr custody helper to access the existing \(rawValue) Keychain item. No credential or signing key will be replaced."
+    "Allow the currently installed Phantom custody helper to access the existing \(rawValue) Keychain item. No credential or signing key will be replaced."
   }
 }
 

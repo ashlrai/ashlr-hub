@@ -115,42 +115,36 @@ and remove an entry when its cause is fixed.
 **`npm run ship:local`** (`scripts/ship-local.mjs`, macOS only) refuses a dirty tree
 (`--allow-dirty` installs it as `releases/<sha>-dirty-<time>`), then:
 
-1. `npm run build` on a clean `dist/`, and `npm pack --ignore-scripts` into OS temp;
-2. extracts the tarball into `~/.local/share/ashlr/releases/<sha>` and points
-   `~/.local/share/ashlr/current` at it;
-3. `npm run build:binary`;
-4. if `/Applications/Ashlr.app` exists: quits it, moves `Contents/MacOS/ashlr` and
-   `Contents/Resources/public` aside to `*.prev-<short sha>`, copies `dist-bin/ashlr` and
-   `dist-bin/public` in (with `--native`, also `desktop/src-tauri/target/release/ashlr-desktop`
-   when it is newer than the installed one), writes `NSMicrophoneUsageDescription` into
-   `Contents/Info.plist`, signs the bundle with the stable local identity **"Ashlr Local"**
-   and `desktop/src-tauri/Entitlements.plist`, verifies, relaunches;
-5. `launchctl kickstart -k` on `ai.ashlr.anthropic-proxy` and `ai.ashlr.serve`, if loaded;
-6. waits for `http://127.0.0.1:7777/verse/` to answer 200 and prints the versions and the
-   tarball path.
+1. preflight existing `phm`/`ashlr` aliases; unrelated files or dangling/foreign links refuse;
+2. build a clean `dist/`, pack into OS temp, and extract a source-distinct CLI release;
+3. for native maintenance, require prior supported Stop/drain, known-empty execution leases and a normally closed app; Stop alone is insufficient;
+4. stage a full verified legacy `Ashlr.app` or current `Phantom.app`, apply fresh sidecar/public/native files, preserve the stable signing identity and verify a compressed full rollback archive;
+5. switch the one active app to `Phantom.app` together with the exact current CLI symlink and missing `phm`/`ashlr` aliases; bare `phantom` remains Secrets;
+6. launch and accept only the exact native PID, parented sidecar, owned listener and healthy console. Never restart the resident or release Stop during maintenance.
 
-Nothing is deleted. Only the three newest `*.prev-*` backups of each file stay in the bundle;
-older ones move to a dated folder under `~/.Trash`. To roll back, move a `.prev-` file back
-and re-run `codesign --force --deep --sign "Ashlr Local" --entitlements desktop/src-tauri/Entitlements.plist /Applications/Ashlr.app`.
+The published 3.25.0 DMG retains `Ashlr.app`; upcoming source artifacts use
+`Phantom.app` and `Phantom_<version>_aarch64.dmg`. Both names present refuse rather
+than choosing one. A first native install requires a verified signed prebuilt
+`desktop/src-tauri/target/release/bundle/macos/Phantom.app`.
+
+The private `/Applications/.phantom-install-*` transaction directory retains a
+`transaction.json` phase record and `previous-app.zip` full, non-launchable backup.
+On a settled failure, the installer restores the original app/current link and
+removes only aliases it created whose identities still match. If the replacement
+is running, rollback is held rather than killing or moving live code. Close it
+normally and inspect the recorded app/pointer state before explicit recovery.
+Temporary owned staging/retired trees are removed only after acceptance; user
+state, grants and credentials are retained. No automatic updater is activated.
+CLI-only installs with no native app keep their existing service behavior.
 
 ### Stable local signing ("Ashlr Local")
 
-macOS keys the microphone permission (TCC) to the app's code signature. An ad-hoc
-signature (`--sign -`) is different after every build, so every `ship:local` used to make
-macOS forget that Ashlr may use the mic. `ship:local` now signs with a self-signed identity
-that never changes:
+Native installation requires an existing valid `Ashlr Local` identity. It refuses
+instead of creating another identity or falling back to ad-hoc signing. The bundle
+identifier, executable names, entitlements and data identities remain stable.
+Codesign can still require a human Keychain approval for that existing key.
+Locally signed builds are not Apple Developer ID notarized.
 
-- **First run only**: if the login keychain has no valid "Ashlr Local" code-signing
-  identity, `/usr/bin/openssl` makes one (10 years, codeSigning only), `security import`
-  adds it (codesign may use the key), and `security add-trusted-cert -p codeSign` trusts it
-  **for code signing, for your user only** — macOS asks for your login password once. The
-  private key exists only in a 0700 temp dir that is removed, and in the keychain.
-- The first `codesign` with it may show "codesign wants to access key 'Ashlr Local'":
-  click **Always Allow**.
-- If any of that fails (no GUI to answer the prompt, cancelled), `ship:local` signs ad-hoc
-  and says so loudly; rerun it from a terminal to finish the setup.
-- Then open Ashlr, dictate once (⌃⌥V or a mic button), and allow the microphone. It stays
-  allowed across rebuilds.
 `npm run ship:local -- --dry-run` prints every step and changes nothing.
 
 The sections below are the manual procedure these two scripts automate, and the traps

@@ -1126,7 +1126,7 @@ fn custody_install(app: &AppHandle, req: &FleetRequest) {
     }
     cmd.arg(&user)
         .arg(checkout.script.as_os_str())
-        .arg("Ashlr wants to install the custody helper at /usr/local/libexec/ashlr-custody.");
+        .arg("Phantom wants to install the custody helper at /usr/local/libexec/ashlr-custody.");
     let result = run_child(
         &mut cmd,
         &base_env(&home, "/usr/bin:/bin:/usr/sbin:/sbin"),

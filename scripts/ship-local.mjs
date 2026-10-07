@@ -1,48 +1,27 @@
 #!/usr/bin/env node
 /**
- * scripts/ship-local.mjs — put the freshly built Verse on this Mac (`npm run ship:local`).
- *
- *   npm run ship:local                     build, pack, install, rebuild the app binary, restart
- *   npm run ship:local -- --dry-run        print every step; change nothing
- *   npm run ship:local -- --native         also install desktop/src-tauri/target/release/ashlr-desktop
- *                                          when it is newer than the one in the app
- *   npm run ship:local -- --allow-dirty    ship uncommitted work (installed as <sha>-dirty-<time>)
- *
- * Steps, in order (docs/RELEASING-LOCALLY.md):
- *   1. If an app is installed, prove the entitlements can actually be signed
- *      on a disposable Mach-O before changing any release or app file.
- *   2. `npm run build` on a clean dist/.
- *   3. `npm pack --ignore-scripts` into OS temp (the tarball you then `npm publish`).
- *   4. Extract into ~/.local/share/ashlr/releases/<sha>; `ln -sfn` it to ~/.local/share/ashlr/current.
- *   5. `npm run build:binary` (dist-bin/ashlr + dist-bin/public).
- *   6. If /Applications/Ashlr.app exists: quit it, move Contents/MacOS/ashlr and
- *      Contents/Resources/public aside to *.prev-<short sha> (never deleted), copy the new
- *      ones in (and, with --native, ashlr-desktop), make sure Info.plist carries the
- *      microphone usage string, codesign with the stable local identity "Ashlr Local"
- *      (created + trusted once, see ensureSigningIdentity; ad-hoc with a warning if that
- *      fails) and Entitlements.plist, verify, relaunch.
- *      Only the 3 newest *.prev-* of each kind stay in the bundle; older ones are moved into a
- *      dated folder under ~/.Trash.
- *   7. `launchctl kickstart -k` ai.ashlr.anthropic-proxy and ai.ashlr.serve, if loaded.
- *   8. Wait for http://127.0.0.1:7777/verse/ to answer 200 and print versions.
- *
- * Nothing here deletes a user file: the only removal is the repo's own dist/ before the build.
- * Everything that touches the machine goes through the injected `io`, so the planning logic
- * is unit-tested without ~/.local, /Applications or launchd (test/ship-local.test.ts).
- *
- * Exit: 0 shipped (or dry-run printed), 1 a step failed, 2 refused (platform, dirty tree, usage).
+ * Build and install a local Phantom release. All installation effects are injected.
+ * Native maintenance requires an existing stable signer, prior Stop/drain and closed app.
+ * It stages a full signed bundle, verifies rollback bytes, and coordinates Phantom.app,
+ * the current CLI release and missing phm/ashlr links before owned launch acceptance.
+ * It never stops work, creates a signer, resumes authority or restarts the resident.
+ * Published legacy Ashlr.app and technical signing/data identities remain compatible.
+ * --dry-run prints only; --native updates the prebuilt native executable/version;
+ * --allow-dirty keeps local dirty output distinct from a committed release.
  */
 import { spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { PHANTOM_APP_PATH, inspectLocalApp, selectLocalApp, requireLocalQuiescence, installLocalApp, launchedAppIsOwned, exclusiveRenameAvailable, renamePathExclusive, inspectCurrentPointer, switchLocalCurrentPointer, inspectLocalAliases, createLocalAliases, removeCreatedAliases } from './local-app-transaction.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-export const APP_PATH = '/Applications/Ashlr.app';
+export const APP_PATH = PHANTOM_APP_PATH;
+export const APP_BUNDLE_BUILD = 'desktop/src-tauri/target/release/bundle/macos/Phantom.app';
 export const VERSE_URL = 'http://127.0.0.1:7777/verse/';
 export const LAUNCH_AGENTS = Object.freeze(['ai.ashlr.anthropic-proxy', 'ai.ashlr.serve']);
 export const KEEP_BACKUPS = 3;
@@ -128,17 +107,20 @@ export function gatherContext(args, io) {
   const status = io.exec('git', ['status', '--porcelain'], { cwd: io.repoRoot });
   const sha = io.exec('git', ['rev-parse', 'HEAD'], { cwd: io.repoRoot }).stdout.trim();
   const pkg = JSON.parse(io.readFile(join(io.repoRoot, 'package.json')));
-  const appExists = io.exists(APP_PATH);
+  const signing = args.native || io.exists(APP_PATH) || io.exists('/Applications/Ashlr.app') ? findSigningIdentity(io) : null;
+  const selectedApp = selectLocalApp(signing?.valid ? signing.hash : null, io);
+  const appExists = selectedApp !== null;
+  const installedAppPath = selectedApp?.path ?? APP_PATH;
+  const sourceApp = !appExists && args.native ? inspectPrebuiltApp(io, signing, pkg.version) : null;
   const installedPlistVersion = (key) => {
     if (!appExists || !args.native) return null;
-    const result = io.exec('plutil', ['-extract', key, 'raw', '-o', '-', join(APP_PATH, 'Contents', 'Info.plist')]);
+    const result = io.exec('plutil', ['-extract', key, 'raw', '-o', '-', join(installedAppPath, 'Contents', 'Info.plist')]);
     return result.status === 0 ? result.stdout.trim() || null : null;
   };
   const listing = {};
   if (appExists) {
-    for (const dir of new Set(Object.values(BUNDLE_TARGETS).map((t) => t.dir))) listing[dir] = io.list(join(APP_PATH, dir));
+    for (const dir of new Set(Object.values(BUNDLE_TARGETS).map((t) => t.dir))) listing[dir] = io.list(join(installedAppPath, dir));
   }
-  const signing = appExists ? findSigningIdentity(io) : null;
   const loadedAgents = LAUNCH_AGENTS.filter(
     (label) => io.exec('launchctl', ['print', `gui/${io.uid}/${label}`]).status === 0,
   );
@@ -154,15 +136,17 @@ export function gatherContext(args, io) {
     packageName: pkg.name,
     dirty: status.status !== 0 || status.stdout.trim().length > 0,
     appExists,
+    selectedApp,
+    sourceApp,
     listing,
     signing,
     loadedAgents,
     nativeBuildMtime: io.mtime(join(io.repoRoot, NATIVE_BUILD)),
-    installedNativeMtime: appExists ? io.mtime(join(APP_PATH, BUNDLE_TARGETS.native.dir, BUNDLE_TARGETS.native.name)) : null,
+    installedNativeMtime: appExists ? io.mtime(join(installedAppPath, BUNDLE_TARGETS.native.dir, BUNDLE_TARGETS.native.name)) : null,
     installedNativeShortVersion: installedPlistVersion('CFBundleShortVersionString'),
     installedNativeBundleVersion: installedPlistVersion('CFBundleVersion'),
     iconBuildMtime: io.mtime(join(io.repoRoot, APP_ICON_BUILD)),
-    installedIconMtime: appExists ? io.mtime(join(APP_PATH, BUNDLE_TARGETS.icon.dir, BUNDLE_TARGETS.icon.name)) : null,
+    installedIconMtime: appExists ? io.mtime(join(installedAppPath, BUNDLE_TARGETS.icon.dir, BUNDLE_TARGETS.icon.name)) : null,
     ...args,
   };
 }
@@ -266,6 +250,17 @@ export function tarballName(packageName, version) {
   return `${packageName.replace(/^@/, '').replace('/', '-')}-${version}.tgz`;
 }
 
+function inspectPrebuiltApp(io, signing, version) {
+  const path = join(io.repoRoot, APP_BUNDLE_BUILD);
+  const source = inspectLocalApp(path, signing?.valid ? signing.hash : null, io);
+  const read = (key) => io.exec('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', join(path, 'Contents', 'Info.plist')]);
+  for (const key of ['CFBundleShortVersionString', 'CFBundleVersion']) {
+    const result = read(key);
+    if (result.status !== 0 || result.stdout.trim() !== version) throw new Refusal('prebuilt Phantom.app must match this source version');
+  }
+  return source;
+}
+
 /**
  * Pure: the ordered step list. Throws Refusal for a non-mac or a dirty tree.
  * Each step is `{ id, title, argv? , wait? }`: argv steps are commands; wait steps are
@@ -293,18 +288,22 @@ export function planShip(ctx) {
   const repo = (rel) => join(ctx.repoRoot, rel);
 
   const steps = [
-    ...(ctx.appExists ? [{ id: 'entitlements-preflight', title: 'prove codesign accepts the app entitlements before touching the release', argv: ['node', repo('scripts/check-macos-entitlements.mjs')] }] : []),
+    {id: 'aliases-preflight', title: 'refuse conflicting Workbench links; preserve Phantom Secrets', aliasesPreflight: true},
+    ...(ctx.appExists || ctx.sourceApp ? [{ id: 'entitlements-preflight', title: 'prove codesign accepts the app entitlements before touching the release', argv: ['node', repo('scripts/check-macos-entitlements.mjs')] }] : []),
     { id: 'clean-dist', title: 'remove the repo\'s dist/ so the build is clean', argv: ['rm', '-rf', repo('dist')] },
     { id: 'build', title: 'npm run build', argv: ['npm', 'run', 'build'] },
+    ...(ctx.appExists || ctx.sourceApp ? [{ id: 'native-quiescence', title: 'require Stop, drained leases and closed native app', quiescence: true }] : []),
     { id: 'pack-dir', title: `pack destination ${packDir}`, argv: ['mkdir', '-p', packDir] },
     { id: 'pack', title: `npm pack → ${tarball}`, argv: ['npm', 'pack', '--ignore-scripts', '--pack-destination', packDir] },
     { id: 'release-dir', title: `release dir ${dest}`, argv: ['mkdir', '-p', dest] },
     { id: 'extract', title: 'extract the tarball into the release dir', argv: ['tar', '-xzf', tarball, '-C', dest, '--strip-components=1'] },
-    { id: 'current', title: `point ${join(shareDir, 'current')} at ${releaseId}`, argv: ['ln', '-sfn', dest, join(shareDir, 'current')] },
     { id: 'build-binary', title: 'npm run build:binary (dist-bin/ashlr + dist-bin/public)', argv: ['npm', 'run', 'build:binary'] },
   ];
 
-  if (ctx.appExists) {
+  if (ctx.appExists || ctx.sourceApp) {
+    if (!ctx.selectedApp && !ctx.sourceApp) throw new Refusal('native install identity is missing');
+    if (!ctx.signing?.valid) throw new Refusal('native updates require the existing valid Ashlr Local signer');
+    const appSteps = [];
     const targets = [BUNDLE_TARGETS.sidecar, BUNDLE_TARGETS.public];
     const nativeNewer = ctx.native && ctx.nativeBuildMtime != null &&
       (ctx.installedNativeMtime == null || ctx.nativeBuildMtime > ctx.installedNativeMtime ||
@@ -315,11 +314,7 @@ export function planShip(ctx) {
       (ctx.installedIconMtime == null || ctx.iconBuildMtime > ctx.installedIconMtime);
     if (iconNewer) targets.push(BUNDLE_TARGETS.icon);
 
-    steps.push({ id: 'app-quit', title: 'quit Ashlr', argv: ['osascript', '-e', 'quit app "Ashlr"'] });
-    // Waits on the main process only: a sidecar that outlives it is reclaimed by the relaunched
-    // app's own orphan sweep (desktop/src-tauri/src/sidecar_supervisor.rs), and renaming a
-    // running binary aside is safe.
-    steps.push({ id: 'app-wait-quit', title: 'wait for Ashlr to exit', wait: { kind: 'app-quit', pattern: `${APP_PATH}/Contents/MacOS/ashlr-desktop`, timeoutMs: 20_000 } });
+    // Every following app file update is applied to a private staging copy.
 
     const trashDir = join(ctx.home, '.Trash', `ashlr-app-backups-${stamp(ctx.now)}`);
     const trashMoves = [];
@@ -330,51 +325,50 @@ export function planShip(ctx) {
       const aside = backupName(target.name, short, taken, ctx.now);
       const creating = taken.includes(target.name);
       if (creating) {
-        steps.push({ id: `backup-${target.name}`, title: `move ${target.dir}/${target.name} aside to ${aside}`, argv: ['mv', join(dir, target.name), join(dir, aside)] });
+        appSteps.push({ id: `backup-${target.name}`, title: `move ${target.dir}/${target.name} aside to ${aside}`, argv: ['mv', join(dir, target.name), join(dir, aside)] });
       }
-      steps.push({ id: `install-${target.name}`, title: `copy ${target.source} into ${target.dir}/${target.name}`, argv: ['cp', '-R', repo(target.source), join(dir, target.name)] });
+      appSteps.push({ id: `install-${target.name}`, title: `copy ${target.source} into ${target.dir}/${target.name}`, argv: ['cp', '-R', repo(target.source), join(dir, target.name)] });
       for (const old of rotateBackups(target.name, entries, { creating }).trash) trashMoves.push(join(dir, old));
     }
     if (ctx.native && !nativeNewer) {
-      steps.push({ id: 'native-skip', title: `--native: ${NATIVE_BUILD} is ${ctx.nativeBuildMtime == null ? 'missing' : 'not newer than the installed one'}; keeping the installed ashlr-desktop` });
+      appSteps.push({ id: 'native-skip', title: `--native: ${NATIVE_BUILD} is ${ctx.nativeBuildMtime == null ? 'missing' : 'not newer than the installed one'}; keeping the installed ashlr-desktop` });
     }
     if (trashMoves.length > 0) {
-      steps.push({ id: 'trash-dir', title: `trash folder ${trashDir}`, argv: ['mkdir', '-p', trashDir] });
-      steps.push({ id: 'rotate-backups', title: `keep ${KEEP_BACKUPS} newest backups; move ${trashMoves.length} older to the Trash`, argv: ['mv', ...trashMoves, trashDir] });
+      appSteps.push({ id: 'trash-dir', title: `trash folder ${trashDir}`, argv: ['mkdir', '-p', trashDir] });
+      appSteps.push({ id: 'rotate-backups', title: `keep ${KEEP_BACKUPS} newest backups; move ${trashMoves.length} older to the Trash`, argv: ['mv', ...trashMoves, trashDir] });
     }
     // The native binary and its Info.plist version must advance together. A sidecar-only
     // update leaves the native binary in place, so it must not claim the new package version.
     if (nativeNewer) {
       const plist = join(APP_PATH, 'Contents', 'Info.plist');
-      steps.push({ id: 'plist-short-version', title: 'Info.plist: CFBundleShortVersionString', argv: ['plutil', '-replace', 'CFBundleShortVersionString', '-string', ctx.version, plist] });
-      steps.push({ id: 'plist-bundle-version', title: 'Info.plist: CFBundleVersion', argv: ['plutil', '-replace', 'CFBundleVersion', '-string', ctx.version, plist] });
+      appSteps.push({ id: 'plist-short-version', title: 'Info.plist: CFBundleShortVersionString', argv: ['plutil', '-replace', 'CFBundleShortVersionString', '-string', ctx.version, plist] });
+      appSteps.push({ id: 'plist-bundle-version', title: 'Info.plist: CFBundleVersion', argv: ['plutil', '-replace', 'CFBundleVersion', '-string', ctx.version, plist] });
     }
     // Dictation: macOS kills an app that touches the mic without this key, and ship:local
     // patches an installed bundle rather than rebuilding it, so write it every time.
-    steps.push({ id: 'plist-mic', title: 'Info.plist: NSMicrophoneUsageDescription', argv: ['plutil', '-replace', 'NSMicrophoneUsageDescription', '-string', MIC_USAGE, join(APP_PATH, 'Contents', 'Info.plist')] });
-    steps.push({ id: 'plist-local-network', title: 'Info.plist: allow local Verse networking', argv: ['plutil', '-replace', 'NSAppTransportSecurity', '-json', LOCAL_NETWORK_ATS, join(APP_PATH, 'Contents', 'Info.plist')] });
-    const valid = ctx.signing?.valid ? ctx.signing.hash : null;
-    if (!valid) {
-      steps.push({ id: 'signing-identity', title: `create / trust the "${SIGNING_IDENTITY}" code-signing identity (once; keeps the microphone permission across rebuilds)`, identity: SIGNING_IDENTITY });
-    }
-    steps.push({
+    appSteps.push({ id: 'plist-mic', title: 'Info.plist: NSMicrophoneUsageDescription', argv: ['plutil', '-replace', 'NSMicrophoneUsageDescription', '-string', MIC_USAGE, join(APP_PATH, 'Contents', 'Info.plist')] });
+    appSteps.push({ id: 'plist-local-network', title: 'Info.plist: allow local Verse networking', argv: ['plutil', '-replace', 'NSAppTransportSecurity', '-json', LOCAL_NETWORK_ATS, join(APP_PATH, 'Contents', 'Info.plist')] });
+    const valid = ctx.signing.hash;
+    appSteps.push({
       id: 'codesign',
       title: valid ? `codesign the bundle as "${SIGNING_IDENTITY}"` : `codesign the bundle as "${SIGNING_IDENTITY}" (ad-hoc if the identity is unavailable)`,
       argv: codesignArgv(valid ?? SIGNING_IDENTITY, repo(ENTITLEMENTS)),
       sign: { identity: valid, entitlements: repo(ENTITLEMENTS) },
     });
     // Finder and the Dock cache the icon until the bundle's mtime changes.
-    if (iconNewer) steps.push({ id: 'touch-app', title: 'touch the bundle so the Dock picks up the new icon', argv: ['touch', APP_PATH] });
-    steps.push({ id: 'codesign-verify', title: 'verify the signature', argv: ['codesign', '--verify', '--deep', '--strict', APP_PATH] });
-    steps.push({ id: 'app-launch', title: 'relaunch Ashlr', argv: ['open', APP_PATH] });
+    if (iconNewer) appSteps.push({ id: 'touch-app', title: 'touch the bundle so the Dock picks up the new icon', argv: ['touch', APP_PATH] });
+    appSteps.push({ id: 'codesign-verify', title: 'verify the signature', argv: ['codesign', '--verify', '--deep', '--strict', APP_PATH] });
+
+    steps.push({ id: 'native-transaction', title: 'stage, verify and switch the single Phantom installation', app: { selected: ctx.selectedApp, source: ctx.selectedApp?.path ?? ctx.sourceApp.path, sourceProof: ctx.selectedApp ?? ctx.sourceApp, signer: ctx.signing.hash, version: ctx.version, native: ctx.native, entitlements: repo(ENTITLEMENTS), current: join(shareDir, 'current'), dest, steps: appSteps } });
   } else {
     steps.push({ id: 'app-absent', title: `${APP_PATH} not installed; skipping the app bundle` });
   }
 
+  if (!(ctx.appExists || ctx.sourceApp)) steps.push({ id: 'current', title: `point ${join(shareDir, 'current')} at ${releaseId}`, links: {current: join(shareDir, 'current'), dest} });
   for (const label of LAUNCH_AGENTS) {
-    steps.push(ctx.loadedAgents.includes(label)
+    steps.push(!(ctx.appExists || ctx.sourceApp) && ctx.loadedAgents.includes(label)
       ? { id: `kickstart-${label}`, title: `restart ${label}`, argv: ['launchctl', 'kickstart', '-k', `gui/${ctx.uid}/${label}`] }
-      : { id: `kickstart-${label}`, title: `${label} is not loaded; leaving it alone` });
+      : { id: `kickstart-${label}`, title: `${label}: native maintenance does not restart services; otherwise leave unloaded services alone` });
   }
   steps.push({ id: 'verse-up', title: `wait for ${VERSE_URL} → 200`, wait: { kind: 'http-200', url: VERSE_URL, timeoutMs: 90_000 } });
   steps.push({ id: 'versions', title: 'print versions', versions: {
@@ -382,7 +376,7 @@ export function planShip(ctx) {
     sha: ctx.sha,
     tarball,
     current: join(shareDir, 'current', 'bin', 'ashlr'),
-    app: ctx.appExists ? join(APP_PATH, 'Contents', 'MacOS', 'ashlr') : null,
+    app: ctx.appExists || ctx.sourceApp ? join(APP_PATH, 'Contents', 'MacOS', 'ashlr') : null,
   } });
   return steps;
 }
@@ -398,9 +392,54 @@ export function describeStep(step, index) {
  */
 export async function runSteps(steps, io, { dryRun }) {
   let identity = null;
+  let aliases = null;
   for (const [index, step] of steps.entries()) {
     io.log(describeStep(step, index));
     if (dryRun) continue;
+    if (step.aliasesPreflight) {
+      try { aliases = inspectLocalAliases(io); } catch (error) { io.log(String(error.message)); return 1; }
+      continue;
+    }
+    if (step.links) {
+      const previous = io.readCurrentPointer(step.links.current);
+      let switched = null;
+      try {
+        switched = io.switchCurrentPointer(step.links.current, previous, step.links.dest);
+        createLocalAliases(aliases, io);
+      } catch (error) {
+        if (switched) io.restoreCurrentPointer(step.links.current, previous, switched); io.log(String(error.message)); return 1;
+      }
+      continue;
+    }
+    if (step.quiescence) {
+      try { await requireLocalQuiescence(io); } catch (error) { io.log(String(error.message)); return 1; }
+      continue;
+    }
+    if (step.app) {
+      try {
+        const previousPointer = io.readCurrentPointer(step.app.current);
+        let createdAliases = [];
+        let switchedPointer = null;
+        await installLocalApp({ ...step.app, previousCurrent: previousPointer,
+          commitPointer: async () => {
+            switchedPointer = io.switchCurrentPointer(step.app.current, previousPointer, step.app.dest);
+            createdAliases = createLocalAliases(aliases, io);
+          },
+          rollbackPointer: async () => { removeCreatedAliases(createdAliases, io); if (switchedPointer) io.restoreCurrentPointer(step.app.current, previousPointer, switchedPointer); },
+          prepare: async (staged) => {
+            const rewrite = (value) => typeof value === 'string' && value.startsWith(APP_PATH) ? staged + value.slice(APP_PATH.length) : value;
+            const inner = step.app.steps.map((item) => ({ ...item, argv: item.argv?.map(rewrite), sign: item.sign && { ...item.sign, app: staged } }));
+            if (await runSteps(inner, io, { dryRun: false }) !== 0) throw new Error('staged bundle preparation failed');
+          },
+          health: async () => {
+            const deadline = io.clock() + 90_000;
+            while (io.clock() <= deadline) { if (launchedAppIsOwned(io) && await io.fetchStatus(VERSE_URL) === 200) return true; await io.sleep(1_000); }
+            return false;
+          },
+        }, io);
+      } catch (error) { io.log(String(error.message)); return 1; }
+      continue;
+    }
     if (step.identity) {
       identity = ensureSigningIdentity(io);
       continue;
@@ -411,7 +450,7 @@ export async function runSteps(steps, io, { dryRun }) {
         io.log(`ship:local: WARNING — signing ad-hoc. macOS forgets Ashlr's microphone permission on every ad-hoc rebuild;`);
         io.log(`           rerun ship:local in a terminal to create/trust the "${SIGNING_IDENTITY}" identity (docs/RELEASING-LOCALLY.md).`);
       }
-      const argv = codesignArgv(hash, step.sign.entitlements);
+      const argv = codesignArgv(hash, step.sign.entitlements, step.sign.app);
       const res = io.exec(argv[0], argv.slice(1), { cwd: io.repoRoot, stdio: 'inherit' });
       if (res.status !== 0) {
         io.log(`ship:local: step "${step.id}" failed (exit ${res.status}). Nothing after it ran.`);
@@ -467,6 +506,32 @@ export async function runSteps(steps, io, { dryRun }) {
 // ---------------------------------------------------------------------------
 
 function realIo() {
+  const stages = new Map();
+  const lstatExists = (path) => { try {lstatSync(path); return true;} catch (error) {if (error.code === 'ENOENT') return false; throw error;} };
+  const safeFile = (path, max = Infinity) => {
+    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const before = fstatSync(fd);
+      if (!before.isFile() || before.size > max) throw new Refusal('unsafe or oversized file');
+      const bytes = readFileSync(fd);
+      const after = fstatSync(fd);
+      if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw new Refusal('file changed during read');
+      return bytes;
+    } finally { closeSync(fd); }
+  };
+  const stageOwned = (owner) => {
+    const expected = stages.get(owner); const actual = lstatSync(owner);
+    if (!expected || actual.isSymbolicLink() || !actual.isDirectory() || actual.dev !== expected.dev || actual.ino !== expected.ino) throw new Refusal('installation stage identity changed');
+  };
+  const safeParents = (path) => {
+    for (let parent = dirname(path); parent !== homedir(); parent = dirname(parent)) {
+      if (parent === dirname(parent) || !parent.startsWith(homedir() + '/')) throw new Refusal('unsupported local installation path');
+      try {const stat = lstatSync(parent); if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Refusal('unsafe local installation directory');} catch (error) {if (error.code !== 'ENOENT') throw error;}
+    }
+  };
+  const fileStat = (path) => { try { const stat = lstatSync(path); return { dev: stat.dev, ino: stat.ino, ctimeMs: stat.ctimeMs, birthtimeMs: stat.birthtimeMs, size: stat.size, isFile: stat.isFile(), isDirectory: stat.isDirectory(), isSymbolicLink: stat.isSymbolicLink() }; } catch (error) { if (error.code === 'ENOENT') return null; throw error; } };
+  const currentTarget = (path) => inspectCurrentPointer(path, {home: homedir(), repoRoot, validateLocalPath: safeParents, lstat: fileStat, readLink: readlinkSync, readBoundedFile: (file, max) => safeFile(file, max).toString('utf8')});
+
   return {
     platform: process.platform,
     home: homedir(),
@@ -485,7 +550,51 @@ function realIo() {
       if (!dir.startsWith(join(tmpdir(), 'ashlr-sign-'))) throw new Error(`refusing to remove ${dir}`);
       rmSync(dir, { recursive: true, force: true });
     },
-    exists: (path) => existsSync(path),
+    lstat: fileStat,
+    readBoundedFile: (path, max) => safeFile(path, max).toString('utf8'),
+    exclusiveRenamePreflight: exclusiveRenameAvailable,
+    renameExclusive: renamePathExclusive,
+    readCurrentPointer: currentTarget,
+    validateLocalPath: safeParents,
+    readLink: (path) => {safeParents(path); return readlinkSync(path);},
+    linkTargetExists: (path) => { try { return statSync(path).isFile(); } catch {return false;} },
+    createAlias: (path, target) => { safeParents(path); mkdirSync(dirname(path), {recursive: true}); safeParents(path); symlinkSync(target, path); },
+    removeAlias: (path) => {safeParents(path); unlinkSync(path);},
+    switchCurrentPointer: (path, before, target) => switchLocalCurrentPointer(path, before, target, `${path}.phantom-${randomBytes(8).toString('hex')}`, {readCurrentPointer: currentTarget, createLink: symlinkSync, rename: renameSync, exists: lstatExists, unlink: unlinkSync}),
+    restoreCurrentPointer: (path, before, expected) => {
+      if (JSON.stringify(currentTarget(path)) !== JSON.stringify(expected)) throw new Refusal('current release changed; rollback held');
+      if (before === null) rmSync(path);
+      else { const temporary = `${path}.phantom-${randomBytes(8).toString('hex')}`; symlinkSync(before.target, temporary); try {renameSync(temporary, path);} finally { if (lstatExists(temporary)) unlinkSync(temporary); } }
+    },
+    appInventory: (path) => {
+      const hash = createHash('sha256');
+      const visit = (file) => {
+        const stat = lstatSync(file);
+        if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())) throw new Refusal('unsafe app inventory entry');
+        hash.update(JSON.stringify([relative(path, file), stat.mode & 0o777, stat.isDirectory() ? 'directory' : 'file']));
+        if (stat.isDirectory()) for (const name of readdirSync(file).sort()) visit(join(file, name));
+        else hash.update(safeFile(file));
+        const after = lstatSync(file);
+        if (stat.dev !== after.dev || stat.ino !== after.ino || stat.mtimeMs !== after.mtimeMs || stat.ctimeMs !== after.ctimeMs) throw new Refusal('app changed during inventory');
+      };
+      visit(path); return hash.digest('hex');
+    },
+    makeInstallStage: () => { const dir = mkdtempSync('/Applications/.phantom-install-'); stages.set(dir, lstatSync(dir)); return dir; },
+    writeInstallJournal: (owner, value) => {
+      stageOwned(owner);
+      const fd = openSync(join(owner, 'transaction.json'), constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
+      try { writeFileSync(fd, JSON.stringify(value) + '\n'); fsyncSync(fd); } finally { closeSync(fd); }
+    },
+    removeInstallTree: (path, owner) => {
+      stageOwned(owner);
+      if (!owner.startsWith('/Applications/.phantom-install-') || dirname(path) !== owner || !['archive-check', 'retired-bundle'].includes(path.slice(owner.length + 1))) throw new Refusal('unsafe installation cleanup');
+      rmSync(path, { recursive: true, force: true });
+    },
+    executionLeaseCensus: async () => {
+      const module = await import(pathToFileURL(join(repoRoot, 'dist/core/sandbox/execution-leases.js')).href);
+      return module.censusExecutionLeases();
+    },
+    exists: (path) => { try { lstatSync(path); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } },
     mtime: (path) => { try { return statSync(path).mtimeMs; } catch { return null; } },
     list: (dir) => {
       try {

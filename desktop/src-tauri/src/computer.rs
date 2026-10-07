@@ -1075,7 +1075,7 @@ pub fn authorize(
     if target.pid == own_pid {
         return Err(Failure::new(
             ErrorCode::Denied,
-            "Agents may never control Ashlr itself.",
+            "Agents may never control Phantom itself.",
         ));
     }
     let (ceiling, category) = app_policy(target.bundle.as_deref(), target.executable.as_deref());
@@ -1087,7 +1087,7 @@ pub fn authorize(
             )
         } else {
             format!(
-                "{} is never available to agents (password managers, the keychain, system authentication prompts and Ashlr itself are off limits).",
+                "{} is never available to agents (password managers, the keychain, system authentication prompts and Phantom itself are off limits).",
                 target.name
             )
         };
@@ -2647,7 +2647,7 @@ mod mac {
     fn missing(name: &str) -> Failure {
         Failure::new(
             ErrorCode::NoPermission,
-            format!("Ashlr does not have the macOS {name} permission. Ask the operator to grant it in Verse's computer-use setup."),
+            format!("Phantom does not have the macOS {name} permission. Ask the operator to grant it in Phantom's computer-use setup."),
         )
     }
 

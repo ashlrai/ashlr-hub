@@ -1,5 +1,5 @@
 /**
- * `ashlr verse` CLI command — open the Ashlr Verse operator console.
+ * `ashlr verse` CLI command — open the Phantom operator console.
  *
  * Usage:
  *   ashlr verse [--port N] [--no-open] [--json]
@@ -462,20 +462,20 @@ export async function cmdVerse(args: string[]): Promise<number> {
     console.log(JSON.stringify(out));
   } else {
     console.log('');
-    console.log(bold('  Ashlr Verse') + '  ' + cyan(verseUrl));
+    console.log(bold('  Phantom') + '  ' + cyan(verseUrl));
     console.log('');
     console.log(`  ${green('✓')} Listening on ${cyan(handle.url)}`);
     console.log(`  ${dim('Bound to 127.0.0.1 only — not externally reachable.')}`);
     console.log('');
 
     if (remote) {
-      console.log(`  ${dim('Local Hub credentials are withheld from remote service output.')}`);
+      console.log(`  ${dim('Local Phantom credentials are withheld from remote service output.')}`);
     } else {
       console.log(`  ${dim('Read token')}  ${bold(handle.readToken)}`);
       console.log(`  ${dim('Read header:')} X-Ashlr-Token: ${handle.readToken}`);
       console.log(`  ${dim('The browser exchanges it for a short-lived, read-only HttpOnly cookie.')}`);
       console.log('');
-      console.log(`  ${yellow('⚠')}  ${bold('Dispatch enabled')} ${gray('(always on for Verse — sessions edit the chosen project)')}`);
+      console.log(`  ${yellow('⚠')}  ${bold('Dispatch enabled')} ${gray('(always on for Phantom — sessions edit the chosen project)')}`);
       console.log(`  ${dim('Mutation token')}  ${bold(handle.token)}`);
       console.log(`  ${dim('Mutations require this separate token; the read token and cookie cannot mutate.')}`);
       console.log(`  ${dim('Never share either token or expose the server to other hosts.')}`);
@@ -559,7 +559,7 @@ function printUsage(): void {
   console.log('');
   console.log(bold('  ashlr verse') + dim(' [--port N] [--no-open] [--json]'));
   console.log('');
-  console.log('  Open the Ashlr Verse console: project + seat (Claude / Codex / Grok / local Ollama)');
+  console.log('  Open the Phantom console: project + seat (Claude / Codex / Grok / local Ollama)');
   console.log('  multi-turn agent sessions served by the local dashboard server at /verse/.');
   console.log('');
   console.log('  ' + bold('Options:'));

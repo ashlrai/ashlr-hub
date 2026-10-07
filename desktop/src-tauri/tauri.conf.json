@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Ashlr",
+  "productName": "Phantom",
   "version": "3.25.1",
   "identifier": "ai.ashlr.desktop",
 

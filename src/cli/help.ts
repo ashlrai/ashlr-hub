@@ -559,7 +559,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'authority protect --print|--apply', desc: 'Print (or apply after confirmation) the GitHub rulesets for the grant\'s server-enforced repos.', topic: 'autonomy' },
   { cmd: 'authority setup [--dry-run [--json]]', desc: 'Guided Phase 0: custody key, trust-root PR, GitHub App, Claude token, canary, rulesets, first grant, switch, daemon service — asks before every step; --dry-run --json prints the checklist as JSON.', topic: 'autonomy' },
   { cmd: 'leader show|run|tick|veto',     desc: 'The Leader (Visionary): show the latest memo and actions, run it now, apply due class-B actions (tick), veto an action or a whole memo (--memo).', topic: 'autonomy' },
-  { cmd: 'leader say|thread|answer|approve|directives', desc: 'Talk to the Leader in the one thread Verse and Telegram share: say something, read the thread, answer a memo question, approve a pending action (applied only if the grant allows), add or retire standing directives.', topic: 'autonomy' },
+  { cmd: 'leader say|thread|answer|approve|directives', desc: 'Talk to the Leader in the one thread Phantom and Telegram share: say something, read the thread, answer a memo question, approve a pending action (applied only if the grant allows), add or retire standing directives.', topic: 'autonomy' },
   { cmd: 'leader oversight-plist --print', desc: 'Print (never install) the nightly ai.ashlr.oversight LaunchAgent that runs `ashlr leader tick --wait` instead of the legacy Strategist; install by hand per docs/AUTHORITY.md.', topic: 'autonomy' },
   { cmd: 'cloud launch "<task>" [--repo o/n] [--base b]', desc: 'Start a Claude Code cloud session that delivers a draft PR (spends Claude credits; never merges). Repo defaults to this folder\'s GitHub origin.', topic: 'autonomy' },
   { cmd: 'playbook list|show|new|edit|run <id>', desc: 'Versioned task templates every lane runs under (`!fix-bug` in any task text): list them, show one with per-version outcomes, write a new version in $EDITOR, or run one in the cloud / Devin lane (`--repo o/n --lane cloud|devin`).', topic: 'autonomy' },
@@ -657,7 +657,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'serve [--port N]',             desc: 'Start local web dashboard + JSON API on 127.0.0.1 (default port 7777).', topic: 'web' },
   { cmd: 'serve --open',                 desc: 'Start dashboard and open browser automatically.', topic: 'web' },
   { cmd: 'serve --allow-dispatch',       desc: 'Enable guarded POST /api/run + web inbox approve/reject (prints session token).', topic: 'web' },
-  { cmd: 'verse [--port N] [--no-open]', desc: 'Open the Ashlr Verse console at /verse/: project + seat (Claude/Codex/Grok/local) chat sessions. Dispatch always on; prints read + mutation tokens.', topic: 'web' },
+  { cmd: 'verse [--port N] [--no-open]', desc: 'Open the Phantom console at /verse/: project + seat (Claude/Codex/Grok/local) chat sessions. Dispatch always on; prints read + mutation tokens.', topic: 'web' },
 
   { cmd: 'new <name> [opts]',            desc: 'Scaffold a project from a template (next-app, node-cli, mcp-server, minimal).', topic: 'scaffold' },
   { cmd: 'ship [path] [opts]',           desc: 'Pre-ship gate (lint/test/build) + optional confirm-gated deploy.', topic: 'scaffold' },
@@ -744,7 +744,7 @@ function renderTopic(topic: HelpTopic): void {
 function renderSummary(): void {
   const c = makeColors(isTty());
   console.log('');
-  console.log(c.bold('  ashlr') + c.dim(' — local-first command center for agentic engineers'));
+  console.log(c.bold('  Phantom') + c.dim(' — phm, the CLI for agentic engineers (ashlr remains compatible)'));
   console.log('');
   for (const topic of TOPICS) {
     const entries = entriesForTopic(topic);
@@ -753,17 +753,17 @@ function renderSummary(): void {
     console.log(`    ${c.cyan(pad(topic, 14))}  ${TOPIC_LABELS[topic]} ${c.dim(`(${unique}, …)`)}`);
   }
   console.log('');
-  console.log('  ' + c.dim('ashlr help <topic>') + '      full table for one topic');
-  console.log('  ' + c.dim('ashlr help --search <t>') + ' find a command by keyword');
-  console.log('  ' + c.dim('ashlr help --all') + '        every command (the legacy full table)');
-  console.log('  ' + c.dim('ashlr docs --agent') + '      the agent contract cheat sheet');
+  console.log('  ' + c.dim('phm help <topic>') + '      full table for one topic');
+  console.log('  ' + c.dim('phm help --search <t>') + ' find a command by keyword');
+  console.log('  ' + c.dim('phm help --all') + '        every command (the legacy full table)');
+  console.log('  ' + c.dim('phm docs --agent') + '      the agent contract cheat sheet');
   console.log('');
 }
 
 function renderAll(): void {
   const c = makeColors(isTty());
   console.log('');
-  console.log(c.bold('  ashlr') + c.dim(' — every command'));
+  console.log(c.bold('  Phantom') + c.dim(' — every command (phm or ashlr)'));
   for (const topic of TOPICS) {
     console.log('');
     console.log('  ' + c.bold(TOPIC_LABELS[topic]));
