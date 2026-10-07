@@ -23,7 +23,7 @@ import { Button } from '../../../components/primitives/Button.js';
 import { Input } from '../../../components/primitives/Input.js';
 import { Meter } from '../../../components/primitives/Meter.js';
 import { IconLock, IconPause, IconPlay, IconRefresh, IconStop } from '../../../components/primitives/icons.js';
-import { useQuery, useRefetch } from '../../../data/hooks.js';
+import { useQuery, useRefetch, useRefresh } from '../../../data/hooks.js';
 import { runQuery } from '../../../data/cache.js';
 import { CopyCommand } from '../autonomy/AutonomyOffState.js';
 import { formatRelative } from '../autonomy/format.js';
@@ -113,6 +113,7 @@ export interface FleetControlProps {
 export function FleetControl({ actions, grantFlow, darkSince = null, setupShownBelow = false }: FleetControlProps) {
   const read = useQuery(fleetControlQuery, { freshMs: 4_000 });
   const refetch = useRefetch(fleetControlQuery);
+  const refresh = useRefresh(fleetControlQuery);
   // A slow/queued read must finish before the next automatic poll replaces it.
   // Native completion still forces a newer read through refreshFleetControlReads.
   usePollWhileVisible(() => {
@@ -242,17 +243,25 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
   const g = state.grant;
   const stage = g.stageId ? `${g.stageId}${g.stageIndex !== null && g.stageCount ? ` (${g.stageIndex + 1}/${g.stageCount})` : ''}` : null;
   const tickProgress = state.daemon.liveness === 'alive' && state.daemon.pid !== null ? state.daemon.tickProgress : null;
+  const preparing = state.state === 'running' && tickProgress != null && state.agents.working === 0;
+  // The cache retains an error during a retry; only a successful read clears it.
+  const lastKnown = read.error !== undefined;
+  const custodyNeedsAttention = state.custody.installed !== true || state.custody.keyInitialized !== true
+    || blocker?.action.kind === 'install-custody' || needs?.kind === 'install-custody'
+    || progress?.op === 'custody-install';
   const daemonLine = state.daemon.service === 'running' || state.daemon.liveness === 'alive'
     ? `Running${state.daemon.pid ? ` · pid ${state.daemon.pid}` : ''}${tickProgress ? ` · ${tickProgress.summary}` : ''}${state.daemon.lastTickAt ? ` · ${tickProgress ? 'last completed' : 'ticked'} ${formatRelative(state.daemon.lastTickAt)}` : ''}`
-    : state.daemon.service === 'absent' ? 'Not installed' : 'Not running';
+    : state.daemon.service === 'absent' ? 'Not installed'
+      : state.daemon.service === 'unknown' && state.daemon.liveness === 'unknown' ? 'Status unavailable'
+        : state.daemon.liveness === 'stale' ? 'Not responding' : 'Not running';
 
   return (
-    <section className={styles.control} aria-label="Fleet control" data-state={state.state}>
+    <section className={styles.control} aria-label="Fleet control" data-state={lastKnown ? 'unknown' : state.state} aria-busy={read.status === 'refreshing'}>
       <div className={styles.head}>
         <p className={styles.headline} role="status" aria-live="polite">
-          <span className={styles.dot} data-tone={STATE_TONE[state.state]} aria-hidden="true" />
-          <span className={styles.stateWord}>{STATE_WORD[state.state]}</span>
-          <span>{state.headline.replace(/^[A-Z][a-z]+ · /u, '')}</span>
+          <span className={styles.dot} data-tone={lastKnown ? 'muted' : STATE_TONE[state.state]} aria-hidden="true" />
+          <span className={styles.stateWord}>{lastKnown ? 'Last known:' : ''} {preparing ? 'Preparing work' : STATE_WORD[state.state]}</span>
+          <span>{preparing ? `0 agents working · ${tickProgress.phase}${stage ? ` · stage ${stage}` : ''}` : state.headline.replace(/^[A-Z][a-z]+ · /u, '')}</span>
         </p>
         <div className={styles.buttons} role="group" aria-label="Fleet controls">
           {state.paused ? (
@@ -266,6 +275,13 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
           <ControlButton label="Stop" icon={<IconStop />} keyId="fleet.halt" availability={state.controls.stop} onClick={stop} busy={actions.busy} readOnly={actions.readOnly} danger />
         </div>
       </div>
+
+      {read.status === 'refreshing' || lastKnown ? (
+        <p className={styles.muted} role="status">
+          {lastKnown ? `The latest fleet status could not be read. Showing the last reading from ${formatRelative(state.checkedAt)}.` : 'Updating fleet status…'}
+          <button type="button" className={styles.link} onClick={refresh}>Check again</button>
+        </p>
+      ) : null}
 
       {darkSince && state.state !== 'running' && state.state !== 'idle' ? (
         <p className={styles.muted}>Fleet dark since {darkSinceLabel(darkSince)}</p>
@@ -353,23 +369,26 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
             {state.custody.installed === true
               ? `Installed${state.custody.keyInitialized === true ? ' · key ready' : state.custody.keyInitialized === false ? ' · no key yet' : ''}`
               : state.custody.installed === false ? 'Not installed' : 'unknown'}
-            <span className={styles.factSub}>Signs grants with Touch ID; holds the GitHub App key</span>
-            {nativeCapable ? (
-              <>
-                <Input label="Custody source checkout" size="sm" mono
-                  value={checkoutOverride ?? state.custody.hubCheckout ?? ''}
-                  onChange={(event) => setCheckoutOverride(event.target.value)}
-                  disabled={busy} autoComplete="off" spellCheck={false}
-                  placeholder="/absolute/path/to/ashlr-hub"
-                  hint="Choose the trusted Hub source to build. Native checks the checkout and confirms its installer hash and command; administrator approval is required."
-                  error={checkoutOverride !== null && !checkoutValid ? 'Enter an absolute path or ~/path within the native 1024-character limit.' : undefined} />
-                <span className={styles.inlineButtons}>
-                  <Button size="sm" variant="ghost" onClick={() => installCustody()} disabled={busy || !checkoutValid}>
-                    {state.custody.installed === true ? 'Reinstall / upgrade' : 'Install'}
-                  </Button>
-                </span>
-              </>
-            ) : null}
+            <details className={styles.output} open={custodyNeedsAttention}>
+              <summary>Helper settings</summary>
+              <span className={styles.factSub}>Signs grants with Touch ID; holds the GitHub App key</span>
+              {nativeCapable ? (
+                <>
+                  <Input label="Custody source checkout" size="sm" mono
+                    value={checkoutOverride ?? state.custody.hubCheckout ?? ''}
+                    onChange={(event) => setCheckoutOverride(event.target.value)}
+                    disabled={busy} autoComplete="off" spellCheck={false}
+                    placeholder="/absolute/path/to/ashlr-hub"
+                    hint="Choose the trusted Hub source to build. Native checks the checkout and confirms its installer hash and command; administrator approval is required."
+                    error={checkoutOverride !== null && !checkoutValid ? 'Enter an absolute path or ~/path within the native 1024-character limit.' : undefined} />
+                  <span className={styles.inlineButtons}>
+                    <Button size="sm" variant="ghost" onClick={() => installCustody()} disabled={busy || !checkoutValid}>
+                      {state.custody.installed === true ? 'Reinstall / upgrade' : 'Install'}
+                    </Button>
+                  </span>
+                </>
+              ) : null}
+            </details>
           </dd>
         </div>
       </dl>
