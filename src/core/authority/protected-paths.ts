@@ -259,6 +259,8 @@ const ALL_REPO_RULES: readonly ProtectedPathRule[] = [
     scope: 'all-repos',
     patterns: [
       'scripts/release*', 'scripts/**/release*', 'scripts/build*', 'scripts/*authority*', 'scripts/install-custody*',
+      // This verifier mints the one-use capability that can replace local build bytes.
+      'scripts/hosted-build-artifact.mjs',
       'tools/custody/**', '**/*.plist', '**/*.entitlements', '**/src-tauri/capabilities/**',
       '**/src-tauri/tauri.conf.json', '**/src-tauri/tauri.*.conf.json',
     ],

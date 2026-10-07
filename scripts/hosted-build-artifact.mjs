@@ -9,6 +9,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 import { observeBuild, validateBuild } from '../.github/scripts/ci-pack-smoke.mjs';
+import { requireProducerEnvironment, requireManifestProducer, requireRepositoryMetadata, requireRepositoryReference } from '../.github/scripts/github-repository-binding.mjs';
 import { readBoundedJson } from './verify-npm-release-provenance.mjs';
 
 const MAX_BYTES = 512 * 1024 * 1024;
@@ -199,12 +200,11 @@ export function captureArtifact({ root, sha: revision, out, snapshot, packageTar
   assert.ok(!fs.existsSync(out), 'artifact output already exists');
   const binding = sourceBinding(root, revision);
   const observed = validateBuild({ root, eventSha: revision, snapshotPath: snapshot });
-  const producer = { repository: process.env.GITHUB_REPOSITORY, runId: process.env.GITHUB_RUN_ID,
+  const producer = { ...requireProducerEnvironment(process.env), runId: process.env.GITHUB_RUN_ID,
     runAttempt: process.env.GITHUB_RUN_ATTEMPT, job: process.env.GITHUB_JOB,
     eventSha: process.env.ASHLR_CI_EVENT_SHA ?? process.env.GITHUB_SHA };
   for (const field of ['runId', 'runAttempt']) assert.match(producer[field] ?? '', /^[1-9][0-9]*$/);
   assert.match(producer.repository ?? '', /^[\w.-]+\/[\w.-]+$/); assert.match(producer.eventSha ?? '', SHA);
-  assert.equal(producer.repository, 'ashlrai/ashlr-hub');
   assert.ok(producer.job && (process.env.ASHLR_CI_SOURCE_SHA ?? process.env.GITHUB_SHA) === revision, 'capture requires exact CI checkout identity');
   const entries = observed.dist.map((entry) => ({ ...entry, path: entry.path ? `dist/${entry.path}` : 'dist' }));
   for (const entry of entries) { safePath(entry.path); safeMode(entry.mode, entry.type); }
@@ -231,7 +231,7 @@ export function captureArtifact({ root, sha: revision, out, snapshot, packageTar
     }
   }
   assert.equal(new Set(coverageFiles.map((file) => file.path)).size, coverageFiles.length, 'duplicate coverage files');
-  const manifest = { schemaVersion: 1, source: binding, producer, tools: tools(root),
+  const manifest = { schemaVersion: 2, source: binding, producer, tools: tools(root),
     buildIdentity: observed.source.identity, archive: { filename: 'dist.tar', bytes: archive.length, sha256: sha(archive), entries },
     package: { filename: `ashlr-hub-${observed.source.identity.packageVersion}.tgz`, bytes: packageBytes.length,
       sha256: sha(packageBytes), entries: packageEntries },
@@ -256,7 +256,9 @@ export function auditGithub({ repository, revision, runId, runAttempt, artifactI
   assert.ok(Array.isArray(requiredJobs) && requiredJobs.length > 0, 'missing source-owned job policy');
   assert.equal(new Set(requiredJobs.map((job) => job.name)).size, requiredJobs.length, 'duplicate required job');
   const base = `repos/${repository}`;
+  requireRepositoryMetadata(repository, read(base));
   const run = read(`${base}/actions/runs/${runId}/attempts/${runAttempt}`);
+  requireRepositoryReference(repository, run.repository);
   assert.equal(run.id, runId); assert.equal(run.run_attempt, runAttempt); assert.equal(run.repository?.full_name, repository);
   assert.equal(run.path, '.github/workflows/ci.yml', 'unexpected producer workflow');
   assert.equal(run.head_sha, revision); assert.equal(run.status, 'completed'); assert.equal(run.conclusion, 'success');
@@ -359,7 +361,8 @@ export function qualifyArtifact({ root, revision, bundle, artifactMap, runId: re
   safePath(manifest.package.filename); assert.ok(!manifest.package.filename.includes('/'), 'package filename must be basename');
   const source = sourceBinding(root, revision); assert.deepEqual(manifest.source, source);
   verifyToolRecord(root, manifest.tools);
-  const producer = manifest.producer; assert.equal(producer.repository, 'ashlrai/ashlr-hub');
+  const producer = manifest.producer; requireManifestProducer(manifest.schemaVersion, producer);
+  const repositoryBinding = requireRepositoryMetadata(producer.repository, read(`repos/${producer.repository}`));
   const runId = Number(producer.runId), runAttempt = Number(producer.runAttempt);
   assert.equal(runId, requestedRun); assert.equal(runAttempt, requestedAttempt);
   const expectedName = `ashlr-build-${runId}-${runAttempt}`;
@@ -379,9 +382,10 @@ export function qualifyArtifact({ root, revision, bundle, artifactMap, runId: re
   const archive = boundedBytes(join(bundle, 'dist.tar')); assert.equal(sha(archive), manifest.archive.sha256); inspectTar(archive, manifest.archive.entries);
   const tgz = boundedBytes(join(bundle, manifest.package.filename), 128 * 1024 * 1024); assert.equal(sha(tgz), manifest.package.sha256);
   assert.deepEqual(npmMembers(join(bundle, manifest.package.filename)), manifest.package.entries); matchPackage(root, manifest.package.entries, manifest.archive.entries);
-  const qualification = { schemaVersion: 1, candidate: { revision, tree: source.tree }, producer: { runId, runAttempt, eventSha: producer.eventSha, ...producerArtifact },
+  const qualification = { schemaVersion: manifest.schemaVersion, ...(manifest.schemaVersion === 2 ? { repositoryBinding } : {}), candidate: { revision, tree: source.tree }, producer: { runId, runAttempt, eventSha: producer.eventSha, ...producerArtifact },
     subjects: { manifestSha256: sha(boundedBytes(manifestPath)), archiveSha256: sha(archive), packageSha256: sha(tgz) }, lanes, closure, official };
   assert.deepEqual(sourceBinding(root, revision), source);
+  assert.deepEqual(requireRepositoryMetadata(producer.repository, read(`repos/${producer.repository}`)), repositoryBinding, 'repository identity changed during qualification');
   fs.writeFileSync(join(bundle, 'qualification.json'), `${JSON.stringify(qualification)}\n`, { flag: 'wx', mode: 0o400 });
   return qualification;
 }
@@ -479,10 +483,12 @@ export function validateCoverage({ root, bundle, source, producer, lanes }) {
  * authorize adoption. The committed caller owns the required-job policy. */
 export function verifyArtifact({ root, revision, bundle, policy, githubRead, attestRun }) {
   root = fs.realpathSync(root); bundle = fs.realpathSync(bundle);
-  const manifestPath = join(bundle, 'manifest.json'); const manifest = readBoundedJson(manifestPath);
-  const qualificationPath = join(bundle, 'qualification.json'); const qualification = readBoundedJson(qualificationPath);
-  assert.equal(qualification.schemaVersion, 1); assert.deepEqual(qualification.candidate, { revision, tree: manifest.source.tree });
-  assert.equal(manifest.schemaVersion, 1);
+  const manifestPath = join(bundle, 'manifest.json'); const manifestBytes = boundedBytes(manifestPath, 32 * 1024 * 1024);
+  const qualificationPath = join(bundle, 'qualification.json'); const qualificationBytes = boundedBytes(qualificationPath, 32 * 1024 * 1024);
+  const manifest = JSON.parse(manifestBytes.toString('utf8')); const qualification = JSON.parse(qualificationBytes.toString('utf8'));
+  requireManifestProducer(manifest.schemaVersion, manifest.producer);
+  assert.equal(qualification.schemaVersion, manifest.schemaVersion, 'mixed hosted artifact schemas refused');
+  assert.deepEqual(qualification.candidate, { revision, tree: manifest.source.tree });
   const source = sourceBinding(root, revision); assert.deepEqual(manifest.source, source, 'artifact source differs from local checkout');
   verifyToolRecord(root, manifest.tools);
   assert.deepEqual(manifest.buildIdentity, { schemaVersion: 1, packageVersion: JSON.parse(boundedBytes(join(root, 'package.json'))).version,
@@ -503,7 +509,9 @@ export function verifyArtifact({ root, revision, bundle, policy, githubRead, att
   assert.ok(policy && policy.runId === qualification.producer.runId && policy.runAttempt === qualification.producer.runAttempt, 'unexpected CI identity');
   assert.deepEqual(qualification.subjects, { manifestSha256: sha(boundedBytes(manifestPath)), archiveSha256: sha(archive), packageSha256: sha(tgz) });
   const producer = manifest.producer;
-  assert.equal(producer.repository, 'ashlrai/ashlr-hub');
+  const read = githubRead ?? ((endpoint) => JSON.parse(command('gh', ['api', '--hostname', 'github.com', endpoint])));
+  const repositoryBinding = requireRepositoryMetadata(producer.repository, read(`repos/${producer.repository}`));
+  if (manifest.schemaVersion === 2) assert.deepEqual(qualification.repositoryBinding, repositoryBinding, 'qualified repository binding differs');
   assert.equal(Number(producer.runId), policy.runId); assert.equal(Number(producer.runAttempt), policy.runAttempt);
   assert.equal(producer.eventSha, qualification.producer.eventSha);
   const closure = validateCoverage({ root, bundle, source, producer, lanes: qualification.lanes });
@@ -514,7 +522,6 @@ export function verifyArtifact({ root, revision, bundle, policy, githubRead, att
     artifactName: `ashlr-build-${policy.runId}-${policy.runAttempt}`, requiredJobs: requiredJobPolicy(root), ...(githubRead ? { read: githubRead } : {}) });
   assert.deepEqual(official, qualification.official);
   assert.equal(official.tree, source.tree);
-  const read = githubRead ?? ((endpoint) => JSON.parse(command('gh', ['api', '--hostname', 'github.com', endpoint])));
   const base = `repos/${producer.repository}`;
   for (const lane of qualification.lanes) {
     const name = lane.role === 'web' ? `ashlr-build-${policy.runId}-${policy.runAttempt}` : `ashlr-qualification-${lane.role}-${policy.runId}-${policy.runAttempt}`;
@@ -525,14 +532,24 @@ export function verifyArtifact({ root, revision, bundle, policy, githubRead, att
   assert.equal(attestorCommit.tree?.sha, source.tree, 'master/candidate tree differs');
   const attestor = read(`${base}/actions/runs/${policy.attestorRun}/attempts/${policy.attestorAttempt}`);
   assert.equal(attestor.id, policy.attestorRun); assert.equal(attestor.run_attempt, policy.attestorAttempt);
-  assert.equal(attestor.repository?.full_name, producer.repository); assert.equal(attestor.head_sha, policy.attestorSha);
+  requireRepositoryReference(producer.repository, attestor.repository); assert.equal(attestor.head_sha, policy.attestorSha);
   assert.equal(attestor.event, 'workflow_dispatch'); assert.equal(attestor.path, '.github/workflows/attest-ci-build.yml');
   assert.equal(attestor.status, 'completed'); assert.equal(attestor.conclusion, 'success');
-  for (const path of [join(bundle, 'dist.tar'), manifestPath, qualificationPath]) verifyAttestation({ path, repository: producer.repository,
-    attestorSha: policy.attestorSha, attestorRun: policy.attestorRun, attestorAttempt: policy.attestorAttempt, ...(attestRun ? { run: attestRun } : {}) });
-  assert.deepEqual(sourceBinding(root, revision), source); assert.equal(sha(boundedBytes(join(bundle, 'dist.tar'))), manifest.archive.sha256);
-  const receipt = { schemaVersion: 1, source: { revision, tree: source.tree }, official,
-    archiveSha256: manifest.archive.sha256, manifestSha256: sha(boundedBytes(manifestPath)), qualificationSha256: sha(boundedBytes(qualificationPath)), packageSha256: manifest.package.sha256,
+  // Parsed policy and the signer must bind the same initial subject bytes;
+  // neither a callback nor the final metadata observation may substitute JSON.
+  const subjects = [[join(bundle, 'dist.tar'), sha(archive)], [manifestPath, sha(manifestBytes)], [qualificationPath, sha(qualificationBytes)]];
+  const verified = subjects.map(([path, expectedHash]) => {
+    const attestation = verifyAttestation({ path, repository: producer.repository,
+      attestorSha: policy.attestorSha, attestorRun: policy.attestorRun, attestorAttempt: policy.attestorAttempt, ...(attestRun ? { run: attestRun } : {}) });
+    assert.equal(attestation.sha256, expectedHash, 'signed subject differs from initially validated bytes');
+    return [path, attestation.sha256];
+  });
+  assert.deepEqual(requireRepositoryMetadata(producer.repository, read(base)), repositoryBinding, 'repository identity changed during signature verification');
+  assert.deepEqual(sourceBinding(root, revision), source);
+  for (const [path, verifiedHash] of verified) assert.equal(sha(boundedBytes(path, path === manifestPath || path === qualificationPath ? 32 * 1024 * 1024 : MAX_ARCHIVE)), verifiedHash, 'signed subject changed after verification');
+  assert.equal(sha(boundedBytes(join(bundle, manifest.package.filename), 128 * 1024 * 1024)), manifest.package.sha256, 'package changed after verification');
+  const receipt = { schemaVersion: manifest.schemaVersion, ...(manifest.schemaVersion === 2 ? { repositoryBinding } : {}), source: { revision, tree: source.tree }, official,
+    archiveSha256: verified[0][1], manifestSha256: verified[1][1], qualificationSha256: verified[2][1], packageSha256: manifest.package.sha256,
     attestor: { revision: policy.attestorSha, runId: policy.attestorRun, runAttempt: policy.attestorAttempt } };
   const expected = { manifest: receipt.manifestSha256, qualification: receipt.qualificationSha256, package: receipt.packageSha256 };
   admissions.set(receipt, { root, source, archive, entries, revision, bundle, manifest, expected });

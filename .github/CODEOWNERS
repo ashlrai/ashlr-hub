@@ -97,6 +97,7 @@
 /scripts/build* @masonwyatt23
 /scripts/*authority* @masonwyatt23
 /scripts/install-custody* @masonwyatt23
+/scripts/hosted-build-artifact.mjs @masonwyatt23
 /tools/custody/** @masonwyatt23
 **/*.plist @masonwyatt23
 **/*.entitlements @masonwyatt23

@@ -5,11 +5,12 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { HUB_REPOSITORY_IDENTITY as hub } from '../scripts/github-repository-binding.mjs';
 import { artifactNames, assemble, copyDataTree, prepare } from '../scripts/ci-attestation-inputs.mjs';
 
 // Only disposable local Git repositories and injected official-shaped API data.
 // No remote service, token, artifact download, package lifecycle, or signer runs.
-function fixture() {
+function fixture(repositoryName = hub.legacyName) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-attestation-input-test-')));
   const root = join(home, 'repo'); const temporary = join(home, 'runner');
   mkdirSync(root, { mode: 0o700 }); mkdirSync(temporary, { mode: 0o700 });
@@ -28,22 +29,24 @@ function fixture() {
     id: 301 + index, name, expired: false, digest: `sha256:${'a'.repeat(64)}`,
     workflow_run: { id: 101, head_sha: candidate },
   }));
+  const repository = { full_name: repositoryName, id: hub.repositoryId, node_id: hub.repositoryNodeId, owner: { id: hub.ownerId, login: hub.ownerLogin }, default_branch: hub.defaultBranch, private: false, visibility: 'public' };
   const answers = new Map([
-    [`repos/ashlrai/ashlr-hub/git/commits/${trusted}`, { sha: trusted, tree: { sha: tree } }],
-    [`repos/ashlrai/ashlr-hub/git/commits/${candidate}`, { sha: candidate, tree: { sha: tree } }],
-    ['repos/ashlrai/ashlr-hub/actions/runs/101/attempts/2', {
+    [`repos/${repositoryName}`, repository],
+    [`repos/${repositoryName}/git/commits/${trusted}`, { sha: trusted, tree: { sha: tree } }],
+    [`repos/${repositoryName}/git/commits/${candidate}`, { sha: candidate, tree: { sha: tree } }],
+    [`repos/${repositoryName}/actions/runs/101/attempts/2`, {
       id: 101, run_attempt: 2, head_sha: candidate, path: '.github/workflows/ci.yml',
-      repository: { full_name: 'ashlrai/ashlr-hub' }, status: 'completed', conclusion: 'success',
+      repository: { ...repository }, status: 'completed', conclusion: 'success',
     }],
-    ['repos/ashlrai/ashlr-hub/actions/runs/101/artifacts?per_page=100&page=1', { total_count: artifacts.length, artifacts }],
+    [`repos/${repositoryName}/actions/runs/101/artifacts?per_page=100&page=1`, { total_count: artifacts.length, artifacts }],
   ]);
-  const inputs = { GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/master', GITHUB_REPOSITORY: 'ashlrai/ashlr-hub',
+  const inputs = { GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/master', GITHUB_REPOSITORY: repositoryName, GITHUB_REPOSITORY_ID: String(hub.repositoryId), GITHUB_REPOSITORY_OWNER_ID: String(hub.ownerId),
     GITHUB_SHA: trusted, CANDIDATE_SHA: candidate, CI_RUN_ID: '101', CI_RUN_ATTEMPT: '2', BUILD_ARTIFACT_ID: '301', RUNNER_TEMP: temporary };
   const read = path => { assert.ok(answers.has(path), `unexpected API lookup: ${path}`); return globalThis.structuredClone(answers.get(path)); };
   return { home, root, temporary, git, inputs, answers, artifacts, read, candidate, trusted, tree };
 }
-function withFixture(fn) {
-  const f = fixture(); const cwd = process.cwd();
+function withFixture(fn, repositoryName) {
+  const f = fixture(repositoryName); const cwd = process.cwd();
   const keys = ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM'];
   const original = keys.map(key => [key, process.env[key]]);
   try {
@@ -54,8 +57,8 @@ function withFixture(fn) {
     rmSync(f.home, { recursive: true, force: true });
   }
 }
-function runRecord(f) { return f.answers.get('repos/ashlrai/ashlr-hub/actions/runs/101/attempts/2'); }
-function listRecord(f) { return f.answers.get('repos/ashlrai/ashlr-hub/actions/runs/101/artifacts?per_page=100&page=1'); }
+function runRecord(f) { return f.answers.get(`repos/${f.inputs.GITHUB_REPOSITORY}/actions/runs/101/attempts/2`); }
+function listRecord(f) { return f.answers.get(`repos/${f.inputs.GITHUB_REPOSITORY}/actions/runs/101/artifacts?per_page=100&page=1`); }
 
 // prepare() is POSIX-only in the trusted Ubuntu workflow; Windows portability
 // remains in CI rather than simulating POSIX permissions with Windows modes.
@@ -69,6 +72,14 @@ test('prepares one exact immutable producer plus all five Mac lanes as inert inp
   assert.equal(readFileSync(join(result.directory, 'candidate', 'seed.txt'), 'utf8'), 'inert fixture\n');
   assert.equal(f.git('rev-parse', 'HEAD'), f.trusted); assert.equal(f.git('status', '--porcelain'), '');
 }));
+
+test('trusted preparation binds the renamed namespace to the same numeric repository without old alias reads', { skip: process.platform === 'win32' }, () => withFixture(f => {
+  const calls = [];
+  const result = prepare({ env: f.inputs, read: path => { calls.push(path); return f.read(path); } });
+  assert.equal(result.map.producer.id, 301);
+  assert.equal(f.git('-C', join(result.directory, 'candidate'), 'rev-parse', 'HEAD'), f.candidate);
+  assert.ok(calls.length > 0 && calls.every(path => path.startsWith(`repos/${hub.renamedName}/`) || path === `repos/${hub.renamedName}`));
+}, hub.renamedName));
 
 for (const [key, value] of [
   ['GITHUB_EVENT_NAME', 'pull_request'], ['GITHUB_REF', 'refs/heads/feature'], ['GITHUB_REPOSITORY', 'foreign/repo'],
@@ -186,3 +197,14 @@ test('refuses traversal and linked assembly maps before copying artifact data', 
     assert.throws(() => assemble(root)); assert.equal(existsSync(join(root, 'bundle')), false);
   }
 }));
+
+for (const kind of ['repository ID', 'owner ID', 'current namespace', 'minimal run identity']) {
+  test(`trusted preparation refuses ${kind} before fetching candidate data`, { skip: process.platform === 'win32' }, () => withFixture((f) => {
+    if (kind === 'repository ID') f.inputs.GITHUB_REPOSITORY_ID = '1';
+    if (kind === 'owner ID') f.answers.get(`repos/${hub.legacyName}`).owner.id++;
+    if (kind === 'current namespace') f.answers.get(`repos/${hub.legacyName}`).full_name = hub.renamedName;
+    if (kind === 'minimal run identity') f.answers.get(`repos/${hub.legacyName}/actions/runs/101/attempts/2`).repository.node_id = 'R_other';
+    assert.throws(() => prepare({ env: f.inputs, read: f.read }));
+    assert.equal(existsSync(join(f.temporary, 'candidate')), false);
+  }));
+}
