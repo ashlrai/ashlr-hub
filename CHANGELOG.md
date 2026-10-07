@@ -22,6 +22,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Carry numeric repository identity in paired hosted artifact schemas, retain
   historical signer namespaces, and recheck signed subject bytes after final
   repository observation before admitting a build.
+- Add a source-only release preflight so publication and documentation mismatches
+  surface before expensive builds and hosted qualification.
 
 ### Fixed
 
@@ -30,6 +32,9 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   helper settings while opening them when attention is needed.
 - Include every runtime dependency in both npm bundle aliases and verify
   offline installation with an exclusive empty cache and empty npm configs.
+- Keep chat settings loading, failure and retry feedback visible without losing
+  drafts or handoff notes. Preserve warm controls during refresh, ignore stale
+  acknowledgements, and name deferred settings actions while they load.
 
 ## [3.24.3] — 2026-10-06
 
