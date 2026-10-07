@@ -30,6 +30,16 @@ vi.mock('../src/core/sandbox/mutation-fence.js', async (importOriginal) => {
 });
 
 const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
+const enrollmentHook = vi.hoisted(() => ({ afterApply: null as (() => void) | null }));
+
+vi.mock('../src/core/sandbox/policy.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/sandbox/policy.js')>();
+  return { ...actual, enroll: (...args: Parameters<typeof actual.enroll>) => {
+    const result = actual.enroll(...args);
+    enrollmentHook.afterApply?.();
+    return result;
+  } };
+});
 
 vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
@@ -66,6 +76,7 @@ let previousUserProfile: string | undefined;
 let previousAshlrHome: string | undefined;
 
 beforeEach(() => {
+  enrollmentHook.afterApply = null;
   privateStorageHarness.useSemanticAdapter = false;
   home = join(tmpdir(), `ashlr-m418-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(home, { recursive: true });
@@ -90,6 +101,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  enrollmentHook.afterApply = null;
   enrollmentTiming.active = false;
   privateStorageHarness.useSemanticAdapter = false;
   vi.unstubAllGlobals();
@@ -236,10 +248,76 @@ describe('M418 Pulse outward-mutation quiescence', () => {
       expect.objectContaining({ status: 'done' }),
     ]);
     expect(outerFenceHeldDuringWriteback).toBe(true);
-    // Six successful phase acquisitions plus the deliberate losing contender:
-    // initial gate/tick share one authority, and enrollment borrows its own.
-    expect(enrollmentTiming.acquisitions).toBe(7);
+    // Four successful acquisitions plus the deliberate losing contender:
+    // tick, recovery poll, pending poll and one borrowed command authority.
+    expect(enrollmentTiming.acquisitions).toBe(5);
     expect(elapsedMs).toBeLessThan(limitMs);
+  });
+
+  it.each(['kill', 'abort'] as const)('does not enroll or write back after %s wins during a successful claim', async (stopKind) => {
+    const repo = join(home, 'stopped-during-claim');
+    const claimed = Promise.withResolvers<void>();
+    const response = Promise.withResolvers<Response>();
+    const controller = new AbortController();
+    const writes: string[] = [];
+    const fetchMock = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+      const endpoint = new URL(String(input));
+      if (endpoint.pathname.endsWith('/traces')) return Promise.resolve(Response.json({}));
+      if (init?.method === 'GET') {
+        return Promise.resolve(Response.json({ commands: endpoint.searchParams.get('status') === 'pending'
+          ? [{ id: 'stop-claim', kind: 'enroll_repo', target: null, payload: { path: repo }, status: 'pending' }]
+          : [] }));
+      }
+      const body = JSON.parse(String(init?.body)) as { status: string };
+      writes.push(body.status);
+      claimed.resolve();
+      return response.promise;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const running = runPulseSync(cfg, { shipDeps: false, signal: controller.signal });
+    await claimed.promise;
+    if (stopKind === 'kill') {
+      expect(setKill(true, { waitMs: 0 })).toMatchObject({ ok: false, quiesced: false });
+    } else {
+      controller.abort(new Error('stop during claim'));
+    }
+    response.resolve(Response.json({}));
+    const result = await running;
+    expect(result.commands).toEqual([expect.objectContaining({
+      id: 'stop-claim', outcome: 'skipped', detail: expect.stringContaining('retryable'),
+    })]);
+    expect(isEnrolled(repo)).toBe(false);
+    expect(writes).toEqual(['claimed']);
+    expect(setKill(true, { waitMs: 500 })).toMatchObject({ ok: true, quiesced: true });
+  });
+
+  it('preserves local enrollment but suppresses terminal writeback when KILL arrives after application', async () => {
+    const repo = join(home, 'stopped-after-application');
+    const writes: string[] = [];
+    let stoppedWhileHeld = false;
+    enrollmentHook.afterApply = () => {
+      expect(isEnrolled(repo)).toBe(true);
+      const stop = setKill(true, { waitMs: 0 });
+      stoppedWhileHeld = !stop.ok && !stop.quiesced;
+    };
+    const fetchMock = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+      const endpoint = new URL(String(input));
+      if (endpoint.pathname.endsWith('/traces')) return Promise.resolve(Response.json({}));
+      if (init?.method === 'GET') {
+        return Promise.resolve(Response.json({ commands: endpoint.searchParams.get('status') === 'pending'
+          ? [{ id: 'stop-after-apply', kind: 'enroll_repo', target: null, payload: { path: repo }, status: 'pending' }]
+          : [] }));
+      }
+      writes.push(JSON.parse(String(init?.body)).status);
+      return Promise.resolve(Response.json({}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await runPulseSync(cfg, { shipDeps: false });
+    expect(stoppedWhileHeld).toBe(true);
+    expect(result.commands).toEqual([expect.objectContaining({ id: 'stop-after-apply', outcome: 'done' })]);
+    expect(isEnrolled(repo)).toBe(true);
+    expect(writes).toEqual(['claimed']);
+    expect(setKill(true, { waitMs: 500 })).toMatchObject({ ok: true, quiesced: true });
   });
 
   it('aborts the active HTTP effect and starts no later sync write', async () => {

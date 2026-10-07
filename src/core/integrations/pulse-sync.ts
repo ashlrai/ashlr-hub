@@ -673,61 +673,76 @@ async function pollAndApplyCommandsWithAuthority(
 
     for (const cmd of poll.commands.slice(0, MAX_COMMANDS_PER_TICK)) {
       if (aborted(signal) || globalKillSwitchOn()) break;
-      // 1. Atomically claim — skip if another machine got it first.
-      const claimed = await underPulseAuthority(signal, (authority, effectiveSignal) =>
-        claimFleetCommand(
-          xcfg,
-          cmd.id,
-          claimant,
-          requestOpts(authority.fence, effectiveSignal),
-        ));
-      if (!claimed.granted || !claimed.value) break;
-      const claim = claimed.value;
-      if (!claim.ok) {
-        out.push({ id: cmd.id, kind: cmd.kind, outcome: 'skipped', detail: claim.detail });
-        continue;
-      }
+      const synchronizeCommand = async (): Promise<boolean> => {
+        // 1. Atomically claim — skip if another machine got it first.
+        const claimed = await underPulseAuthority(signal, (authority, effectiveSignal) =>
+          claimFleetCommand(
+            xcfg,
+            cmd.id,
+            claimant,
+            requestOpts(authority.fence, effectiveSignal),
+          ));
+        if (!claimed.granted || !claimed.value) return false;
+        const claim = claimed.value;
+        if (!claim.ok) {
+          out.push({ id: cmd.id, kind: cmd.kind, outcome: 'skipped', detail: claim.detail });
+          return true;
+        }
 
-      // 2. Execute locally (never throws).
-      const execution = await applyClaimedCommand(cfg, cmd, signal);
-      const applied = execution.result;
-      out.push(applied);
-      if (execution.retryable) continue;
+        // 2. Execute locally (never throws).
+        const execution = await applyClaimedCommand(cfg, cmd, signal);
+        const applied = execution.result;
+        out.push(applied);
+        if (execution.retryable) return true;
 
-      // 3. Write the outcome back (metadata-only result / error).
-      try {
-        const written = await underPulseAuthority(signal, (authority, effectiveSignal) =>
-          applied.outcome === 'done'
-            ? patchFleetCommand(
-                xcfg,
-                cmd.id,
-                { status: 'done', claimedBy: claimant, result: { detail: applied.detail } },
-                requestOpts(authority.fence, effectiveSignal),
-              )
-            : patchFleetCommand(
-                xcfg,
-                cmd.id,
-                { status: 'failed', claimedBy: claimant, error: applied.detail },
-                requestOpts(authority.fence, effectiveSignal),
-              ));
-        if (!written.granted) break;
-      } catch {
-        // Writeback best-effort — the local action already happened; the cloud
-        // can re-derive state from the next tick's spans.
-      }
+        // 3. Write the outcome back (metadata-only result / error).
+        try {
+          const written = await underPulseAuthority(signal, (authority, effectiveSignal) =>
+            applied.outcome === 'done'
+              ? patchFleetCommand(
+                  xcfg,
+                  cmd.id,
+                  { status: 'done', claimedBy: claimant, result: { detail: applied.detail } },
+                  requestOpts(authority.fence, effectiveSignal),
+                )
+              : patchFleetCommand(
+                  xcfg,
+                  cmd.id,
+                  { status: 'failed', claimedBy: claimant, error: applied.detail },
+                  requestOpts(authority.fence, effectiveSignal),
+                ));
+          if (!written.granted) return false;
+        } catch {
+          // Writeback best-effort — the local action already happened; the cloud
+          // can re-derive state from the next tick's spans.
+        }
 
-      // 4. Audit every applied command (metadata-only summary).
-      if (aborted(signal) || globalKillSwitchOn()) break;
-      try {
-        audit({
-          action: 'pulse:command',
-          repo: null,
-          sandboxId: null,
-          summary: `fleet command ${cmd.kind} ${applied.outcome}: ${applied.detail}`,
-          result: applied.outcome === 'done' ? 'ok' : 'error',
-        });
-      } catch {
-        /* audit best-effort */
+        // 4. Audit every applied command (metadata-only summary).
+        if (aborted(signal) || globalKillSwitchOn()) return false;
+        try {
+          audit({
+            action: 'pulse:command',
+            repo: null,
+            sandboxId: null,
+            summary: `fleet command ${cmd.kind} ${applied.outcome}: ${applied.detail}`,
+            result: applied.outcome === 'done' ? 'ok' : 'error',
+          });
+        } catch {
+          /* audit best-effort */
+        }
+        return true;
+      };
+
+      // These commands only plan a goal or update enrollment. Borrow one exact
+      // authority for their claim/application/writeback instead of persisting
+      // three consecutive fences. Nested phase gates still recheck ownership,
+      // KILL and cancellation after every await; enrollment keeps its durable
+      // transaction. Proposal commands retain proposal-lock -> outward order.
+      if (cmd.kind === 'assign_goal' || cmd.kind === 'enroll_repo') {
+        const synchronized = await underPulseAuthority(signal, synchronizeCommand);
+        if (!synchronized.granted || !synchronized.value) break;
+      } else if (!await synchronizeCommand()) {
+        break;
       }
     }
   } catch {
