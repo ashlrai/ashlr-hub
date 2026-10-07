@@ -51,6 +51,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Reuse incoming chat event validation to reduce startup code. Run independent
   native broker CI checks alongside Mac suites, retaining all required jobs and
   complete qualification before artifact admission.
+- Use tiny evaluator files in inspection-only POSIX test fixtures, preserving
+  real Node execution tests, fresh evidence checks and Windows behavior.
+- Expose release-article commands in help and shell completions. Check existing
+  CLI discovery and release metadata contracts in the fast release preflight.
 
 ## [3.24.4] — 2026-10-07
 
