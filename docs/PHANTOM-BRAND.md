@@ -2,7 +2,7 @@
 
 Phantom is the engineering agent workbench, formerly Ashlr Verse. AshlrAI, Inc. is the company; [ashlr.ai](https://ashlr.ai) remains the company site.
 
-This presentation release preserves `@ashlr/hub`, the `ashlr` command, `ashlr verse`, the `ashlr-hub` repository, `/verse/` and `/verse/m/` routes, existing saved data and signed authority. The existing `phantom` command belongs to Phantom Secrets and is not replaced by the workbench.
+Published 3.25.1 adds the `phm` command and preserves `@ashlr/hub`, the compatible `ashlr` command, `ashlr verse`, the `ashlr-hub` repository, `/verse/` and `/verse/m/` routes, existing saved data and signed authority. The existing `phantom` command belongs to Phantom Secrets and is not replaced by the workbench.
 
 The planned GitHub destination is `ashlrai/phantom`, after release and authority,
 mirror and build-provenance bindings are qualified. A new npm identity,
@@ -10,7 +10,7 @@ mirror and build-provenance bindings are qualified. A new npm identity,
 Existing package imports, CLI commands and saved data must remain compatible
 through either migration. Availability checks do not reserve either name.
 
-The native window, menus and About identify Phantom. Published 3.25.0 retains `Ashlr.app`; upcoming source builds `Phantom.app`. The guarded installer requires prior Stop/drain and a closed, identity-verified app, then coordinates the app/current CLI links with a full rollback archive. It refuses conflicting names or uncertain work. The bundle identifier, signing identity, custody keys, grants, data and launch-agent names are retained. This does not activate automatic updates.
+The native window, menus and About identify Phantom. Published 3.25.1 uses `Phantom.app` and `Phantom_3.25.1_aarch64.dmg`; the historical 3.25.0 release retains `Ashlr.app`. The guarded installer requires prior Stop/drain and a closed, identity-verified app, then coordinates the app/current CLI links with a full rollback archive. It refuses conflicting names or uncertain work. The bundle identifier, signing identity, custody keys, grants, data and launch-agent names are retained. This does not activate automatic updates. Signed idle updates remain a 3.25.2 source candidate, with no activated public feed or notarization claim.
 
 ## Mark provenance
 

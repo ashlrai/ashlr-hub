@@ -18,15 +18,15 @@
 
 ## Install
 
-Phantom 3.25.0:
+Phantom 3.25.1:
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.0/ashlr-hub-3.25.0.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
-ashlr verse                 # start the console at http://127.0.0.1:7777/verse/
+npm install -g @ashlr/hub@3.25.1   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
+phm verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 On an Apple silicon Mac, download the
-[v3.25.0 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.0/Ashlr_3.25.0_aarch64.dmg).
+[v3.25.1 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.1/Phantom_3.25.1_aarch64.dmg).
 It is locally signed, not Apple notarized; macOS may require **Open Anyway** on
 first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
@@ -60,14 +60,14 @@ your enrolled repositories only inside a standing grant you sign with Touch ID:
 it starts in shadow, recording what it would merge, and climbs a rollout ladder
 from there.
 
-It ships as a macOS desktop app and as the `ashlr` CLI (`@ashlr/hub`), which
+It ships as a macOS desktop app and as the `phm` CLI (`@ashlr/hub`, also available as `ashlr`), which
 serves the same console in a browser on macOS, Linux and Windows. Under the
 console is the Hub kernel: the CLI, the Universe experiment runtime and
 account-aware resource pools.
 
 Phantom was formerly Ashlr Verse. Names stay compatible. The repository is `ashlr-hub`, the package is
-`@ashlr/hub`, the command is `ashlr`, and experiments remain `ashlr universe`
-with the `@ashlr/hub/universe` SDK. Existing manifests, schemas and stores need no naming migration. Published 3.25.0 retains `Ashlr.app`; upcoming source uses the guarded `Phantom.app` migration; see [branding and compatibility](https://github.com/ashlrai/ashlr-hub/blob/master/docs/PHANTOM-BRAND.md).
+`@ashlr/hub`, and `phm` and `ashlr` share the same entrypoint. Experiments remain compatible with `ashlr universe`
+and the `@ashlr/hub/universe` SDK. Existing manifests, schemas and stores need no naming migration. Published 3.25.1 uses `Phantom.app`; 3.25.0 retains its historical `Ashlr.app` filename. See [branding and compatibility](https://github.com/ashlrai/ashlr-hub/blob/master/docs/PHANTOM-BRAND.md).
 
 The user guide is [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
 See [Automatic work](docs/AUTOMATIC-OUTCOMES.md) for chat routing, editable outcomes and recovery.
@@ -213,7 +213,7 @@ separate Node.js install to run.
 
 ### Install
 
-Use the [v3.25.0 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.0)
+Use the [v3.25.1 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.1)
 for the versioned arm64 DMG. It is locally signed, not Apple Developer ID notarized,
 so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
@@ -232,8 +232,8 @@ ashlr authority stop --json
 npm run ship:local -- --native
 ```
 
-The `ditto` step seeds a first install only; `ship:local --native` updates an
-existing app with the prebuilt native binary and local signature. It does not
+The guarded `ship:local --native` path handles a first install or an existing
+verified app with the prebuilt native binary and local signature. It does not
 compile Rust. Verify that it copied the new binary and that the installed app
 reports this release. A bare `cargo tauri build` can wrap stale web assets.
 
@@ -301,19 +301,21 @@ check identity and quota, are in
 The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
-The next source candidate adds `phm` as the primary CLI command. Both `phm` and
+Published 3.25.1 provides `phm` as the primary CLI command. Both `phm` and
 `ashlr` use the same workbench entrypoint; existing `ashlr` scripts keep working.
-The published 3.25.0 archive below uses `ashlr`. When building this source,
-`./install.sh` installs both aliases and refuses unrelated files or links.
-The separate Phantom Secrets command remains `phantom`.
+When building from source, `./install.sh` installs both aliases and refuses
+unrelated files or links. The separate Phantom Secrets command remains `phantom`.
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.0/ashlr-hub-3.25.0.tgz
-ashlr --version
-ashlr verse                 # start the server and open http://127.0.0.1:7777/verse/
+npm install -g @ashlr/hub@3.25.1
+phm --version
+phm verse                 # start the server and open http://127.0.0.1:7777/verse/
 ```
 
-`ashlr verse` prints two tokens. Paste the **read token** into the page once. It
+The 3.25.1 package also preserves the public SDK entrypoints `@ashlr/hub`,
+`@ashlr/hub/core`, `@ashlr/hub/types`, `@ashlr/hub/plugin` and `@ashlr/hub/universe`.
+
+`phm verse` prints two tokens. Paste the **read token** into the page once. It
 asks for the **mutation token** the first time you start a chat or change
 something. The server listens on `127.0.0.1` only, and neither token is written
 to disk. `ashlr verse --no-open --json` prints one machine-readable line instead
