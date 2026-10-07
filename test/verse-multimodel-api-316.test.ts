@@ -17,9 +17,10 @@ import type { AshlrConfig } from '../src/core/types.js';
 import type { VerseApiContext } from '../src/core/verse/verse-api.js';
 import type { VerseEvent, VerseSeat, VerseSession } from '../src/core/verse/types.js';
 import type { VerseSeatLaunch } from '../src/core/verse/session-engine.js';
-import { createMultimodelApi, foldRoiByEngine, listPriceOf, type MultimodelApiDeps } from '../src/core/verse/multimodel-api.js';
+import { createMultimodelApi, foldRoiByEngine, listPriceOf, localBadges, type MultimodelApiDeps } from '../src/core/verse/multimodel-api.js';
 import { createMultimodelStore, type MultimodelStore } from '../src/core/verse/multimodel/store.js';
-import { isLoopbackUrl, lastThroughput, resetThroughputForTest, warmLocalModel } from '../src/core/verse/multimodel/local-warm.js';
+import { isLoopbackUrl, lastThroughput, recordThroughput, resetThroughputForTest, warmLocalModel } from '../src/core/verse/multimodel/local-warm.js';
+import { localSpeedBinding, type LocalSpeedBinding } from '../src/core/verse/local-throughput.js';
 import { KNOWN_MODELS } from '../src/core/run/model-catalog.js';
 import type { ChatMeter, LocalWarmResult, MultimodelContext } from '../src/core/verse/multimodel/types.js';
 
@@ -72,6 +73,11 @@ const deps: MultimodelApiDeps = {
   store: () => store,
   listSessions: async () => sessions,
   getEvents: async (id) => events[id] ?? [],
+  getLocalBinding: async (id) => {
+    const session = sessions.find(s => s.id === id);
+    const launch = session ? LAUNCHES.get(session.seatId) : null;
+    return session && launch ? localSpeedBinding(launch.seat, session.model, launch) : null;
+  },
   discovery: async () => ({ seats: SEATS, launches: LAUNCHES }),
   roi: () => ({ claude: { dispatches: 12, shipRate: 0.5, avgLatencyMs: 1000 } }),
   localOnlyReason: async (_cfg, projectPath) => (projectPath === '/private-repo' ? 'private-repo is listed in foundry.wiki.localOnlyRepos.' : localOnly),
@@ -136,8 +142,8 @@ describe('routes', () => {
   it('GET /context: learned table, per-engine ROI, local-only, and local badges (private only on loopback)', async () => {
     await post('/api/verse/multimodel/outcome', { seatId: 'claude', kind: 'review', signal: 'up' });
     events['q'] = [
-      { seq: 1, at: '', type: 'usage', turnId: 't1', usage: { inputTokens: 10, outputTokens: 400, cacheReadTokens: 0, cacheCreationTokens: 0, contextTokens: 0, contextWindow: null } },
-      { seq: 2, at: '', type: 'turn-done', turnId: 't1', ok: true, durationMs: 10_000, nativeSessionId: null },
+      { seq: 1, at: new Date(NOW - 10_000).toISOString(), type: 'usage', turnId: 't1', usage: { inputTokens: 10, outputTokens: 400, cacheReadTokens: 0, cacheCreationTokens: 0, contextTokens: 0, contextWindow: 65_536 } },
+      { seq: 2, at: new Date(NOW).toISOString(), type: 'turn-done', turnId: 't1', ok: true, durationMs: 10_000, nativeSessionId: null },
     ] as unknown as VerseEvent[];
     sessions.push(session('q', { engine: 'local', seatId: 'local:qwen3.6:27b', model: 'qwen3.6:27b', turnCount: 1 }));
     const res = await get('/api/verse/multimodel/context?projectPath=%2Fprivate-repo');
@@ -282,7 +288,7 @@ describe('warmLocalModel', () => {
   it('Ollama lane: keep_alive, exact generation speed and the cold-load time', async () => {
     let body: Record<string, unknown> = {};
     let url = '';
-    const res = await warmLocalModel({ seatId: 'local:q', model: 'qwen3.6:27b', ollamaBaseUrl: 'http://127.0.0.1:11434/' }, {
+    const res = await warmLocalModel({ seatId: 'local:q', model: 'qwen3.6:27b', contextWindow: 65_536, ollamaBaseUrl: 'http://127.0.0.1:11434/' }, {
       fetchImpl: (async (u: string, init: RequestInit) => {
         url = u;
         body = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -292,7 +298,7 @@ describe('warmLocalModel', () => {
     expect(url).toBe('http://127.0.0.1:11434/api/generate');
     expect(body).toMatchObject({ model: 'qwen3.6:27b', stream: false, keep_alive: '30m' });
     expect(res).toMatchObject({ ok: true, tokPerSec: 48, loadMs: 7250, error: null });
-    expect(lastThroughput('qwen3.6:27b')).toMatchObject({ tokPerSec: 48, source: 'warm' });
+    expect(lastThroughput({ seatId: 'local:q', model: 'qwen3.6:27b', endpoint: 'http://127.0.0.1:11434', contextWindow: 65_536 })).toMatchObject({ tokPerSec: 48, source: 'warm' });
   });
 
   it('llama-server lane goes through its loopback proxy and is measured end to end', async () => {
@@ -313,4 +319,59 @@ describe('warmLocalModel', () => {
     const refused = await warmLocalModel({ seatId: 'l', model: 'm', ollamaBaseUrl: 'http://127.0.0.1:1' }, { fetchImpl: (async () => new Response('no', { status: 404 })) as typeof fetch });
     expect(refused).toMatchObject({ ok: false, error: 'The runtime answered 404.' });
   });
+});
+
+
+describe('local speed attribution and measurement time', () => {
+  const current = () => localSpeedBinding(SEATS[1]!, 'qwen3.6:27b', LAUNCHES.get(SEATS[1]!.id)!)!;
+  const turn = (at: number, outputTokens = 400): VerseEvent[] => [
+    { seq: 1, at: new Date(at - 10_000).toISOString(), type: 'usage', turnId: 't', usage: { inputTokens: 0, outputTokens, cacheReadTokens: 0, cacheCreationTokens: 0, contextTokens: 0, contextWindow: 65_536 } },
+    { seq: 2, at: new Date(at).toISOString(), type: 'turn-done', turnId: 't', ok: true, nativeSessionId: null, durationMs: 10_000 },
+  ];
+  it('refreshes an older cached measurement from a newer valid completed turn with its original time', async () => {
+    recordThroughput(current(), { tokPerSec: 90.12345, source: 'warm', scope: 'warm-decode', at: new Date(NOW - 60_000).toISOString() });
+    sessions = [session('q', { engine: 'local', seatId: current().seatId, model: current().model })];
+    events.q = turn(NOW - 20_000, 412);
+    const result = await localBadges(deps, { seats: SEATS, launches: LAUNCHES });
+    expect(result[0]).toMatchObject({ tokPerSec: 41.2, tokPerSecSource: 'turn', tokPerSecScope: 'turn-end-to-end', tokPerSecObservedAt: new Date(NOW - 20_000).toISOString(), state: 'unknown' });
+    events.q = turn(NOW - 5_000, 573);
+    expect((await localBadges(deps, { seats: SEATS, launches: LAUNCHES }))[0]).toMatchObject({ tokPerSec: 57.3, tokPerSecObservedAt: new Date(NOW - 5_000).toISOString() });
+  });
+  it('keeps a newer warm-up reading when the only completed turn is older', async () => {
+    const reading = { tokPerSec: 41.234567, source: 'warm' as const, scope: 'warm-decode' as const, at: new Date(NOW).toISOString() };
+    recordThroughput(current(), reading);
+    sessions = [session('q', { engine: 'local', seatId: current().seatId, model: current().model })]; events.q = turn(NOW - 10_000);
+    expect((await localBadges(deps, { seats: SEATS, launches: LAUNCHES }))[0]).toMatchObject({ tokPerSec: reading.tokPerSec, tokPerSecObservedAt: reading.at, tokPerSecScope: reading.scope });
+  });
+  it('does not share a model measurement across endpoints, seats or configured contexts', () => {
+    const identity = current(); recordThroughput(identity, { tokPerSec: 40, source: 'warm', scope: 'warm-decode', at: new Date(NOW).toISOString() });
+    for (const change of [{ endpoint: 'http://127.0.0.1:8099' }, { seatId: 'local:other' }, { contextWindow: 32_768 }]) {
+      expect(lastThroughput({ ...identity, ...change })).toBeNull();
+    }
+    recordThroughput(identity, { tokPerSec: 10, source: 'turn', scope: 'turn-end-to-end', at: new Date(NOW - 1).toISOString() });
+    expect(lastThroughput(identity)?.tokPerSec).toBe(40);
+  });
+  it.each(['missing', 'changed-endpoint', 'changed-context'])('keeps an unproved saved launch %s unknown instead of using current discovery as proof', async reason => {
+    sessions = [session('q', { engine: 'local', seatId: current().seatId, model: current().model })]; events.q = turn(NOW);
+    const binding: LocalSpeedBinding | null = reason === 'missing' ? null : { ...current(), ...(reason === 'changed-endpoint' ? { endpoint: 'http://127.0.0.1:8099' } : { contextWindow: 32_768 }) };
+    const result = await localBadges({ ...deps, getLocalBinding: async () => binding }, { seats: SEATS, launches: LAUNCHES });
+    expect(result[0]).toMatchObject({ tokPerSec: null, tokPerSecObservedAt: null, state: 'unknown' });
+  });
+  it('retains unknown when per-turn context is absent, and reads at most three matching sessions', async () => {
+    sessions = Array.from({ length: 5 }, (_, i) => session(`q${i}`, { engine: 'local', seatId: current().seatId, model: current().model, updatedAt: new Date(NOW - i).toISOString() }));
+    const seen: string[] = [];
+    const result = await localBadges({ ...deps, getEvents: async id => { seen.push(id); return turn(NOW).map(event => event.type === 'usage' ? { ...event, usage: { ...event.usage, contextWindow: null } } : event); } }, { seats: SEATS, launches: LAUNCHES });
+    expect(seen.sort()).toEqual(['q0', 'q1', 'q2']); expect(result[0]?.tokPerSec).toBeNull();
+  });
+});
+
+
+it('end-to-end warm speed includes body generation instead of stopping at response headers', async () => {
+  let clock = 100;
+  const response = new Response('{}', { status: 200 });
+  Object.defineProperty(response, 'json', { value: async () => { clock = 1500; return { usage: { output_tokens: 10 } }; } });
+  const result = await warmLocalModel({ seatId: 'local:test', model: 'test', contextWindow: 65_536,
+    ollamaBaseUrl: 'http://127.0.0.1:11434', anthropicBaseUrl: 'http://127.0.0.1:8099' },
+  { now: () => clock, fetchImpl: (async () => response) as typeof fetch });
+  expect(result).toMatchObject({ ms: 1400, tokPerSec: 10 / 1.4, tokPerSecScope: 'warm-end-to-end' });
 });

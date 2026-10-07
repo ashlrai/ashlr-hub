@@ -38,6 +38,7 @@ import { formatTokens } from '../verse-readouts.js';
 import { DEFAULT_FLOW_API, escalate, routeMessage, type FlowTarget } from './multimodel-flows.js';
 import { chatMeterQuery, invalidateChatMeter, labelPromptRemote, recordOutcome, warmLocalSeat } from './multimodel-queries.js';
 import { AUTO_PREFS, loadAutoPref, saveAutoPref, useAutoSeat, type AutoPref } from './useAutoSeat.js';
+import { localSpeedReadout, localSpeedCompactReadout, localWarmReadout } from './local-speed-readout.js';
 import styles from './multimodel.module.css';
 
 const ManagerStatus = lazy(async () => ({ default: (await import('./ManagerStatus.js')).ManagerStatus }));
@@ -242,7 +243,7 @@ export function MultiModelBar({ sessionId, seats, text, running, registerInterce
     try {
       const r = await warmLocalSeat(seatId);
       setNotice(r.ok
-        ? { text: `Warm and resident${r.tokPerSec ? ` — ${r.tokPerSec} tok/s` : ''}${r.loadMs ? ` (loaded in ${(r.loadMs / 1000).toFixed(1)} s)` : ''}.`, error: false }
+        ? { text: localWarmReadout(r), error: false }
         : { text: r.error ?? 'Could not warm the model.', error: true });
     } catch (err) {
       setNotice({ text: err instanceof Error ? err.message : 'Could not warm the model.', error: true });
@@ -302,10 +303,10 @@ export function MultiModelBar({ sessionId, seats, text, running, registerInterce
       {badge ? (
         <span className={`${styles.group}`}>
           <span className={`${styles.chip} ${badge.private ? styles.chipPrivate : ''}`}
-            title={badge.tokPerSecSource === 'turn' ? 'Speed measured end to end on the last local turn (a floor)' : 'Speed measured by the warm-up (generation only)'}>
+            title={localSpeedReadout(badge, context?.sampledAt ?? '')}>
             {badge.private ? 'On this Mac · private' : 'Local runtime'}
             {badge.contextWindow ? ` · ${formatTokens(badge.contextWindow)} ctx` : ''}
-            {badge.tokPerSec ? ` · ${badge.tokPerSec} tok/s` : ''}
+            {badge.tokPerSec ? ` · ${localSpeedCompactReadout(badge, context?.sampledAt ?? '')}` : ''}
           </span>
           <button type="button" className={styles.chip} disabled={warming} onClick={() => { void warm(badge.seatId); }}
             title="Load the model now and keep it resident, so the next turn starts at once">

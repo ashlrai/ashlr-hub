@@ -82,7 +82,7 @@ describe('MultiModelBar', () => {
     stubFetch();
     renderBar('what does this regex match?');
     expect(await screen.findByText('Qwen3 Coder (local) — quick explanation — free and private on this Mac.')).toBeInTheDocument();
-    expect(screen.getByText(/On this Mac · private · 66k ctx · 42.5 tok\/s/)).toBeInTheDocument();
+    expect(screen.getByText(/On this Mac · private · 66k ctx · 43 tok\/s · age unavailable/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Warm up' })).toBeInTheDocument();
     // Override: every other eligible seat is offered, with its note.
     const select = screen.getByRole('combobox', { name: 'Send this message to' });
@@ -287,4 +287,28 @@ describe('explicit Manager mode', () => {
     await act(async () => { expect(await intercept('Preserve this draft')).toBe('held'); });
     expect(await screen.findByRole('button', { name: 'Retry saved message' })).toBeInTheDocument();
   });
+});
+
+
+describe('local speed evidence readout', () => {
+  it('uses two significant figures and original age/scope without displaying runtime readiness', async () => {
+    const { localSpeedReadout, localSpeedCompactReadout, localWarmReadout } = await import('./local-speed-readout.js');
+    const badge = { ...CONTEXT.local[0]!, tokPerSec: 41.234567, tokPerSecObservedAt: '2026-10-07T00:00:00Z', tokPerSecScope: 'turn-end-to-end' as const };
+    expect(localSpeedCompactReadout(badge, '2026-10-07T02:00:00Z')).toBe('41 tok/s · 2 h ago');
+    expect(localSpeedReadout(badge, '2026-10-07T02:00:00Z')).toBe('41 tok/s · last turn, end to end · 2 h ago');
+    expect(localSpeedReadout({ ...badge, tokPerSecObservedAt: null }, '2026-10-07T02:00:00Z')).toContain('age unavailable');
+    expect(localSpeedReadout({ ...badge, tokPerSec: Infinity }, '2026-10-07T02:00:00Z')).toBe('speed not measured yet');
+    expect(localSpeedReadout({ ...badge, tokPerSecScope: 'warm-decode' }, '2026-10-07T00:00:20Z')).toContain('warm-up decode · just measured');
+    expect(localSpeedReadout({ ...badge, tokPerSecScope: 'warm-end-to-end' }, '2026-10-07T00:00:20Z')).toContain('warm-up, end to end');
+    expect(localWarmReadout({ seatId: 'local', ok: true, ms: 2000, loadMs: 1234.567, tokPerSec: 123.456, tokPerSecScope: 'warm-end-to-end', error: null })).toBe('Warm — 120 tok/s (end to end), loaded in 1.2 s.');
+  });
+});
+
+
+it('renders the new-chat local badge with the measured age and scope', async () => {
+  const { LocalSeatBadge } = await import('./LocalSeatBadge.js');
+  stubFetch({ ...CONTEXT, sampledAt: '2026-10-07T02:00:00Z', local: [{ ...CONTEXT.local[0]!, tokPerSec: 41.234567,
+    tokPerSecObservedAt: '2026-10-07T00:00:00Z', tokPerSecScope: 'warm-end-to-end' }] });
+  render(<LocalSeatBadge seatId={LOCAL_SEAT.id} projectPath="/repo" />);
+  expect(await screen.findByText('41 tok/s · warm-up, end to end · 2 h ago')).toBeInTheDocument();
 });

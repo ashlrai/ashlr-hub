@@ -11,6 +11,7 @@ import { useState } from 'react';
 import { useQuery } from '../../../data/hooks.js';
 import { formatTokens } from '../verse-readouts.js';
 import { multimodelContextQuery, warmLocalSeat } from './multimodel-queries.js';
+import { localSpeedReadout, localWarmReadout } from './local-speed-readout.js';
 import styles from './multimodel.module.css';
 
 export function LocalSeatBadge({ seatId, projectPath }: { seatId: string | null; projectPath: string | null }) {
@@ -24,7 +25,7 @@ export function LocalSeatBadge({ seatId, projectPath }: { seatId: string | null;
     setState({ busy: true, text: null, error: false });
     try {
       const r = await warmLocalSeat(id);
-      setState({ busy: false, error: !r.ok, text: r.ok ? `Warm${r.tokPerSec ? ` — ${r.tokPerSec} tok/s` : ''}${r.loadMs ? `, loaded in ${(r.loadMs / 1000).toFixed(1)} s` : ''}.` : r.error ?? 'Could not warm it.' });
+      setState({ busy: false, error: !r.ok, text: r.ok ? localWarmReadout(r) : r.error ?? 'Could not warm it.' });
     } catch (err) {
       setState({ busy: false, error: true, text: err instanceof Error ? err.message : 'Could not warm it.' });
     }
@@ -44,7 +45,7 @@ export function LocalSeatBadge({ seatId, projectPath }: { seatId: string | null;
           </span>
           {badge.contextWindow ? <span className={styles.meter}>{formatTokens(badge.contextWindow)} context</span> : null}
           <span className={styles.meter}>
-            {badge.tokPerSec ? `${badge.tokPerSec} tok/s${badge.tokPerSecSource === 'turn' ? ' (end to end)' : ''}` : 'speed not measured yet'}
+            {localSpeedReadout(badge, context?.sampledAt ?? '')}
           </span>
           <button type="button" className={styles.chip} disabled={state.busy} onClick={() => { void warm(badge.seatId); }}>
             {state.busy ? 'Warming…' : 'Warm up'}

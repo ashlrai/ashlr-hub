@@ -818,6 +818,7 @@
     "src/core/verse/health-api.ts",
     "src/core/verse/health-types.ts",
     "src/core/verse/local-models.ts",
+    "src/core/verse/local-throughput.ts",
     "src/core/verse/manager-conversation.ts",
     "src/core/verse/manager-scope.ts",
     "src/core/verse/manager-session.ts",

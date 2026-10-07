@@ -1,3 +1,4 @@
+import { localSpeedBinding, type LocalSpeedBinding } from './local-throughput.js';
 /**
  * Verse session engine — owns session lifecycle, the durable store, and the
  * one-process-per-turn spawn (detached process group, SIGINT → grace → SIGKILL).
@@ -298,6 +299,8 @@ export interface VerseEngineHandle {
   listSessions(): VerseSession[];
   getSession(id: string): VerseSession | null;
   getEvents(id: string, fromSeq?: number): VerseEvent[];
+  /** Whitelisted saved local configuration only; never returns a private launch record. */
+  getLocalSpeedBinding?(id: string): LocalSpeedBinding | null;
   /**
    * `opts` carries what the API resolved server-side (memory snapshot, handoff
    * provenance). Omitted by every pre-3.9 caller, whose records then carry no
@@ -2685,6 +2688,14 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       if (!session) return null;
       materializeLegacyMode(session);
       return cloneSession(session);
+    },
+
+    getLocalSpeedBinding(id: string): LocalSpeedBinding | null {
+      const session = store.get(id);
+      if (!session || session.engine !== 'local') return null;
+      const launch = store.loadLaunch(id);
+      if (!isSeatLaunch(launch) || launch.seat.id !== session.seatId) return null;
+      return localSpeedBinding(launch.seat, session.model, launch);
     },
 
     getEvents(id: string, fromSeq = 0): VerseEvent[] {

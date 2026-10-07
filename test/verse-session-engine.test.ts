@@ -1875,3 +1875,23 @@ describe('V3.10 reliability — real processes', () => {
     expect(down.ms).toBeLessThan(100);
   });
 });
+
+
+describe('saved local speed configuration binding', () => {
+  it('returns only exact whitelisted saved metadata and remains unknown for missing or ambiguous launch identity', () => {
+    const local = seat('local', 'local:speed', ['qwen:test']);
+    const launch = { seat: local, launcher: null, ollamaBaseUrl: 'http://127.0.0.1:11434', anthropicBaseUrl: 'http://127.0.0.1:8099/v1' };
+    const created = engine.createSession({ projectPath: project, seatId: local.id }, launch);
+    expect(engine.getLocalSpeedBinding?.(created.id)).toEqual({ seatId: local.id, model: 'qwen:test', endpoint: 'http://127.0.0.1:8099', contextWindow: 32_000 });
+    const store = createVerseSessionStore(root);
+    store.saveLaunch(created.id, { ...launch, seat: { ...local, id: 'local:changed' } });
+    expect(engine.getLocalSpeedBinding?.(created.id)).toBeNull();
+    store.saveLaunch(created.id, { ...launch, seat: { ...local, models: [...local.models, { ...local.models[0]!, id: 'other' }] } });
+    expect(engine.getLocalSpeedBinding?.(created.id)).toBeNull();
+    store.saveLaunch(created.id, { ...launch, seat: { ...local, models: [{ ...local.models[0]!, contextWindow: null }] } });
+    expect(engine.getLocalSpeedBinding?.(created.id)).toBeNull();
+    store.saveLaunch(created.id, { private: 'not a launch' });
+    expect(engine.getLocalSpeedBinding?.(created.id)).toBeNull();
+    expect(engine.getLocalSpeedBinding?.('missing')).toBeNull();
+  });
+});
