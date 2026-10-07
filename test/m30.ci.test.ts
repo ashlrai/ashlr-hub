@@ -164,9 +164,12 @@ describe('M30 CI workflow', () => {
     expect(job).toContain('if-no-files-found: error');
   });
 
-  it('keeps native broker coverage behind the complete Mac lanes without giving CI signing authority', () => {
+  it('runs independent native broker coverage without giving CI signing authority', () => {
     const native = workflowJob('native-macos-broker-foundation');
-    expect(native).toContain('needs: [mac-general, mac-isolated]');
+    expect(native).not.toMatch(/^ {4}(?:needs|if|continue-on-error):/m);
+    expect(native).not.toMatch(/download-artifact|\$\{\{\s*needs\./);
+    expect(native).toContain('ref: ${{ github.event.pull_request.head.sha || github.sha }}');
+    expect(native).toContain('run: node .github/scripts/ci-source-binding.mjs');
     for (const step of ['Check native broker formatting', 'Check native broker library', 'Lint native broker library', 'Test native broker library']) {
       expect(native).toContain(`- name: ${step}`);
     }
