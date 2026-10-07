@@ -10,6 +10,7 @@
  * fit a phone, and a horizontal scroll hides the action).
  */
 import { formatMetric } from '../../../components/charts/format-metric.js';
+import { volumeLimitLabel } from '../../../../core/authority/types.js';
 import type { FleetLiveSnapshotV1, FleetMirrorSummary, FleetRepoRow, RepoHold } from '../../../../core/fleet/fleet-types.js';
 import { Sparkline } from '../../../components/charts/Sparkline.js';
 import { Button } from '../../../components/primitives/Button.js';
@@ -133,7 +134,7 @@ export function mirrorsText(mirrors: FleetMirrorSummary | null | undefined): str
   return `Fleet mirrors: ${mirrors.count} working ${mirrors.count === 1 ? 'copy' : 'copies'}${shown ? ` (${shown}${more})` : ''} — the fleet's own clones of the repos above.`;
 }
 
-const today = (row: FleetRepoRow) => (row.mergesToday === null ? '—' : `${row.mergesToday}${row.maxMergesPerDay !== null ? ` / ${row.maxMergesPerDay}` : ''}`);
+const today = (row: FleetRepoRow) => (row.mergesToday === null ? '—' : `${formatMetric(row.mergesToday)}${row.maxMergesPerDay !== null ? ` / ${volumeLimitLabel(row.maxMergesPerDay)}` : ''}`);
 
 export function RepoTable({ read, actions, now, compact }: { read: OptionalRead<FleetLiveSnapshotV1> | undefined; actions: SurfaceActions; now: number; compact: boolean }) {
   const live = read?.value ?? null;

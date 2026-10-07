@@ -13,7 +13,7 @@
  * Framework-free; tested directly.
  */
 import { formatMetric } from '../../../components/charts/format-metric.js';
-import type { AuthorityStatusV1 } from '../../../../core/authority/types.js';
+import { volumeLimitLabel, type AuthorityStatusV1 } from '../../../../core/authority/types.js';
 import type { CloudTaskV1 } from '../../../../core/cloud/types.js';
 import type {
   AutonomyLadderMoveV1,
@@ -155,11 +155,23 @@ export interface LadderView {
   nextLine: string | null;
 }
 
+function changeVolumeLine(files: number, lines: number): string {
+  if (files !== Number.MAX_SAFE_INTEGER && lines !== Number.MAX_SAFE_INTEGER) {
+    return `≤ ${volumeLimitLabel(files)} files / ${volumeLimitLabel(lines)} lines`;
+  }
+  const fileLimit = files === Number.MAX_SAFE_INTEGER ? 'No file cap' : `≤ ${volumeLimitLabel(files)} files`;
+  const lineLimit = lines === Number.MAX_SAFE_INTEGER ? 'no line cap' : `≤ ${volumeLimitLabel(lines)} lines`;
+  return `${fileLimit} / ${lineLimit}`;
+}
+
 function rung(stage: AutonomyLadderStageV1, current: number): RungView {
   const state: RungState = stage.index < current ? 'done' : stage.index === current ? 'current' : stage.index === current + 1 ? 'next' : 'later';
   const mergeLine = stage.merging.length > 0 ? `Merging: ${list(stage.merging)}` : 'Nothing merges — propose only';
   const proposeLine = stage.proposing.length > 0 ? `Proposing: ${list(stage.proposing)}` : null;
-  const capLine = `${stage.maxRisk} risk · ≤ ${stage.maxFiles} files / ${stage.maxLines} lines${stage.maxMergesPerRepoPerDay > 0 ? ` · ≤ ${stage.maxMergesPerRepoPerDay} merges/repo/day` : ''}`;
+  const mergeRate = stage.maxMergesPerRepoPerDay === Number.MAX_SAFE_INTEGER
+    ? ' · No daily merge cap'
+    : stage.maxMergesPerRepoPerDay > 0 ? ` · ≤ ${volumeLimitLabel(stage.maxMergesPerRepoPerDay)} merges/repo/day` : '';
+  const capLine = `${stage.maxRisk} risk · ${changeVolumeLine(stage.maxFiles, stage.maxLines)}${mergeRate}`;
   const c = stage.criteria;
   const exit = [`${c.minMerges} ${c.minMerges === 1 ? stage.counts.replace(/s$/, '') : stage.counts}`, `${c.minHours} h`];
   if (c.minPostMergeGreenPct > 0) exit.push(`≥ ${c.minPostMergeGreenPct}% green`);
@@ -220,7 +232,7 @@ export function ladderView(status: AuthorityStatusV1 | null): LadderView | null 
   const nextLine = next
     ? newlyMerging.length > 0
       ? `${stageLabel(next.id)} lets ${list(newlyMerging)} merge`
-      : `${stageLabel(next.id)}: ${next.maxRisk} risk, ≤ ${next.maxFiles} files / ${next.maxLines} lines`
+      : `${stageLabel(next.id)}: ${next.maxRisk} risk, ${changeVolumeLine(next.maxFiles, next.maxLines)}`
     : null;
   return {
     stageId: rollout.stageId,
