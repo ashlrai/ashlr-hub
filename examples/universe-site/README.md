@@ -94,9 +94,10 @@ prove endorsement, provider activation or unrestricted multi-account routing.
 
 ## Dependency notes
 
-The initial Sites scaffold's dependency pins were updated to patched compatible
-versions. `sharp` is overridden to 0.35.4 to patch its build-tool transitive
-dependency. Deployment contains static browser output only, not these build tools.
+The build-tool graph pins `sharp` to 0.35.5 and shadcn's MCP SDK to 1.31.0
+for their respective security patches. These pins do not imply that every
+dependency advisory is resolved. Deployment contains static browser output only,
+not these build tools.
 Recheck `npm audit` when changing dependencies; never use `--force` to conceal
 incompatible peer requirements.
 
