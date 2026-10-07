@@ -105,12 +105,12 @@ describe('emergency authority release truth', () => {
     // legacy console contract now lives.
     expect(readme).toContain('docs/HUB-REFERENCE.md');
     expect(readme).toMatch(/Autonomy ships \*\*dormant\*\*/i);
-    // #580 rewrote the quickstart for Verse: the legacy `/next/` console and
+    // #580 rewrote the quickstart for the workbench: the legacy `/next/` console and
     // its token lifecycle now live only in the Hub reference, and the
     // quickstart must steer new users away from that path.
     expect(quickstart).toContain('[Hub reference](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md)');
     expect(quickstart).toMatch(/Resident autonomy is macOS-only and starts dormant/);
-    expect(quickstart).toMatch(/older `\/` and `\/next\/` dashboard guidance should not\s+be used as a Verse onboarding path/);
+    expect(quickstart).toMatch(/older `\/` and `\/next\/` dashboard guidance should not\s+be used as a \S+ onboarding path/);
     for (const doc of [hubReference]) {
       expect(doc).toMatch(/compiled\s+(?:daemon and conductor\s+)?trust roots\s+are empty/i);
       expect(doc).toMatch(/live non-dry[^.\n]*(?:dormant|refuse)/i);

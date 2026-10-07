@@ -65,6 +65,38 @@ vi.mock('../src/core/daemon/post-merge-halt.js', async (importOriginal) => {
   };
 });
 
+// Advance only the window's observation clock after real admission. Other
+// tests, filesystem clocks and async timers continue to use the real clock.
+const windowHarness = vi.hoisted(() => ({
+  nowMs: null as number | null,
+  acceptedAtMs: null as number | null,
+  endsAtMs: null as number | null,
+  expiryReason: null as string | null,
+}));
+
+vi.mock('../src/core/daemon/run-window.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/daemon/run-window.js')>();
+  return {
+    ...actual,
+    resolveRunWindow: (...args: Parameters<typeof actual.resolveRunWindow>) => {
+      if (windowHarness.nowMs === null) return actual.resolveRunWindow(...args);
+      const resolved = actual.resolveRunWindow(args[0], { ...args[1], nowMs: windowHarness.nowMs });
+      if (resolved.ok && resolved.window.kind === 'at-time' && resolved.window.endsAtMs !== null) {
+        windowHarness.acceptedAtMs = resolved.window.startedAtMs;
+        windowHarness.endsAtMs = resolved.window.endsAtMs;
+        windowHarness.nowMs = resolved.window.endsAtMs;
+      }
+      return resolved;
+    },
+    evaluateRunWindow: (...args: Parameters<typeof actual.evaluateRunWindow>) => {
+      if (windowHarness.nowMs === null) return actual.evaluateRunWindow(...args);
+      const verdict = actual.evaluateRunWindow(args[0], { ...args[1], nowMs: windowHarness.nowMs });
+      windowHarness.expiryReason = verdict.reason;
+      return verdict;
+    },
+  };
+});
+
 let fx: H1Fixture;
 
 beforeEach(() => {
@@ -161,16 +193,31 @@ describe('W1 · A · the iteration window bounds the run, and ends it by PARKING
 
   it('A3: an already-elapsed at-time window parks before running ANY tick', async () => {
     const cfg = fastCfg();
-    // Armed 2 seconds ahead, but the window is evaluated at the top of each
-    // iteration — arm it far enough out to resolve, then prove the clock rule
-    // is what stops it by giving it a deadline it reaches almost immediately.
-    const state = await runDaemon(cfg, {
-      once: false, dryRun: false, maxCycles: 50,
-      runWindow: { kind: 'at-time', at: new Date(Date.now() + 1_500).toISOString() },
-    });
-    expect(state.running).toBe(false);
-    expect(paused()).toBe(true);
-    expect(killEngaged()).toBe(false);
+    const admittedAtMs = Date.now();
+    const endsAtMs = admittedAtMs + 1_500;
+    windowHarness.nowMs = admittedAtMs;
+    try {
+      // Resolve a genuinely future window, then cross its absolute deadline
+      // before the first evaluation; maxCycles and real timers do not end it.
+      const state = await runDaemon(cfg, {
+        once: false, dryRun: false, maxCycles: 50,
+        runWindow: { kind: 'at-time', at: new Date(endsAtMs).toISOString() },
+      });
+      expect(windowHarness.acceptedAtMs).toBe(admittedAtMs);
+      expect(windowHarness.endsAtMs).toBe(endsAtMs);
+      expect(windowHarness.expiryReason).toBe('clock-reached');
+      expect(state.ticks).toHaveLength(0);
+      expect(state.running).toBe(false);
+      expect(state.terminalFailure).toBeUndefined();
+      expect(paused()).toBe(true);
+      expect(killEngaged()).toBe(false);
+      expect(readOvernightStatus().run!.activity).toContain('clock-reached');
+    } finally {
+      windowHarness.nowMs = null;
+      windowHarness.acceptedAtMs = null;
+      windowHarness.endsAtMs = null;
+      windowHarness.expiryReason = null;
+    }
   }, 30_000);
 
   it('A4: the overnight status records the run and keeps it after the run ends', async () => {

@@ -15,6 +15,7 @@
  * service worker's scope), writes the PWA head tags, and registers the
  * service worker (routes/verse/mobile/pwa.ts).
  */
+import { PRODUCT_NAME } from './product-brand.js';
 import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { adoptInjectedTokens, markCheckComplete } from '../data/auth-store.js';
 import { isRemoteMobileMode } from '../data/remote-mode.js';
@@ -129,12 +130,12 @@ function LocalVerseMobileApp() {
     <Boot>
       {phase === 'unauthenticated' ? (
         <Suspense fallback={CONNECTING}>
-          <SessionGate heading="Connect to your Mac" command="ashlr verse" subject="Ashlr Verse" mutationField />
+          <SessionGate heading="Connect to your Mac" command="ashlr verse" subject={PRODUCT_NAME} mutationField />
         </Suspense>
       ) : unreachable ? (
         <div role="alert">
           <h1 className={ui.largeTitle}>Can’t reach your Mac</h1>
-          <p className={ui.muted}>Verse runs on your Mac. It may be asleep, offline, or the connection to it is down. Nothing was sent.</p>
+          <p className={ui.muted}>{PRODUCT_NAME} runs on your Mac. It may be asleep, offline, or the connection to it is down. Nothing was sent.</p>
           <button type="button" className={`${ui.btn} ${ui.primary}`} onClick={() => setAttempt((n) => n + 1)}>Try again</button>
         </div>
       ) : CONNECTING}

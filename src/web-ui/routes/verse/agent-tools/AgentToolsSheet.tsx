@@ -36,7 +36,7 @@ export interface AgentToolsSheetProps {
 }
 
 const TERMINAL_HELP: Record<VerseAgentTerminalMode, string> = {
-  off: 'The agent cannot use Verse terminals.',
+  off: 'The agent cannot use Phantom terminals.',
   agent: 'The agent opens its own terminal tabs (marked Agent) and runs commands there. You can watch, type to take over, and hand back.',
   shared: 'Also lets you share one of your own shells with the agent, per tab, from the terminal\'s More menu.',
 };
@@ -87,13 +87,13 @@ export function AgentToolsSheet({ sessionId, open, onClose, api = agentToolsApi 
   return (
     <>
       <Sheet open={open} onClose={onClose} titleId={titleId} title="Agent tools"
-        description={`What ${seat} may do on this Mac in this chat, through Verse. Changes apply at once.`}
-        footer={<p className={styles.footnote}>Everything starts off again when Verse restarts. Destructive commands always ask you first.</p>}>
+        description={`What ${seat} may do on this Mac in this chat, through Phantom. Changes apply at once.`}
+        footer={<p className={styles.footnote}>Everything starts off again when Phantom restarts. Destructive commands always ask you first.</p>}>
         <div className={styles.sheetBody} aria-busy={state === null || busy || undefined}>
           {error ? <p className={styles.error} role="alert">{error}</p> : null}
           {unsupported ? <p className={styles.warning} role="note">{unsupported}</p> : null}
           {state && !state.desktop ? (
-            <p className={styles.warning} role="note">Terminal and computer tools need the Ashlr desktop app; this Verse server has no built-in terminal.</p>
+            <p className={styles.warning} role="note">Terminal and computer tools need the Phantom desktop app; this Phantom server has no built-in terminal.</p>
           ) : null}
           {state && state.support.supported ? <p className={styles.quiet}>{state.support.note}</p> : null}
 

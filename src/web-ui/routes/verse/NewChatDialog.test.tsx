@@ -130,7 +130,7 @@ describe('NewChatDialog — capacity at the point of choice', () => {
   it('names the credits that outlive a spent window', () => {
     render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={[CODEX_CREDITS_SEAT]} onCreate={() => {}} />);
     expect(screen.getByText('limit reached')).toBeInTheDocument();
-    expect(screen.getByText('2048.4196250000 credits available')).toBeInTheDocument();
+    expect(screen.getByText('2,000 credits available')).toHaveAttribute('title', 'Exact native balance: 2048.4196250000 credits.');
   });
 
   it('draws no meter for a seat nothing was read from', () => {
@@ -152,10 +152,10 @@ describe('NewChatDialog — context mode', () => {
   it('shows the chosen model’s budget and its provenance', async () => {
     render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
     const context = screen.getByRole('group', { name: 'Context' });
-    expect(within(context).getByText('1M window · compacts ≈367k')).toBeInTheDocument();
+    expect(within(context).getByText('1M window · compacts ≈370k')).toBeInTheDocument();
     expect(within(context).getByText(`Window ${WINDOW_SOURCE_TEXT['cli-catalog']}.`)).toBeInTheDocument();
     expect(await within(context).findByRole('radio', { name: 'Standard', checked: true })).toBeInTheDocument();
-    expect(within(context).getByText(/Compacts at about 367k\. Every turn re-sends the whole context/)).toBeInTheDocument();
+    expect(within(context).getByText(/Compacts at about 370k\. Every turn re-sends the whole context/)).toBeInTheDocument();
   });
 
   it('starts from the seat’s saved default and sends it', async () => {
@@ -165,7 +165,7 @@ describe('NewChatDialog — context mode', () => {
     render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={onCreate} />);
     expect(await screen.findByRole('radio', { name: 'Expansive', checked: true })).toBeInTheDocument();
     // The picker row for the chosen model shows the budget it will actually get.
-    expect(screen.getByRole('option', { name: /Fable 5\.1 · 1M ctx · compacts ≈967k \(expansive\)/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Fable 5\.1 · 1M ctx · compacts ≈970k \(expansive\)/ })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Start chat' }));
     expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ seatId: 'claude-a', model: 'claude-fable-5-1', contextMode: 'expansive' }), undefined, { automatic: false });
   });
@@ -184,8 +184,8 @@ describe('NewChatDialog — context mode', () => {
     expect(screen.queryByRole('button', { name: /the default for/ })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('radio', { name: 'Expansive' }));
-    expect(screen.getByText(/Runs to about 967k before compacting/)).toBeInTheDocument();
-    expect(screen.getByText(/re-sends 2\.6× the tokens of one at 367k/)).toBeInTheDocument();
+    expect(screen.getByText(/Runs to about 970k before compacting/)).toBeInTheDocument();
+    expect(screen.getByText(/re-sends 2\.6× the tokens of one at 370k/)).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Make Expansive the default for Claude Max' }));
     expect(reasons).toHaveLength(1);
@@ -311,7 +311,7 @@ describe('NewChatDialog — context fit', () => {
     render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
     expect(await screen.findByText('Tight fit')).toBeInTheDocument();
     expect(queries.fetchContextFit).toHaveBeenCalledWith({ projectPath: '/Users/mason/dev/hub' });
-    expect(screen.getByText(/~300k tokens of tracked code fits under the ≈367k compaction point/)).toBeInTheDocument();
+    expect(screen.getByText(/~300k tokens of tracked code fits under the ≈370k compaction point/)).toBeInTheDocument();
     expect(screen.getByText(/bytes ÷ 4/)).toBeInTheDocument();
     // Every row carries its own verdict.
     expect(screen.getByRole('option', { name: /GPT-6 Astra .* · code needs expansive/ })).toBeInTheDocument();
@@ -333,11 +333,11 @@ describe('NewChatDialog — context fit', () => {
     const user = userEvent.setup();
     render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
     expect(await screen.findByText('Tight fit')).toBeInTheDocument();
-    expect(screen.getByText(/Expansive \(≈967k\) would hold it with room to spare/)).toBeInTheDocument();
+    expect(screen.getByText(/Expansive \(≈970k\) would hold it with room to spare/)).toBeInTheDocument();
     await user.click(screen.getByRole('radio', { name: 'Expansive' }));
     expect(screen.getByText('Fits')).toBeInTheDocument();
-    expect(screen.getByText(/fits well inside this model's Expansive budget \(compacts ≈967k\)/)).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /Fable 5\.1 · 1M ctx · compacts ≈967k \(expansive\) · code fits$/ })).toBeInTheDocument();
+    expect(screen.getByText(/fits well inside this model's Expansive budget \(compacts ≈970k\)/)).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Fable 5\.1 · 1M ctx · compacts ≈970k \(expansive\) · code fits$/ })).toBeInTheDocument();
   });
 
   it('marks a truncated scan as a floor', async () => {

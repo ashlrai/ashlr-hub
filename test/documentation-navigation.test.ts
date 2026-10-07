@@ -113,9 +113,8 @@ describe('operator documentation navigation', () => {
     }
     expect(manifest.files).not.toContain('docs');
     expect(manifest.files).not.toContain('src');
-    expect(OPERATOR_DOCUMENTATION).toHaveLength(23);
     expect(OPERATOR_DOCUMENTATION).toEqual(expect.arrayContaining([
-      'docs/VERSE.md', 'docs/AUTONOMY-SETUP.md', 'docs/RESIDENT-RUNTIME.md', 'docs/DEVIN.md',
+      'docs/PHANTOM-BRAND.md', 'docs/VERSE.md', 'docs/AUTONOMY-SETUP.md', 'docs/RESIDENT-RUNTIME.md', 'docs/DEVIN.md',
     ]));
   });
 

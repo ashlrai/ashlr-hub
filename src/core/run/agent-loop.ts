@@ -37,6 +37,7 @@ import { nullSink } from './streaming.js';
 import type { StreamSink } from './streaming.js';
 import { resolveModelProfile } from './model-profile.js';
 import { assembleSystemPrompt } from './prompts/index.js';
+import { hostVerifiedExecutorRole } from './prompts/roles.js';
 import {
   commitToolEffect,
   prepareToolEffect,
@@ -101,6 +102,8 @@ export type RunTaskContext = {
    * two-sentence prompt + TASK_STEP_CAP (byte-identical to prior behavior).
    */
   adaptivePrompts?: boolean;
+  /** Prompt clarification only: required command checks belong to the host; no tool authority changes. */
+  hostVerification?: boolean;
   /** M41: optional memory block to inject into the executor prompt. */
   memory?: string;
   /** Optional caller cancellation for this task's model/tool loop. */
@@ -310,12 +313,15 @@ async function runTaskBody(
   const useAdaptive = ctx.adaptivePrompts === true;
   const stepCap = useAdaptive ? profile.stepCap : TASK_STEP_CAP;
 
+  // Only describe executable tools actually exposed by this client/context.
+  const hostVerificationTools = ctx.hostVerification === true ? [...toolExecutors.keys()] : undefined;
   let systemContent: string;
   if (useAdaptive) {
     // Assemble the verbosity-tiered prompt layers for this profile.
     let assembled = assembleSystemPrompt({
       role: 'executor',
       useTools,
+      ...(hostVerificationTools !== undefined ? { hostVerificationTools } : {}),
       profile,
       memory: ctx.memory,
       charCap: profile.promptCharCap,
@@ -340,6 +346,9 @@ async function runTaskBody(
       (useTools
         ? 'You may call tools to gather information; always follow up with a final answer.'
         : 'Do not request tools — respond with a final textual answer only.');
+    if (hostVerificationTools !== undefined) {
+      systemContent += '\n\n' + hostVerifiedExecutorRole(hostVerificationTools);
+    }
   }
 
   // M264: prepend local-context bundle when provided.

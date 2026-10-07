@@ -77,7 +77,7 @@ export const overnightQuery: QueryDef<OptionalFleetRead<OvernightStatus>> = {
           value: null,
           available: true,
           // Nothing is shown rather than guessed from an unknown shape.
-          reason: 'Unrecognized response — update Ashlr.',
+          reason: 'Unrecognized response — update Phantom.',
         };
       }
       return { value, available: true, reason: null };

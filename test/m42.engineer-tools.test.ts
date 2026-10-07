@@ -7,7 +7,7 @@
  * so assertMayMutate's allowAnyRepo seam is honored against tmp worktrees.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync, readFileSync, writeFileSync, symlinkSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -561,27 +561,36 @@ describe('bash (runBash)', () => {
     'escalates and settles boundedly when bash ignores graceful termination',
     async () => {
       const controller = new AbortController();
+      const readyPath = join(repo.dir, 'bash-cancel-ready');
       const pending = callEngineerTool(
         'bash',
-        { command: 'echo "owned-pid=$$"; trap "" INT TERM; while :; do sleep 1; done' },
+        // One Bash leader exercises escalation without orphaned external sleep
+        // children making success depend on the host's PID1 reaping schedule.
+        { command: 'trap "" INT TERM; echo "owned-pid=$$"; echo ready > bash-cancel-ready; while :; do :; done' },
         fullCtx(),
         controller.signal,
       );
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      const startedAt = Date.now();
-      controller.abort();
+      try {
+        // Readiness is published only after the ignore handlers are installed.
+        await vi.waitFor(() => expect(existsSync(readyPath)).toBe(true), { timeout: 1_000 });
+        const startedAt = Date.now();
+        controller.abort();
 
-      const out = await pending;
-      const elapsed = Date.now() - startedAt;
-      const ownedPid = Number(/owned-pid=(\d+)/.exec(out)?.[1]);
+        const out = await pending;
+        const elapsed = Date.now() - startedAt;
+        const ownedPid = Number(/owned-pid=(\d+)/.exec(out)?.[1]);
 
-      expect(out).toContain('"cancellationRequested": true');
-      expect(out).toContain('"cancelled": true');
-      expect(out).toContain('"cleanupVerified": true');
-      expect(out).not.toContain('cleanup unverified');
-      expect(Number.isInteger(ownedPid)).toBe(true);
-      expect(elapsed).toBeLessThan(7_000);
-      expect(() => process.kill(-ownedPid, 0)).toThrow();
+        expect(out).toContain('"cancellationRequested": true');
+        expect(out).toContain('"cancelled": true');
+        expect(out).toContain('"cleanupVerified": true');
+        expect(out).not.toContain('cleanup unverified');
+        expect(Number.isInteger(ownedPid)).toBe(true);
+        expect(elapsed).toBeLessThan(7_000);
+        expect(() => process.kill(-ownedPid, 0)).toThrow();
+      } finally {
+        controller.abort();
+        await pending;
+      }
     },
     10_000,
   );

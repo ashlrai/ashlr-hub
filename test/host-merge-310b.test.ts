@@ -10,6 +10,8 @@
  * REAL-IO (spawns git through the fake): belongs in the real-io lane —
  * requested in the U3 report (test/config/realio-lane-membership.mjs).
  */
+import { unlinkSync } from 'node:fs';
+import { outwardMutationFencePath } from '../src/core/sandbox/mutation-fence.js';
 import { createHash } from 'node:crypto';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -414,6 +416,92 @@ describe('the SHA-pinned merge through the revocation protocol', () => {
     const epochChanged = await mergeFleetPrPinned(pinnedInput(h, state, { currentPolicyEpoch: () => sha256('a different grant') }), h.deps);
     expect(epochChanged).toMatchObject({ ok: false, code: 'recheck', mergeCalled: false });
     expect(h.fake.mergeCalls()).toHaveLength(0);
+  });
+
+  it.each(['Stop', 'kill-epoch', 'grant', 'caller-epoch', 'fence', 'expiry'] as const)(
+    'refuses %s changes during deferred token mint before contacting the merge transport', async (change) => {
+      const h = harness();
+      const { state, head } = await openChange(h);
+      h.fake.greenRequired(head);
+      let entered!: () => void;
+      let release!: () => void;
+      const waiting = new Promise<void>((resolve) => { entered = resolve; });
+      const deferred = new Promise<void>((resolve) => { release = resolve; });
+      h.deps.token = async () => { entered(); await deferred; return { token: 'ghs_test_installation_token', expiresAt: null }; };
+      let epoch = policyEpochDigest(h.deps.policy(), h.repo);
+      const merging = mergeFleetPrPinned(pinnedInput(h, state, { currentPolicyEpoch: () => epoch }), h.deps);
+      await waiting;
+      expect(state.merge?.phase).toBe('consumed');
+      if (change === 'Stop') h.kill.on = true;
+      if (change === 'kill-epoch') h.deps.killEpoch = () => sha256('replaced Stop');
+      if (change === 'grant') h.deps.policy = () => null;
+      if (change === 'caller-epoch') epoch = null;
+      if (change === 'fence') unlinkSync(outwardMutationFencePath());
+      if (change === 'expiry') h.deps.nowMs = () => Date.parse(state.merge!.identity.expiresAt);
+      release();
+      expect(await merging).toMatchObject({ ok: false, mergeCalled: false });
+      expect(h.fake.mergeCalls()).toHaveLength(0);
+      expect(state.merge).toMatchObject({ phase: 'failed', error: 'merge request not sent' });
+    },
+  );
+
+  it('keeps a contacted but unanswered merge consumed and a failed token mint definitely unsent', async () => {
+    const h = harness();
+    const { state, head } = await openChange(h);
+    h.fake.greenRequired(head);
+    const transport = h.deps.transport;
+    h.deps.transport = async (call) => {
+      const reply = await transport(call);
+      if (call.method === 'PUT' && call.path.endsWith('/merge')) throw new Error('lost response');
+      return reply;
+    };
+    expect(await mergeFleetPrPinned(pinnedInput(h, state), h.deps)).toMatchObject({ ok: false, mergeCalled: true });
+    expect(state.merge?.phase).toBe('consumed');
+    expect(h.fake.mergeCalls()).toHaveLength(1);
+    expect(h.fake.pulls.get(state.pr!.number)!.merged).toBe(true);
+    const attempt = state.merge;
+    expect(await mergeFleetPrPinned(pinnedInput(h, state), h.deps)).toMatchObject({ ok: false, code: 'protocol', mergeCalled: false });
+    expect(state.merge).toBe(attempt);
+    expect(h.fake.mergeCalls()).toHaveLength(1);
+
+    const unsent = harness();
+    const opened = await openChange(unsent);
+    unsent.deps.token = async () => { throw new Error('custody unavailable'); };
+    expect(await mergeFleetPrPinned(pinnedInput(unsent, opened.state), unsent.deps)).toMatchObject({ ok: false, mergeCalled: false });
+    expect(opened.state.merge).toMatchObject({ phase: 'failed', error: 'merge request not sent' });
+    expect(unsent.fake.mergeCalls()).toHaveLength(0);
+  });
+
+  it.each([false, null])('distinguishes explicit merged:%s from a malformed 200 before retrying', async (merged) => {
+    const h = harness();
+    const { state, head } = await openChange(h);
+    h.fake.greenRequired(head);
+    const transport = h.deps.transport;
+    let calls = 0;
+    let now = Date.now();
+    h.deps.nowMs = () => now;
+    h.deps.transport = (call) => {
+      if (call.method === 'PUT' && call.path.endsWith('/merge')) {
+        calls++;
+        if (calls === 1) return Promise.resolve({ status: 200, body: merged === false ? { merged: false } : null });
+      }
+      return transport(call);
+    };
+    expect(await mergeFleetPrPinned(pinnedInput(h, state), h.deps)).toMatchObject({ ok: false, code: 'github', mergeCalled: true });
+    expect(calls).toBe(1);
+    expect(h.fake.mergeCalls()).toHaveLength(0);
+    now++;
+    if (merged === false) {
+      expect(state.merge).toMatchObject({ phase: 'failed', error: 'GitHub definitively declined merge (merged:false)' });
+      expect(await mergeFleetPrPinned(pinnedInput(h, state), h.deps)).toMatchObject({ ok: true });
+      expect(calls).toBe(2);
+      expect(h.fake.mergeCalls()).toHaveLength(1);
+    } else {
+      expect(state.merge).toMatchObject({ phase: 'consumed', error: 'GitHub answered HTTP 200' });
+      expect(await mergeFleetPrPinned(pinnedInput(h, state), h.deps)).toMatchObject({ ok: false, code: 'protocol', mergeCalled: false });
+      expect(calls).toBe(1);
+      expect(h.fake.mergeCalls()).toHaveLength(0);
+    }
   });
 
   it('GitHub itself refuses a merge whose required checks are not green (server-side enforcement)', async () => {

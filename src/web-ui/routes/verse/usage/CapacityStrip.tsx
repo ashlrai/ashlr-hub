@@ -260,7 +260,8 @@ function CapacityRowView({
               </span>
             ) : null}
             {reserve !== null && row.credits !== null ? ' · ' : null}
-            {row.credits !== null ? <span>{row.credits}</span> : null}
+            {row.credits !== null ? <span title={row.creditBalance === null || row.creditBalance === undefined
+              ? undefined : `Exact native balance: ${row.creditBalance} credits.`}>{row.credits}</span> : null}
           </p>
         ) : null}
       </div>
@@ -286,15 +287,16 @@ export function CapacityStrip({
   accounts,
 }: CapacityStripProps) {
   const headingId = useId();
-  const [tick, setTick] = useState(() => Date.now());
-  usePollWhileVisible(() => setTick(Date.now()), ACCOUNT_CLOCK_MS, { enabled: accounts !== undefined && accounts.now === undefined });
-  const now = accounts?.now ?? tick;
+  const [, setTick] = useState(() => Date.now());
+  usePollWhileVisible(() => setTick(Date.now()), ACCOUNT_CLOCK_MS, { enabled: accounts?.now === undefined });
+  const now = accounts?.now ?? Date.now();
   const healthRead = accounts?.healthRead ?? false;
   const accountsMode = accounts !== undefined;
   // Accounts mode words every window reset and reason against the SAME clock
   // as its status line ("Spent · resets Sat 11:46 PM"), so the two never
   // disagree about which day "today" is.
-  const rowsNow = accountsMode ? now : undefined;
+  // Every layout expires current evidence even when its cached seats do not change.
+  const rowsNow = now;
   const built = useMemo(
     () => buildCapacityRows(seats, {
       health: health ?? null,

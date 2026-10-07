@@ -16,15 +16,19 @@
  *
  * Hermetic: tmp HOME, fake ledger / sources / seat. No model, no network.
  */
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as directoryDurability from '../src/core/util/durability.js';
+import * as privateStorage from '../src/core/util/private-storage.js';
 
 import {
   LEADER_CONVERSATION_SYSTEM,
   LeaderThreadError,
   THREAD_LIMITS,
   answerLeaderQuestion,
+  readLeaderQuestion,
+  submitLeaderQuestion,
   appendMasonMessage,
   approveLeaderAction,
   leaderThreadPath,
@@ -38,12 +42,17 @@ import {
   setLeaderThreadDepsForTest,
   syncLeaderMemosToThread,
 } from '../src/core/vision/leader-thread.js';
+import { parseLeaderQuestionSubmission } from '../src/core/vision/leader-thread-types.js';
 import {
   addOperatorDirective,
   findLeaderQuestion,
   listOperatorApprovals,
   listOperatorDirectives,
   questionIdFor,
+  operatorQuestionsPath,
+  registerLeaderQuestions,
+  recordTypedLeaderAnswer,
+  recordLeaderAnswer,
   readLeaderOperatorContext,
   retireOperatorDirective,
 } from '../src/core/vision/leader-operator.js';
@@ -586,4 +595,383 @@ describe('approvals', () => {
     expect(ctx.trusted.approvals).toEqual([{ actionId: ask!.id, kind: 'escalate', outcome: 'recorded-outside-grant', on: expect.any(String) }]);
     expect(ctx.untrusted.approvedActions[0]!.actionId).toBe(ask!.id);
   });
+});
+
+
+describe('canonical typed question acceptance', () => {
+  it('rejects accessor/prototype payloads and array getters without invoking them', () => {
+    let called = false;
+    const accessor = { get schemaVersion() { called = true; throw new Error('must not run'); } };
+    expect(parseLeaderQuestionSubmission(accessor)).toBeNull();
+    const options: number[] = [];
+    Object.defineProperty(options, '0', { get() { called = true; return 0; }, enumerable: true });
+    expect(parseLeaderQuestionSubmission({ schemaVersion: 1, formRevision: Array(8).fill('a'.repeat(8)).join('-'),
+      kind: 'options', optionIndices: options })).toBeNull();
+    expect(parseLeaderQuestionSubmission(Object.create({ schemaVersion: 1 }))).toBeNull();
+    expect(parseLeaderQuestionSubmission(new Proxy({}, { ownKeys() { throw new Error('held'); } }))).toBeNull();
+    expect(called).toBe(false);
+  });
+
+  function typedMemo(mode: 'single' | 'multiple' | 'short-answer' = 'multiple'): LeaderMemo {
+    return memo({ questionsForMason: ['What should improve?'], questionForms: [{ index: 0, mode,
+      ...(mode !== 'short-answer' ? { options: ['Reliability', 'Phone 😀', 'Tests'] } : {}) }] });
+  }
+
+  it('posts authoritative form metadata and records a concurrent selection only once before composition', async () => {
+    const w = world({ replies: [reply('Saved your direction.')] });
+    const m = typedMemo();
+    writeLeaderMemo(m);
+    const posted = syncLeaderMemosToThread();
+    const qid = questionIdFor(m.id, 0)!;
+    const q = readLeaderQuestion(qid)!;
+    expect(posted.find((row) => row.questionId === qid)?.questionForm).toEqual(q.questionForm);
+    expect(q.questionForm?.expiresAt).toBe(new Date(Date.parse(m.at) + 24 * 60 * 60 * 1000).toISOString());
+    const submission = { schemaVersion: 1 as const, formRevision: q.questionForm!.revision,
+      kind: 'options' as const, optionIndices: [2, 0] };
+    const results = await Promise.all([
+      submitLeaderQuestion(qid, submission, { channel: 'verse' }),
+      submitLeaderQuestion(qid, submission, { channel: 'telegram' }),
+    ]);
+    expect(results.map((result) => result.outcome)).toEqual(['recorded', 'already-answered']);
+    expect(w.calls).toHaveLength(1);
+    const accepted = readLeaderQuestion(qid)!;
+    expect(accepted.answer?.text).toBe('Reliability; Tests');
+    expect(accepted.answer?.typedAcceptance).toMatchObject({ formRevision: submission.formRevision,
+      kind: 'options', optionIndices: [0, 2], text: 'Reliability; Tests', messageId: results[0]!.message!.id });
+    expect(listThread().filter((row) => row.from === 'mason' && row.questionId === qid)).toHaveLength(1);
+    expect(findLeaderQuestion(qid)?.messageId).toBe(q.messageId);
+  });
+
+  it('retains deliberate legacy refinement without misattributing it to the earlier typed acceptance', async () => {
+    const w = world({ replies: [reply('First answer'), reply('Refined answer')] });
+    const m = typedMemo('single');
+    writeLeaderMemo(m); syncLeaderMemosToThread();
+    const qid = questionIdFor(m.id, 0)!;
+    const revision = readLeaderQuestion(qid)!.questionForm!.revision;
+    expect((await submitLeaderQuestion(qid, { schemaVersion: 1, formRevision: revision,
+      kind: 'options', optionIndices: [1] }, { channel: 'verse' })).outcome).toBe('recorded');
+    await answerLeaderQuestion(qid, 'Actually focus on tests instead.', { channel: 'cli' });
+    expect(readLeaderQuestion(qid)?.answer).toMatchObject({ text: 'Actually focus on tests instead.' });
+    expect(readLeaderQuestion(qid)?.answer?.typedAcceptance).toBeUndefined();
+    expect((await submitLeaderQuestion(qid, { schemaVersion: 1, formRevision: revision,
+      kind: 'options', optionIndices: [1] }, { channel: 'telegram' })).outcome).toBe('already-answered');
+    expect(w.calls).toHaveLength(2);
+  });
+
+  it('refuses stale revisions, expired buttons and wrong choices without append or model calls', async () => {
+    const w = world();
+    const m = typedMemo('single');
+    const [question] = registerLeaderQuestions(m);
+    const before = listThread().length;
+    const qid = question!.questionId;
+    expect((await submitLeaderQuestion(qid, { schemaVersion: 1, formRevision: Array(8).fill('f'.repeat(8)).join('-'),
+      kind: 'text', text: 'stale' }, { channel: 'verse' })).outcome).toBe('stale');
+    expect((await submitLeaderQuestion(qid, { schemaVersion: 1, formRevision: question!.questionForm!.revision,
+      kind: 'options', optionIndices: [0, 1] }, { channel: 'verse' })).outcome).toBe('stale');
+    expect(recordTypedLeaderAnswer(qid, { schemaVersion: 1, formRevision: question!.questionForm!.revision,
+      kind: 'options', optionIndices: [0] }, { channel: 'verse', messageId: 'lt-20260101000000-abcdef' },
+    Date.parse(question!.questionForm!.expiresAt)).outcome).toBe('stale');
+    expect(listThread()).toHaveLength(before);
+    expect(readLeaderQuestion(qid)?.answered).toBe(false);
+    expect(w.calls).toHaveLength(0);
+  });
+
+  it('does not accept typed text for a choice form or attribute a forged text receipt', async () => {
+    const w = world(); const m = typedMemo('single'); registerLeaderQuestions(m);
+    const qid = questionIdFor(m.id, 0)!;
+    const revision = readLeaderQuestion(qid)!.questionForm!.revision;
+    const before = readFileSync(operatorQuestionsPath());
+    const result = await submitLeaderQuestion(qid, { schemaVersion: 1, formRevision: revision,
+      kind: 'text', text: 'This must be an intentional ordinary answer instead.' }, { channel: 'verse' });
+    expect(result.outcome).toBe('stale');
+    expect(readFileSync(operatorQuestionsPath())).toEqual(before);
+    expect(listThread().filter((row) => row.from === 'mason')).toHaveLength(0);
+    expect(w.calls).toHaveLength(0);
+
+    expect(recordLeaderAnswer(qid, { text: 'An ordinary refinement', channel: 'cli', messageId: null }).ok).toBe(true);
+    const saved = JSON.parse(readFileSync(operatorQuestionsPath(), 'utf8'));
+    const answer = saved.questions[0].answer;
+    answer.typedAcceptance = { schemaVersion: 1, formRevision: revision, kind: 'text',
+      text: answer.text, at: answer.at, messageId: answer.messageId };
+    writeFileSync(operatorQuestionsPath(), JSON.stringify(saved), { mode: 0o600 });
+    expect(readLeaderQuestion(qid)?.answer?.text).toBe('An ordinary refinement');
+    expect(readLeaderQuestion(qid)?.answer?.typedAcceptance).toBeUndefined();
+  });
+
+  it('Select all records the entire maximum-size visible answer in stable displayed order', async () => {
+    const w = world({ replies: [reply('Saved all choices')] });
+    const options = Array.from({ length: 10 }, (_, index) => {
+      const label = `Option ${index}: `;
+      return label + '·'.repeat((index === 0 ? 200 : 198) - label.length);
+    });
+    const m = memo({ questionsForMason: ['Choose all that matter'],
+      questionForms: [{ index: 0, mode: 'multiple', options }] });
+    registerLeaderQuestions(m);
+    const qid = questionIdFor(m.id, 0)!;
+    const revision = readLeaderQuestion(qid)!.questionForm!.revision;
+    const result = await submitLeaderQuestion(qid, { schemaVersion: 1, formRevision: revision,
+      kind: 'options', optionIndices: Array.from({ length: 10 }, (_, index) => 9 - index) }, { channel: 'verse' });
+    expect(result.outcome).toBe('recorded');
+    expect(result.question?.answer?.text).toBe(options.join('; '));
+    expect(result.question?.answer?.text).toHaveLength(2000);
+    expect(result.message?.text).toBe(options.join('; '));
+    expect(w.calls).toHaveLength(1);
+  });
+
+  it('accepts complete bounded short answers and refuses an overlong invisible suffix', async () => {
+    const w = world({ replies: [reply('Thanks')] });
+    const m = typedMemo('short-answer'); registerLeaderQuestions(m);
+    const qid = questionIdFor(m.id, 0)!;
+    const revision = readLeaderQuestion(qid)!.questionForm!.revision;
+    await expect(submitLeaderQuestion(qid, { schemaVersion: 1, formRevision: revision,
+      kind: 'text', text: 'x'.repeat(2001) }, { channel: 'verse' })).rejects.toMatchObject({ code: 400 });
+    expect(readLeaderQuestion(qid)?.answered).toBe(false);
+    const result = await submitLeaderQuestion(qid, { schemaVersion: 1, formRevision: revision,
+      kind: 'text', text: 'Keep the filename `tests.md` and price $20.' }, { channel: 'verse' });
+    expect(result.outcome).toBe('recorded');
+    expect(result.question?.answer?.text).toBe('Keep the filename `tests.md` and price $20.');
+    expect(w.calls).toHaveLength(1);
+  });
+
+  it('holds unreadable or malformed canonical storage without restoring an unanswered row', async () => {
+    const w = world(); const m = typedMemo(); registerLeaderQuestions(m);
+    const qid = questionIdFor(m.id, 0)!;
+    const revision = readLeaderQuestion(qid)!.questionForm!.revision;
+    writeFileSync(operatorQuestionsPath(), '{broken', { mode: 0o600 });
+    expect(() => readLeaderQuestion(qid)).toThrow(LeaderThreadError);
+    expect((await submitLeaderQuestion(qid, { schemaVersion: 1, formRevision: revision,
+      kind: 'options', optionIndices: [0] }, { channel: 'verse' })).outcome).toBe('held');
+    expect(readFileSync(operatorQuestionsPath(), 'utf8')).toBe('{broken');
+    expect(listThread().filter((row) => row.from === 'mason')).toHaveLength(0);
+    expect(w.calls).toHaveLength(0);
+  });
+
+  it.runIf(process.platform !== 'win32')('holds a privacy-blocked question file instead of displaying or accepting it', async () => {
+    const w = world(); const m = typedMemo(); registerLeaderQuestions(m);
+    const qid = questionIdFor(m.id, 0)!;
+    const revision = readLeaderQuestion(qid)!.questionForm!.revision;
+    const before = readFileSync(operatorQuestionsPath());
+    chmodSync(operatorQuestionsPath(), 0o644);
+    expect(() => readLeaderQuestion(qid)).toThrow(LeaderThreadError);
+    expect((await submitLeaderQuestion(qid, { schemaVersion: 1, formRevision: revision,
+      kind: 'options', optionIndices: [0] }, { channel: 'verse' })).outcome).toBe('held');
+    expect(readFileSync(operatorQuestionsPath())).toEqual(before);
+    expect(w.calls).toHaveLength(0);
+    chmodSync(operatorQuestionsPath(), 0o600);
+  });
+
+  it('does not recreate an accepted question from malformed storage during registration', async () => {
+    const w = world({ replies: [reply('Saved')] }); const m = typedMemo(); registerLeaderQuestions(m);
+    const qid = questionIdFor(m.id, 0)!;
+    const revision = readLeaderQuestion(qid)!.questionForm!.revision;
+    expect((await submitLeaderQuestion(qid, { schemaVersion: 1, formRevision: revision,
+      kind: 'options', optionIndices: [0] }, { channel: 'verse' })).outcome).toBe('recorded');
+    writeFileSync(operatorQuestionsPath(), '{broken', { mode: 0o600 });
+    expect(() => registerLeaderQuestions(m)).toThrow();
+    expect(readFileSync(operatorQuestionsPath(), 'utf8')).toBe('{broken');
+    expect(w.calls).toHaveLength(1);
+  });
+
+  it('keeps canonical acceptance after a failed thread append and never replays composition', async () => {
+    const w = world(); const m = typedMemo(); registerLeaderQuestions(m);
+    const qid = questionIdFor(m.id, 0)!;
+    const revision = readLeaderQuestion(qid)!.questionForm!.revision;
+    mkdirSync(leaderThreadPath());
+    const submission = { schemaVersion: 1 as const, formRevision: revision, kind: 'options' as const, optionIndices: [0] };
+    expect((await submitLeaderQuestion(qid, submission, { channel: 'verse' })).outcome).toBe('held');
+    expect(readLeaderQuestion(qid)?.answer?.typedAcceptance).toMatchObject({ formRevision: revision, text: 'Reliability' });
+    rmSync(leaderThreadPath(), { recursive: true });
+    expect((await submitLeaderQuestion(qid, submission, { channel: 'verse' })).outcome).toBe('already-answered');
+    expect(w.calls).toHaveLength(0);
+    expect(listThread().filter((row) => row.from === 'mason')).toHaveLength(0);
+  });
+
+  it('does not attribute a malformed stored selection receipt to its current answer text', async () => {
+    const w = world({ replies: [reply('Saved')] }); const m = typedMemo(); registerLeaderQuestions(m);
+    const qid = questionIdFor(m.id, 0)!;
+    const revision = readLeaderQuestion(qid)!.questionForm!.revision;
+    const submission = { schemaVersion: 1 as const, formRevision: revision, kind: 'options' as const, optionIndices: [0] };
+    expect((await submitLeaderQuestion(qid, submission, { channel: 'verse' })).outcome).toBe('recorded');
+    const saved = JSON.parse(readFileSync(operatorQuestionsPath(), 'utf8'));
+    saved.questions[0].answer.typedAcceptance.optionIndices = [2];
+    writeFileSync(operatorQuestionsPath(), JSON.stringify(saved), { mode: 0o600 });
+    const current = readLeaderQuestion(qid)!;
+    expect(current.answered).toBe(true);
+    expect(current.answer?.text).toBe('Reliability');
+    expect(current.answer?.typedAcceptance).toBeUndefined();
+    expect((await submitLeaderQuestion(qid, submission, { channel: 'telegram' })).outcome).toBe('already-answered');
+    expect(w.calls).toHaveLength(1);
+  });
+
+  it('another device text answer is answered but cannot prove this typed submission', async () => {
+    const w = world(); const m = typedMemo(); registerLeaderQuestions(m);
+    const qid = questionIdFor(m.id, 0)!;
+    const revision = readLeaderQuestion(qid)!.questionForm!.revision;
+    expect(recordLeaderAnswer(qid, { text: 'Phone 😀', channel: 'cli', messageId: null }).ok).toBe(true);
+    const result = await submitLeaderQuestion(qid, { schemaVersion: 1, formRevision: revision,
+      kind: 'options', optionIndices: [1] }, { channel: 'verse' });
+    expect(result.outcome).toBe('already-answered');
+    expect(result.question?.answer?.typedAcceptance).toBeUndefined();
+    expect(w.calls).toHaveLength(0);
+  });
+
+  it('migrates a valid unmarked legacy store without replacing its answer and durably registers typed metadata', () => {
+    world(); const legacy = memo({ questionsForMason: ['Keep this ordinary answer?'] });
+    registerLeaderQuestions(legacy);
+    const legacyId = questionIdFor(legacy.id, 0)!;
+    expect(recordLeaderAnswer(legacyId, { text: 'Keep the existing reply', channel: 'cli', messageId: null }).ok).toBe(true);
+    const before = JSON.parse(readFileSync(operatorQuestionsPath(), 'utf8')).questions[0];
+    const typed = typedMemo(); typed.id = 'lm-20261006010101-abcdef';
+    const original = directoryDurability.fsyncDirectory;
+    const durable = vi.spyOn(directoryDurability, 'fsyncDirectory').mockImplementation((path, options) => original(path, options));
+    try {
+      registerLeaderQuestions(typed);
+      const marker = join(leaderRoot(), 'question-initialized.json');
+      expect(JSON.parse(readFileSync(marker, 'utf8'))).toEqual({ schemaVersion: 1, initialized: true });
+      if (process.platform !== 'win32') expect(statSync(marker).mode & 0o7777).toBe(0o600);
+      expect(JSON.parse(readFileSync(operatorQuestionsPath(), 'utf8')).questions[0]).toEqual(before);
+      expect(durable).toHaveBeenCalledWith(leaderRoot());
+      const bytes = readFileSync(marker), prior = statSync(marker, { bigint: true });
+      readLeaderQuestion(questionIdFor(typed.id, 0)!);
+      registerLeaderQuestions(typed);
+      expect(readFileSync(marker)).toEqual(bytes);
+      expect(statSync(marker, { bigint: true }).ino).toBe(prior.ino);
+    } finally { durable.mockRestore(); }
+  });
+
+  it.each(['missing-questions', 'malformed-marker', 'hardlinked-marker'] as const)(
+    'holds %s initialization state without reconstructing questions or invoking the model', async fault => {
+      const w = world(); const m = typedMemo(); registerLeaderQuestions(m);
+      const qid = questionIdFor(m.id, 0)!, revision = readLeaderQuestion(qid)!.questionForm!.revision;
+      const marker = join(leaderRoot(), 'question-initialized.json'), outside = join(leaderRoot(), 'marker-copy.json');
+      const questions = readFileSync(operatorQuestionsPath());
+      if (fault === 'missing-questions') rmSync(operatorQuestionsPath());
+      else if (fault === 'malformed-marker') writeFileSync(marker, '{broken', { mode: 0o600 });
+      else linkSync(marker, outside);
+      const markerBytes = readFileSync(marker);
+      expect(() => readLeaderQuestion(qid)).toThrow(LeaderThreadError);
+      expect(() => registerLeaderQuestions(m)).toThrow();
+      expect((await submitLeaderQuestion(qid, { schemaVersion: 1, formRevision: revision,
+        kind: 'options', optionIndices: [0] }, { channel: 'verse' })).outcome).toBe('held');
+      expect(readFileSync(marker)).toEqual(markerBytes);
+      if (fault === 'missing-questions') expect(() => statSync(operatorQuestionsPath())).toThrow();
+      else expect(readFileSync(operatorQuestionsPath())).toEqual(questions);
+      expect(listThread().filter(row => row.from === 'mason')).toHaveLength(0);
+      expect(w.calls).toHaveLength(0);
+    },
+  );
+
+  it('holds an initialization durability failure before publishing any typed question or answer', () => {
+    world(); const m = typedMemo();
+    const original = directoryDurability.fsyncDirectory;
+    let injected = false;
+    const durable = vi.spyOn(directoryDurability, 'fsyncDirectory').mockImplementation((path, options) => {
+      if (!injected && existsSync(operatorQuestionsPath()) && existsSync(join(leaderRoot(), '.operator.lock')) &&
+        !existsSync(join(leaderRoot(), 'question-initialized.json'))) {
+        expect(JSON.parse(readFileSync(operatorQuestionsPath(), 'utf8')).questions).toEqual([]);
+        expect(listThread().filter(row => row.from === 'mason')).toHaveLength(0);
+        injected = true;
+        throw new Error('Synthetic durability refusal after initial empty publication');
+      }
+      original(path, options);
+    });
+    try {
+      expect(() => registerLeaderQuestions(m)).toThrow();
+      expect(injected).toBe(true);
+      expect(JSON.parse(readFileSync(operatorQuestionsPath(), 'utf8')).questions).toEqual([]);
+      expect(() => statSync(join(leaderRoot(), 'question-initialized.json'))).toThrow();
+      expect(listThread().filter(row => row.from === 'mason')).toHaveLength(0);
+    } finally { durable.mockRestore(); }
+  });
+
+  it('requires directory durability after acceptance before thread append or composition and does not replay an uncertain rename', async () => {
+    const w = world(); const m = typedMemo(); registerLeaderQuestions(m);
+    const qid = questionIdFor(m.id, 0)!, revision = readLeaderQuestion(qid)!.questionForm!.revision;
+    const submission = { schemaVersion: 1 as const, formRevision: revision, kind: 'options' as const, optionIndices: [0] };
+    const original = directoryDurability.fsyncDirectory;
+    let injected = false;
+    const durable = vi.spyOn(directoryDurability, 'fsyncDirectory').mockImplementation((path, options) => {
+      const answer = JSON.parse(readFileSync(operatorQuestionsPath(), 'utf8')).questions[0].answer;
+      // Release durability happens after the canonical lock is removed. Only
+      // inject at acceptance publication while the claim is still owned.
+      if (!injected && answer?.typedAcceptance?.formRevision === revision && existsSync(join(leaderRoot(), '.operator.lock'))) {
+        expect(listThread().filter(row => row.from === 'mason')).toHaveLength(0);
+        expect(w.calls).toHaveLength(0);
+        injected = true;
+        throw new Error('Synthetic durability refusal after acceptance rename');
+      }
+      original(path, options);
+    });
+    try {
+      expect((await submitLeaderQuestion(qid, submission, { channel: 'verse' })).outcome).toBe('held');
+      expect(injected).toBe(true);
+      expect(readLeaderQuestion(qid)?.answer?.typedAcceptance).toMatchObject({ formRevision: revision, text: 'Reliability' });
+      expect((await submitLeaderQuestion(qid, submission, { channel: 'verse' })).outcome).toBe('already-answered');
+      expect(listThread().filter(row => row.from === 'mason')).toHaveLength(0);
+      expect(w.calls).toHaveLength(0);
+    } finally { durable.mockRestore(); }
+  });
+
+  it('secures each fresh question inode and preserves readable typed acceptance and deliberate legacy refinement', async () => {
+    const w = world(); const m = typedMemo();
+    const original = privateStorage.assurePrivateStoragePath;
+    const assurance = vi.spyOn(privateStorage, 'assurePrivateStoragePath').mockImplementation((...args) => original(...args));
+    try {
+      registerLeaderQuestions(m);
+      const marker = join(leaderRoot(), 'question-initialized.json'), qid = questionIdFor(m.id, 0)!;
+      expect(assurance.mock.calls.some(([path, kind, mode]) => path === marker && kind === 'file' && mode === 'secure-created')).toBe(true);
+      expect(assurance.mock.calls.some(([path, kind, mode]) => path === operatorQuestionsPath() && kind === 'file' && mode === 'secure-created')).toBe(true);
+      const publications = () => assurance.mock.calls.filter(([, , mode]) => mode === 'secure-created').length;
+      const beforeRead = publications();
+      const form = readLeaderQuestion(qid)!.questionForm!;
+      registerLeaderQuestions(m);
+      expect(publications()).toBe(beforeRead);
+      expect((await submitLeaderQuestion(qid, { schemaVersion: 1, formRevision: form.revision,
+        kind: 'options', optionIndices: [0] }, { channel: 'verse' })).outcome).toBe('recorded');
+      expect(readLeaderQuestion(qid)?.answer?.typedAcceptance).toMatchObject({ formRevision: form.revision, text: 'Reliability' });
+      expect(publications()).toBeGreaterThan(beforeRead);
+      const beforeRefinement = publications();
+      expect(recordLeaderAnswer(qid, { text: 'Prioritize phone controls instead', channel: 'cli', messageId: null }).ok).toBe(true);
+      expect(readLeaderQuestion(qid)?.answer).toMatchObject({ text: 'Prioritize phone controls instead' });
+      expect(readLeaderQuestion(qid)?.answer?.typedAcceptance).toBeUndefined();
+      expect(publications()).toBeGreaterThan(beforeRefinement);
+      expect(w.calls).toHaveLength(1);
+    } finally { assurance.mockRestore(); }
+  });
+
+  it.each(['marker', 'answer'] as const)('holds an authenticated Windows DACL refusal at %s publication before thread or model work', async stage => {
+    const w = world(); const m = typedMemo();
+    if (stage === 'answer') registerLeaderQuestions(m);
+    const qid = questionIdFor(m.id, 0)!, form = stage === 'answer' ? readLeaderQuestion(qid)!.questionForm! : null;
+    const original = privateStorage.assurePrivateStoragePath;
+    let rejected = false;
+    const assurance = vi.spyOn(privateStorage, 'assurePrivateStoragePath').mockImplementation((path, kind, mode, options) => {
+      const target = stage === 'marker' ? join(leaderRoot(), 'question-initialized.json') : operatorQuestionsPath();
+      if (path !== target || kind !== 'file' || mode !== 'secure-created') return original(path, kind, mode, options);
+      if (stage === 'answer' && JSON.parse(readFileSync(path, 'utf8')).questions[0].answer === null) return original(path, kind, mode, options);
+      rejected = true;
+      // Exercise the real nonce-authenticated Windows adapter verdict without
+      // changing the production platform or weakening its strict readers.
+      return original('C:\\private\\questions.json', 'file', 'secure-created', {
+        platform: 'win32', systemRoot: 'C:\\Windows', anchorPath: 'C:\\private',
+        runner: invocation => {
+          const request = JSON.parse(invocation.input) as { nonce: string; operation: string; mode: string };
+          expect(request.mode).toBe('secure-created');
+          expect(listThread().filter(row => row.from === 'mason')).toHaveLength(0);
+          expect(w.calls).toHaveLength(0);
+          return { status: 1, stdout: JSON.stringify({ nonce: request.nonce, operation: request.operation,
+            ok: false, reason: 'dacl-not-protected' }) };
+        },
+      });
+    });
+    try {
+      if (stage === 'marker') expect(() => registerLeaderQuestions(m)).toThrow();
+      else expect((await submitLeaderQuestion(qid, { schemaVersion: 1, formRevision: form!.revision,
+        kind: 'options', optionIndices: [0] }, { channel: 'verse' })).outcome).toBe('held');
+      expect(rejected).toBe(true);
+      expect(listThread().filter(row => row.from === 'mason')).toHaveLength(0);
+      expect(w.calls).toHaveLength(0);
+    } finally { assurance.mockRestore(); }
+  });
+
 });

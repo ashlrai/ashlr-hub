@@ -44,6 +44,8 @@ describe('LiveStatus line', () => {
     const stale: VerseLiveState = { ...LIVE, progress: { phase: 'thinking', tool: null, elapsedMs: 1000, outTokens: null, tokPerSec: 2.5, receivedAt: now } };
     expect(liveStatusLine(stale, { phase: 'tool', detail: 'npm test' }, now)).toMatchObject({ word: 'Running', detail: 'npm test', rate: null });
     expect(liveStatusLine(stale, { phase: 'waiting', detail: null }, now).rate).toBe('2.5 tok/s');
+    expect(liveStatusLine({ ...stale, progress: { ...stale.progress!, tokPerSec: 123.456 } }, { phase: 'waiting', detail: null }, now).rate).toBe('120 tok/s');
+    expect(liveStatusLine({ ...stale, progress: { ...stale.progress!, tokPerSec: Number.POSITIVE_INFINITY } }, { phase: 'waiting', detail: null }, now).rate).toBeNull();
   });
 
   it('formats elapsed time compactly', () => {

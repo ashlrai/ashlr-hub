@@ -186,7 +186,7 @@ function AddServerSheet({ open, snapshot, run, onClose, onAdded }: {
       {proposal === null ? (
         <form className={styles.dialogBody} onSubmit={(e) => void review(e)}>
           <Select label="Add to" value={target} onChange={(e) => setTarget(e.target.value)}
-            hint={chosen?.disabledReason ?? (target === 'hub' ? 'The hub’s own registry.' : 'A Verse chat on a Claude seat still loads none; Claude Code in a terminal does.')}>
+            hint={chosen?.disabledReason ?? (target === 'hub' ? 'The hub’s own registry.' : 'A Phantom chat on a Claude seat still loads none; Claude Code in a terminal does.')}>
             {targets.map((t) => <option key={t.id} value={t.id} disabled={t.disabledReason !== null}>{t.label}</option>)}
           </Select>
           <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} required placeholder="filesystem" autoComplete="off" />
@@ -263,7 +263,7 @@ export function McpGroup({
       }
       caveat={
         <>
-          Claude and local seats do not load account-configured MCP servers. Verse’s own agent tools are controlled separately per chat. Codex and Grok seats load their own
+          Claude and local seats do not load account-configured MCP servers. Phantom’s own agent tools are controlled separately per chat. Codex and Grok seats load their own
           account’s config — and an <code>ashlr__</code> write through one is refused on a folder that is not enrolled.
         </>
       }

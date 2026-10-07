@@ -119,7 +119,7 @@ export const cloudQuery: QueryDef<OptionalRead<CloudOverviewResponse>> = {
       const value = narrowCloudOverview(await apiGet<unknown>(VERSE_CLOUD_PATH, signal));
       if (value === null) {
         // Nothing is shown rather than guessed from an unknown shape.
-        return { value: null, available: true, reason: 'Unrecognized response — update Ashlr.' };
+        return { value: null, available: true, reason: 'Unrecognized response — update Phantom.' };
       }
       return { value, available: true, reason: null };
     } catch (err) {
@@ -198,7 +198,7 @@ export async function refreshCloudTasks(): Promise<unknown> {
  * it is spliced into a path the mutation token is sent to.
  */
 export async function dismissCloudTask(taskId: string): Promise<unknown> {
-  if (!CLOUD_TASK_ID_PATTERN.test(taskId)) throw new Error('That task id is not one Verse issued, so nothing was sent.');
+  if (!CLOUD_TASK_ID_PATTERN.test(taskId)) throw new Error('That task id is not one Phantom issued, so nothing was sent.');
   try {
     return await post<unknown>(`${VERSE_CLOUD_TASKS_PATH}/${taskId}/dismiss`, {});
   } finally {

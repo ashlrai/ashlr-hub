@@ -16,6 +16,7 @@
  *
  * ⌘K and the keys (command-keys.ts fleet.*) run the same handlers.
  */
+import { formatMetricUsd } from '../../../components/charts/format-metric.js';
 import { useRef, useState, type ReactNode } from 'react';
 import type { FleetControlActionResultV1, FleetControlStateV1, FleetNextAction } from '../../../../core/fleet/fleet-control-types.js';
 import { Button } from '../../../components/primitives/Button.js';
@@ -23,6 +24,7 @@ import { Input } from '../../../components/primitives/Input.js';
 import { Meter } from '../../../components/primitives/Meter.js';
 import { IconLock, IconPause, IconPlay, IconRefresh, IconStop } from '../../../components/primitives/icons.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
+import { runQuery } from '../../../data/cache.js';
 import { CopyCommand } from '../autonomy/AutonomyOffState.js';
 import { formatRelative } from '../autonomy/format.js';
 import { stopConfirm, type GrantFlow } from '../command/AutonomyBar.js';
@@ -71,7 +73,7 @@ function keyHint(id: string): string | null {
 
 function money(n: number | null): string {
   if (n === null) return '$—';
-  return n >= 100 ? `$${Math.round(n)}` : `$${n.toFixed(2)}`;
+  return formatMetricUsd(n);
 }
 
 /** Syntax only; native validates the actual directory, origin and installer. */
@@ -111,7 +113,11 @@ export interface FleetControlProps {
 export function FleetControl({ actions, grantFlow, darkSince = null, setupShownBelow = false }: FleetControlProps) {
   const read = useQuery(fleetControlQuery, { freshMs: 4_000 });
   const refetch = useRefetch(fleetControlQuery);
-  usePollWhileVisible(refetch, FLEET_CONTROL_POLL_MS);
+  // A slow/queued read must finish before the next automatic poll replaces it.
+  // Native completion still forces a newer read through refreshFleetControlReads.
+  usePollWhileVisible(() => {
+    void runQuery(fleetControlQuery.key, () => fleetControlQuery.fetch());
+  }, FLEET_CONTROL_POLL_MS);
   const [did, setDid] = useState<string[]>([]);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [needs, setNeeds] = useState<FleetNextAction | null>(null);
@@ -448,7 +454,7 @@ function BlockerRow({
       ) : !clickable && command ? (
         <span className={styles.blockerCommand}>
           <span className={styles.muted}>
-            {needsNative && !nativeCapable ? 'Open the Ashlr desktop app to do this with a click, or run:' : action.kind === 'setup' ? 'Finish the remaining setup steps (GitHub App, trust root, Claude token):' : 'Run:'}
+            {needsNative && !nativeCapable ? 'Open the Phantom desktop app to do this with a click, or run:' : action.kind === 'setup' ? 'Finish the remaining setup steps (GitHub App, trust root, Claude token):' : 'Run:'}
           </span>
           <CopyCommand command={command} />
         </span>

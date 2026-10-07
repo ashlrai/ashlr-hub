@@ -24,7 +24,7 @@ vi.setConfig({ testTimeout: 30_000 });
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
 import { closeGitScratch, openGitScratch, parseFleetTrailers, type FleetGitScratch, type HostMergeDeps } from '../src/core/fleet/host-merge.js';
 import { allowedJudgeLanes } from '../src/core/fleet/merge-gates.js';
-import { proposalHasFleetPr, proposalStateKey, readFleetMergeState } from '../src/core/fleet/fleet-merge-state.js';
+import { proposalHasFleetPr, proposalStateKey, readFleetMergeState, writeFleetMergeState } from '../src/core/fleet/fleet-merge-state.js';
 import { runStandingMergePass, type StandingPassDeps } from '../src/core/fleet/standing-merge-pass.js';
 import type { AutoMergePassResult } from '../src/core/fleet/automerge-pass.js';
 import type { EffectivePolicy } from '../src/core/authority/types.js';
@@ -1105,4 +1105,123 @@ describe('standing outcome progression fences', () => {
     expect(p.status).toBe('applied');
     expect(w.ledger.of('merge:landed')).toHaveLength(1);
   });
+});
+
+
+describe('consumed host merge outcome reconciliation', () => {
+  it.each(['current', 'historical-network', 'historical-200'] as const)('credits exactly one lost-response landing (%s)', async (history) => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    await pass(w);
+    const pr = prOf(w);
+    w.fake.greenRequired(w.fake.headOfPull(pr.number)!);
+    w.clock.now += 10 * 60_000;
+    const transport = w.deps.host!.transport;
+    w.deps.host!.transport = async (call) => {
+      const reply = await transport(call);
+      if (call.method === 'PUT' && call.path.endsWith('/merge')) throw new Error('lost response');
+      return reply;
+    };
+    expect((await pass(w)).out.merged).toBe(0);
+    const read = readFleetMergeState(proposalStateKey(p.id)!);
+    expect(read.state).toBe('ok');
+    if (read.state !== 'ok') throw new Error('missing attempt');
+    expect(read.record.merge?.phase).toBe('consumed');
+    const originalStage = read.record.merge!.trailers!.stageId;
+    if (history !== 'current') {
+      read.record.merge!.phase = 'failed';
+      if (history === 'historical-200') read.record.merge!.error = 'GitHub answered HTTP 200';
+      expect(writeFleetMergeState(read.record)).toBe(true);
+    }
+    w.deps.host!.transport = transport;
+    w.policy.current = { ...w.policy.current!, rollout: { ...w.policy.current!.rollout, stageId: 'later-stage' } };
+    w.clock.now += 10 * 60_000;
+    expect((await pass(w)).out.merged).toBe(1);
+    expect((w.ledger.of('merge:landed')[0] as LandingRecord).rolloutStageId).toBe(originalStage);
+    w.clock.now += 10 * 60_000;
+    expect((await pass(w)).out.merged).toBe(0);
+    expect(w.fake.mergeCalls()).toHaveLength(1);
+    expect(w.ledger.of('merge:landed')).toHaveLength(1);
+    expect(w.ledger.of('pr:closed')).toHaveLength(0);
+    expect(p.status).toBe('applied');
+  });
+
+  it('holds open or unreadable outcomes without overwriting the attempt or repeating a PUT', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    await pass(w);
+    const pr = prOf(w);
+    w.fake.greenRequired(w.fake.headOfPull(pr.number)!);
+    w.clock.now += 10 * 60_000;
+    const transport = w.deps.host!.transport;
+    let puts = 0;
+    let unreadable = false;
+    w.deps.host!.transport = async (call) => {
+      if (call.method === 'PUT' && call.path.endsWith('/merge')) { puts++; return { status: 0, body: null }; }
+      if (unreadable && call.method === 'GET' && call.path.endsWith(`/pulls/${pr.number}`)) return { status: 0, body: null };
+      return transport(call);
+    };
+    await pass(w);
+    const before = readFleetMergeState(proposalStateKey(p.id)!);
+    if (before.state !== 'ok') throw new Error('missing attempt');
+    unreadable = true;
+    w.clock.now += 10 * 60_000;
+    await pass(w);
+    unreadable = false;
+    w.clock.now += 10 * 60_000;
+    await pass(w);
+    const after = readFleetMergeState(proposalStateKey(p.id)!);
+    expect(after.state === 'ok' && after.record.merge).toEqual(before.record.merge);
+    expect(puts).toBe(1);
+    expect(w.ledger.of('merge:landed')).toHaveLength(0);
+    expect(w.ledger.of('pr:closed')).toHaveLength(0);
+    expect(p.status).toBe('pending');
+  });
+
+  it.each(['unreadable-commit', 'duplicate-trailer', 'wrong-head', 'historical-mismatched-authority'] as const)(
+    'holds %s after a lost response without human misattribution', async (fault) => {
+      const w = world();
+      const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+      await pass(w);
+      const pr = prOf(w);
+      w.fake.greenRequired(w.fake.headOfPull(pr.number)!);
+      w.clock.now += 10 * 60_000;
+      const transport = w.deps.host!.transport;
+      w.deps.host!.transport = async (call) => {
+        const reply = await transport(call);
+        if (call.method === 'PUT' && call.path.endsWith('/merge')) throw new Error('lost response');
+        return reply;
+      };
+      await pass(w);
+      if (fault === 'historical-mismatched-authority') {
+        const read = readFleetMergeState(proposalStateKey(p.id)!);
+        if (read.state !== 'ok' || !read.record.merge) throw new Error('missing attempt');
+        read.record.merge.phase = 'failed';
+        read.record.merge.error = 'GitHub answered HTTP 200';
+        read.record.merge.operationPrefix += '.different';
+        expect(writeFleetMergeState(read.record)).toBe(true);
+      }
+      w.deps.host!.transport = async (call) => {
+        const reply = await transport(call);
+        if (call.method === 'GET' && call.path.includes('/git/commits/')) {
+          if (fault === 'unreadable-commit') return { status: 0, body: null };
+          if (fault === 'duplicate-trailer') {
+            const body = reply.body as { message: string };
+            return { ...reply, body: { ...body, message: `${body.message}\nAshlr-Proposal: forged\n` } };
+          }
+        }
+        if (fault === 'wrong-head' && call.path.endsWith(`/pulls/${pr.number}`)) {
+          const body = reply.body as { head: Record<string, unknown> };
+          return { ...reply, body: { ...body, head: { ...body.head, sha: 'e'.repeat(40) } } };
+        }
+        return reply;
+      };
+      w.clock.now += 10 * 60_000;
+      expect((await pass(w)).out.merged).toBe(0);
+      expect(w.fake.mergeCalls()).toHaveLength(1);
+      expect(w.ledger.of('merge:landed')).toHaveLength(0);
+      expect(w.ledger.of('pr:closed')).toHaveLength(0);
+      expect(p.status).toBe('pending');
+    },
+  );
 });

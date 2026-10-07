@@ -61,7 +61,7 @@ export const APP_ICON_BUILD = 'desktop/src-tauri/icons/icon.icns';
 export const SIGNING_IDENTITY = 'Ashlr Local';
 export const ENTITLEMENTS = 'desktop/src-tauri/Entitlements.plist';
 /** Must match desktop/src-tauri/Info.plist (a Rust test pins that file's copy). */
-export const MIC_USAGE = 'Verse transcribes your voice on this Mac when you hold the dictation key.';
+export const MIC_USAGE = 'Phantom transcribes your voice on this Mac when you hold the dictation key.';
 /** The native WebView loads the loopback Verse server over HTTP. Keep ATS scoped to local traffic. */
 export const LOCAL_NETWORK_ATS = JSON.stringify({ NSAllowsLocalNetworking: true });
 

@@ -8,6 +8,7 @@
  * Renders nothing while the first read is out and nothing on a server
  * without the route (404).
  */
+import { formatMetric } from '../../../components/charts/format-metric.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import usage from '../usage/usage.module.css';
@@ -67,9 +68,9 @@ export function JevPanel() {
                 <tbody>
                   {body.status.byKind.map((k) => (
                     <tr key={k.kind} data-jev-kind={k.kind}>
-                      <td title={k.topFallbackReasons.map((r) => `${r.reason} ×${r.count}`).join(', ') || undefined}>{k.kind}</td>
-                      <td>{k.decisions}</td>
-                      <td>{k.jev}</td>
+                      <td title={k.topFallbackReasons.map((r) => `${r.reason} ×${formatMetric(r.count)}`).join(', ') || undefined}>{k.kind}</td>
+                      <td>{formatMetric(k.decisions)}</td>
+                      <td>{formatMetric(k.jev)}</td>
                       <td>{formatPercent(k.fallbackRate)}</td>
                       <td>{formatConfidence(k.avgConfidence)}</td>
                       <td>{formatLatency(k.avgLatencyMs)}</td>

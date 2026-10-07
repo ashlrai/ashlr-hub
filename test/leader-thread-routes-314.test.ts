@@ -20,9 +20,9 @@ import {
   setLeaderApiHooksForTest,
 } from '../src/core/verse/leader-api.js';
 import { isNeedsYouItem } from '../src/core/verse/workbench-types.js';
-import { setLeaderThreadDepsForTest, listThread, syncLeaderMemosToThread } from '../src/core/vision/leader-thread.js';
+import { setLeaderThreadDepsForTest, listThread, readLeaderQuestion, syncLeaderMemosToThread } from '../src/core/vision/leader-thread.js';
 import { listOperatorDirectives, questionIdFor } from '../src/core/vision/leader-operator.js';
-import { LEADER_QUESTION_ITEM_PREFIX } from '../src/core/vision/leader-thread-types.js';
+import { LEADER_QUESTION_ITEM_PREFIX, LEADER_QUESTION_REVISION_RE } from '../src/core/vision/leader-thread-types.js';
 import { enactLeaderActions, findStoredAction, readLeaderDirectives } from '../src/core/vision/leader-apply.js';
 import { actionIdFor, writeLeaderMemo, type AnyLeaderActionDraft } from '../src/core/vision/leader-memo.js';
 import type { LeaderRunDeps } from '../src/core/vision/leader.js';
@@ -204,6 +204,86 @@ describe('thread routes', () => {
     expect((await call('POST', '/api/verse/leader/questions/lm-20260101000000-abcdef:0/answer', { text: 'x' })).status).toBe(404);
     expect((await call('POST', '/api/verse/leader/questions/nope/answer', { text: 'x' })).status).toBe(400);
     expect((await call('POST', `/api/verse/leader/questions/${qid}/answer`, { text: 'x', extra: 1 })).status).toBe(400);
+  });
+
+  it('reads the full authoritative question without conversation or model work', async () => {
+    const m = memo();
+    m.questionsForMason = ['Which improvements should we make?'];
+    m.questionForms = [{ index: 0, mode: 'multiple', options: ['Startup speed', 'Agent tracing', 'Phone controls'] }];
+    writeLeaderMemo(m); syncLeaderMemosToThread();
+    const qid = questionIdFor(m.id, 0)!;
+    const before = listThread();
+    ctx = { ...ctx, allowDispatch: false };
+    const res = await call('GET', `/api/verse/leader/questions/${qid}`);
+    expect(res.status).toBe(200);
+    expect(res.body.typedQuestionsSupported).toBe(true);
+    expect(res.body.question).toMatchObject({ questionId: qid, text: m.questionsForMason[0], answered: false,
+      answer: null, questionForm: { schemaVersion: 1, mode: 'multiple', options: m.questionForms[0]!.options } });
+    expect(res.body.question.questionForm.revision).toMatch(LEADER_QUESTION_REVISION_RE);
+    expect(res.body.question.questionForm.revision).toBe(readLeaderQuestion(qid)?.questionForm?.revision);
+    expect(listThread()).toEqual(before);
+    expect(replies).toEqual([]);
+    expect((await call('GET', `/api/verse/leader/questions/${qid}?force=true`)).status).toBe(400);
+    expect((await call('GET', '/api/verse/leader/questions/nope')).status).toBe(400);
+    const missing = await call('GET', '/api/verse/leader/questions/lm-20260101000000-abcdef:0');
+    expect(missing.status).toBe(404);
+    expect(missing.body).toMatchObject({ code: 'VERSE_NOT_FOUND', typedQuestionsSupported: true });
+    expect(listThread()).toEqual(before);
+  });
+
+  it('records one typed answer, rejects replay, and distinguishes deliberate later text refinement', async () => {
+    const m = memo();
+    m.questionsForMason = ['Which improvements should we make?'];
+    m.questionForms = [{ index: 0, mode: 'multiple', options: ['Startup speed', 'Agent tracing', 'Phone controls'] }];
+    writeLeaderMemo(m); syncLeaderMemosToThread();
+    const qid = questionIdFor(m.id, 0)!;
+    const form = (await call('GET', `/api/verse/leader/questions/${qid}`)).body.question.questionForm;
+    const body = { submission: { schemaVersion: 1, formRevision: form.revision, kind: 'options', optionIndices: [2, 0] } };
+    replies.push(JSON.stringify({ reply: 'I will prioritize startup and phone controls.' }));
+    const accepted = await call('POST', `/api/verse/leader/questions/${qid}/answer`, body);
+    expect(accepted.status).toBe(200);
+    expect(accepted.body.outcome).toBe('recorded');
+    expect(accepted.body.question.answer.typedAcceptance).toMatchObject({ formRevision: form.revision, kind: 'options', optionIndices: [0, 2] });
+    expect(accepted.body.question.answer.text).toBe('Startup speed; Phone controls');
+    expect(accepted.body.message).toMatchObject({ kind: 'answer', questionId: qid });
+    const after = listThread();
+    const repeated = await call('POST', `/api/verse/leader/questions/${qid}/answer`, body);
+    expect(repeated.status).toBe(200);
+    expect(repeated.body).toMatchObject({ outcome: 'already-answered', message: null, reply: null });
+    expect(listThread()).toEqual(after);
+    expect(replies).toEqual([]);
+    replies.push(JSON.stringify({ reply: 'Updated: prioritize tracing first.' }));
+    expect((await call('POST', `/api/verse/leader/questions/${qid}/answer`, { text: 'Actually, tracing first.' })).status).toBe(200);
+    const current = (await call('GET', `/api/verse/leader/questions/${qid}`)).body.question;
+    expect(current.answered).toBe(true);
+    expect(current.answer.text).toBe('Actually, tracing first.');
+    expect(current.answer.typedAcceptance).toBeUndefined();
+  });
+
+  it('holds stale forms and refuses malformed typed bodies behind the existing mutation gate', async () => {
+    const m = memo();
+    m.questionForms = [{ index: 0, mode: 'single', options: ['Startup speed', 'Agent tracing'] }];
+    writeLeaderMemo(m); syncLeaderMemosToThread();
+    const qid = questionIdFor(m.id, 0)!;
+    const form = (await call('GET', `/api/verse/leader/questions/${qid}`)).body.question.questionForm;
+    const submission = { schemaVersion: 1, formRevision: form.revision, kind: 'options', optionIndices: [0] };
+    const before = listThread();
+    const stale = await call('POST', `/api/verse/leader/questions/${qid}/answer`, { submission: { ...submission, formRevision: Array(8).fill('00000000').join('-') } });
+    expect(stale.status).toBe(200);
+    expect(stale.body).toMatchObject({ outcome: 'stale', message: null, reply: null });
+    for (const body of [
+      { submission, text: 'Legacy fallback' }, { submission, channel: 'system' },
+      { submission: { ...submission, actor: 'owner' } },
+      { submission: { ...submission, optionIndices: [] } }, { submission: { ...submission, optionIndices: [0, 0] } },
+      { submission: { ...submission, optionIndices: [-1] } }, { submission: { ...submission, optionIndices: [10] } },
+      { submission: { schemaVersion: 1, formRevision: form.revision, kind: 'text', text: 'x'.repeat(2_001) } },
+    ]) expect((await call('POST', `/api/verse/leader/questions/${qid}/answer`, body)).status).toBe(400);
+    expect((await call('POST', `/api/verse/leader/questions/${qid}/answer`, { submission }, { 'x-ashlr-token': 'wrong' })).status).toBe(401);
+    expect((await call('POST', `/api/verse/leader/questions/${qid}/answer`, { submission }, { 'content-type': 'text/plain' })).status).toBe(415);
+    ctx = { ...ctx, allowDispatch: false };
+    expect((await call('POST', `/api/verse/leader/questions/${qid}/answer`, { submission })).status).toBe(404);
+    expect(listThread()).toEqual(before);
+    expect(replies).toEqual([]);
   });
 
   it('POST /actions/<id>/approve applies a class-B action early through the grant checks', async () => {

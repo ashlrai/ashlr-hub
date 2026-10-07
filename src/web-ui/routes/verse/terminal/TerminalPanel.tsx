@@ -1463,7 +1463,7 @@ export function TerminalPanel({ sessionId, roots, request, onSendToChat, onAskCh
             compact
             icon={<TerminalGlyph size={20} />}
             title="Terminal needs the desktop app"
-            body="This Verse server has no built-in terminal. The Agent tab still shows what this chat's agents ran."
+            body="This Phantom server has no built-in terminal. The Agent tab still shows what this chat's agents ran."
             action={deps.platform === 'mac' ? (
               <Button size="sm" variant="subtle" icon={<IconExternalLink />} onClick={() => void openExternal()}>Open in Terminal</Button>
             ) : undefined}

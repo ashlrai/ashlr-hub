@@ -26,6 +26,7 @@
  * does not have — the title filter above still works.
  */
 import { useEffect, useId, useRef, useState } from 'react';
+import { formatMetric } from '../../../components/charts/format-metric.js';
 import type { VerseSearchResponse } from '../../../../core/verse/types.js';
 import { ApiError } from '../../../data/client.js';
 import { formatRelative } from '../verse-model.js';
@@ -118,7 +119,7 @@ export function SessionSearch({ onOpenSession, query, selectedId = null }: Sessi
     return standalone ? (
       <div className={styles.search}>
         {field}
-        <p className={`${styles.hint} ${styles.searchNote}`}>This server cannot search messages yet — update Ashlr and restart <code>ashlr verse</code>.</p>
+        <p className={`${styles.hint} ${styles.searchNote}`}>This server cannot search messages yet — update Phantom and restart <code>ashlr verse</code>.</p>
       </div>
     ) : null;
   }
@@ -192,7 +193,7 @@ export function SessionSearch({ onOpenSession, query, selectedId = null }: Sessi
 
       {response && state.status !== 'error' ? (
         <p className={`${styles.hint} ${styles.searchNote}`}>
-          Searched {response.scannedSessions.toLocaleString()} {response.scannedSessions === 1 ? 'chat' : 'chats'}
+          Searched {formatMetric(response.scannedSessions)} {response.scannedSessions === 1 ? 'chat' : 'chats'}
           {response.truncated ? ' — the most recent ones only; older chats were not searched.' : '.'}
         </p>
       ) : null}

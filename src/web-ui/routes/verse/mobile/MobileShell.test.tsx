@@ -98,13 +98,13 @@ describe('the shell', () => {
     mac();
     render(<MobileShell />);
     // The frame paints before the runtime chunk: tabs, no badges yet.
-    const frameTabs = screen.getByRole('navigation', { name: 'Verse' });
+    const frameTabs = screen.getByRole('navigation', { name: 'Phantom' });
     expect(within(frameTabs).getAllByRole('button')).toHaveLength(5);
     expect(within(frameTabs).getByRole('button', { name: 'Home' })).toHaveAttribute('aria-current', 'page');
     expect(within(frameTabs).getByRole('button', { name: 'Needs you' })).toBeInTheDocument();
     // Then the runtime lands (the frame is redrawn with the live context).
     expect(await screen.findByRole('button', { name: 'Needs you, 1 waiting' }, { timeout: 4000 })).toBeInTheDocument();
-    const tabs = screen.getByRole('navigation', { name: 'Verse' });
+    const tabs = screen.getByRole('navigation', { name: 'Phantom' });
     expect(within(tabs).getByRole('button', { name: 'Agents, 1 working' })).toBeInTheDocument();
   });
 
@@ -112,7 +112,7 @@ describe('the shell', () => {
     mac();
     render(<MobileShell />);
     await homeLoaded();
-    const tabs = screen.getByRole('navigation', { name: 'Verse' });
+    const tabs = screen.getByRole('navigation', { name: 'Phantom' });
     fireEvent.click(within(tabs).getByRole('button', { name: /^More/ }));
     await waitFor(() => expect(window.location.hash).toBe('#/more'));
     await waitFor(() => expect(within(tabs).getByRole('button', { name: /^More/ })).toHaveAttribute('aria-current', 'page'));
@@ -177,7 +177,7 @@ describe('Home', () => {
   it('shows skeletons before the Mac answers', () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)));
     render(<MobileShell />);
-    expect(screen.getByRole('heading', { name: 'Verse', level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Phantom', level: 1 })).toBeInTheDocument();
     expect(screen.getAllByRole('status', { name: /Loading/ }).length).toBeGreaterThan(0);
   });
 

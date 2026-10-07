@@ -148,7 +148,7 @@ export function MoreScreen() {
     setPushMessage(null);
     try {
       await subscribeRemotePush(await enableRemotePush(pushKey));
-      setPushMessage('Notifications are on. They only say that Verse has an update.');
+      setPushMessage('Notifications are on. They only say that Phantom has an update.');
     } catch (error) {
       setPushMessage(error instanceof Error ? error.message : 'Notifications could not be enabled.');
     } finally { setPushBusy(false); }
@@ -183,9 +183,9 @@ export function MoreScreen() {
       </Section>
 
       {pushAvailable ? <Section title="Notifications" flat>
-        <p className={ui.card}>Verse can send a generic alert when something needs you or a run completes. The alert contains no agent or repository details.</p>
+        <p className={ui.card}>Phantom can send a generic alert when something needs you or a run completes. The alert contains no agent or repository details.</p>
         {pushEligible ? <Button variant="tinted" block disabled={pushBusy || !pushKey} onClick={() => void enablePush()}>{pushBusy ? 'Enabling…' : pushKey ? 'Enable notifications' : 'Preparing notifications…'}</Button>
-          : <p className={ui.card}>Notifications require Verse installed on an iPhone Home Screen with Web Push support. You can still use Verse in this browser.</p>}
+          : <p className={ui.card}>Notifications require Phantom installed on an iPhone Home Screen with Web Push support. You can still use Phantom in this browser.</p>}
         {pushMessage ? <p role="status">{pushMessage}</p> : null}
       </Section> : null}
 
@@ -201,10 +201,10 @@ export function MoreScreen() {
 
       <Section title="Install on your Home Screen" flat>
         {standalone ? (
-          <p className={ui.card}>Installed — Verse is running from your Home Screen.</p>
+          <p className={ui.card}>Installed — Phantom is running from your Home Screen.</p>
         ) : (
           <div className={ui.card}>
-            <p className={styles.lead}>Add Verse to your Home Screen and it opens full screen, like an app.</p>
+            <p className={styles.lead}>Add Phantom to your Home Screen and it opens full screen, like an app.</p>
             <ol className={styles.steps}>
               <li><strong>iPhone (Safari):</strong> tap Share, then Add to Home Screen.</li>
               <li><strong>Android (Chrome):</strong> open the menu button, then Install app.</li>

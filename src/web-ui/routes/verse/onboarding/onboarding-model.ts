@@ -18,6 +18,7 @@
  * The tour NEVER renders a command it invented: the seats step shows only
  * A2's own fix argv (through C6's capacity rows).
  */
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 import type { LocalModelsSnapshot } from '../usage/usage-contract.js';
 
 // ---------------------------------------------------------------------------
@@ -37,7 +38,7 @@ export interface OnboardingStepMeta {
 export const ONBOARDING_STEPS: readonly OnboardingStepMeta[] = [
   {
     id: 'welcome',
-    title: 'Welcome to Verse',
+    title: `Welcome to ${PRODUCT_NAME}`,
     subtitle: 'Five sections, one rail.',
   },
   {
@@ -131,7 +132,7 @@ export function buildLocalFinding(input: LocalInput): LocalFinding {
     return {
       tone: 'unknown',
       state: 'not reported',
-      summary: 'This server does not report local runtimes, so Verse cannot say whether one is available here.',
+      summary: 'This server does not report local runtimes, so Phantom cannot say whether one is available here.',
       meaning: LOCAL_MEANING_ABSENT,
       fix: input.unavailableReason,
       modelCount: 0,
@@ -151,7 +152,7 @@ export function buildLocalFinding(input: LocalInput): LocalFinding {
       // "Not reachable" and "not installed" are different facts and the probe
       // cannot tell them apart — so this does not claim either one.
       summary:
-        'No local runtime answered. Verse cannot tell whether one is not running or not installed — the probe only knows it got no answer.',
+        'No local runtime answered. Phantom cannot tell whether one is not running or not installed — the probe only knows it got no answer.',
       meaning: LOCAL_MEANING_ABSENT,
       fix: 'Start Ollama (or LM Studio) and press Refresh in Usage. If neither is installed, everything still works — it all runs on the cloud seats.',
       modelCount: 0,

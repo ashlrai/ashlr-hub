@@ -41,7 +41,7 @@ describe('CloudCreditsPanel', () => {
       expect(within(panel).getByLabelText(label)).toBeInTheDocument();
     }
     expect(within(panel).getByLabelText('Credits on the account')).toHaveValue('250');
-    expect(within(panel).getByRole('switch', { name: 'Verse may launch self-improvement tasks on its own' })).toHaveAttribute('aria-checked', 'true');
+    expect(within(panel).getByRole('switch', { name: 'Phantom may launch self-improvement tasks on its own' })).toHaveAttribute('aria-checked', 'true');
   });
 
   it('seat not set up: says so as the state, with the credits as a plain estimate and no meter', async () => {
@@ -65,7 +65,7 @@ describe('CloudCreditsPanel', () => {
     const spent = within(panel).getByLabelText('Already spent');
     await user.clear(spent);
     await user.type(spent, '17.25');
-    await user.click(within(panel).getByRole('switch', { name: 'Verse may launch self-improvement tasks on its own' }));
+    await user.click(within(panel).getByRole('switch', { name: 'Phantom may launch self-improvement tasks on its own' }));
     await user.click(within(panel).getByRole('button', { name: 'Save budget' }));
     await waitFor(() => expect(posted).toEqual([
       { url: '/api/verse/cloud/budget', body: { creditsSpentAdjustmentUsd: 17.25, selfImprove: { enabled: false } } },
@@ -99,7 +99,7 @@ describe('CloudLaneChip', () => {
     const chip = await screen.findByRole('listitem', { name: 'Cloud: 3 running' });
     expect(chip).toHaveTextContent('Cloud · 3 running');
     expect(chip).toHaveAttribute('data-active', 'true');
-    expect(chip.getAttribute('title')).toMatch(/^Claude Code cloud sessions Verse launched/);
+    expect(chip.getAttribute('title')).toMatch(/^Claude Code cloud sessions Phantom launched/);
   });
 
   it('reads "0 running" when idle, and is absent without the cloud lane', async () => {

@@ -16,7 +16,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync, linkSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -25,12 +25,16 @@ const thread = vi.hoisted(() => ({
   delivered: [] as Array<{ id: string; channel: string; ok: boolean }>,
   appendMasonMessage: vi.fn(),
   answerLeaderQuestion: vi.fn(),
+  readLeaderQuestion: vi.fn(),
+  submitLeaderQuestion: vi.fn(),
   approveLeaderAction: vi.fn(),
 }));
 
 vi.mock('../src/core/vision/leader-thread.js', () => ({
   appendMasonMessage: thread.appendMasonMessage,
   answerLeaderQuestion: thread.answerLeaderQuestion,
+  readLeaderQuestion: thread.readLeaderQuestion,
+  submitLeaderQuestion: thread.submitLeaderQuestion,
   approveLeaderAction: thread.approveLeaderAction,
   pendingOutbound: vi.fn(() => thread.outbound.filter((m) => !thread.delivered.some((d) => d.id === m['id'] && d.ok))),
   markDelivered: vi.fn((id: string, channel: string, ok: boolean) => {
@@ -57,13 +61,20 @@ import {
   escapeTelegramHtml,
   sendTelegramMessage,
   setTelegramTransportForTests,
+  setTelegramSendClockForTests,
   splitTelegramText,
   TELEGRAM_MAX_MESSAGE,
   pollTelegramUpdates,
 } from '../src/core/integrations/telegram.js';
 import { runCommsCycle } from '../src/core/comms/dispatch.js';
 import { listRequests, markSent, outstanding, postRequest } from '../src/core/comms/requests.js';
-import { lookupTelegramMessage } from '../src/core/comms/telegram-thread-map.js';
+import { lookupTelegramMessage, readTelegramQuestionControl, registerTelegramQuestion,
+  bindTelegramQuestionMessage, changeTelegramQuestion } from '../src/core/comms/telegram-thread-map.js';
+import { telegramQuestionNamespace } from '../src/core/integrations/telegram.js';
+import { typedQuestionKeyboard } from '../src/core/comms/leader-line.js';
+import { handleLeaderButton, sendThreadMessage, converseWithLeader } from '../src/core/comms/telegram-channel.js';
+import type { LeaderThreadMessage, LeaderQuestionProjection } from '../src/core/vision/leader-thread-types.js';
+import { cleanOperatorText, OPERATOR_LIMITS } from '../src/core/vision/leader-operator.js';
 import { writeLeaderMemo } from '../src/core/vision/leader-memo.js';
 import {
   collectDigestFacts,
@@ -101,7 +112,7 @@ function fakeTransport(method: string, body: Record<string, unknown>): Promise<u
     if (failSends) return Promise.resolve({ ok: false, description: 'Forbidden: bot was blocked by the user' });
     if (rejectHtmlOnce && body['parse_mode'] === 'HTML') {
       rejectHtmlOnce = false;
-      return Promise.resolve({ ok: false, description: "Bad Request: can't parse entities: unsupported start tag" });
+      return Promise.resolve({ ok: false, error_code: 400, description: "Bad Request: can't parse entities: unsupported start tag" });
     }
     return Promise.resolve({ ok: true, result: { message_id: nextMessageId++ } });
   }
@@ -173,7 +184,16 @@ function leaderMsg(over: Record<string, unknown>): Record<string, unknown> {
 let home = '';
 const savedHome = process.env['HOME'];
 
+let telegramNow = 0;
+
 beforeEach(() => {
+  telegramNow = 0;
+  // Exercise actual-attempt pacing with a virtual monotonic clock, not a
+  // fake-transport bypass or larger timeout.
+  setTelegramSendClockForTests({
+    now: () => telegramNow,
+    sleep: async (ms) => { telegramNow += ms; },
+  });
   home = mkdtempSync(join(tmpdir(), 'ashlr-tg314-'));
   process.env['HOME'] = home;
   calls = [];
@@ -185,6 +205,10 @@ beforeEach(() => {
   thread.delivered = [];
   thread.appendMasonMessage.mockReset();
   thread.answerLeaderQuestion.mockReset();
+  thread.readLeaderQuestion.mockReset();
+  thread.readLeaderQuestion.mockImplementation((questionId: string) => ({ questionId, text: 'Legacy question', askedAt: '',
+    messageId: null, answered: false, answer: null }));
+  thread.submitLeaderQuestion.mockReset();
   thread.approveLeaderAction.mockReset();
   apply.vetoLeaderMemo.mockClear();
   apply.vetoLeaderAction.mockClear();
@@ -193,6 +217,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setTelegramTransportForTests(null);
+  setTelegramSendClockForTests(null);
   process.env['HOME'] = savedHome;
   rmSync(home, { recursive: true, force: true });
 });
@@ -359,12 +384,13 @@ describe('Leader thread over Telegram', () => {
   });
 
   it("mirrors Mason's Verse messages for context; never echoes his own Telegram messages", async () => {
+    const literal = `Memo ${MEMO_ID} at 2026-09-26T06:30:00.000Z; 2499.91 credits, 12345678901234567890`;
     thread.outbound = [
-      { ...leaderMsg({ id: 'v-1', text: 'ship billing first' }), from: 'mason', channel: 'verse' },
+      { ...leaderMsg({ id: 'v-1', text: literal }), from: 'mason', channel: 'verse' },
       { ...leaderMsg({ id: 't-own', text: 'already on the phone' }), from: 'mason', channel: 'telegram' },
     ];
     await runCommsCycle(cfg(), fastCycle);
-    expect(texts()).toEqual(['You (in Verse):\nship billing first']);
+    expect(texts()).toEqual([`You (in Verse):\n${literal}`]);
     expect(thread.delivered).toEqual([
       { id: 'v-1', channel: 'telegram', ok: true },
       { id: 't-own', channel: 'telegram', ok: true },
@@ -477,7 +503,8 @@ describe('Leader memo buttons', () => {
     expect(out).toContain('Vetoed: memo vetoed, 1 action undone');
     expect(thread.approveLeaderAction).toHaveBeenCalledWith(ACTION_ESCALATED, expect.objectContaining({ channel: 'telegram' }));
     const approved = out.find((t) => t.startsWith('Approved'))!;
-    expect(approved).toContain(ACTION_ESCALATED);
+    expect(approved).toMatch(/^Approved action:/);
+    expect(approved).not.toContain(ACTION_ESCALATED);
     expect(approved).toContain('Recorded — outside the grant');
     // The Leader's acknowledgement rode in that reply: marked delivered, never sent twice.
     expect(thread.delivered).toContainEqual({ id: 'lt-20260926070000-bbbbbb', channel: 'telegram', ok: true });
@@ -494,7 +521,7 @@ describe('Leader memo buttons', () => {
     })];
     await runCommsCycle(cfg(), fastCycle);
     const [s] = sends();
-    expect(s!.body['text']).toBe(`Leader memo ${MEMO_ID}\nBottleneck: review queue`);
+    expect(s!.body['text']).toBe('Leader memo\nBottleneck: review queue');
     const data = keyboardData(s!);
     expect(data.map((d) => d.slice(0, 5))).toEqual(['lt:a:', 'lt:v:', 'lt:d:']);
     expect(lookupTelegramMessage(1000)).toMatchObject({ kind: 'memo', memoId: MEMO_ID, actionIds: [ACTION_ESCALATED] });
@@ -529,21 +556,32 @@ describe('Leader memo buttons', () => {
 // ===========================================================================
 
 describe('slash commands and keywords', () => {
-  it('/help, /status, /directives, /leader and unknown commands all answer as replies', async () => {
+  it('/help, /start, /status, /directives, /leader and unknown commands all answer as replies', async () => {
     writeLeaderMemo(memo());
     updates = [
       textUpdate('/help', 1), textUpdate('/status', 2), textUpdate('/directives', 3),
-      textUpdate('/leader', 4), textUpdate('/bogus', 5),
+      textUpdate('/leader', 4), textUpdate('/bogus', 5), textUpdate('/start', 6),
     ];
     await runCommsCycle(cfg(), fastCycle);
     const s = sends();
-    expect(s.map(replyTarget)).toEqual([1, 2, 3, 4, 5]);
-    expect(texts()[0]).toContain('/status');
+    expect(s.map(replyTarget)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(texts()[0]).toContain('<b>Read</b>');
+    expect(texts()[0]).toContain('<b>Talk &amp; work</b>');
+    expect(texts()[0]).toContain('<b>Decisions</b>');
+    expect(texts()[0]).toContain('<b>Messages</b>');
+    expect(texts()[0]).toContain('<code>/status or /brief</code>');
+    expect(texts()[0]).toContain('<code>/task &lt;owner/repo&gt; &lt;what to do&gt;</code>');
+    expect(texts()[0]).not.toContain('&amp;lt;');
+    expect(texts()[0]).toContain('within the grant');
+    expect(texts()[0]!.length).toBeLessThanOrEqual(TELEGRAM_MAX_MESSAGE);
     expect(texts()[1]).toMatch(/Autonomy: off — next step: `ashlr authority setup`/);
     expect(texts()[2]).toMatch(/No standing directives/);
-    expect(texts()[3]).toContain(MEMO_ID);
+    expect(texts()[3]).toMatch(/^Leader memo — /);
+    expect(texts()[3]).not.toContain(MEMO_ID);
+    expect(lookupTelegramMessage(1003)).toMatchObject({ kind: 'memo', memoId: MEMO_ID });
     expect(keyboardData(s[3]!).some((d) => d.startsWith('lt:d:'))).toBe(true);
-    expect(texts()[4]).toContain('Unknown command /bogus');
+    expect(texts()[4]).toContain('Unknown command <code>/bogus</code>');
+    expect(texts()[5]).toBe(texts()[0]);
     expect(thread.appendMasonMessage).not.toHaveBeenCalled();
   });
 
@@ -560,13 +598,14 @@ describe('slash commands and keywords', () => {
   it('paused: inbound still works (resume arrives) but nothing informational goes out', async () => {
     updates = [textUpdate('pause', 1)];
     await runCommsCycle(cfg(), fastCycle);
+    expect(texts()).toEqual(['⏸ Fleet messages paused. Send &quot;resume&quot; to resume messages.']);
     calls = [];
     postRequest({ kind: 'fleet-digest', type: 'report', text: 'held', options: [] });
     await runCommsCycle(cfg(), fastCycle);
     expect(sends()).toHaveLength(0);
     updates = [textUpdate('resume', 2)];
     await runCommsCycle(cfg(), fastCycle);
-    expect(texts()).toEqual(['▶️ Fleet resumed.', 'held']);
+    expect(texts()).toEqual(['▶️ Fleet messages resumed.', 'held']);
   });
 });
 
@@ -725,4 +764,310 @@ describe('change-driven digest', () => {
     expect(second.posted).toBe(false);
     expect(listRequests({ kind: 'fleet-digest' })).toHaveLength(1);
   });
+});
+
+function typedQuestionFixture(mode: 'single' | 'multiple' | 'short-answer' = 'multiple') {
+  const questionId = `${MEMO_ID}:0`, threadId = 'lt-20260926063000-abcdef';
+  const form = { schemaVersion: 1 as const, revision: Array(8).fill('a'.repeat(8)).join('-'), mode,
+    ...(mode === 'short-answer' ? {} : { options: ['Startup speed', 'Agent reliability', 'Phone experience'] }),
+    expiresAt: new Date(Date.now() + 60_000).toISOString() };
+  let question: LeaderQuestionProjection = { questionId, text: 'Which improvements matter most?',
+    askedAt: new Date().toISOString(), messageId: threadId, questionForm: form, answered: false, answer: null };
+  thread.readLeaderQuestion.mockImplementation(() => structuredClone(question));
+  thread.submitLeaderQuestion.mockImplementation(async (_id, submission) => {
+    const text = submission.kind === 'options' ? submission.optionIndices.map((index: number) => form.options![index]).join('; ') : cleanOperatorText(submission.text, OPERATOR_LIMITS.answerMaxChars * 2)!;
+    const at = new Date().toISOString(), messageId = 'lt-20260926063001-abcdef';
+    question = { ...question, answered: true, answer: { text, at, channel: 'telegram', messageId,
+      typedAcceptance: { schemaVersion: 1, formRevision: form.revision, kind: submission.kind,
+        ...(submission.kind === 'options' ? { optionIndices: [...submission.optionIndices] } : {}), text, at, messageId } } };
+    return { outcome: 'recorded', question: structuredClone(question), message: { id: messageId, at, from: 'mason',
+      channel: 'telegram', kind: 'answer', text, questionId }, reply: null };
+  });
+  const message: LeaderThreadMessage = { id: threadId, at: new Date().toISOString(), from: 'leader', channel: 'telegram',
+    kind: 'question', questionId, questionForm: form, text: question.text };
+  const namespace = telegramQuestionNamespace(cfg())!;
+  return { form, questionId, threadId, message, namespace,
+    question: () => structuredClone(question), changeQuestion: (next: LeaderQuestionProjection) => { question = next; } };
+}
+function controlEvent(data: string, callbackId = 'typed-callback', messageId = 1000) {
+  return { kind: 'callback' as const, fromChatId: CHAT, data, messageId, callbackQueryId: callbackId };
+}
+function draftFor(data: string, namespace: string, messageId = 1000) {
+  return readTelegramQuestionControl(data.split(':')[2]!, namespace, messageId)!;
+}
+function control(draft: ReturnType<typeof draftFor>, suffix: string) {
+  return `lt:q:${draft.token}:${draft.revision.toString(36)}:${suffix}`;
+}
+
+describe('typed Leader question controls with strict offline drafts', () => {
+  it('keeps draft toggles/all/clear and empty Submit separate from model or approval work', async () => {
+    const f = typedQuestionFixture(); expect(await sendThreadMessage(f.message, cfg())).toBe(true);
+    const first = keyboardData(sends()[0]!)[0]!, token = first.split(':')[2]!;
+    expect(Buffer.byteLength(first)).toBeLessThanOrEqual(64);
+    const get = () => readTelegramQuestionControl(token, f.namespace, 1000)!;
+    await handleLeaderButton(controlEvent(control(get(), 'o:0'), 'toggle'), cfg());
+    expect(get().selected).toEqual([0]);
+    await handleLeaderButton(controlEvent(control(get(), 'a'), 'all'), cfg());
+    expect(get().selected).toEqual([0, 1, 2]);
+    await handleLeaderButton(controlEvent(control(get(), 'c'), 'clear'), cfg());
+    expect(get().selected).toEqual([]);
+    await handleLeaderButton(controlEvent(control(get(), 's'), 'empty'), cfg());
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled();
+    expect(thread.answerLeaderQuestion).not.toHaveBeenCalled(); expect(thread.approveLeaderAction).not.toHaveBeenCalled();
+    expect(lookupTelegramMessage(1000)).toMatchObject({ kind: 'question', questionId: f.questionId, threadId: f.threadId });
+  });
+
+  it('submits the frozen exact selection once and reconciles both duplicate callback identities without replay', async () => {
+    const f = typedQuestionFixture(); expect(await sendThreadMessage(f.message, cfg())).toBe(true);
+    const first = keyboardData(sends()[0]!)[0]!, token = first.split(':')[2]!;
+    const get = () => readTelegramQuestionControl(token, f.namespace, 1000)!;
+    await handleLeaderButton(controlEvent(control(get(), 'o:2'), 'third'), cfg());
+    await handleLeaderButton(controlEvent(control(get(), 'o:0'), 'first'), cfg());
+    const submit = control(get(), 's');
+    await handleLeaderButton(controlEvent(submit, 'submit'), cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledExactlyOnceWith(f.questionId,
+      { schemaVersion: 1, formRevision: f.form.revision, kind: 'options', optionIndices: [0, 2] }, { channel: 'telegram', cfg: cfg() });
+    expect(get().claim?.submission).toEqual({ schemaVersion: 1, formRevision: f.form.revision, kind: 'options', optionIndices: [0, 2] });
+    await handleLeaderButton(controlEvent(submit, 'submit'), cfg());
+    await handleLeaderButton(controlEvent(submit, 'different-repeat'), cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledOnce();
+    expect(thread.answerLeaderQuestion).not.toHaveBeenCalled(); expect(thread.approveLeaderAction).not.toHaveBeenCalled();
+    expect(lookupTelegramMessage(1000)).toMatchObject({ kind: 'question', questionId: f.questionId, threadId: f.threadId });
+    expect(calls.filter(call => call.method === 'editMessageReplyMarkup').at(-1)?.body['reply_markup']).toEqual({ inline_keyboard: [] });
+    expect(calls.some(call => call.method === 'answerCallbackQuery')).toBe(true);
+  });
+
+  it('serializes concurrent same-revision toggles and refuses the old visible Submit keyboard', async () => {
+    const f = typedQuestionFixture(); await sendThreadMessage(f.message, cfg());
+    const first = keyboardData(sends()[0]!)[0]!;
+    await Promise.all([handleLeaderButton(controlEvent(first, 'same'), cfg()), handleLeaderButton(controlEvent(first, 'same'), cfg())]);
+    const current = draftFor(first, f.namespace);
+    expect(current.selected).toEqual([0]); expect(current.revision).toBe(1);
+    await handleLeaderButton(controlEvent(first.replace(/o:0$/, 's'), 'old-submit'), cfg());
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled();
+    expect(draftFor(first, f.namespace).selected).toEqual([0]);
+    expect(calls.filter(call => call.method === 'editMessageReplyMarkup').at(-1)?.body['reply_markup']).toEqual({
+      inline_keyboard: typedQuestionKeyboard(current).map(row => row.map(button => ({ text: button.text, callback_data: 'data' in button ? button.data : '' }))),
+    });
+  });
+
+  it.each(['message', 'chat', 'bot', 'form', 'expiry'] as const)('holds a changed %s binding without answering or approving', async changed => {
+    const f = typedQuestionFixture(); await sendThreadMessage(f.message, cfg());
+    const first = keyboardData(sends()[0]!)[0]!, configuration = cfg();
+    const event = controlEvent(first);
+    if (changed === 'message') event.messageId++;
+    if (changed === 'chat') event.fromChatId = 'foreign';
+    if (changed === 'bot') configuration.comms!.telegram!.botToken = 'rotated-synthetic';
+    if (changed === 'form') f.changeQuestion({ ...f.question(), questionForm: { ...f.form, revision: Array(8).fill('b'.repeat(8)).join('-') } });
+    if (changed === 'expiry') {
+      // Actual supplied time fence, not a larger timeout or bypassed transport.
+      const row = draftFor(first, f.namespace);
+      expect(changeTelegramQuestion({ token: row.token, namespace: f.namespace, messageId: 1000, revision: 0,
+        callbackId: 'expired', operation: 'option', optionIndex: 0 }, Date.parse(f.form.expiresAt))).toMatchObject({ outcome: 'held' });
+      expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+      expect(thread.approveLeaderAction).not.toHaveBeenCalled(); expect(draftFor(first, f.namespace).selected).toEqual([]);
+      return;
+    }
+    await handleLeaderButton(event, configuration);
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+    expect(thread.approveLeaderAction).not.toHaveBeenCalled();
+    expect(draftFor(first, f.namespace).selected).toEqual([]);
+  });
+
+  it('retains a canonical uncertain claim and reconciles its exact acceptance without another submit', async () => {
+    const f = typedQuestionFixture(); await sendThreadMessage(f.message, cfg());
+    const first = keyboardData(sends()[0]!)[0]!; await handleLeaderButton(controlEvent(first, 'choice'), cfg());
+    const submission = control(draftFor(first, f.namespace), 's');
+    const accept = thread.submitLeaderQuestion.getMockImplementation()!;
+    thread.submitLeaderQuestion.mockImplementation(async (...args) => { await accept(...args); throw new Error('Lost reply'); });
+    await handleLeaderButton(controlEvent(submission, 'submit'), cfg());
+    expect(draftFor(first, f.namespace).claim).not.toBeNull();
+    await handleLeaderButton(controlEvent(submission, 'uncertain-repeat'), cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledOnce();
+    expect(draftFor(first, f.namespace).claim?.messageId).toBe('lt-20260926063001-abcdef');
+    expect(calls.some(call => call.method === 'answerCallbackQuery' && call.body['text'] === 'Your answer is saved.')).toBe(true);
+  });
+
+  it('does not equate another device or a legacy refinement answered boolean with this claim', async () => {
+    const f = typedQuestionFixture(); await sendThreadMessage(f.message, cfg());
+    const first = keyboardData(sends()[0]!)[0]!; await handleLeaderButton(controlEvent(first, 'choice'), cfg());
+    thread.submitLeaderQuestion.mockRejectedValue(new Error('Unknown canonical result'));
+    const submission = control(draftFor(first, f.namespace), 's');
+    await handleLeaderButton(controlEvent(submission, 'submit'), cfg());
+    f.changeQuestion({ ...f.question(), answered: true, answer: { text: 'Someone else answered', at: new Date().toISOString(),
+      channel: 'verse', messageId: 'lt-20260926063002-abcdef' } });
+    calls = [];
+    await handleLeaderButton(controlEvent(submission, 'uncertain-repeat'), cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledOnce();
+    expect(draftFor(first, f.namespace).claim?.messageId).toBeNull();
+    expect(calls.some(call => call.body['text'] === 'Your answer is saved.')).toBe(false);
+    expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+  });
+
+  it('uses the same typed seam for a genuine short answer while preserving the bot question and duplicate human identity', async () => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    const event = { kind: 'text' as const, fromChatId: CHAT, messageId: 2000, replyToMessageId: 1000 };
+    await converseWithLeader(event, 'Check the failing tests.', cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledExactlyOnceWith(f.questionId,
+      { schemaVersion: 1, formRevision: f.form.revision, kind: 'text', text: 'Check the failing tests.' }, { channel: 'telegram', cfg: cfg() });
+    expect(lookupTelegramMessage(1000)).toMatchObject({ kind: 'question', questionId: f.questionId });
+    expect(lookupTelegramMessage(2000)).toMatchObject({ kind: 'answer', questionId: f.questionId });
+    await converseWithLeader(event, 'Check the failing tests.', cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledOnce(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+    await converseWithLeader({ ...event, messageId: 2001 }, 'Also check the README.', cfg());
+    expect(thread.answerLeaderQuestion).toHaveBeenCalledOnce();
+  });
+
+  it('holds malformed storage instead of resetting claims, and never persists a raw bot token', async () => {
+    const f = typedQuestionFixture(); await sendThreadMessage(f.message, cfg());
+    const first = keyboardData(sends()[0]!)[0]!, path = join(home, '.ashlr', 'comms', 'telegram-questions', 'drafts.json');
+    expect(readFileSync(path, 'utf8')).not.toContain('fake-token-314');
+    writeFileSync(path, '{broken', { mode: 0o600 });
+    await handleLeaderButton(controlEvent(first), cfg());
+    expect(readFileSync(path, 'utf8')).toBe('{broken');
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+    expect(registerTelegramQuestion(f.namespace, f.questionId, f.threadId, f.form)).toBeNull();
+  });
+
+  it('bounds aggregate labels, keeps literal Unicode labels and requires safe delivered message identity', () => {
+    const f = typedQuestionFixture();
+    const bad = { ...f.form, options: Array.from({ length: 10 }, (_, index) => `${index}${'x'.repeat(199)}`) };
+    expect(registerTelegramQuestion(f.namespace, f.questionId, f.threadId, bad)).toBeNull();
+    const row = registerTelegramQuestion(f.namespace, f.questionId, f.threadId, { ...f.form, options: ['Read "x.ts" 🚀', 'Skip it'] })!;
+    expect(typedQuestionKeyboard(row)[0]![0]!.text).toBe('○ Read "x.ts" 🚀');
+    expect(bindTelegramQuestionMessage(row.token, f.namespace, -1)).toBe(false);
+    expect(bindTelegramQuestionMessage(row.token, f.namespace, 1000)).toBe(true);
+    expect(bindTelegramQuestionMessage(row.token, f.namespace, 1001)).toBe(false);
+    expect(changeTelegramQuestion({ token: row.token, namespace: f.namespace, messageId: 1001, revision: 0,
+      callbackId: 'forged-message', operation: 'submit' })).toBeNull();
+  });
+  it.each(['single', 'multiple'] as const)('offers an intentional ordinary written reply for %s without a typed-mode downgrade', async mode => {
+    const f = typedQuestionFixture(mode); await sendThreadMessage(f.message, cfg());
+    const first = keyboardData(sends()[0]!)[0]!;
+    await handleLeaderButton(controlEvent(control(draftFor(first, f.namespace), 'w'), 'write-navigation'), cfg());
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+    thread.answerLeaderQuestion.mockResolvedValue({ message: { id: 'lt-20260926063002-abcdef' }, reply: null });
+    await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2000, replyToMessageId: 1000 },
+      'Please explain the tradeoff first.', cfg());
+    expect(thread.answerLeaderQuestion).toHaveBeenCalledExactlyOnceWith(f.questionId, 'Please explain the tradeoff first.',
+      { channel: 'telegram', cfg: cfg() });
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.approveLeaderAction).not.toHaveBeenCalled();
+    expect(lookupTelegramMessage(1000)).toMatchObject({ kind: 'question', threadId: f.threadId });
+  });
+
+  it('does not use a pending short answer to consume an unbound interjection', async () => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    thread.appendMasonMessage.mockResolvedValue({ message: { id: 'lt-20260926063002-abcdef' }, reply: null });
+    await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2000 }, 'Also consider startup speed.', cfg());
+    expect(thread.appendMasonMessage).toHaveBeenCalledOnce();
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+  });
+  it('records a genuine reply to a current unclaimed expired short form as an ordinary answer', async () => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(f.form.expiresAt) + 1);
+    try {
+      thread.answerLeaderQuestion.mockResolvedValue({ message: { id: 'lt-20260926063002-abcdef' }, reply: null });
+      await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2000, replyToMessageId: 1000 },
+        'Please check the tests first.', cfg());
+      expect(thread.answerLeaderQuestion).toHaveBeenCalledExactlyOnceWith(f.questionId, 'Please check the tests first.',
+        { channel: 'telegram', cfg: cfg() });
+      expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.approveLeaderAction).not.toHaveBeenCalled();
+      expect(lookupTelegramMessage(1000)).toMatchObject({ kind: 'question', threadId: f.threadId, questionId: f.questionId });
+      expect(lookupTelegramMessage(2000)).toMatchObject({ threadId: 'lt-20260926063002-abcdef' });
+    } finally { clock.mockRestore(); }
+  });
+  it.each(['missing', 'changed'] as const)('holds an expired short reply with %s delivered-question binding', async fault => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    if (fault === 'missing') rmSync(join(home, '.ashlr', 'comms', 'telegram-questions', 'drafts.json'));
+    else f.changeQuestion({ ...f.question(), questionForm: { ...f.form, revision: Array(8).fill('b'.repeat(8)).join('-') } });
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(f.form.expiresAt) + 1);
+    try {
+      await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2000, replyToMessageId: 1000 }, 'Keep this answer.', cfg());
+      expect(thread.answerLeaderQuestion).not.toHaveBeenCalled(); expect(thread.submitLeaderQuestion).not.toHaveBeenCalled();
+      expect(texts().at(-1)).toMatch(/typed question is held/);
+    } finally { clock.mockRestore(); }
+  });
+  it('holds an expired short reply after an uncertain typed claim without downgrading it', async () => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    thread.submitLeaderQuestion.mockRejectedValue(new Error('Unknown canonical result'));
+    await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2000, replyToMessageId: 1000 }, 'First answer.', cfg());
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(f.form.expiresAt) + 1);
+    try {
+      await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2001, replyToMessageId: 1000 }, 'Replacement answer.', cfg());
+      expect(thread.submitLeaderQuestion).toHaveBeenCalledOnce(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+      expect(texts().at(-1)).toMatch(/do not repeat an uncertain submission/);
+    } finally { clock.mockRestore(); }
+  });
+
+  it.each(['missing', 'symlink', 'hardlink', 'mismatched-claim'] as const)('holds %s private state and never replays delivery or canonical submission', async fault => {
+    const f = typedQuestionFixture(); await sendThreadMessage(f.message, cfg());
+    const first = keyboardData(sends()[0]!)[0]!, path = join(home, '.ashlr', 'comms', 'telegram-questions', 'drafts.json');
+    const original = readFileSync(path, 'utf8'), outside = join(home, 'outside-draft.json');
+    if (fault === 'mismatched-claim') {
+      const state = JSON.parse(original);
+      state.drafts[0].claim = { submission: { schemaVersion: 1, formRevision: f.form.revision, kind: 'options', optionIndices: [9] },
+        messageId: null, inboundMessageId: null };
+      writeFileSync(path, JSON.stringify(state), { mode: 0o600 });
+    } else {
+      rmSync(path);
+      if (fault !== 'missing') {
+        writeFileSync(outside, original, { mode: 0o600 });
+        if (fault === 'symlink') symlinkSync(outside, path); else linkSync(outside, path);
+      }
+    }
+    await handleLeaderButton(controlEvent(first), cfg());
+    expect(await sendThreadMessage(f.message, cfg())).toBe(false);
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+    expect(sends()).toHaveLength(1);
+    if (fault === 'symlink' || fault === 'hardlink') expect(readFileSync(outside, 'utf8')).toBe(original);
+  });
+
+  it('reserves one typed delivery attempt even when the transport outcome is unknown', async () => {
+    const f = typedQuestionFixture();
+    failSends = true;
+    expect(await sendThreadMessage(f.message, cfg())).toBe(false);
+    failSends = false;
+    expect(await sendThreadMessage(f.message, cfg())).toBe(false);
+    expect(sends()).toHaveLength(1);
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled();
+  });
+
+  it('holds a different genuine reply while the first short-answer claim remains unconfirmed', async () => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    thread.submitLeaderQuestion.mockRejectedValue(new Error('Unknown canonical result'));
+    await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2000, replyToMessageId: 1000 }, 'Check the tests.', cfg());
+    await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2001, replyToMessageId: 1000 }, 'Check something else.', cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledOnce(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+  });
+
+  it('accepts one-choice canonical forms and reads a draft without rewriting its protected state', async () => {
+    const f = typedQuestionFixture('single'); f.message.questionForm = { ...f.form, options: ['Use the existing approach'] };
+    expect(await sendThreadMessage(f.message, cfg())).toBe(true);
+    const first = keyboardData(sends()[0]!)[0]!, path = join(home, '.ashlr', 'comms', 'telegram-questions', 'drafts.json');
+    const before = lstatSync(path, { bigint: true }), bytes = readFileSync(path);
+    const row = draftFor(first, f.namespace);
+    expect(row.form.options).toEqual(['Use the existing approach']);
+    expect(lstatSync(path, { bigint: true })).toMatchObject({ ino: before.ino, dev: before.dev, mtimeNs: before.mtimeNs, ctimeNs: before.ctimeNs });
+    expect(readFileSync(path)).toEqual(bytes);
+  });
+
+  it('reconciles the exact canonical text normalization without treating answered alone as acceptance', async () => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    const text = '  Check\u0000the tests.\nKeep the README.  ';
+    await converseWithLeader({ kind: 'text', fromChatId: CHAT, messageId: 2000, replyToMessageId: 1000 }, text, cfg());
+    expect(thread.submitLeaderQuestion).toHaveBeenCalledExactlyOnceWith(f.questionId,
+      { schemaVersion: 1, formRevision: f.form.revision, kind: 'text', text }, { channel: 'telegram', cfg: cfg() });
+    const first = keyboardData(sends()[0]!)[0]!;
+    expect(draftFor(first, f.namespace).claim?.messageId).toBe('lt-20260926063001-abcdef');
+    expect(texts().at(-1)).toBe('Your answer is saved.');
+  });
+
+  it('holds a short-answer reply without a genuine message ID instead of matching two missing IDs', async () => {
+    const f = typedQuestionFixture('short-answer'); await sendThreadMessage(f.message, cfg());
+    await converseWithLeader({ kind: 'text', fromChatId: CHAT, replyToMessageId: 1000 }, 'Check the tests.', cfg());
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled(); expect(thread.answerLeaderQuestion).not.toHaveBeenCalled();
+    expect(thread.appendMasonMessage).not.toHaveBeenCalled();
+    expect(texts().at(-1)).toContain('held');
+  });
+
 });

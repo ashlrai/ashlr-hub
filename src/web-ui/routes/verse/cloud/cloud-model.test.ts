@@ -76,7 +76,7 @@ describe('the credits meter', () => {
   it('warns under the self-improvement reserve, and says spent at zero without a negative bar', () => {
     const low = creditsMeter(budgetView({ estimatedSpentUsd: 215 }));
     expect(low.tone).toBe('warning');
-    expect(low.warning).toBe('Under the $40 reserve, so Verse stops launching self-improvement tasks.');
+    expect(low.warning).toBe('Under the $40 reserve, so Phantom stops launching self-improvement tasks.');
     const over = creditsMeter(budgetView({ estimatedSpentUsd: 262.5 }));
     expect(over).toMatchObject({ value: 0, text: '$0 of $250 · estimate', usedText: '100% used', tone: 'danger' });
     expect(over.warning).toMatch(/^The estimate says the credits are spent\. Check the real balance on claude\.ai/);
@@ -103,7 +103,7 @@ describe('the counting lines', () => {
 
   it('describes self-improvement on and off', () => {
     expect(selfImproveLine(budgetView())).toBe('1 of 4 self-improvement launches today, on ashlrai/ashlr-hub. Stops under a $40 estimated balance.');
-    expect(selfImproveLine(budgetView({ budget: budget({}, { enabled: false }) }))).toBe('Self-improvement is off. Verse launches cloud tasks only when you ask.');
+    expect(selfImproveLine(budgetView({ budget: budget({}, { enabled: false }) }))).toBe('Self-improvement is off. Phantom launches cloud tasks only when you ask.');
   });
 
   it('puts the seat ahead of the budget gate', () => {

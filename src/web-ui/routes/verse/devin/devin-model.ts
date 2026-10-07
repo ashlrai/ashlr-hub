@@ -16,6 +16,7 @@ import {
   type DevinTaskV1,
 } from '../../../../core/devin/types.js';
 import type { ResourceReadinessRow } from '../../../../core/routing/readiness-types.js';
+import { formatMetric } from '../../../components/charts/format-metric.js';
 import type { DevinConsumptionSnapshot } from '../../../../core/devin/consumption.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -95,12 +96,12 @@ export function devinConsumptionEvidence(raw: unknown, now = Date.now()): { valu
   const stale = snapshot.state !== 'ready' || snapshot.stale === true || expires <= now;
   lines.push(`Retrieved ${new Date(fetched).toLocaleString()}${stale ? ' · last reading, current consumption unconfirmed' : ' · retrieval is current; provider publication delay is unknown'}.`);
   lines.push(`${report.days.length} daily reporting bucket${report.days.length === 1 ? '' : 's'}; dates retained as provider values.`);
-  return { value: report.days.length === 0 ? 'No consumption reported' : `${formatConsumptionAcu(report.totalAcus)} consumed${stale ? ' · last' : ''}`, lines, stale, report };
+  return { value: report.days.length === 0 && report.totalAcus === 0 ? 'No consumption reported' : `${formatConsumptionAcu(report.totalAcus)} consumed${stale ? ' · last' : ''}`, lines, stale, report };
 }
 
-/** Provider consumption retains fractional ACUs separately from rounded tracked budgets. */
+/** Display consumption with two significant figures; raw provider values remain unchanged. */
 export function formatConsumptionAcu(value: number): string {
-  return `${value.toLocaleString('en-US', { maximumFractionDigits: 20 })} ACU${value === 1 ? '' : 's'}`;
+  return `${formatMetric(value)} ACU${value === 1 ? '' : 's'}`;
 }
 
 /**
@@ -124,8 +125,8 @@ export function devinModelsLines(models: unknown): { catalog: string; defaultLin
 
 /** "12 ACUs", "1 ACU", "2.5 ACUs". */
 export function formatAcu(value: number): string {
-  const v = Math.max(0, Math.round(value * 100) / 100);
-  return `${v} ACU${v === 1 ? '' : 's'}`;
+  const v = Math.max(0, value);
+  return `${formatMetric(v)} ACU${v === 1 ? '' : 's'}`;
 }
 
 /** https only, on the expected host — a link the page may open. */

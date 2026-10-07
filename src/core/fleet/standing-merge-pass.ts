@@ -25,6 +25,7 @@
  * owner lane, head-SHA races and judge-family refusals are tested without
  * GitHub, models or a real ledger.
  */
+import { readHostMergeRevocationState } from '../autonomy/host-merge-revocation-protocol.js';
 import { outcomeProposalStillCurrent } from '../daemon/outcome-proposal-admission.js';
 import { assertSelectedOutcomeAdmission } from '../run/outcome-admission.js';
 import { execFileSync } from 'node:child_process';
@@ -73,12 +74,14 @@ import {
   commentOnPr,
   defaultHostMergeDeps,
   FLEET_APP_BOT_LOGIN,
+  FLEET_APP_BOT_EMAIL_RE,
   FLEET_BRANCH_PREFIX,
   fleetMergeCommitMessage,
   labelOwnerLane,
   landingId,
   ledgerPrOpened,
   mergeFleetPrPinned,
+  mergeAttemptNeedsReconciliation,
   openFleetPr,
   openGitScratch,
   OWNER_LANE_LABEL,
@@ -1678,6 +1681,13 @@ async function progressFleetPr(key: string, ctx: PassContext): Promise<void> {
       persist(ctx, state);
       return;
     }
+    if (mergeAttemptNeedsReconciliation(state)) {
+      note(ctx, `${state.repo}#${state.pr.number}: consumed merge request is unresolved; no repeat PUT`);
+      backoff(ctx, state);
+      ctx.summary.waiting++;
+      persist(ctx, state);
+      return;
+    }
     if (live.state === 'closed') {
       state.pr.state = 'closed';
       state.pr.closedBy = state.pr.closedBy ?? 'github';
@@ -2127,15 +2137,42 @@ async function reconcileMerged(ctx: PassContext, state: FleetMergeStateV1, propo
   const { deps } = ctx;
   const attempt = state.merge;
   const mergeSha = live.mergeCommitSha;
-  if (attempt && (attempt.phase === 'consumed' || attempt.phase === 'merged') && attempt.trailers && mergeSha) {
-    // Our PUT reached GitHub even if its answer did not reach us: prove it from
-    // the commit's trailers before claiming the landing.
-    const commit = await readRemoteCommit(state.repo, mergeSha, deps.host);
-    const trailers = typeof commit === 'string' ? null : parseFleetTrailers(commit.message);
-    if (trailers && trailers['Ashlr-Proposal']?.[0] === proposal.id && trailers['Ashlr-Gates']?.[0] === attempt.trailers.gatesDigest) {
-      finishLanding(ctx, state, proposal, deps.host.policy(), mergeSha, live.mergedAt ?? iso(deps.host.nowMs()), attempt.trailers);
+  if (attempt && mergeAttemptNeedsReconciliation(state)) {
+    const authority = readHostMergeRevocationState(attempt.identity);
+    const pr = state.pr!;
+    const identity = attempt.identity;
+    const exactAttempt = authority.state === 'healthy' && authority.record.phase === 'consumed' &&
+      authority.record.receipts.at(-1)?.operationId === `${attempt.operationPrefix}.consume` &&
+      identity.nameWithOwner === state.repo && identity.repositoryId === pr.repositoryId &&
+      identity.pullRequestId === pr.nodeId && identity.pullRequestNumber === pr.number &&
+      identity.baseRef === pr.baseBranch && identity.baseOid === pr.baseSha &&
+      identity.headRef === pr.branch && identity.headOid === pr.headSha &&
+      live.nodeId === pr.nodeId && live.number === pr.number && live.headSha === pr.headSha &&
+      live.headRef === pr.branch && live.baseRef === pr.baseBranch && live.authorLogin === FLEET_APP_BOT_LOGIN;
+    const commit = exactAttempt && mergeSha ? await readRemoteCommit(state.repo, mergeSha, deps.host) : null;
+    const trailers = commit && typeof commit !== 'string' ? parseFleetTrailers(commit.message) : null;
+    const expected = attempt.trailers ? {
+      'Ashlr-Proposal': proposal.id, 'Ashlr-Grant': attempt.trailers.grantId,
+      'Ashlr-Gates': attempt.trailers.gatesDigest, 'Ashlr-Ledger-Head': attempt.trailers.ledgerHead,
+      'Ashlr-Stage': attempt.trailers.stageId,
+    } : null;
+    if (commit && typeof commit !== 'string' && mergeSha && live.mergedAt &&
+      Number.isFinite(Date.parse(live.mergedAt)) && commit.sha === mergeSha && commit.tree === pr.treeSha &&
+      commit.parents.length === 1 && commit.parents[0] === pr.baseSha &&
+      FLEET_APP_BOT_EMAIL_RE.test(commit.authorEmail ?? '') && expected && trailers &&
+      identity.evidencePackDigest === expected['Ashlr-Gates'] &&
+      Object.entries(expected).every(([key, value]) => trailers[key]?.length === 1 && trailers[key]![0] === value)) {
+      attempt.phase = 'merged';
+      attempt.mergeSha = mergeSha;
+      attempt.error = null;
+      // Recovery belongs to the committed attempt, not a later rollout stage.
+      finishLanding(ctx, state, proposal, null, mergeSha, live.mergedAt, attempt.trailers!);
       return;
     }
+    note(ctx, `${state.repo}#${pr.number}: merge outcome attribution is unresolved; no fleet or human landing credited`);
+    backoff(ctx, state);
+    ctx.summary.waiting++;
+    return;
   }
   // Merged by someone other than the fleet (Mason, on GitHub): not a fleet
   // landing, so the post-merge watch and the rollout never count it.

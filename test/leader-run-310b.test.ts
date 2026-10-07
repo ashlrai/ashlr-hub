@@ -41,6 +41,7 @@ import {
   type LeaderRunState,
 } from '../src/core/vision/leader.js';
 import type { LeaderSeatDeps } from '../src/core/vision/leader-seat.js';
+import { readLeaderMemo } from '../src/core/vision/leader-memo.js';
 import { readLeaderDirectives } from '../src/core/vision/leader-apply.js';
 import { routeSeat } from '../src/core/routing/router.js';
 import { capacityFromSeat } from '../src/core/routing/headroom.js';
@@ -132,6 +133,19 @@ function world(opts: { now: () => number; policy?: () => EffectivePolicy | null;
 }
 
 describe('runLeader', () => {
+  it('forwards optional question forms from the actual model draft into the persisted memo', async () => {
+    const questionForms = [{ index: 0, mode: 'single', options: ['Yes, add verification', 'First fix reliability'] }];
+    const { deps, calls } = world({ now: () => T0, replies: [reply({ questionForms })] });
+    const result = await runLeader(deps, 'manual');
+    expect(result.outcome).toBe('ok');
+    expect(result.memo?.questionForms).toEqual(questionForms);
+    expect(readLeaderMemo(result.memo!.id)?.questionForms).toEqual(questionForms);
+    expect(result.memo?.questionsForMason).toEqual(['Should ashlr-cortex get a verify command?']);
+    expect(calls).toHaveLength(1);
+    expect(result.memo?.dryRun).toBe(true);
+    expect(readLeaderDirectives()).toBeNull();
+  });
+
   it('writes a dry-run memo when there is no grant: actions are shown, never applied', async () => {
     const { deps, calls } = world({ now: () => T0 });
     const r = await runLeader(deps, 'manual');

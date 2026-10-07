@@ -265,13 +265,13 @@ async function handleTelegramText(event: InboundEvent, text: string, cfg: AshlrC
   if (/^\s*pause(\s+fleet)?\s*$/i.test(text)) {
     const { setPause } = await import('./pause.js');
     setPause(true);
-    await sendTelegramMessage('⏸ Fleet messages paused. Send "resume" to restart.', replyOpts(event), cfg);
+    await sendTelegramMessage('⏸ Fleet messages paused. Send "resume" to resume messages.', replyOpts(event), cfg);
     return;
   }
   if (/^\s*resume(\s+fleet)?\s*$/i.test(text)) {
     const { setPause } = await import('./pause.js');
     setPause(false);
-    await sendTelegramMessage('▶️ Fleet resumed.', replyOpts(event), cfg);
+    await sendTelegramMessage('▶️ Fleet messages resumed.', replyOpts(event), cfg);
     return;
   }
 

@@ -16,12 +16,17 @@
  *    paid seat): a real loop is stopped as `loop-stall`, a real editor is not
  *    stopped by the no-diff check, a spinner is stopped as `no-diff-stall`.
  */
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createEngineOutputNormaliser, engineStreamFamily, spawnEngine } from '../src/core/run/engines.js';
+import { runEngineSandboxed, isTransientAbort } from '../src/core/run/sandboxed-engine.js';
+import { withTmpHome } from './helpers/h1-fixture.js';
+import { BUILTIN_ENGINE_REGISTRY } from '../src/core/run/engine-registry.js';
+import { loadProposal } from '../src/core/inbox/store.js';
+import { listSandboxes } from '../src/core/sandbox/worktree.js';
 import type { AshlrConfig } from '../src/core/types.js';
 
 const GROK_ARGS = ['--no-auto-update', '--output-format', 'streaming-messages-json', '--cwd', '/w', '--permission-mode', 'dontAsk', '--single=goal'];
@@ -169,5 +174,169 @@ describe('spawnEngine stall monitor on a grok stream', () => {
     const lines = Array.from({ length: 16 }, (_, i) => toolUse(`r${i}`, 'read_file', { path: `f${i}.ts` }));
     const res = await run(fakeGrok(lines), 12);
     expect(res.terminationReason).toBe('no-diff-stall');
+  });
+});
+
+/** A real offline child; the final line deliberately has no newline. */
+function nativeResultChild(output: string, name = 'grok-1.0.46-macos-aarch64', exitCode = 0): string {
+  const bin = join(dir, name);
+  writeFileSync(bin, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(output)});process.exit(${exitCode});\n`);
+  chmodSync(bin, 0o755);
+  return bin;
+}
+
+async function terminalRun(output: string, name?: string, exitCode?: number) {
+  return spawnEngine({ bin: nativeResultChild(output, name, exitCode), args: [], cwd: dir },
+    { models: {}, foundry: { noDiffMinEvents: 1_000 } } as AshlrConfig, { timeoutMs: 20_000 });
+}
+
+describe('native terminal results and process truth', () => {
+  it.each([
+    [{ type: 'result', subtype: 'error_during_execution', is_error: true }, 'error_during_execution'],
+    [{ type: 'result', subtype: 'success', is_error: true }, 'result reported an error'],
+  ])('a zero-exit native failure stays failed and retains output and usage (%j)', async (terminal, error) => {
+    const output = line({ ...terminal, usage: { input_tokens: 21, output_tokens: 8 } });
+    const result = await terminalRun(output);
+    expect(result).toMatchObject({ ok: false, error: `native CLI result failed: ${error}`, terminationReason: 'error-exit', output, usage: { tokensIn: 21, tokensOut: 8 } });
+  });
+
+  it('keeps native cancellation distinct from human Stop and never retries it', async () => {
+    const result = await terminalRun(line({ type: 'result', subtype: 'error_during_execution', is_error: true, stop_reason: 'cancelled' }));
+    expect(result).toMatchObject({ ok: false, terminationReason: 'error-exit', error: 'native CLI cancellation: error_during_execution' });
+    expect(isTransientAbort(result, false)).toBe(false);
+  });
+
+  it('accepts native success, ordinary prose and unrelated tool-result errors', async () => {
+    const output = ['warming up: error_during_execution', line({ type: 'user', message: { content: [{ type: 'tool_result', is_error: true }] } }), line({ type: 'result', subtype: 'success', is_error: false, result: 'done' })].join('\n');
+    expect(await terminalRun(output)).toMatchObject({ ok: true, output });
+    expect(await terminalRun('plain answer mentions error_during_execution')).toMatchObject({ ok: true });
+  });
+
+  it('never interprets a generic or Codex process as the native result dialect', async () => {
+    const output = line({ type: 'result', subtype: 'error_during_execution', is_error: true });
+    for (const name of ['aider', 'codex']) expect(await terminalRun(output, name)).toMatchObject({ ok: true, output });
+  });
+
+  it('retains nonzero process failure precedence over a native success', async () => {
+    expect(await terminalRun(line({ type: 'result', subtype: 'success' }), undefined, 7)).toMatchObject({ ok: false, error: 'exit 7' });
+  });
+
+  it('recognizes a final error after a long stream and cannot erase it with later success', () => {
+    const n = createEngineOutputNormaliser({ bin: 'grok', args: GROK_ARGS });
+    for (let i = 0; i < 20_001; i++) n.line(line({ type: 'assistant', message: { content: [] } }), i);
+    n.line(line({ type: 'result', subtype: 'error_during_execution', is_error: true }), 20_002);
+    n.line(line({ type: 'result', subtype: 'success' }), 20_003);
+    expect(n.terminalError()).toBe('native CLI result failed: error_during_execution');
+  });
+
+  it('retains actual caller Stop precedence over an already printed native error', async () => {
+    const controller = new AbortController();
+    const bin = join(dir, 'grok-stop-fixture');
+    const output = line({ type: 'result', subtype: 'error_during_execution', is_error: true, usage: { input_tokens: 4, output_tokens: 2 } });
+    writeFileSync(bin, `#!${process.execPath}\nprocess.on('SIGINT',()=>{});process.stdout.write(${JSON.stringify(output + '\n')});setTimeout(()=>{}, 10_000);\n`);
+    chmodSync(bin, 0o755);
+    const result = await spawnEngine({ bin, args: [], cwd: dir }, { models: {}, foundry: {} } as AshlrConfig,
+      { signal: controller.signal, timeoutMs: 20_000, _stallGraceMs: 100, _terminationDrainMs: 200, onEvent: () => controller.abort() });
+    expect(result).toMatchObject({ ok: false, error: 'cancelled', terminationReason: 'cancelled', usage: { tokensIn: 4, tokensOut: 2 } });
+  });
+
+  it('ignores malformed partial terminal JSON', async () => {
+    expect(await terminalRun('{"type":"result","is_error":')).toMatchObject({ ok: true });
+  });
+});
+
+// Exercise persisted counters through the real sandbox, child and verification
+// loop. A disposable Codex-shaped executable is the only producer contacted.
+describe.skipIf(process.platform === 'win32')('sandbox native stream action counters', () => {
+  it.each([true, false])('native failure preserves partial work without retrying (native cancellation %s)', async nativeCancelled => {
+    await withTmpHome(async fx => {
+      const previousAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      const counter = join(dir, 'partial-count');
+      const bin = join(dir, 'grok-partial-fixture');
+      const terminal = line({ type: 'result', subtype: 'error_during_execution', is_error: true, ...(nativeCancelled ? { stop_reason: 'cancelled' } : {}) });
+      writeFileSync(bin, `#!${process.execPath}\n` +
+        `const fs=require('node:fs'),path=require('node:path');fs.appendFileSync(${JSON.stringify(counter)},'contact\\n');\n` +
+        `const cwd=process.argv[process.argv.indexOf('--cd')+1];fs.writeFileSync(path.join(cwd,'generated.ts'),'export const generated = true;\\n');\n` +
+        `console.log(${JSON.stringify(terminal)});\n`);
+      chmodSync(bin, 0o755);
+      try {
+        const repo = fx.makeRepo(); repo.enroll();
+        const cfg = { models: {}, foundry: { allowedBackends: ['codex'], completenessGate: false, dispatchRetries: 2,
+          engines: { codex: { ...BUILTIN_ENGINE_REGISTRY['codex']!, bin, bins: [bin], argv: ['--cd', '$CWD'] } } } } as AshlrConfig;
+        const result = await runEngineSandboxed('codex', 'offline partial fixture', cfg, { sourceRepo: repo.dir, propose: true });
+        expect(readFileSync(counter, 'utf8').trim().split('\n')).toHaveLength(1);
+        expect(result.state.status).toBe('failed');
+        expect(result.state.terminationReason).toBe('error-exit');
+        expect(result.state.result).toContain(nativeCancelled ? 'native CLI cancellation:' : 'native CLI result failed:');
+        expect(result.proposalOutcome).toMatchObject({ isPartial: true, files: 1 });
+        expect(result.proposalId).toBeDefined();
+        expect(loadProposal(result.proposalId!)?.isPartial).toBe(true);
+        expect(listSandboxes()).toEqual([]);
+      } finally {
+        if (previousAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO; else process.env.ASHLR_TEST_ALLOW_ANY_REPO = previousAllow;
+      }
+    });
+  });
+
+  it('counts both the initial child and actual verify-to-green repair tools', async () => {
+    await withTmpHome(async fx => {
+      const previousPath = process.env.PATH;
+      const previousAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      const counter = join(dir, 'repair-count');
+      const bin = join(dir, 'codex');
+      writeFileSync(bin, `#!${process.execPath}\n` +
+        `const fs=require('node:fs'),path=require('node:path');const p=${JSON.stringify(counter)};const n=fs.existsSync(p)?Number(fs.readFileSync(p,'utf8'))+1:1;fs.writeFileSync(p,String(n));\n` +
+        `const cwd=process.argv[process.argv.indexOf('--cd')+1];fs.writeFileSync(path.join(cwd,'generated.ts'),'export const value = '+n+';\\n');\n` +
+        `for(let i=0;i<(n===1?2:3);i++)console.log(JSON.stringify({type:'function_call',name:'read_file'}));console.log('done');\n`);
+      chmodSync(bin, 0o755);
+      process.env.PATH = `${dir}:${previousPath ?? ''}`;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      try {
+        const repo = fx.makeRepo({ files: {
+          'generated.ts': 'export const value = 0;\n',
+          'package.json': JSON.stringify({ private: true, scripts: { typecheck: 'node verify.cjs' } }),
+          'verify.cjs': "const fs=require('node:fs');process.exit(fs.readFileSync('generated.ts','utf8').includes('value = 2') ? 0 : 1);\n",
+        } }); repo.enroll();
+        const cfg = { models: {}, foundry: { allowedBackends: ['codex'], dispatchRetries: 0, verifyToGreen: { enabled: true, maxIterations: 1 } } } as AshlrConfig;
+        const result = await runEngineSandboxed('codex', 'correct generated value', cfg, { sourceRepo: repo.dir, propose: true });
+        expect(readFileSync(counter, 'utf8')).toBe('2');
+        expect(result.state.status).toBe('done');
+        expect(result.proposalId).toBeDefined();
+        expect(result.state.runEventSummary?.actionCounts).toMatchObject({ spawnAttempts: 2, modelSteps: 2, toolSteps: 5, totalSteps: 7, verifyRepairAttempts: 1 });
+        expect(listSandboxes()).toEqual([]);
+      } finally {
+        if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+        if (previousAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO; else process.env.ASHLR_TEST_ALLOW_ANY_REPO = previousAllow;
+      }
+    });
+  }, 30_000);
+
+  it('counts tool calls across a transient retry without counting usage or file events', async () => {
+    await withTmpHome(async fx => {
+      const previousPath = process.env.PATH;
+      const previousAllow = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
+      const counter = join(dir, 'retry-count');
+      const bin = join(dir, 'codex');
+      writeFileSync(bin, `#!${process.execPath}\n` +
+        `const fs=require('node:fs');const p=${JSON.stringify(counter)};const n=fs.existsSync(p)?Number(fs.readFileSync(p,'utf8'))+1:1;fs.writeFileSync(p,String(n));\n` +
+        `for(let i=0;i<(n===1?2:1);i++)console.log(JSON.stringify({type:'function_call',name:'read_file'}));\n` +
+        `if(n===1){process.stderr.write('error_during_execution');process.exit(1);}console.log('done');\n`);
+      chmodSync(bin, 0o755);
+      process.env.PATH = `${dir}:${previousPath ?? ''}`;
+      process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
+      try {
+        const repo = fx.makeRepo(); repo.enroll();
+        const cfg = { models: {}, foundry: { allowedBackends: ['codex'], completenessGate: false, dispatchRetries: 1 } } as AshlrConfig;
+        const result = await runEngineSandboxed('codex', 'offline fixture', cfg, { sourceRepo: repo.dir, propose: false });
+        expect(readFileSync(counter, 'utf8')).toBe('2');
+        expect(result.state.status).toBe('done');
+        expect(result.state.runEventSummary?.actionCounts).toMatchObject({ spawnAttempts: 2, modelSteps: 2, toolSteps: 3, totalSteps: 5, transientRetries: 1 });
+        expect(listSandboxes()).toEqual([]);
+      } finally {
+        if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+        if (previousAllow === undefined) delete process.env.ASHLR_TEST_ALLOW_ANY_REPO; else process.env.ASHLR_TEST_ALLOW_ANY_REPO = previousAllow;
+      }
+    });
   });
 });

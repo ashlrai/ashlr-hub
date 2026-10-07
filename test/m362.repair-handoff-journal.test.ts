@@ -1,7 +1,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   linkSync,
   mkdirSync,
   readFileSync,
@@ -79,6 +81,7 @@ vi.mock('../src/core/util/private-storage.js', async (importOriginal) => {
 
 import type { DispatchProductionEvent } from '../src/core/fleet/dispatch-production-ledger.js';
 import {
+  _setDispatchProductionLedgerRetentionHooksForTest,
   dispatchProductionDir,
   recordDispatchProduction,
   sanitizeDispatchProductionEvent,
@@ -113,11 +116,16 @@ import { recentlyDeclined, recordOutcome } from '../src/core/fleet/worked-ledger
 import { pendingProposalItemKeysForBacklog, workItemCoverageKey } from '../src/core/fleet/proposal-matching.js';
 import type { Proposal, WorkItem } from '../src/core/types.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
+import * as storeLocks from '../src/core/fleet/local-store-lock.js';
 import { queueSelfHealItem } from '../src/core/fleet/self-heal.js';
 import { repairTreatmentForUnitId } from '../src/core/fleet/generated-repair-identity.js';
 import { workItemObjectiveHash } from '../src/core/fleet/work-item-objective.js';
 import { inboxDir } from '../src/core/inbox/store.js';
-import { assurePrivateStoragePath } from '../src/core/util/private-storage.js';
+import {
+  _setPrivateStorageTestControlForTest,
+  assurePrivateStoragePath,
+  PRIVATE_STORAGE_TEST_CONTROL,
+} from '../src/core/util/private-storage.js';
 
 let fx: H1Fixture;
 
@@ -150,7 +158,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, undefined);
   _setRepairHandoffJournalFaultForTest(undefined);
+  _setDispatchProductionLedgerRetentionHooksForTest(undefined);
   privateStorageHarness.semanticFailure = undefined;
   privateStorageHarness.captureFileContents = false;
   privateStorageHarness.useSemanticAdapter = process.platform === 'win32';
@@ -391,6 +401,52 @@ function recordDiagnosticProposal(
 }
 
 describe('M362 durable repair handoff journal', () => {
+  it.runIf(process.platform === 'darwin')('reuses current Darwin custody verdicts across unchanged journal reads', () => {
+    const repo = fx.makeRepo();
+    expect(recordRepairHandoffs(event(repo.dir))).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const path = repairHandoffV2JournalPath();
+    const directory = dirname(path);
+    const before = lstatSync(directory, { bigint: true });
+    const bytes = readFileSync(path);
+    let probes = 0;
+    _setPrivateStorageTestControlForTest(PRIVATE_STORAGE_TEST_CONTROL, {
+      enableVerdictCache: true,
+      observeInvocation: () => { probes += 1; },
+    });
+
+    const first = readRepairHandoffs();
+    expect(first.sourceState).toBe('healthy');
+    const primedProbes = probes;
+    expect(primedProbes).toBeGreaterThan(0);
+    expect(readRepairHandoffs()).toEqual(first);
+    expect(readRepairHandoffs()).toEqual(first);
+    expect(probes).toBe(primedProbes);
+    const after = lstatSync(directory, { bigint: true });
+    expect({ dev: after.dev, ino: after.ino, mode: after.mode, ctimeNs: after.ctimeNs })
+      .toEqual({ dev: before.dev, ino: before.ino, mode: before.mode, ctimeNs: before.ctimeNs });
+    expect(readFileSync(path)).toEqual(bytes);
+  });
+
+  it.runIf(process.platform !== 'win32').each([
+    { label: 'ordinary 0755', mode: 0o755 },
+    { label: 'sticky 01700', mode: 0o1700 },
+  ])('repairs an existing $label journal directory before trusting its rows', ({ mode }) => {
+    const repo = fx.makeRepo();
+    expect(recordRepairHandoffs(event(repo.dir))).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const path = repairHandoffV2JournalPath();
+    const directory = dirname(path);
+    const bytes = readFileSync(path);
+    const before = lstatSync(directory, { bigint: true });
+    chmodSync(directory, mode);
+    expect(lstatSync(directory, { bigint: true }).mode & 0o7777n).toBe(BigInt(mode));
+
+    expect(readRepairHandoffs()).toMatchObject({ sourceState: 'healthy', observations: [expect.any(Object)] });
+    const after = lstatSync(directory, { bigint: true });
+    expect(after.mode & 0o7777n).toBe(0o700n);
+    expect({ dev: after.dev, ino: after.ino }).toEqual({ dev: before.dev, ino: before.ino });
+    expect(readFileSync(path)).toEqual(bytes);
+  });
+
   it('does not assign diagnostic treatment metadata to capture repairs', () => {
     const repo = fx.makeRepo();
     const observation = repairHandoffFromDispatchEvent(event(repo.dir, {
@@ -1590,6 +1646,165 @@ describe('M362 durable repair handoff journal', () => {
     });
   });
 
+  // Mutate an actual safe parent directory epoch only after durable journal
+  // sync begins. The real parent reader rejects that sample; no authority
+  // verdict is mocked, and each test resets the hook through afterEach.
+  function disturbPostDurableParentOnce(): { fileSyncs: number; disturbances: number } {
+    const counters = { fileSyncs: 0, disturbances: 0 };
+    let durable = false;
+    _setRepairHandoffJournalFaultForTest(point => {
+      if (point === 'append-file-fsync') counters.fileSyncs += 1;
+      if (point === 'append-directory-fsync') durable = true;
+    });
+    _setDispatchProductionLedgerRetentionHooksForTest({ afterDispatchReadPass(path) {
+      if (!durable || counters.disturbances !== 0 || path !== join(dispatchProductionDir(), '2026-07-10.jsonl')) return;
+      const directory = dispatchProductionDir();
+      const before = statSync(directory, { bigint: true });
+      utimesSync(directory, new Date(Number(before.atimeNs / 1_000_000n)),
+        new Date(Number(before.mtimeNs / 1_000_000n) + 1_000));
+      const after = statSync(directory, { bigint: true });
+      expect(after.dev).toBe(before.dev);
+      expect(after.ino).toBe(before.ino);
+      expect(after.mtimeNs).not.toBe(before.mtimeNs);
+      counters.disturbances += 1;
+    } });
+    return counters;
+  }
+
+  it('reacquires fresh authority after a durable append without appending the row twice', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir, { itemId: 'repo:self:post-durable-parent-settlement' });
+    const counters = disturbPostDurableParentOnce();
+    expect(recordRepairHandoffs(input)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    expect(counters).toEqual({ fileSyncs: 2, disturbances: 1 });
+    expect(readFileSync(repairHandoffV2JournalPath(), 'utf8').split('\n').filter(Boolean)).toHaveLength(1);
+    expect(readRepairHandoffs()).toMatchObject({ sourceState: 'healthy', physicalRows: 1, conflictingIds: 0 });
+    expect(existsSync(`${repairHandoffV2JournalPath()}.lock`)).toBe(false);
+  });
+
+  it('keeps an exact durable historical replay ahead of a newer activation after releasing for settlement', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir, { itemId: 'repo:self:old-durable-settlement' });
+    const newer = event(repo.dir, { itemId: 'repo:self:new-activation-during-settlement',
+      ts: '2026-07-10T12:01:00.000Z', runId: 'attempt-22345678-1234-4123-8123-123456789abc',
+      trajectoryId: 'run:attempt-22345678-1234-4123-8123-123456789abc' });
+    const counters = disturbPostDurableParentOnce();
+    const releaseActual = storeLocks.releaseLocalStoreLock;
+    let inserted = false;
+    const release = vi.spyOn(storeLocks, 'releaseLocalStoreLock').mockImplementation(lock => {
+      const released = releaseActual(lock);
+      if (released && lock?.path === `${repairHandoffV2JournalPath()}.lock` && counters.disturbances === 1 && !inserted) {
+        inserted = true;
+        expect(recordRepairHandoffsRaw(newer, { schemaVersion: 2, activation: ACTIVATION_B }))
+          .toEqual({ attempted: 1, recorded: 1, failed: 0 });
+      }
+      return released;
+    });
+    try {
+      expect(recordRepairHandoffs(input)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+      expect(inserted).toBe(true);
+      expect(counters).toEqual({ fileSyncs: 3, disturbances: 1 });
+      expect(readRepairHandoffs()).toMatchObject({ sourceState: 'healthy', physicalRows: 2 });
+      expect(readFileSync(repairHandoffV2JournalPath(), 'utf8').split('\n').filter(Boolean)).toHaveLength(2);
+    } finally { release.mockRestore(); }
+  });
+
+  it.skipIf(process.platform === 'win32')('refuses a journal made unsafe during the unlocked settlement interval', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir, { itemId: 'repo:self:unsafe-after-settlement-release' });
+    const counters = disturbPostDurableParentOnce();
+    const releaseActual = storeLocks.releaseLocalStoreLock;
+    let changed = false;
+    const release = vi.spyOn(storeLocks, 'releaseLocalStoreLock').mockImplementation(lock => {
+      const released = releaseActual(lock);
+      if (released && lock?.path === `${repairHandoffV2JournalPath()}.lock` && counters.disturbances === 1 && !changed) {
+        changed = true;
+        chmodSync(repairHandoffV2JournalPath(), 0o666);
+      }
+      return released;
+    });
+    try {
+      expect(recordRepairHandoffs(input)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+      expect(changed).toBe(true);
+      expect(counters).toEqual({ fileSyncs: 1, disturbances: 1 });
+      expect(readFileSync(repairHandoffV2JournalPath(), 'utf8').split('\n').filter(Boolean)).toHaveLength(1);
+      expect(existsSync(`${repairHandoffV2JournalPath()}.lock`)).toBe(false);
+    } finally {
+      release.mockRestore();
+      if (existsSync(repairHandoffV2JournalPath())) chmodSync(repairHandoffV2JournalPath(), 0o600);
+    }
+  });
+
+  it('cannot report durable success or retry when its exact owned lock release is unconfirmed', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir, { itemId: 'repo:self:unconfirmed-journal-release' });
+    const releaseActual = storeLocks.releaseLocalStoreLock;
+    let retained: storeLocks.LocalStoreLock | null = null;
+    let refusals = 0;
+    const release = vi.spyOn(storeLocks, 'releaseLocalStoreLock').mockImplementation(lock => {
+      if (lock?.path === `${repairHandoffV2JournalPath()}.lock`) {
+        retained = lock;
+        refusals += 1;
+        return false;
+      }
+      return releaseActual(lock);
+    });
+    try {
+      expect(recordRepairHandoffs(input)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+      expect(refusals).toBe(1);
+      expect(existsSync(`${repairHandoffV2JournalPath()}.lock`)).toBe(true);
+      expect(readFileSync(repairHandoffV2JournalPath(), 'utf8').split('\n').filter(Boolean)).toHaveLength(1);
+    } finally {
+      release.mockRestore();
+      if (retained) expect(releaseActual(retained)).toBe(true);
+    }
+  });
+
+  it('shares the full acquisition allowance across post-durable settlement attempts', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir, { itemId: 'repo:self:cumulative-acquisition-allowance' });
+    const counters = disturbPostDurableParentOnce();
+    const acquireActual = storeLocks.acquireLocalStoreLock;
+    let acquisitions = 0;
+    const acquire = vi.spyOn(storeLocks, 'acquireLocalStoreLock').mockImplementation((path, ...args) => {
+      const lock = acquireActual(path, ...args);
+      if (path === `${repairHandoffV2JournalPath()}.lock`) {
+        acquisitions += 1;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_100);
+      }
+      return lock;
+    });
+    try {
+      expect(recordRepairHandoffs(input)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+      expect(acquisitions).toBe(2);
+      expect(counters).toEqual({ fileSyncs: 1, disturbances: 1 });
+      expect(readFileSync(repairHandoffV2JournalPath(), 'utf8').split('\n').filter(Boolean)).toHaveLength(1);
+      expect(existsSync(`${repairHandoffV2JournalPath()}.lock`)).toBe(false);
+    } finally { acquire.mockRestore(); }
+  }, 60_000);
+
+  it('charges the entire lock acquisition call before admitting a row or renewing the budget', () => {
+    const repo = fx.makeRepo();
+    const input = event(repo.dir, { itemId: 'repo:self:full-acquisition-allowance' });
+    const acquireActual = storeLocks.acquireLocalStoreLock;
+    let acquisitions = 0;
+    const acquire = vi.spyOn(storeLocks, 'acquireLocalStoreLock').mockImplementation((path, ...args) => {
+      const lock = acquireActual(path, ...args);
+      if (path === `${repairHandoffV2JournalPath()}.lock`) {
+        acquisitions += 1;
+        // Include work outside the helper's internal acquisition stopwatch.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2_100);
+      }
+      return lock;
+    });
+    try {
+      expect(recordRepairHandoffs(input)).toEqual({ attempted: 1, recorded: 0, failed: 1 });
+      expect(acquisitions).toBe(1);
+      expect(existsSync(repairHandoffV2JournalPath())).toBe(false);
+      expect(existsSync(`${repairHandoffV2JournalPath()}.lock`)).toBe(false);
+    } finally { acquire.mockRestore(); }
+  }, 60_000);
+
   it('requires torn-tail compaction to restore health before any later append', () => {
     const repo = fx.makeRepo();
     const first = event(repo.dir, { itemId: 'repo:self:first' });
@@ -2009,6 +2224,155 @@ describe('M362 durable repair handoff journal', () => {
     expect(read.observations).toHaveLength(12);
     expect(new Set(read.observations.map((row) => row.eventId)).size).toBe(12);
   }, 60_000); // Twelve child runtimes contend with the broad release suite.
+
+  it.skipIf(process.platform === 'win32')('permits a healthy follower to settle while another writer retries real parent directory churn', async () => {
+    // Construct the documented lock/parent-retry interaction. This is not
+    // evidence for the cause of an earlier broad-suite refusal.
+    const repo = fx.makeRepo();
+    const seed = event(repo.dir, { itemId: 'repo:self:parent-retry-seed' });
+    expect(recordRepairHandoffs(seed)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const barriers = join(fx.home, 'm362-parent-retry-progress');
+    mkdirSync(barriers, { mode: 0o700 });
+    const inputs = ['a', 'b'].map((role, index) => event(repo.dir, {
+      itemId: `repo:self:parent-retry-${role}`,
+      runId: `attempt-${index + 2}2345678-1234-4123-8123-123456789abc`,
+      trajectoryId: `run:attempt-${index + 2}2345678-1234-4123-8123-123456789abc`,
+    }));
+    // Persist both incoming parents before either child is armed. The public
+    // handoff call still performs its mandatory fresh parent write; this does
+    // not replace parent authority with a test verdict or bypass that effect.
+    expect(recordDispatchProduction(inputs)).toEqual({ attempted: 2, recorded: 2, failed: 0 });
+    const script = `
+      import { existsSync, lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+      import { join } from 'node:path';
+      import { dispatchProductionDir, _setDispatchProductionLedgerRetentionHooksForTest } from './src/core/fleet/dispatch-production-ledger.ts';
+      import { recordRepairHandoffs, repairHandoffV2JournalPath } from './src/core/fleet/repair-handoff-journal.ts';
+      const role = process.env.ASHLR_TEST_ROLE;
+      const barriers = process.env.ASHLR_TEST_BARRIERS;
+      const input = JSON.parse(process.env.ASHLR_TEST_EVENT);
+      const activation = JSON.parse(process.env.ASHLR_TEST_ACTIVATION);
+      const parentDir = dispatchProductionDir();
+      const partition = join(parentDir, '2026-07-10.jsonl');
+      const journalLock = repairHandoffV2JournalPath() + '.lock';
+      const waitWord = new Int32Array(new SharedArrayBuffer(4));
+      let probes = 0;
+      let fencePublished = false;
+      function publish(name, value) {
+        const path = join(barriers, name);
+        const temporary = path + '.' + process.pid + '.tmp';
+        writeFileSync(temporary, JSON.stringify(value) + '\\n', { flag: 'wx', mode: 0o600 });
+        renameSync(temporary, path);
+      }
+      async function waitFor(name) {
+        const deadline = Date.now() + 10000;
+        while (!existsSync(join(barriers, name))) {
+          if (Date.now() >= deadline) throw new Error('fixture-barrier-unavailable');
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+      }
+      function currentWriterOwnsJournalLock() {
+        if (!existsSync(journalLock)) return false;
+        const stat = lstatSync(journalLock);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 ||
+            stat.uid !== process.getuid() || (stat.mode & 0o7777) !== 0o600) return false;
+        return JSON.parse(readFileSync(journalLock, 'utf8')).pid === process.pid;
+      }
+      try {
+        if (role === 'a') {
+          _setDispatchProductionLedgerRetentionHooksForTest({ afterDispatchReadPass(path) {
+            // Never turn a pre-journal parent lookup into a lock-held barrier.
+            if (path !== partition || !currentWriterOwnsJournalLock() || existsSync(join(barriers, 'b-terminal'))) return;
+            if (!fencePublished) {
+              fencePublished = true;
+              publish('a-journal-held', { pid: process.pid });
+              const deadline = Date.now() + 1000;
+              while (!existsSync(join(barriers, 'b-attempting'))) {
+                if (Date.now() >= deadline) throw new Error('fixture-follower-not-attempting');
+                Atomics.wait(waitWord, 0, 0, 1);
+              }
+            }
+            const before = lstatSync(parentDir);
+            const leaf = join(parentDir, '.m362-progress-' + process.pid + '-' + probes++);
+            try {
+              writeFileSync(leaf, 'owned fixture churn', { flag: 'wx', mode: 0o600 });
+              const entry = lstatSync(leaf);
+              if (!entry.isFile() || entry.isSymbolicLink() || entry.nlink !== 1 ||
+                  entry.uid !== process.getuid() || (entry.mode & 0o7777) !== 0o600) throw new Error('fixture-churn-file-unsafe');
+              // Actual directory mutation, not a forged parent-reader result.
+              Atomics.wait(waitWord, 0, 0, 1);
+            } finally { unlinkSync(leaf); }
+            const after = lstatSync(parentDir);
+            if (!after.isDirectory() || after.isSymbolicLink() || after.uid !== before.uid ||
+                after.dev !== before.dev || after.ino !== before.ino ||
+                (after.mode & 0o7777) !== 0o700 || (before.mode & 0o7777) !== 0o700 ||
+                after.mtimeMs === before.mtimeMs && after.ctimeMs === before.ctimeMs) throw new Error('fixture-directory-churn-unconfirmed');
+          } });
+        }
+        publish(role + '-ready', { pid: process.pid });
+        await waitFor(role === 'a' ? 'start-a' : 'a-journal-held');
+        if (role === 'b') publish('b-attempting', { pid: process.pid });
+        const result = recordRepairHandoffs(input, { schemaVersion: 2, activation });
+        publish(role + '-terminal', { result, probes, fencePublished,
+          followerTerminalBeforeReturn: role === 'a' && existsSync(join(barriers, 'b-terminal')) });
+      } catch {
+        publish(role + '-terminal', { fixtureFailure: true, probes, fencePublished });
+        process.exitCode = 1;
+      } finally { _setDispatchProductionLedgerRetentionHooksForTest(undefined); }
+    `;
+    const children: Array<{ child: ReturnType<typeof spawn>; closed: boolean;
+      done: Promise<{ code: number | null; signal: NodeJS.Signals | null; stderr: string }> }> = [];
+    const start = (role: string, input: DispatchProductionEvent): void => {
+      // Same direct Node+tsx ESM pattern as helpers/throughput-310b; no shell
+      // or explicitly spawned descendant, and only these owned handles are killed.
+      const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', script], {
+        cwd: process.cwd(), env: { ...process.env, HOME: fx.home, USERPROFILE: fx.home,
+          ASHLR_HOME: fx.ashlrDir, ASHLR_TEST_ROLE: role, ASHLR_TEST_BARRIERS: barriers,
+          ASHLR_TEST_EVENT: JSON.stringify(input), ASHLR_TEST_ACTIVATION: JSON.stringify(ACTIVATION_A) },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      const owned = { child, closed: false, done: Promise.resolve({ code: null as number | null,
+        signal: null as NodeJS.Signals | null, stderr: '' }) };
+      owned.done = new Promise((resolve, reject) => {
+        let stderr = '';
+        child.stderr?.on('data', chunk => { stderr += String(chunk); });
+        child.once('error', reject);
+        child.once('close', (code, signal) => { owned.closed = true; resolve({ code, signal, stderr }); });
+      });
+      children.push(owned);
+    };
+    let fixtureTimedOut = false;
+    const watchdog = setTimeout(() => {
+      fixtureTimedOut = true;
+      for (const owned of children) if (!owned.closed) owned.child.kill('SIGKILL');
+    }, 25_000);
+    try {
+      start('a', inputs[0]!); start('b', inputs[1]!);
+      await vi.waitFor(() => {
+        expect(existsSync(join(barriers, 'a-ready'))).toBe(true);
+        expect(existsSync(join(barriers, 'b-ready'))).toBe(true);
+      }, { timeout: 10_000, interval: 5 });
+      writeFileSync(join(barriers, 'start-a'), 'start', { flag: 'wx', mode: 0o600 });
+      const outcomes = await Promise.all(children.map(owned => owned.done));
+      expect(fixtureTimedOut).toBe(false);
+      expect(outcomes).toEqual(outcomes.map(() => ({ code: 0, signal: null, stderr: '' })));
+      const a = JSON.parse(readFileSync(join(barriers, 'a-terminal'), 'utf8'));
+      const b = JSON.parse(readFileSync(join(barriers, 'b-terminal'), 'utf8'));
+      expect(a).toMatchObject({ result: { attempted: 1, recorded: 1, failed: 0 },
+        fencePublished: true, followerTerminalBeforeReturn: true });
+      expect(a.probes).toBeGreaterThan(0);
+      expect(b).toMatchObject({ result: { attempted: 1, recorded: 1, failed: 0 } });
+      const read = readRepairHandoffs();
+      expect(read).toMatchObject({ sourceState: 'healthy', invalidRows: 0, conflictingIds: 0, physicalRows: 3 });
+      expect(read.observations.map(row => row.parentItemId).sort()).toEqual([seed, ...inputs].map(row => row.itemId).sort());
+      expect(new Set(read.observations.map(row => row.eventId)).size).toBe(3);
+      expect(lstatSync(dispatchProductionDir()).mode & 0o7777).toBe(0o700);
+      expect(existsSync(`${repairHandoffV2JournalPath()}.lock`)).toBe(false);
+    } finally {
+      clearTimeout(watchdog);
+      for (const owned of children) if (!owned.closed) owned.child.kill('SIGKILL');
+      await Promise.allSettled(children.map(owned => owned.done));
+    }
+  }, 60_000);
 
   it('serializes an equal-time activation race and keeps exact replay idempotent', async () => {
     const repo = fx.makeRepo();

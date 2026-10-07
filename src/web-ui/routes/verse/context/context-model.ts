@@ -7,6 +7,7 @@
  * server and the browser share), so "compacts ≈367k" in the handoff dialog is
  * the same figure the meter and the seat picker show.
  */
+import { formatMetric } from '../../../components/charts/format-metric.js';
 import type { VerseEngine, VerseModelOption, VerseSeat, VerseSession } from '../../../data/api-types.js';
 import type {
   VerseContextMode,
@@ -289,9 +290,9 @@ export function jsonBodyBytes(body: unknown): number {
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '—';
-  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024) return `${formatMetric(bytes)} B`;
   const kb = bytes / 1024;
-  return `${kb < 10 ? kb.toFixed(1).replace(/\.0$/, '') : Math.round(kb)} KB`;
+  return `${formatMetric(kb)} KB`;
 }
 
 /**

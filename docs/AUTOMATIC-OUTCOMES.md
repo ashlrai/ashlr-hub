@@ -1,6 +1,8 @@
-# Automatic work in Verse
+<a id="automatic-work-in-verse"></a>
 
-Describe what you want to achieve. Verse chooses among connected resources and
+# Automatic work in Phantom
+
+Describe what you want to achieve. Phantom chooses among connected resources and
 keeps the result, work, and evidence together. You can guide a conversation in
 **Work with me**, or steer a durable outcome in **Work for me**.
 

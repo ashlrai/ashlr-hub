@@ -16,7 +16,7 @@ function subscription(patch: Partial<CreditPoolRowView> = {}): CreditPoolRowView
 describe('credit pool display-only projection', () => {
   it('keeps a cloud gift historical and scoped separately from purchased credits and subscription', () => {
     const gift = creditPoolDisplay(row(), NOW);
-    expect(gift.title).toBe('Cloud gift'); expect(gift.amountText).toBe('$12.340000000000000001 last recorded');
+    expect(gift.title).toBe('Cloud gift'); expect(gift.amountText).toBe('$12 last recorded');
     expect(gift.sourceText).toBe('Verified account UI capture · historical reading'); expect(gift.expiryText).toBe('Verified credit expiry');
     expect(gift.scopeText).toContain('cloud sessions only'); expect(gift.scopeText).toContain('excludes Projects and Routines');
     const purchased = creditPoolDisplay(row({ kind: 'purchased-usage', surface: 'over-plan-usage', amount: '7.01', total: null, expiresAt: null, expiryKind: 'unknown', expiryState: 'unknown' }), NOW);

@@ -1,33 +1,42 @@
-# Quickstart — Ashlr Verse
+<a id="quickstart--ashlr-verse"></a>
 
-Verse is the everyday coding-agent workbench. The Universe experiment kernel is a
-separate, bounded source-checkout path below. Installing Verse, enrolling a repo,
-starting a resident fleet and publishing its work are distinct steps.
+# Quickstart — Phantom
 
-## Open Verse
+Phantom by AshlrAI is the everyday coding-agent workbench, formerly Ashlr Verse.
+The Universe experiment kernel is a separate, bounded source-checkout path below.
+Installing Phantom, enrolling a repo, starting a resident fleet and publishing
+its work are distinct steps.
+
+The CLI remains `ashlr`, the package remains `@ashlr/hub`, and local routes remain
+`/verse/`. The compatible macOS installation is still `Ashlr.app`. See
+[the product naming guide](PHANTOM-BRAND.md).
+
+<a id="open-verse"></a>
+
+## Open Phantom
 
 ### CLI on macOS, Linux or Windows
 
-Install Node.js 22.15+ and Git, then install Verse 3.24.2 from its versioned
+Install Node.js 22.15+ and Git, then install Phantom 3.24.3 from its versioned
 GitHub release after its artifacts are published:
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.2/ashlr-hub-3.24.2.tgz
-ashlr --version   # should print 3.24.2
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.3/ashlr-hub-3.24.3.tgz
+ashlr --version   # should print 3.24.3
 ashlr verse
 ```
 
-Verse opens at `http://127.0.0.1:7777/verse/` and binds to loopback. The CLI
+Phantom opens at `http://127.0.0.1:7777/verse/` and binds to loopback. The CLI
 prints a read token for the browser and asks for a separate mutation token
 before your first chat or other change. Keep both tokens private. Confirm
-`ashlr --version` reports `3.24.2`; the
-[versioned GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.24.2) is the
+`ashlr --version` reports `3.24.3`; the
+[versioned GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.24.3) is the
 source for versioned installers. Check its artifacts before installing; the unversioned npm package may be an older release.
 
 ### Desktop app on Apple silicon Mac
 
-Download the [v3.24.2 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.2/Ashlr_3.24.2_aarch64_locally-signed.dmg)
-after publication from the [versioned release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.24.2).
+Download the [v3.24.3 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.3/Ashlr_3.24.3_aarch64_locally-signed.dmg)
+after publication from the [versioned release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.24.3).
 It includes the CLI and the same console. This DMG is locally signed, not
 Apple Developer ID notarized; macOS may require **Open Anyway** on first launch.
 For a source build and local signing, follow [Releasing locally](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
@@ -56,10 +65,10 @@ There is no Linux or Windows desktop package in this release; use the CLI above.
    a tool-capable local model. **Automatic** chooses an eligible resource;
    open **Advanced** if you want to pin an account or model. For separate Claude Code, Codex and Grok accounts,
    follow [seat commissioning](RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity).
-   Each vendor signs in through its own CLI; Verse does not take its password.
+   Each vendor signs in through its own CLI; Phantom does not take its password.
 3. Ask for a small, checkable change. Review its diff and results in the
    workbench before accepting it. Use **⌘K** to find actions and **⌘J** for
-   **Needs you**. The full interface is in the [Verse guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
+   **Needs you**. The full interface is in the [Phantom guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
 
 Choose **Work for me**, open Fleet and select **New outcome**. Describe the
 result, select enrolled repositories and add observable acceptance criteria.
@@ -158,10 +167,10 @@ commissioning guide above before authorizing generation.
 ## General Hub and legacy fleet setup
 
 `ashlr init`, `ashlr serve`, `ashlr enroll` and `ashlr daemon` remain compatibility
-surfaces beneath Verse. For their command and safety contracts, use the
+surfaces beneath the workbench. For their command and safety contracts, use the
 [Hub reference](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md). The current first-run console is
 `ashlr verse` at `/verse/`; older `/` and `/next/` dashboard guidance should not
-be used as a Verse onboarding path.
+be used as a Phantom onboarding path.
 
 To inspect resident authority, use the **installed** binary, not an unbuilt
 source checkout:

@@ -191,7 +191,7 @@ mod tests {
         let plist = include_str!("../../Info.plist");
         assert!(plist.contains("<key>NSMicrophoneUsageDescription</key>"));
         assert!(plist.contains(
-            "<string>Verse transcribes your voice on this Mac when you hold the dictation key.</string>"
+            "<string>Phantom transcribes your voice on this Mac when you hold the dictation key.</string>"
         ));
         let entitlements = include_str!("../../Entitlements.plist");
         assert!(entitlements.contains("<key>com.apple.security.device.audio-input</key>"));

@@ -364,14 +364,18 @@ export function campaignUniverse(summary: Pick<UniverseCampaignSummary, 'definit
   return projectUniverse(universePath(resolve(options.root ?? defaultUniverseRoot()), summary.definition.universeId));
 }
 
-export function readUniverseCampaign(id: string, options: UniverseStoreOptions = {}): UniverseCampaignSummary {
+/** One read-only observation; never retained as execution authority or a cross-call cache. */
+export function readUniverseCampaignProjection(id: string, options: UniverseStoreOptions = {}): {
+  campaign: UniverseCampaignSummary; universe: UniverseSummary | null;
+} {
   const directory = campaignDirectory(id, options);
   inspectPrivateDirectory(directory);
   try {
     const records = readCampaignEvents(directory);
     const created = foldCampaignEvents(records).created;
     if (created.definition.id !== id) throw new Error('Campaign definition id does not match its storage slot');
-    return projectCampaign(records, campaignUniverse(created, options));
+    const universe = campaignUniverse(created, options);
+    return { campaign: projectCampaign(records, universe), universe };
   } catch (error) {
     // A damaged history is never a fresh campaign with a fresh resource budget.
     const first = readImmutablePrivateRecordPoint(config(directory), '00000000', '00000000.json').record;
@@ -379,10 +383,14 @@ export function readUniverseCampaign(id: string, options: UniverseStoreOptions =
     const emptyUniverse: UniverseSummary = { manifest: { id: first.definition.universeId } as UniverseSummary['manifest'],
       manifestDigest: first.manifestDigest, comparatorDigest: first.comparatorDigest, runs: [], elites: [], activeRun: null, sourceState: 'healthy', reasons: [] };
     const summary = projectCampaign([first], emptyUniverse);
-    return { ...summary, state: 'failed', reason: 'Campaign evidence is degraded', sourceState: 'degraded',
+    return { campaign: { ...summary, state: 'failed', reason: 'Campaign evidence is degraded', sourceState: 'degraded',
       reasons: [error instanceof Error ? error.message : 'Campaign evidence unavailable'],
-      progress: { ...summary.progress, reportedTokens: null, usageComplete: false } };
+      progress: { ...summary.progress, reportedTokens: null, usageComplete: false } }, universe: null };
   }
+}
+
+export function readUniverseCampaign(id: string, options: UniverseStoreOptions = {}): UniverseCampaignSummary {
+  return readUniverseCampaignProjection(id, options).campaign;
 }
 
 export function readUniverseCampaigns(options: UniverseStoreOptions = {}): {

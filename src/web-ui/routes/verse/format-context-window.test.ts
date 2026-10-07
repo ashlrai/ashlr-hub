@@ -12,16 +12,16 @@ describe('formatContextWindow — one spelling of a window everywhere', () => {
 
   it('keeps a decimal window decimal', () => {
     expect(formatContextWindow(200_000)).toBe('200k');
-    expect(formatContextWindow(272_000)).toBe('272k');
+    expect(formatContextWindow(272_000)).toBe('270k');
     expect(formatContextWindow(500_000)).toBe('500k');
     expect(formatContextWindow(1_000_000)).toBe('1M');
-    expect(formatContextWindow(258_400)).toBe('258k');
+    expect(formatContextWindow(258_400)).toBe('260k');
     // Rounded before the unit is chosen: never "1000k".
     expect(formatContextWindow(999_700)).toBe('1M');
   });
 
   it('says a small or missing window plainly', () => {
-    expect(formatContextWindow(512)).toBe('512');
+    expect(formatContextWindow(512)).toBe('510');
     expect(formatContextWindow(null)).toBe('—');
     expect(formatContextWindow(undefined)).toBe('—');
     expect(formatContextWindow(Number.NaN)).toBe('—');

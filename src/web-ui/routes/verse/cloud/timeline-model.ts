@@ -37,7 +37,7 @@ export const BADGE_WORD: Record<TimelineBadge, string> = {
 
 /** Tooltip / screen-reader sentence for each badge. */
 export const BADGE_MEANING: Record<TimelineBadge, string> = {
-  verified: 'Read from a record Verse or GitHub wrote, not from the session.',
+  verified: 'Read from a record Phantom or GitHub wrote, not from the session.',
   claim: 'The cloud session’s own say-so. Nothing checked it.',
   estimate: 'An estimate, not a bill; the real usage is on the provider’s own page (this step links it).',
   unknown: 'Nothing was recorded, or the record could not be read.',

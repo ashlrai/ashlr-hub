@@ -46,10 +46,13 @@
  * recorded for the chat (cli-prs.ts, which feeds Needs-you) and, the first
  * time this chat sees it, shown as the chat's PR card (`remote-pr`).
  *
- * USAGE. The CLI reports none over ACP (3000.11.3's `initialize` advertises
+ * USAGE. No billed token usage is imported (3000.11.3's `initialize` advertises
  * no usage capability and prompt answers carry only `stopReason`), so a CLI
  * turn is not counted against the Devin ACU budget; the Resources drawer says
  * so rather than implying it is.
+ * Current ACP v1 `usage_update` may report context occupancy; that reading is
+ * forwarded separately. Its optional cumulative cost is not token usage and
+ * is deliberately ignored here (https://agentclientprotocol.com/protocol/v1/schema).
  *
  * NOTHING FROM THE CLI'S STDERR IS FORWARDED. The CLI logs, among other
  * things, the commands it uses to start the operator's MCP servers (seen on
@@ -303,6 +306,7 @@ export async function runDevinCliTurn(payload: DevinTurnPayload, io: DevinTurnIo
   /** ENOENT / EACCES: the binary discovery found is gone or not runnable. */
   let spawnFailed = false;
   let sessionId: string | null = null;
+  let contextUsageAllowed = false;
   /** While session/load replays history, updates are the past, not this turn. */
   let replaying = false;
   let message = '';
@@ -366,6 +370,17 @@ export async function runDevinCliTurn(payload: DevinTurnPayload, io: DevinTurnIo
     const update = isRecord(params['update']) ? params['update'] : null;
     if (!update) return;
     switch (update['sessionUpdate']) {
+      case 'usage_update': {
+        // ACP v1 used/size describe current context, never lifetime billing.
+        // Preserve an above-window reading; compaction may also lower used.
+        if (!contextUsageAllowed || sessionId === null || exited || io.signal.aborted) return;
+        const used = update['used'];
+        const size = update['size'];
+        if (typeof used !== 'number' || !Number.isSafeInteger(used) || used < 0
+          || typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) return;
+        emit({ type: 'context', contextTokens: used, contextWindow: size });
+        return;
+      }
       case 'agent_message_chunk': {
         const text = textOf(update['content']);
         if (!text) return;
@@ -525,6 +540,7 @@ export async function runDevinCliTurn(payload: DevinTurnPayload, io: DevinTurnIo
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: terminals !== null },
     });
     const caps = isRecord(init) && isRecord(init['agentCapabilities']) ? init['agentCapabilities'] : {};
+    contextUsageAllowed = isRecord(init) && init['protocolVersion'] === ACP_PROTOCOL_VERSION;
     const cwd = payload.projectPath;
     const mcpServers = acpMcpServers(verseMcp, caps);
 

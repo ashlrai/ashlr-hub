@@ -20,12 +20,12 @@ describe('installMobileHead', () => {
     document.head.innerHTML = '<meta name="viewport" content="width=device-width, initial-scale=1.0">';
     installMobileHead(document);
     const meta = (name: string) => [...document.head.querySelectorAll(`meta[name="${name}"]`)].map((m) => m.getAttribute('content'));
-    expect(document.title).toBe('Ashlr Verse');
+    expect(document.title).toBe('Phantom');
     expect(meta('viewport')).toEqual(['width=device-width, initial-scale=1, viewport-fit=cover']);
     expect(meta('apple-mobile-web-app-capable')).toEqual(['yes']);
     expect(meta('mobile-web-app-capable')).toEqual(['yes']);
     expect(meta('apple-mobile-web-app-status-bar-style')).toEqual(['black-translucent']);
-    expect(meta('apple-mobile-web-app-title')).toEqual(['Verse']);
+    expect(meta('apple-mobile-web-app-title')).toEqual(['Phantom']);
     expect(meta('theme-color')).toEqual([THEME_COLORS.light, THEME_COLORS.dark]);
     expect(document.head.querySelector('link[rel="manifest"]')?.getAttribute('href')).toBe(VERSE_MOBILE_MANIFEST_HREF);
     expect(document.head.querySelector('link[rel="apple-touch-icon"]')?.getAttribute('href')).toBe('/next/verse-m/apple-touch-icon.png');
@@ -201,7 +201,7 @@ describe('the service worker', () => {
     const show = (self.registration as { showNotification: ReturnType<typeof vi.fn> }).showNotification;
     expect(show).toHaveBeenCalledTimes(1);
     const displayed = JSON.stringify(show.mock.calls[0]);
-    expect(displayed).toContain('Verse has an update');
+    expect(displayed).toContain('Phantom has an update');
     expect(displayed).not.toContain('PRIVATE');
     expect(displayed).not.toContain('secret-repo');
   });
@@ -211,8 +211,8 @@ describe('the service worker', () => {
     const show = (self.registration as { showNotification: ReturnType<typeof vi.fn> }).showNotification;
     await dispatchPush({ json: () => ({ kind: 'needs-you', title: 'PRIVATE approval', body: 'secret transcript' }) });
     await dispatchPush({ json: () => ({ kind: 'completed', title: 'PRIVATE repo', body: 'secret result' }) });
-    expect(show.mock.calls[0]![1]).toMatchObject({ body: 'Something needs you. Open Verse for details.', data: { path: '/verse/m/#/needs' } });
-    expect(show.mock.calls[1]![1]).toMatchObject({ body: 'A run completed. Open Verse for details.', data: { path: '/verse/m/#/' } });
+    expect(show.mock.calls[0]![1]).toMatchObject({ body: 'Something needs you. Open Phantom for details.', data: { path: '/verse/m/#/needs' } });
+    expect(show.mock.calls[1]![1]).toMatchObject({ body: 'A run completed. Open Phantom for details.', data: { path: '/verse/m/#/' } });
     expect(JSON.stringify(show.mock.calls)).not.toMatch(/PRIVATE|secret/);
   });
   it('routes: never /api/, never another origin or method; shell, hashed assets and its own files only', () => {

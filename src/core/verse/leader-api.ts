@@ -22,7 +22,9 @@
  *                                                        (limit 1–200, default 50;
  *                                                        before = message id or ISO)
  *   POST   /api/verse/leader/thread {text, replyTo?}   → {message, reply, directive?}
+ *   GET    /api/verse/leader/questions/<questionId> → exact saved question + capability
  *   POST   /api/verse/leader/questions/<questionId>/answer {text} → {message, reply}
+ *          or {submission} → recorded/already-answered/stale/held + saved question
  *   POST   /api/verse/leader/actions/<actionId>/approve {}        → approval result
  *   GET    /api/verse/leader/directives                → {directives, retired}
  *   POST   /api/verse/leader/directives {text, kind?}  → {directive, duplicate}
@@ -80,8 +82,11 @@ import {
   appendMasonMessage,
   approveLeaderAction,
   listThread,
+  readLeaderQuestion,
+  submitLeaderQuestion,
   syncLeaderMemosToThread,
 } from '../vision/leader-thread.js';
+import { parseLeaderQuestionSubmission } from '../vision/leader-thread-types.js';
 
 // ---------------------------------------------------------------------------
 // Needs-you (pure builder + cache)
@@ -440,6 +445,7 @@ const NOTE_MAX = 500;
 const THREAD_PATH = `${VERSE_LEADER_PATH}/thread`;
 const DIRECTIVES_PATH = `${VERSE_LEADER_PATH}/directives`;
 const ANSWER_PATH_RE = /^\/api\/verse\/leader\/questions\/([^/]+)\/answer$/;
+const QUESTION_PATH_RE = /^\/api\/verse\/leader\/questions\/([^/]+)$/;
 const APPROVE_PATH_RE = /^\/api\/verse\/leader\/actions\/([^/]+)\/approve$/;
 const DIRECTIVE_PATH_RE = /^\/api\/verse\/leader\/directives\/([^/]+)$/;
 
@@ -526,12 +532,27 @@ function parseThreadQuery(req: IncomingMessage): { limit?: number; before?: stri
 /** The 3.14 thread / question / approve / directive routes. False = not one of them. */
 async function handleThreadRoutes(ctx: VerseApiContext, req: IncomingMessage, res: ServerResponse, path: string, method: string): Promise<boolean> {
   const answer = ANSWER_PATH_RE.exec(path);
+  const question = QUESTION_PATH_RE.exec(path);
   const approve = APPROVE_PATH_RE.exec(path);
   const directive = DIRECTIVE_PATH_RE.exec(path);
-  const known = path === THREAD_PATH || path === DIRECTIVES_PATH || answer !== null || approve !== null || directive !== null;
+  const known = path === THREAD_PATH || path === DIRECTIVES_PATH || answer !== null || question !== null || approve !== null || directive !== null;
   if (!known) return false;
 
   if (method === 'GET') {
+    if (question) {
+      if ([...new URL(req.url ?? '/', 'http://localhost').searchParams.keys()].length > 0) {
+        sendInvalid(res, 'this route takes no query parameters');
+        return true;
+      }
+      try {
+        const snapshot = readLeaderQuestion(question[1]!);
+        if (snapshot === null) sendJson(res, 404, { code: 'VERSE_NOT_FOUND', error: 'No such Leader question', typedQuestionsSupported: true });
+        else sendJson(res, 200, { question: snapshot, typedQuestionsSupported: true });
+      } catch (err) {
+        if (!sendThreadError(res, err)) throw err;
+      }
+      return true;
+    }
     if (path === THREAD_PATH) {
       const query = parseThreadQuery(req);
       if (typeof query === 'string') {
@@ -573,7 +594,7 @@ async function handleThreadRoutes(ctx: VerseApiContext, req: IncomingMessage, re
     return true;
   }
 
-  if (method !== 'POST' || directive) return false;
+  if (method !== 'POST' || directive || question) return false;
   const body = await readMutationBody(ctx, req, res);
   if (!body) return true;
   try {
@@ -593,6 +614,22 @@ async function handleThreadRoutes(ctx: VerseApiContext, req: IncomingMessage, re
       return true;
     }
     if (answer) {
+      // A typed submission is a distinct contract: never retry an uncertain
+      // submission through the intentionally refinable legacy text branch.
+      if (Object.hasOwn(body, 'submission')) {
+        const extra = hasOnlyKeys(body, ['submission']);
+        const submission = parseLeaderQuestionSubmission(body['submission']);
+        if (extra || submission === null) {
+          sendInvalid(res, extra ? `unknown key: ${extra}` : 'invalid question submission');
+          return true;
+        }
+        const result = await submitLeaderQuestion(answer[1]!, submission, { channel: 'verse', cfg: ctx.cfg });
+        if (result.outcome === 'recorded' || result.question?.answered === true) {
+          await refreshLeaderCache().catch(() => undefined);
+        }
+        sendJson(res, 200, result);
+        return true;
+      }
       const extra = hasOnlyKeys(body, ['text']);
       if (extra) {
         sendInvalid(res, `unknown key: ${extra}`);

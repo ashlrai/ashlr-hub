@@ -199,19 +199,19 @@ describe('groupTranscriptItems', () => {
 describe('formatTokens', () => {
   it('renders compact token counts', () => {
     expect(formatTokens(0)).toBe('0');
-    expect(formatTokens(999)).toBe('999');
-    expect(formatTokens(123_456)).toBe('123k');
+    expect(formatTokens(999)).toBe('1k');
+    expect(formatTokens(123_456)).toBe('120k');
     expect(formatTokens(200_000)).toBe('200k');
     expect(formatTokens(1_250_000)).toBe('1.3M');
     expect(formatTokens(null)).toBe('—');
   });
 
   it('chooses the unit after rounding, so nothing prints as "1000k" or "1000"', () => {
-    expect(formatTokens(999_499)).toBe('999k');
+    expect(formatTokens(999_499)).toBe('1M');
     expect(formatTokens(999_500)).toBe('1M');
     expect(formatTokens(999_999)).toBe('1M');
     expect(formatTokens(1_000_000)).toBe('1M');
-    expect(formatTokens(999.4)).toBe('999');
+    expect(formatTokens(999.4)).toBe('1k');
     expect(formatTokens(999.6)).toBe('1k');
   });
 });

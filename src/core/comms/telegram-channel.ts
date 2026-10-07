@@ -41,14 +41,17 @@
 import type { AshlrConfig } from '../types.js';
 import {
   answerCallbackQuery,
+  editTelegramQuestionKeyboard,
+  telegramQuestionNamespace,
   sendTelegramMessage,
   type InboundEvent,
   type TelegramButton,
   type TelegramSendOpts,
   type TelegramSendResult,
 } from '../integrations/telegram.js';
-import { escapeTelegramHtml } from '../integrations/telegram-format.js';
+import { escapeTelegramHtml, leaderDisplayText } from '../integrations/telegram-format.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { cleanOperatorText, OPERATOR_LIMITS } from '../vision/leader-operator.js';
 import type { CommsRequest } from './requests.js';
 import {
   lookupTelegramMessage,
@@ -58,12 +61,22 @@ import {
   registerButtonTarget,
   resolveButtonTarget,
   telegramIdForThread,
+  registerTelegramQuestion,
+  bindTelegramQuestionMessage,
+  changeTelegramQuestion,
+  claimTelegramQuestionText,
+  readTelegramQuestionDraft,
+  readTelegramQuestionControl,
+  settleTelegramQuestionClaim,
+  validTelegramQuestionForm,
+  type TelegramQuestionDraft,
   type TelegramButtonTarget,
   type TelegramThreadKind,
 } from './telegram-thread-map.js';
 import type { LeaderThreadMessage } from '../vision/leader-thread.js';
+import type { LeaderQuestionProjection, LeaderQuestionSubmission, SubmitLeaderQuestionResult } from '../vision/leader-thread-types.js';
 import { LEADER_TELEGRAM_DETAIL_MAX_LINES, LEADER_TELEGRAM_MAX_LINES, fitTelegram, guardPersonaText, wantsDetail } from '../vision/leader-persona.js';
-import { QUESTION_ANSWERS, instantBrief, rememberFullReply, routeLeaderText, type ThreadLineHooks } from './leader-line.js';
+import { QUESTION_ANSWERS, typedQuestionKeyboard, instantBrief, rememberFullReply, routeLeaderText, type ThreadLineHooks } from './leader-line.js';
 
 export const LEADER_CALLBACK_PREFIX = 'lt:';
 const LEADER_MEMO_ID_RE = /^lm-\d{14}-[a-f0-9]{6}$/;
@@ -197,7 +210,7 @@ export async function sendReportViaTelegram(req: CommsRequest, cfg: AshlrConfig)
     );
   }
   const text = isMemo
-    ? `${scrubSecrets(req.text)}\n\nReply to this message to talk to the Leader about it.`
+    ? `${leaderDisplayText(scrubSecrets(req.text))}\n\nReply to this message to talk to the Leader about it.`
     : scrubSecrets(req.text);
   const res = await sendTelegramMessage(text, opts, cfg);
   if (res.ok) {
@@ -214,7 +227,7 @@ export async function sendReportViaTelegram(req: CommsRequest, cfg: AshlrConfig)
 /** How a Leader-thread message reads on the phone (plain text; escaped at the transport). */
 export function formatThreadMessage(msg: LeaderThreadMessage): string {
   // 3.15: the Leader always speaks as itself (leader-persona.ts); Mason's own words are shown as written.
-  const body = scrubSecrets(msg.from === 'mason' ? (msg.text ?? '') : guardPersonaText(msg.text ?? '')).trim();
+  const body = scrubSecrets(msg.from === 'mason' ? (msg.text ?? '') : leaderDisplayText(guardPersonaText(msg.text ?? ''))).trim();
   // Mason's own words from another surface (e.g. Verse), mirrored so the
   // Leader's reply on Telegram has its context.
   if (msg.from === 'mason') return `You (in ${msg.channel === 'verse' ? 'Verse' : String(msg.channel)}):\n${body}`;
@@ -222,9 +235,11 @@ export function formatThreadMessage(msg: LeaderThreadMessage): string {
     case 'question':
       return `Leader asks:\n${body}\n\n(Reply to this message to answer.)`;
     case 'memo': {
-      // The thread's memo summary already opens with "Memo <id>". Phone-sized:
+      // Only the display loses IDs; the exact memo/action targets remain in
+      // the thread map and buttons. Phone-sized:
       // the Details button carries the full memo.
-      const text = /^Memo /.test(body) ? `Leader ${body.replace(/^Memo /, 'memo ')}` : `Leader memo${msg.memoId ? ` ${msg.memoId}` : ''}\n${body}`;
+      const text = (/^Memo(?: |\n|$)/.test(body) ? `Leader ${body.replace(/^Memo/, 'memo')}` : `Leader memo\n${body}`)
+        .replace('Approve or veto any of them by id.', 'Use Approve / Veto, or reply to this message.');
       return fitTelegram(text, LEADER_TELEGRAM_MAX_LINES + 2).text.replace('… (say "more" for the rest)', '… (tap Details for the full memo)');
     }
     case 'action':
@@ -249,6 +264,13 @@ export async function sendThreadMessage(
   shape: { maxLines?: number; keyboard?: TelegramButton[][] | null } = {},
 ): Promise<boolean> {
   const opts: TelegramSendOpts = {};
+  let typedDraft: TelegramQuestionDraft | null = null;
+  const namespace = telegramQuestionNamespace(cfg);
+  if (msg.kind === 'question' && msg.questionForm !== undefined) {
+    if (!namespace || !msg.questionId || !validTelegramQuestionForm(msg.questionForm)) return false;
+    typedDraft = registerTelegramQuestion(namespace, msg.questionId, msg.id, msg.questionForm);
+    if (!typedDraft) return false;
+  }
   const replyTarget = replyToTg ?? telegramIdForThread(msg.replyTo);
   if (typeof replyTarget === 'number') opts.replyToMessageId = replyTarget;
 
@@ -274,6 +296,7 @@ export async function sendThreadMessage(
     // 3.15: a yes/no Leader question gets Yes / No / Your call.
     opts.keyboard = shape.keyboard;
   }
+  if (typedDraft) opts.keyboard = typedQuestionKeyboard(typedDraft);
 
   let text = formatThreadMessage(msg);
   if (shape.maxLines !== undefined) {
@@ -284,6 +307,11 @@ export async function sendThreadMessage(
     text = fit.text;
   }
   const res = await sendTelegramMessage(text, opts, cfg);
+  if (typedDraft) {
+    const keyboardMessageId = res.messageIds?.at(-1) ?? res.messageId;
+    if (!res.ok || res.partial || namespace !== telegramQuestionNamespace(cfg) || typeof keyboardMessageId !== 'number' ||
+        !bindTelegramQuestionMessage(typedDraft.token, namespace!, keyboardMessageId)) return false;
+  }
   if (res.ok) {
     recordTelegramMessages(sendResultIds(res), {
       threadId: msg.id,
@@ -400,6 +428,45 @@ export async function converseWithLeader(event: InboundEvent, text: string, cfg:
     let reply: LeaderThreadMessage | null = null;
     let directive: unknown;
     if (repliedTo?.kind === 'question' && repliedTo.questionId) {
+      if (typeof mod.readLeaderQuestion === 'function' && typeof mod.submitLeaderQuestion === 'function') {
+        const question = mod.readLeaderQuestion(repliedTo.questionId);
+        if (!question) {
+          await replyTo(event, 'That question is unavailable. Your words were not submitted.', cfg); return;
+        }
+        const namespace = telegramQuestionNamespace(cfg, event.fromChatId);
+        const draft = namespace && typeof event.replyToMessageId === 'number'
+          ? readTelegramQuestionDraft(namespace, event.replyToMessageId, repliedTo.questionId) : null;
+        const pendingClaim = draft?.claim;
+        if (typeof event.messageId === 'number' && pendingClaim && pendingClaim.inboundMessageId !== null &&
+            pendingClaim.inboundMessageId === event.messageId) {
+          await replyTo(event, exactTypedAcceptance(question, pendingClaim.submission)
+            ? 'Your answer is saved.' : 'That submission is unconfirmed. Your draft is retained.', cfg);
+          return;
+        }
+        if (question.questionForm && !question.answered &&
+            (!draft || draft.form.revision !== question.questionForm.revision || draft.claim)) {
+          await replyTo(event, 'That typed question is held. Your words were not submitted; do not repeat an uncertain submission.', cfg);
+          return;
+        }
+        // An expired, current, unclaimed form still permits this genuine written reply.
+        if (question.questionForm?.mode === 'short-answer' && !question.answered &&
+            Date.parse(question.questionForm.expiresAt) > Date.now()) {
+          const claimed = namespace && typeof event.replyToMessageId === 'number' && typeof event.messageId === 'number'
+            ? claimTelegramQuestionText(namespace, event.replyToMessageId, event.messageId, repliedTo.questionId, text) : null;
+          if (!claimed?.claim || claimed.form.revision !== question.questionForm.revision || namespace !== telegramQuestionNamespace(cfg, event.fromChatId)) {
+            await replyTo(event, 'That typed question is held. Your words were not submitted; do not repeat an uncertain submission.', cfg);
+            return;
+          }
+          const result = await mod.submitLeaderQuestion(repliedTo.questionId, claimed.claim.submission, { channel: 'telegram', cfg });
+          if (result.outcome === 'recorded' && result.message) {
+            recordTelegramMessages([event.messageId!], { kind: 'answer', threadId: result.message.id, questionId: repliedTo.questionId });
+          }
+          await replyTo(event, await deliverTypedQuestionResult(result, claimed, cfg, event.messageId!), cfg);
+          return;
+        }
+      }
+      // For a choice or expired short form, an actual human reply is the intentional
+      // ordinary answer/refinement path, never a failed typed submission fallback.
       ({ message, reply } = await mod.answerLeaderQuestion(repliedTo.questionId, text, { channel: 'telegram', cfg }));
     } else {
       // A reply to a memo the comms queue delivered has no thread id: name
@@ -460,13 +527,109 @@ function resultMessage(r: unknown, fallback: string): { ok: boolean; message: st
   return { ok: Boolean(r), message: fallback };
 }
 
+function exactTypedAcceptance(question: LeaderQuestionProjection | null, submission: LeaderQuestionSubmission): boolean {
+  const accepted = question?.answer?.typedAcceptance;
+  if (!accepted || accepted.formRevision !== submission.formRevision || accepted.kind !== submission.kind) return false;
+  if (submission.kind === 'text') return accepted.text === cleanOperatorText(submission.text, OPERATOR_LIMITS.answerMaxChars * 2);
+  return JSON.stringify(accepted.optionIndices) === JSON.stringify(submission.optionIndices) &&
+    accepted.text === submission.optionIndices.map(index => question?.questionForm?.options?.[index]).join('; ');
+}
+
+async function deliverTypedQuestionResult(result: SubmitLeaderQuestionResult, draft: TelegramQuestionDraft,
+  cfg: AshlrConfig, replyToMessageId: number): Promise<string> {
+  const submission = draft.claim?.submission;
+  if (!submission) return 'That submission is held.';
+  if (telegramQuestionNamespace(cfg) !== draft.namespace) return 'Question configuration changed. Submission status is held.';
+  if (exactTypedAcceptance(result.question, submission)) {
+    const messageId = result.question?.answer?.typedAcceptance?.messageId;
+    if (messageId) settleTelegramQuestionClaim(draft.token, draft.namespace, submission, messageId);
+    // The BOT question retains its original association. Only a genuine human
+    // inbound message can be mapped to a separate canonical answer message.
+    await editTelegramQuestionKeyboard(draft.messageId!, [], cfg);
+    if (result.outcome === 'recorded' && result.reply) {
+      const mod = await thread();
+      const ok = await sendThreadMessage(result.reply, cfg, replyToMessageId, { maxLines: LEADER_TELEGRAM_MAX_LINES + 1 });
+      await mod?.markDelivered(result.reply.id, 'telegram', ok);
+    }
+    return 'Your answer is saved.';
+  }
+  if (result.outcome === 'already-answered') return 'This question already has an answer.';
+  if (result.outcome === 'stale') return 'That question changed. Your draft was retained; no answer was submitted.';
+  return 'Submission is held. Your draft was retained; do not repeat it.';
+}
+
+async function handleTypedQuestionButton(event: InboundEvent, cfg: AshlrConfig): Promise<boolean> {
+  if (!(event.data ?? '').startsWith('lt:q:')) return false;
+  const ack = async (text: string): Promise<void> => {
+    if (event.callbackQueryId) await answerCallbackQuery(event.callbackQueryId, cfg, text);
+  };
+  const match = /^lt:q:([a-f0-9]{24}):([0-9a-z]{1,6}):([oacsw])(?::(\d{1,2}))?$/.exec(event.data!);
+  const namespace = telegramQuestionNamespace(cfg, event.fromChatId);
+  if (!namespace) return true;
+  await ack('Checking question…');
+  if (!match || !namespace || !event.callbackQueryId || !Number.isSafeInteger(event.messageId) ||
+      (match[3] === 'o') !== (match[4] !== undefined)) {
+    await ack('That question control is unavailable.'); return true;
+  }
+  const bound = readTelegramQuestionControl(match[1]!, namespace, event.messageId!);
+  const mod = await thread();
+  if (!bound || !mod || typeof mod.readLeaderQuestion !== 'function' || typeof mod.submitLeaderQuestion !== 'function') {
+    await ack('Typed answers are unavailable. Your draft is retained.'); return true;
+  }
+  let question: LeaderQuestionProjection | null;
+  try { question = mod.readLeaderQuestion(bound.questionId); }
+  catch { await ack('Question state is held. Your draft is retained.'); return true; }
+  if (namespace !== telegramQuestionNamespace(cfg, event.fromChatId) ||
+      !question || question.questionForm?.revision !== bound.form.revision || question.answered && !bound.claim) {
+    await ack('That question changed or already has an answer. Your draft is retained.'); return true;
+  }
+  const operation = { o: 'option', a: 'all', c: 'clear', s: 'submit', w: 'write' } as const;
+  const changed = changeTelegramQuestion({ token: match[1]!, namespace, messageId: event.messageId!,
+    revision: parseInt(match[2]!, 36), callbackId: event.callbackQueryId,
+    operation: operation[match[3] as keyof typeof operation],
+    ...(match[4] === undefined ? {} : { optionIndex: Number(match[4]) }) });
+  if (!changed) { await ack('Question state is held. Reply in words when it is available.'); return true; }
+  const draft = changed.draft;
+  if (changed.outcome === 'draft' || changed.outcome === 'stale') {
+    if (namespace === telegramQuestionNamespace(cfg, event.fromChatId)) {
+      const edited = await editTelegramQuestionKeyboard(event.messageId!, typedQuestionKeyboard(draft), cfg);
+      await ack(changed.outcome === 'stale' ? 'Old keyboard: use the updated choices.'
+        : edited ? 'Choices updated. Submit when ready.' : 'Choices retained. Keyboard update is unconfirmed.');
+    }
+    return true;
+  }
+  if (changed.outcome === 'write') {
+    await ack('Reply to the question in your own words.'); return true;
+  }
+  try {
+    question = mod.readLeaderQuestion(draft.questionId);
+    if (changed.outcome !== 'submit') {
+      if (draft.claim && exactTypedAcceptance(question, draft.claim.submission)) {
+        const messageId = question?.answer?.typedAcceptance?.messageId;
+        if (messageId) settleTelegramQuestionClaim(draft.token, namespace, draft.claim.submission, messageId);
+        if (namespace === telegramQuestionNamespace(cfg, event.fromChatId)) await editTelegramQuestionKeyboard(event.messageId!, [], cfg);
+        await ack('Your answer is saved.');
+      } else await ack(changed.outcome === 'duplicate' ? 'That tap was already handled.'
+        : 'Submission is held. Your draft is retained.');
+      return true;
+    }
+    if (namespace !== telegramQuestionNamespace(cfg, event.fromChatId) ||
+        question?.questionForm?.revision !== draft.form.revision || !draft.claim) {
+      await ack('That question changed. Your submission is held.'); return true;
+    }
+    const result = await mod.submitLeaderQuestion(draft.questionId, draft.claim.submission, { channel: 'telegram', cfg });
+    await ack(await deliverTypedQuestionResult(result, draft, cfg, event.messageId!));
+  } catch { await ack('Submission is unconfirmed. Your draft is retained; do not repeat it.'); }
+  return true;
+}
+
 async function memoDetails(memoId: string): Promise<string> {
   try {
     const { readLeaderMemo } = await import('../vision/leader-memo.js');
     const memo = readLeaderMemo(memoId);
     if (!memo) return 'That Leader memo is no longer on file.';
     const { leaderMemoText } = await import('./handlers.js');
-    return scrubSecrets(leaderMemoText(memo));
+    return leaderDisplayText(scrubSecrets(leaderMemoText(memo)));
   } catch {
     return 'Could not read that Leader memo.';
   }
@@ -476,16 +639,16 @@ async function actionDetails(actionIds: string[]): Promise<string> {
   try {
     const { findStoredAction } = await import('../vision/leader-apply.js');
     const lines: string[] = [];
-    for (const id of actionIds.slice(0, MAX_ACTIONS_PER_TAP)) {
+    for (const [index, id] of actionIds.slice(0, MAX_ACTIONS_PER_TAP).entries()) {
       const stored = findStoredAction(id);
       if (!stored) {
-        lines.push(`${id}: no longer on file`);
+        lines.push(`Action ${index + 1}: no longer on file`);
         continue;
       }
       const a = stored.action;
-      lines.push(`${a.id} [class ${a.class}] ${a.status}: ${a.summary}`, `  why: ${a.why}`);
+      lines.push(`Action ${index + 1} [class ${a.class}] ${a.status}: ${a.summary}`, `  why: ${a.why}`);
     }
-    return scrubSecrets(lines.join('\n')) || 'No details on file.';
+    return leaderDisplayText(scrubSecrets(lines.join('\n'))) || 'No details on file.';
   } catch {
     return 'Could not read those Leader actions.';
   }
@@ -496,6 +659,7 @@ async function actionDetails(actionIds: string[]): Promise<string> {
  * tapped message with the outcome. Returns true when the tap was ours.
  */
 export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig): Promise<boolean> {
+  if (await handleTypedQuestionButton(event, cfg)) return true;
   const data = event.data ?? '';
   const m = /^lt:([avdync]):(\d{1,12})$/.exec(data);
   if (!m) return false;
@@ -522,7 +686,8 @@ export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig):
       }
       await ack(verb === 'y' ? 'Yes' : verb === 'n' ? 'No' : 'Your call');
       const { message, reply } = await mod.answerLeaderQuestion(questionId, QUESTION_ANSWERS[verb], { channel: 'telegram', cfg });
-      if (typeof event.messageId === 'number' && message?.id) recordTelegramMessages([event.messageId], { threadId: message.id, kind: 'answer', questionId });
+      // A tapped BOT message remains the question. It is not a human reply.
+      void message;
       if (reply && typeof reply.text === 'string' && reply.text.trim()) {
         const ok = await sendThreadMessage(reply, cfg, event.messageId, { maxLines: LEADER_TELEGRAM_MAX_LINES + 1 });
         await mod.markDelivered(reply.id, 'telegram', ok);
@@ -559,10 +724,10 @@ export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig):
           const res = await mod.approveLeaderAction(id, { channel: 'telegram', cfg });
           const r = resultMessage(res, 'approved');
           const leaderSays = res?.thread?.reply?.text;
-          lines.push(`${r.ok ? 'Approved' : 'Not approved'} ${id}: ${leaderSays && leaderSays.trim() ? leaderSays : r.message}`);
+          lines.push(`${r.ok ? 'Approved' : 'Not approved'} action: ${leaderDisplayText(leaderSays && leaderSays.trim() ? leaderSays : r.message)}`);
           if (res?.thread?.reply?.id) ackIds.push(res.thread.reply.id);
         } catch (err) {
-          lines.push(`Not approved ${id}: ${errorText(err)}`);
+          lines.push(`Not approved action: ${errorText(err)}`);
         }
       }
       const sent = await replyTo(event, scrubSecrets(lines.join('\n')), cfg);
@@ -582,7 +747,7 @@ export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig):
     } else {
       for (const id of actionIds) {
         const r = await apply.vetoLeaderAction(deps, id, 'Vetoed from Telegram');
-        lines.push(r.ok ? `Vetoed: ${r.message}` : `Could not veto ${id}: ${r.message}`);
+        lines.push(r.ok ? `Vetoed: ${r.message}` : `Could not veto action: ${r.message}`);
       }
     }
     await replyTo(event, scrubSecrets(lines.join('\n') || 'Nothing to veto.'), cfg);
@@ -596,24 +761,49 @@ export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig):
 // Inbound: slash commands
 // ---------------------------------------------------------------------------
 
+const TELEGRAM_HELP_INTRO = 'Talk to the Leader: type a message, or reply to one to follow up.';
+const TELEGRAM_HELP_SECTIONS = [
+  ['Read', [
+    ['/status or /brief', 'shipped, running, blockers and next'],
+    ['status / update / what\'s up', 'the same instant brief'],
+    ['/leader', 'latest Leader memo'],
+    ['snapshot', 'full fleet snapshot'],
+  ]],
+  ['Talk & work', [
+    ['/leader <text>', 'message the Leader'],
+    ['/task <owner/repo> <what to do>', 'hand work to an enabled Telegram automation'],
+    ['build X / fix Y in owner/repo', 'ask the Leader to start work within the grant'],
+  ]],
+  ['Decisions', [
+    ['approve <id> / veto <id>', 'or reply "approve" / "veto" to an action message'],
+    ['/directives', 'your standing directives to the Leader'],
+    ['/settings', 'the Leader\'s settings and standards'],
+  ]],
+  ['Messages', [
+    ['more', 'expand the last long reply'],
+    ['pause / resume', 'pause or resume fleet messages'],
+    ['/help', 'this guide'],
+  ]],
+] as const;
+const TELEGRAM_HELP_BUTTONS = 'Buttons: Approve (apply a scheduled class-B action now, or record your approval of a class-C ask); Veto undoes the memo\'s actions; Details opens the full memo.';
+
+/** Plain help stays available to CLI/test consumers; Telegram uses source-built HTML. */
 export const TELEGRAM_HELP_TEXT = [
-  'Talk to the Leader: just type. Reply to a Leader message to answer it or follow up.',
-  '"status" / "update" / "what\'s up" — an instant brief. "more" — the rest of a long reply.',
-  '"build X" / "fix Y in owner/repo" — the Leader starts it now (cheapest lane that can do it) and pings you with the result.',
-  '"approve <id>" / "veto <id>" — or reply "approve" / "veto" to an action message.',
-  '',
-  'Commands',
-  '/status — the instant brief (shipped, running, blockers, next)',
-  '/brief — same',
-  '/leader — the latest Leader memo (or /leader <text> to message the Leader)',
-  '/directives — your standing directives to the Leader',
-  '/settings — the Leader\'s settings (lanes, router tuning) and standards',
-  '/task <owner/repo> <what to do> — hand work to a Telegram automation',
-  '/help — this list',
-  'pause / resume — hold or restart messages from the fleet',
-  'snapshot — full fleet snapshot',
-  '',
-  'Buttons: Approve (apply a scheduled class-B action now, or record your approval of a class-C ask), Veto (undo a memo\'s actions), Details (the full memo).',
+  TELEGRAM_HELP_INTRO,
+  ...TELEGRAM_HELP_SECTIONS.flatMap(([heading, entries]) => [
+    '', heading, ...entries.map(([command, description]) => `${command} — ${description}`),
+  ]),
+  '', TELEGRAM_HELP_BUTTONS,
+].join('\n');
+
+/** Escape every command/example before adding our fixed heading/code tags. */
+const TELEGRAM_HELP_HTML = [
+  escapeTelegramHtml(TELEGRAM_HELP_INTRO),
+  ...TELEGRAM_HELP_SECTIONS.flatMap(([heading, entries]) => [
+    '', `<b>${escapeTelegramHtml(heading)}</b>`,
+    ...entries.map(([command, description]) => `<code>${escapeTelegramHtml(command)}</code> — ${escapeTelegramHtml(description)}`),
+  ]),
+  '', escapeTelegramHtml(TELEGRAM_HELP_BUTTONS),
 ].join('\n');
 
 function ago(iso: string | null | undefined, nowMs: number): string {
@@ -654,9 +844,9 @@ export async function buildStatusText(nowMs: number = Date.now()): Promise<strin
     const { buildLeaderState } = await import('../vision/leader.js');
     const s = buildLeaderState(nowMs);
     const last = s.lastRun ? `last run ${ago(s.lastRun.at, nowMs)} (${s.lastRun.outcome})` : 'no run yet';
-    const next = s.nextRunAt ? `, next ${s.nextRunAt.slice(0, 16).replace('T', ' ')}` : '';
+    const next = s.nextRunAt ? `, next ${leaderDisplayText(s.nextRunAt, nowMs)}` : '';
     lines.push(`Leader: ${last}${next}`);
-    if (s.latest) lines.push(`Latest memo: ${s.latest.id} (${ago(s.latest.at, nowMs)})`);
+    if (s.latest) lines.push(`Latest memo: ${ago(s.latest.at, nowMs)}`);
   } catch { /* skip */ }
   return lines.join('\n');
 }
@@ -670,7 +860,7 @@ async function sendLatestMemo(event: InboundEvent, cfg: AshlrConfig): Promise<vo
       await replyTo(event, 'No Leader memo yet. Message the Leader with /leader <text>, or just type.', cfg);
       return;
     }
-    const parts = [`Leader memo ${memo.id} — ${memo.at.slice(0, 16).replace('T', ' ')}${memo.dryRun ? ' (dry run)' : ''}`];
+    const parts = [`Leader memo — ${leaderDisplayText(memo.at)}${memo.dryRun ? ' (dry run)' : ''}`];
     if (memo.bottleneck) parts.push(`Bottleneck: ${clip(memo.bottleneck.statement, 300)}`);
     if (memo.move) parts.push(`Move: ${clip(memo.move.statement, 300)}`);
     if (memo.questionsForMason.length > 0) parts.push(`Question: ${clip(memo.questionsForMason[0]!, 300)}`);
@@ -679,7 +869,7 @@ async function sendLatestMemo(event: InboundEvent, cfg: AshlrConfig): Promise<vo
       { memoId: memo.id, ...(facts?.approvable.length ? { actionIds: facts.approvable } : {}) },
       { approve: (facts?.approvable.length ?? 0) > 0, veto: (facts?.live ?? 0) > 0 },
     );
-    const res = await sendTelegramMessage(scrubSecrets(parts.join('\n')), {
+    const res = await sendTelegramMessage(leaderDisplayText(scrubSecrets(parts.join('\n'))), {
       keyboard,
       ...(typeof event.messageId === 'number' ? { replyToMessageId: event.messageId } : {}),
     }, cfg);
@@ -731,7 +921,7 @@ async function settingsText(): Promise<string> {
       lines.push(`  codex lanes: ${d.codexEnabled === null ? 'default (off)' : d.codexEnabled ? 'on' : 'off'}`);
       const tuning = d.routerTuning ? Object.entries(d.routerTuning).map(([k, v]) => `${k}=${String(v)}`).join(', ') : '';
       lines.push(`  router tuning: ${tuning || 'none'}`);
-      lines.push(`  updated ${d.updatedAt.slice(0, 16).replace('T', ' ')}`);
+      lines.push(`  updated ${leaderDisplayText(d.updatedAt)}`);
     }
     const standards = readStandards().filter((s) => !s.retiredAt);
     lines.push('', `Standards (${standards.length})`);
@@ -755,7 +945,7 @@ export async function handleSlashCommand(event: InboundEvent, text: string, cfg:
   switch (cmd) {
     case 'help':
     case 'start':
-      await replyTo(event, TELEGRAM_HELP_TEXT, cfg);
+      await replyTo(event, TELEGRAM_HELP_HTML, cfg, { html: true });
       return true;
     case 'status':
     case 'brief':
@@ -790,7 +980,7 @@ export async function handleSlashCommand(event: InboundEvent, text: string, cfg:
       return true;
     }
     default:
-      await replyTo(event, `Unknown command /${cmd}.\n\n${TELEGRAM_HELP_TEXT}`, cfg);
+      await replyTo(event, `Unknown command <code>${escapeTelegramHtml(`/${cmd}`)}</code>.\n\n${TELEGRAM_HELP_HTML}`, cfg, { html: true });
       return true;
   }
 }

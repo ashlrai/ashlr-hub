@@ -1,23 +1,23 @@
-import { campaignUniverse, readUniverseCampaign } from './campaign-store.js';
+import { readUniverseCampaignProjection } from './campaign-store.js';
 import { canonical } from './artifacts.js';
 import { hasVerifiedCampaignPassedSeedImprovement, hasVerifiedInitialCampaignRepair, hasVerifiedInitialCampaignSeedImprovement,
   type UniverseCampaignDeliveryTarget } from './campaign-delivery.js';
 import { readUniverseDeliveries, type UniverseDeliveryReceipt } from './delivery.js';
 import { manifestRecord, universePath } from './store.js';
-import type { UniverseCampaignSummary } from './types.js';
+import type { UniverseCampaignSummary, UniverseSummary } from './types.js';
 
 /** Read an already delivered improvement under the pinned target policy; never create or repair a branch. */
-export function readCompletedCampaignDelivery(campaign: UniverseCampaignSummary,
-  target: UniverseCampaignDeliveryTarget, options: { root: string }): UniverseDeliveryReceipt | null {
+export function readCompletedCampaignDeliveryProjection(campaign: UniverseCampaignSummary,
+  target: UniverseCampaignDeliveryTarget, options: { root: string }): { receipt: UniverseDeliveryReceipt; universe: UniverseSummary } | null {
   try {
     const repairOption = Object.getOwnPropertyDescriptor(target, 'allowInitialRepair');
     if ('allowInitialRepair' in target && (!repairOption || !Object.hasOwn(repairOption, 'value') || repairOption.value !== true)) return null;
     if (campaign.sourceState !== 'healthy' || campaign.state !== 'completed') return null;
     // Caller projections cannot erase a measured seed to bypass its delivery
     // floor. Interpret policy only from the exact current durable campaign.
-    if (canonical(readUniverseCampaign(campaign.definition.id, options)) !== canonical(campaign)) return null;
+    const { campaign: latest, universe } = readUniverseCampaignProjection(campaign.definition.id, options);
+    if (latest.sourceState !== 'healthy' || !universe || canonical(latest) !== canonical(campaign)) return null;
     const universeId = campaign.definition.universeId;
-    const universe = campaignUniverse(campaign, options);
     if (universe.sourceState !== 'healthy' || universe.manifestDigest !== campaign.manifestDigest ||
         universe.comparatorDigest !== campaign.comparatorDigest || universe.manifest.seed.revision !== target.baseCommit) return null;
     const deliveries = readUniverseDeliveries(universeId, options);
@@ -40,6 +40,12 @@ export function readCompletedCampaignDelivery(campaign: UniverseCampaignSummary,
     const strictImprovement = trial.delta !== null && trial.delta > 0 && parent?.artifact && parent.artifact.digest !== trial.artifact.digest;
     if (!strictImprovement && !hasVerifiedInitialCampaignSeedImprovement(universe, campaign, trial, seedDigest, options) &&
         !(repairOption?.value === true && hasVerifiedInitialCampaignRepair(universe, campaign, trial, seedDigest, options))) return null;
-    return receipt;
+    return { receipt, universe };
   } catch { return null; }
+}
+
+/** Preserve receipt-only recovery semantics for existing historical callers. */
+export function readCompletedCampaignDelivery(campaign: UniverseCampaignSummary,
+  target: UniverseCampaignDeliveryTarget, options: { root: string }): UniverseDeliveryReceipt | null {
+  return readCompletedCampaignDeliveryProjection(campaign, target, options)?.receipt ?? null;
 }

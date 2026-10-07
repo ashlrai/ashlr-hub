@@ -85,9 +85,9 @@ export interface RepoExecutionProfile {
   mergeVerifyContractSource: MergeVerifyContractScannerSource;
 }
 
-function verifyContractSource(repoRoot: string): RepoVerifyContractSource {
+function verifyContractSource(repoRoot: string, trustedGitRead?: (args: readonly string[]) => string): RepoVerifyContractSource {
   if (!existsSync(join(repoRoot, VERIFY_CONTRACT_FILE))) return 'missing';
-  const git = (args: string[]): string => execFileSync('git', args, {
+  const git = (args: string[]): string => trustedGitRead ? trustedGitRead(args) : execFileSync('git', args, {
     cwd: repoRoot,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
@@ -963,7 +963,7 @@ function discoverProjectRoots(repoRoot: string, maxDepth: number): string[] {
 
 export function detectRepoExecutionProfile(
   repoRoot: string,
-  opts?: { maxDepth?: number },
+  opts?: { maxDepth?: number; trustedGitRead?: (args: readonly string[]) => string },
 ): RepoExecutionProfile {
   const root = resolve(repoRoot);
   const maxDepth = Math.max(0, Math.min(3, opts?.maxDepth ?? 2));
@@ -981,7 +981,7 @@ export function detectRepoExecutionProfile(
     : projects.flatMap((project) => project.verifyCommands);
   const detectedProjectKinds = [...new Set(projects.map((project) => project.kind))].sort();
   const contract = parseVerifyContract(root);
-  const contractSource = verifyContractSource(root);
+  const contractSource = verifyContractSource(root, opts?.trustedGitRead);
   let verifyCommands = detectedCommands;
   let effectiveDetectedVerifyCommandCount = detectedCommands.length;
   let effectiveContractVerifyCommandCount = 0;

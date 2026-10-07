@@ -30,8 +30,40 @@
 
 import { originFor, resolveLlamaRuntimeConfig } from './config.js';
 import { startAnthropicProxy } from './anthropic-proxy.js';
-import type { AnthropicProxyHandle } from './anthropic-proxy.js';
+import type { AnthropicProxyHandle, AnthropicRequestAttribution } from './anthropic-proxy.js';
 import { loadConfigReadOnly } from '../../config.js';
+
+/** Explicit opt-in; one bounded numeric record, using the existing host log.
+ * Skip backpressured output and contain failures. No token estimates. */
+export function requestAttributionLogger(
+  env: NodeJS.ProcessEnv = process.env,
+  output: { destroyed: boolean; writableNeedDrain: boolean; write(line: string): unknown } = process.stdout,
+): ((metadata: AnthropicRequestAttribution) => void) | undefined {
+  if (env['ASHLR_LOCAL_RUNTIME_REQUEST_ATTRIBUTION'] !== '1') return undefined;
+  return (metadata) => {
+    try {
+      if (output.destroyed || output.writableNeedDrain) return;
+      // Project each field explicitly, even if an untyped caller adds content.
+      const number = (value: unknown): number | null =>
+        typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+      const record = {
+        requestBytes: number(metadata.requestBytes),
+        forwardedBytes: number(metadata.forwardedBytes),
+        parsed: number(metadata.parsed),
+        capped: number(metadata.capped),
+        systemSerializedChars: number(metadata.systemSerializedChars),
+        messagesSerializedChars: number(metadata.messagesSerializedChars),
+        toolsSerializedChars: number(metadata.toolsSerializedChars),
+        systemBlockCount: number(metadata.systemBlockCount),
+        messageCount: number(metadata.messageCount),
+        toolDefinitionCount: number(metadata.toolDefinitionCount),
+      };
+      output.write(`[ashlr request-attribution] ${JSON.stringify(record)}\n`);
+    } catch {
+      // Logging is diagnostic only and must not interrupt a model request.
+    }
+  };
+}
 
 /**
  * Start the listener and resolve once it is bound.
@@ -71,6 +103,7 @@ export async function startAnthropicProxyHost(): Promise<AnthropicProxyHandle> {
     host: runtime.host,
     port: runtime.anthropicPort,
     upstreamOrigin: originFor(runtime.host, runtime.port),
+    onRequestAttribution: requestAttributionLogger(),
   });
 }
 

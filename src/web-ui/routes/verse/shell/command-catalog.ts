@@ -314,7 +314,7 @@ export const WORKBENCH_COMMANDS = [
 
   // ── App ──────────────────────────────────────────────────────────────────
   { ...bind('appearance.toggle-theme'), title: 'Toggle light / dark', group: 'actions', section: 'App', keywords: ['theme', 'dark mode'] },
-  { ...bind('app.summon'), title: 'Show Verse and focus the composer', group: null, section: 'App', note: 'system-wide; turn on in Settings ▸ Desktop' },
+  { ...bind('app.summon'), title: 'Show Phantom and focus the composer', group: null, section: 'App', note: 'system-wide; turn on in Settings ▸ Desktop' },
   { id: 'fleet.stop', title: 'Stop the fleet…', scope: 'global', keys: [], group: 'actions', section: 'App', guard: STOP_FLEET_GUARD, keywords: ['kill', 'halt', 'autonomy'] },
   // ── The fleet's control surface (3.15; the Fleet tab serves these) ──────
   // Start confirms on the Fleet tab (it clears Stop, resumes and raises the

@@ -223,6 +223,9 @@ function goalStub(repo: string) {
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
+  // Routing and quota cases do not test UTC day rollover. Freeze only Date so
+  // real process/timer behavior stays intact and the spend guard cannot cross midnight.
+  vi.useFakeTimers({ toFake: ['Date'], now: Date.parse('2026-10-06T12:00:00.000Z') });
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m48-fleet-home-'));
   tmpRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m48-fleet-repo-'));
   process.env.HOME = tmpHome;
@@ -267,6 +270,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   try { unenroll(tmpRepo); } catch { /* ignore */ }
   try { setKill(false); } catch { /* ignore */ }
 

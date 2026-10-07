@@ -1,3 +1,4 @@
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 /**
  * routes/verse/leader/thread-model.ts — pure helpers behind the Leader
  * conversation on Mind (and its one-line preview on Command).
@@ -17,7 +18,11 @@
  *
  * Framework-free; tested directly (thread-model.test.ts).
  */
+import { formatLeaderDisplayText } from '../../../../core/vision/leader-display-text.js';
 import {
+  LEADER_QUESTION_FORM_LIMITS,
+  LEADER_QUESTION_REVISION_RE,
+  type LeaderQuestionForm,
   LEADER_THREAD_CHANNELS,
   LEADER_THREAD_KINDS,
   type LeaderSendResult,
@@ -57,6 +62,8 @@ export function narrowMessage(raw: unknown): LeaderThreadMessage | null {
   if (replyTo) out.replyTo = replyTo;
   if (memoId) out.memoId = memoId;
   if (questionId) out.questionId = questionId;
+  const questionForm = narrowQuestionForm(raw['questionForm']);
+  if (questionForm) out.questionForm = questionForm;
   const actionIds = Array.isArray(raw['actionIds']) ? raw['actionIds'].filter((a): a is string => typeof a === 'string' && a.length > 0) : [];
   if (actionIds.length) out.actionIds = actionIds;
   const delivery = raw['delivery'];
@@ -309,11 +316,18 @@ export function awaitingReply(entries: readonly ThreadEntry[], awaiting: Readonl
 }
 
 export const CHANNEL_LABEL: Readonly<Record<LeaderThreadChannel, string>> = {
-  verse: 'Verse',
+  verse: PRODUCT_NAME,
   telegram: 'Telegram',
   cli: 'CLI',
   system: 'System',
 };
+
+/** Only source-generated memo/action prose is projected; human words and model conversation stay exact. */
+export function displayThreadText(message: Pick<LeaderThreadMessage, 'from' | 'kind' | 'text'>): string {
+  return message.from === 'leader' && (message.kind === 'memo' || message.kind === 'action')
+    ? formatLeaderDisplayText(message.text, undefined, message.kind === 'memo')
+    : message.text;
+}
 
 /** The newest message from the Leader (Command's preview line). */
 export function latestLeaderMessage(messages: readonly LeaderThreadMessage[]): LeaderThreadMessage | null {
@@ -351,3 +365,21 @@ export function clockTime(iso: string): string {
 
 /** Longest message the composer sends (the server may cap lower and say so). */
 export const LEADER_MESSAGE_MAX = 4_000;
+
+
+/** Optional newer/invalid presentation metadata never changes the readable question. */
+export function narrowQuestionForm(raw: unknown): LeaderQuestionForm | null {
+  if (!isRecord(raw) || raw['schemaVersion'] !== 1 || typeof raw['revision'] !== 'string' ||
+    !LEADER_QUESTION_REVISION_RE.test(raw['revision']) || typeof raw['expiresAt'] !== 'string' ||
+    !Number.isFinite(Date.parse(raw['expiresAt']))) return null;
+  const mode = raw['mode'];
+  if (mode !== 'single' && mode !== 'multiple' && mode !== 'short-answer') return null;
+  if (mode === 'short-answer') return raw['options'] === undefined
+    ? { schemaVersion: 1, revision: raw['revision'], mode, expiresAt: raw['expiresAt'] } : null;
+  const options = raw['options'];
+  if (!Array.isArray(options) || options.length === 0 || options.length > LEADER_QUESTION_FORM_LIMITS.maxOptions ||
+    !options.every((label): label is string => typeof label === 'string' && label.trim().length > 0 &&
+      label.length <= LEADER_QUESTION_FORM_LIMITS.optionMaxChars) || new Set(options).size !== options.length ||
+    options.join('; ').length > LEADER_QUESTION_FORM_LIMITS.answerMaxChars) return null;
+  return { schemaVersion: 1, revision: raw['revision'], mode, options: [...options], expiresAt: raw['expiresAt'] };
+}

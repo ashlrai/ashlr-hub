@@ -892,13 +892,27 @@ describe('runtime release closed launch-input observation', () => {
       __testHooks?: { afterBeforeObservation?: () => void };
     };
     const original = `${release.packageRoot}-old`;
+    const originalIdentity = lstatSync(release.packageRoot);
+    let replaced = false;
     options.__testHooks = {
       afterBeforeObservation: () => {
+        // Darwin requires a writable source directory for rename. Only fixture
+        // preparation is writable; both trees are frozen before re-observation.
+        chmodSync(release.packageRoot, 0o755);
         renameSync(release.packageRoot, original);
         cpSync(original, release.packageRoot, { recursive: true, preserveTimestamps: true });
+        chmodSync(original, 0o555);
+        chmodTree(release.packageRoot, true);
+        replaced = true;
       },
     };
     expect(observeLaunch(options)).toMatchObject({ ok: false });
+    expect(replaced).toBe(true);
+    const replacementIdentity = lstatSync(release.packageRoot);
+    expect([replacementIdentity.dev, replacementIdentity.ino]).not.toEqual([
+      originalIdentity.dev, originalIdentity.ino,
+    ]);
+    expect(replacementIdentity.mode & 0o7777).toBe(0o555);
 
     const wrongRevision = fixture();
     expect(observeRuntimeReleaseImmutableStagedTree({
@@ -914,7 +928,9 @@ describe('runtime release closed launch-input observation', () => {
     const release = fixture();
     const relocatedRevision = 'b'.repeat(40);
     const relocatedRoot = join(dirname(release.packageRoot), relocatedRevision);
+    chmodSync(release.packageRoot, 0o755);
     renameSync(release.packageRoot, relocatedRoot);
+    chmodSync(relocatedRoot, 0o555);
 
     expect(observeRuntimeReleaseImmutableStagedTree({
       ...stageOptions(release),

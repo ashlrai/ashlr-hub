@@ -1,0 +1,95 @@
+name: Attest qualified CI build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Completed CI run ID
+        required: true
+        type: string
+      ci_run_attempt:
+        description: Completed CI run attempt
+        required: true
+        type: string
+      candidate_sha:
+        description: Exact candidate revision that produced the build
+        required: true
+        type: string
+      build_artifact_id:
+        description: Immutable producer artifact ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  attest:
+    name: Attest verified build and qualification
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.22.3'
+      - name: Resolve immutable CI inputs
+        id: inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          CI_RUN_ATTEMPT: ${{ inputs.ci_run_attempt }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          BUILD_ARTIFACT_ID: ${{ inputs.build_artifact_id }}
+        run: node .github/scripts/ci-attestation-inputs.mjs prepare
+      - name: Download immutable qualification artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.inputs.outputs.artifact_ids }}
+          path: ${{ steps.inputs.outputs.directory }}/download
+          merge-multiple: false
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.ci_run_id }}
+          digest-mismatch: error
+      - name: Verify complete qualification and assemble signed closure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIRECTORY: ${{ steps.inputs.outputs.directory }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          CI_RUN_ATTEMPT: ${{ inputs.ci_run_attempt }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node .github/scripts/ci-attestation-inputs.mjs assemble "$DIRECTORY"
+          node scripts/hosted-build-artifact.mjs qualify --root "$DIRECTORY/candidate" --sha "$CANDIDATE_SHA" --bundle "$DIRECTORY/bundle" --run "$CI_RUN_ID" --attempt "$CI_RUN_ATTEMPT" --artifact-map "$DIRECTORY/artifact-map.json"
+      # Sign data verified by trusted policy. Downloaded source and compiled
+      # bytes are never executed, rebuilt, repacked, or installed in this job.
+      - name: Attest original build bytes and qualification
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ steps.inputs.outputs.directory }}/bundle/dist.tar
+            ${{ steps.inputs.outputs.directory }}/bundle/manifest.json
+            ${{ steps.inputs.outputs.directory }}/bundle/qualification.json
+      - name: Upload attested handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ashlr-attested-${{ inputs.ci_run_id }}-${{ inputs.ci_run_attempt }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.inputs.outputs.directory }}/bundle
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

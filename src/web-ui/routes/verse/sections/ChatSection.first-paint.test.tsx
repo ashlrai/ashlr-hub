@@ -108,7 +108,9 @@ describe('the heavy parts of Chat stay out of its first-paint chunk', () => {
 });
 
 describe('ChatSection before its chunks land', () => {
-  afterEach(() => {
+  afterEach(async () => {
+    // Module evaluation starts chunk imports; settle them before changing mocks or caches.
+    await act(async () => { await vi.dynamicImportSettled(); });
     vi.doUnmock('../Workspace.js');
     vi.doUnmock('../Sidebar.js');
     vi.doUnmock('../verse-list-channel.js');

@@ -247,7 +247,7 @@ describe('command workflows stay out of the !macro surfaces', () => {
 
   it('commandPasteUnavailableReason explains what is missing', () => {
     expect(commandPasteUnavailableReason({ activeSessionId: null, terminalLanded: true })).toMatch(/Open a chat first/);
-    expect(commandPasteUnavailableReason({ activeSessionId: 's', terminalLanded: false })).toMatch(/no Verse terminal/);
+    expect(commandPasteUnavailableReason({ activeSessionId: 's', terminalLanded: false })).toMatch(/no Phantom terminal/);
     expect(commandPasteUnavailableReason({ activeSessionId: 's', terminalLanded: true })).toBeNull();
   });
 });

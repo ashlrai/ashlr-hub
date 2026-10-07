@@ -23,6 +23,8 @@ export interface PromptLayer {
 
 export interface AssembleOptions {
   role: PromptRole;
+  /** Host verifies the sandbox diff; these names describe existing executable capabilities only. */
+  hostVerificationTools?: readonly string[];
   /** Whether the serving client supports tool calls (tool vs no-tool layer). */
   useTools: boolean;
   /** Resolved capability profile (drives verbosity + tool-format hint). */

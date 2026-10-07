@@ -1,3 +1,4 @@
+import { PRODUCT_NAME } from './app/product-brand.js';
 import { lazy, StrictMode, Suspense } from 'react';
 import { createRoot } from 'react-dom/client';
 import { autoSelectVerseMobile, isResourceConsolePath, isUniverseConsolePath, isVerseConsolePath, isVerseMobilePath } from './app/console-mode.js';
@@ -21,6 +22,6 @@ if (!container) {
 
 createRoot(container).render(
   <StrictMode>
-    <Suspense fallback={<p role="status">Loading Ashlr…</p>}><App /></Suspense>
+    <Suspense fallback={<p role="status">{`Loading ${PRODUCT_NAME}…`}</p>}><App /></Suspense>
   </StrictMode>,
 );

@@ -466,6 +466,13 @@ export interface LeaderExpectedDelta {
   byDate: string;
 }
 
+/** Optional presentation for an existing memo question; plain questions stay compatible. */
+export interface LeaderMemoQuestionForm {
+  index: number;
+  mode: 'single' | 'multiple' | 'short-answer';
+  options?: string[];
+}
+
 export interface LeaderMemo {
   v: 1;
   id: string;
@@ -495,6 +502,7 @@ export interface LeaderMemo {
   /** ≤ LEADER_LIMITS.maxHypothesesPerMemo. */
   hypotheses: HarnessHypothesis[];
   questionsForMason: string[];
+  questionForms?: LeaderMemoQuestionForm[];
   actions: LeaderAction[];
   /**
    * 3.15: Jev's advisory class labels for `actions` (only confident answers;

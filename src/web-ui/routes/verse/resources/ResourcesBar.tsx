@@ -16,8 +16,10 @@
  * plus the budget view (useCapacityData, as the drawer does) and the
  * drawer's cloud read, so it adds no poll of its own for accounts.
  */
-import { estimatedCreditValue } from './codex-credit-value.js';
-import { useMemo, useState, type CSSProperties } from 'react';
+import { codexCreditsAvailable } from '../../../../core/resources/codex-credits.js';
+import { estimatedCreditValue, formatNativeCreditUnits } from './codex-credit-value.js';
+import { useMemo, useState, type CSSProperties, type ReactNode } from 'react';
+import { formatMetric } from '../../../components/charts/format-metric.js';
 import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
 import { Tooltip } from '../../../components/primitives/Tooltip.js';
 import { useQuery } from '../../../data/hooks.js';
@@ -32,6 +34,7 @@ import { cloudCreditsQuery } from './resources-queries.js';
 import { devinConsumptionEvidence, devinUsageEvidence, formatAcu } from '../devin/devin-model.js';
 import { devinQuery } from '../devin/devin-queries.js';
 import { openResources } from './resources-store.js';
+import { moveResource, orderedResources, useResourceOrder } from './resource-order.js';
 import styles from './ResourcesBar.module.css';
 
 type Level = 'ok' | 'low' | 'out' | 'idle' | 'unknown';
@@ -48,6 +51,8 @@ export interface BarRow {
   /** Independent Codex credit reading, including unknown/unconfirmed states. */
   creditLabel?: string;
   creditHeld?: boolean;
+  /** Exact provider evidence is available only on deliberate title inspection. */
+  exactCreditBalance?: string;
   /** Spoken + hover summary. */
   summary: string;
   detail: string[];
@@ -79,7 +84,7 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
       out.push({
         key: 'local',
         engine: 'local',
-        name: row.localCount > 1 ? `Local models (${row.localCount})` : 'Local model',
+        name: row.localCount > 1 ? `Local models (${formatMetric(row.localCount)})` : 'Local model',
         leftPercent: null,
         // An unread runtime is not "ready": the battery must say what the
         // hover summary does ("readiness not reported"), as Command's strip does.
@@ -94,14 +99,29 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
     // Quota history does not determine freshness of the independent credit read.
     const currentCredits = !row.lastReading && !row.signedOut;
     const creditValue = currentCredits && (row.creditState === 'none' || row.credits !== null) ? estimatedCreditValue(row.creditBalance, row.plan) : null;
-    const creditLabel = row.engine !== 'codex' ? undefined : !currentCredits ? 'Credits unconfirmed'
+    const priorCredit = row.engine === 'codex' && !row.signedOut &&
+      (!currentCredits || row.creditState === 'unknown') ? row.historicalCredits : null;
+    const priorValue = priorCredit ? estimatedCreditValue(priorCredit.reading.balance, priorCredit.planType) : null;
+    let priorLabel: string | null = null;
+    if (priorCredit) {
+      const formattedBalance = formatNativeCreditUnits(priorCredit.reading.balance);
+      const units = priorCredit.reading.unlimited ? 'unlimited'
+        : formattedBalance === null ? 'reported' : `${formattedBalance} units`;
+      priorLabel = codexCreditsAvailable(priorCredit.reading)
+        ? `Credits ${priorValue === null ? units : `≈${priorValue}`} · last` : 'No credits reported · last';
+    }
+    const creditLabel = row.engine !== 'codex' ? undefined : priorLabel !== null ? priorLabel : !currentCredits ? 'Credits unconfirmed'
       : row.credits !== null ? creditValue === null ? row.credits : `Credits ≈${creditValue}`
       : row.creditState === 'none' ? 'No credits reported' : 'Credits not reported';
     const creditHeld = row.engine === 'codex' && currentCredits && row.creditSpendControlReached === true;
     const creditSummary = creditLabel ? ` · ${creditLabel}${creditHeld ? ' · credit spending held' : ''}` : '';
-    const creditDetail: string[] = [];
+    const exactBalance = priorCredit ? priorCredit.reading.balance : (currentCredits ? row.creditBalance : null);
+    const exactCreditBalance = formatNativeCreditUnits(exactBalance) === null ? undefined : exactBalance ?? undefined;
+    const creditDetail: string[] = priorCredit ? [`Credits recorded ${new Date(priorCredit.observedAt).toLocaleString()}`,
+      'Prior credit reading; current balance and availability are unconfirmed.'] : [];
     if (row.credits !== null && currentCredits) creditDetail.push(row.credits, 'Credit units are independent of subscription usage; autonomous credit spending is not admitted.');
     if (row.engine === 'codex' && currentCredits && row.creditState === 'none') creditDetail.push('Native provider reports no available credits.');
+    if (priorValue !== null) creditDetail.push(`Prior estimated credit value ${priorValue} · personal-plan $0.04/credit reference; not attributed spend.`);
     if (creditValue !== null) creditDetail.push(`Estimated credit value ${creditValue} · personal-plan $0.04/credit reference; not attributed spend.`);
     const history = row.windows.length === 0 && !row.signedOut ? row.historicalUsage : null;
     if (history) {
@@ -114,6 +134,7 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
       out.push({ key: row.seatId, engine: row.engine, name: row.label, leftPercent: recordedLeft, level: 'unknown',
         value: row.engine === 'codex' ? historicalValue : recordedLeft === null ? 'last reading' : `${usedPercentText(recordedLeft)} last`,
         ...(creditLabel === undefined ? {} : { creditLabel, creditHeld }),
+        ...(exactCreditBalance === undefined ? {} : { exactCreditBalance }),
         summary: `${row.label}: last known usage · current usage unconfirmed${creditSummary}`,
         detail: [`Recorded ${new Date(history.observedAt).toLocaleString()}`, 'Historical reading; current availability and resets are unconfirmed.',
           ...history.windows.map(window => `${window.id}: ${window.limitReached ? 'limit was flagged' : window.usedPercent === null ? 'usage unknown' : `${usedPercentText(window.usedPercent)} used`}${window.resetsAt ? ` · recorded reset ${new Date(window.resetsAt).toLocaleString()}` : ''}`), ...creditDetail],
@@ -157,6 +178,7 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
       level: left === null && level === 'ok' ? 'unknown' : level,
       value,
       ...(creditLabel === undefined ? {} : { creditLabel, creditHeld }),
+        ...(exactCreditBalance === undefined ? {} : { exactCreditBalance }),
       summary: `${row.label}: ${status.label}${status.detail ? ` · ${status.detail}` : ''}${row.engine === 'codex' ? ` · subscription ${value}` : ''}${creditSummary}${creditValue !== null ? ` · estimated credit value ${creditValue}` : ''}`,
       detail,
     });
@@ -182,7 +204,7 @@ function RowTip({ row }: { row: BarRow }) {
         <ProviderLogo engine={row.engine} size={14} />
         <strong>{row.name}</strong>
       </div>
-      <div className={styles.tipSummary}>{row.summary.slice(row.name.length + 2)}</div>
+      <div className={styles.tipSummary} title={row.exactCreditBalance === undefined ? undefined : `Exact native balance: ${row.exactCreditBalance} credits.`}>{row.summary.slice(row.name.length + 2)}</div>
       {row.detail.map((line) => (
         <div key={line} className={styles.tipLine}>{line}</div>
       ))}
@@ -199,6 +221,10 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   const devinRead = useQuery(devinQuery);
   const devin = devinRead.data?.value ?? null;
   const [, setClock] = useState(() => Date.now());
+  const savedOrder = useResourceOrder();
+  const [dragged, setDragged] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState('');
   // The poll triggers expiry renders; query arrivals use the actual render time,
   // so a freshly retrieved reading is not rejected by an older clock tick.
   usePollWhileVisible(() => setClock(Date.now()), ACCOUNT_CLOCK_MS);
@@ -220,16 +246,16 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   const devinNewChatPause = devin?.budget.canLaunch?.ok === false
     ? devin.budget.canLaunch.reason ?? 'The Devin budget refused another session.' : null;
 
-  if (rows.length === 0 && !cloud && !devinShown) return null;
-  return (
-    <div className={styles.bar} data-expanded={expanded || undefined} role="group" aria-label="Resources at a glance" aria-busy={data.refreshing || undefined}>
-      {rows.map((row) => (
-        <Tooltip key={row.key} content={<RowTip row={row} />} placement="right">
+  const entries: { key: string; name: string; content: ReactNode }[] = rows.map((row) => ({
+    key: `account:${row.key}`, name: row.name,
+    content: (
+        <Tooltip content={<RowTip row={row} />} placement="right">
           <button
             type="button"
             className={styles.row}
             data-level={row.level}
             aria-label={`${row.summary}. Open Resources`}
+            title={row.exactCreditBalance === undefined ? undefined : `Exact native balance: ${row.exactCreditBalance} credits.`}
             onClick={() => openResources()}
           >
             {expanded ? (
@@ -255,14 +281,15 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
             )}
           </button>
         </Tooltip>
-      ))}
-      {cloud ? (
+    ),
+  }));
+  if (cloud) entries.push({ key: 'budget:cloud', name: 'Cloud estimate', content: (
         <Tooltip
           content={
             <div className={styles.tip}>
               <div className={styles.tipHead}><ProviderLogo engine="claude" size={14} /><strong>Cloud estimate</strong></div>
               <div className={styles.tipSummary}>{formatUsd(cloud.remainingUsd)} of {formatUsd(cloud.totalUsd)} left · estimate</div>
-              <div className={styles.tipLine}>{cloud.running} running · {cloud.sessionsToday} today</div>
+              <div className={styles.tipLine}>{formatMetric(cloud.running)} running · {formatMetric(cloud.sessionsToday)} today</div>
               <div className={styles.tipHint}>Click for Resources · ⌘.</div>
             </div>
           }
@@ -294,15 +321,15 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
             )}
           </button>
         </Tooltip>
-      ) : null}
-      {devinShown && devin ? (
+  ) });
+  if (devinShown && devin) entries.push({ key: 'budget:devin', name: 'Devin tracked budget', content: (
         <Tooltip
           content={
             <div className={styles.tip}>
-              <div className={styles.tipHead}><ProviderLogo engine="devin" size={14} className={styles.logo} /><strong>Devin</strong></div>
+              <div className={styles.tipHead}><ProviderLogo engine="devin" size={14} className={styles.logo} /><strong>Devin budget</strong></div>
               <div className={styles.tipSummary}>{formatAcu(devinAvailable)} of {formatAcu(devin.budget.acuBudgetTotal)} {devinUsage ? 'available' : 'left'} · tracked budget{devin.budget.paused ? ' · paused' : ''}</div>
               {devinUsage ? <div className={styles.tipLine}>{formatAcu(devinUsage.reported)} reported usage + adjustment · {formatAcu(devinUsage.held)} held exposure</div> : null}
-              <div className={styles.tipLine}>{devin.budget.running} running · {devin.budget.sessionsToday} today</div>
+              <div className={styles.tipLine}>{formatMetric(devin.budget.running)} running · {formatMetric(devin.budget.sessionsToday)} today</div>
               {devinNewChatPause ? <div className={styles.tipLine}>New chats paused: {devinNewChatPause}</div> : null}
               <div className={styles.tipHint}>Click for Resources · ⌘.</div>
             </div>
@@ -321,7 +348,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
               <>
                 <span className={styles.line}>
                   <ProviderLogo engine="devin" size={14} className={styles.logo} />
-                  <span className={styles.name}>Devin</span>
+                  <span className={styles.name}>Devin budget</span>
                 </span>
                 <span className={styles.line}>
                   <Battery left={devinLeft} level={devinLevel} vertical={false} />
@@ -337,7 +364,48 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
             )}
           </button>
         </Tooltip>
-      ) : null}
+  ) });
+  const ordered = orderedResources(entries, savedOrder);
+  const ids = ordered.map(entry => entry.key);
+  const move = (source: string, target: string) => {
+    if (moveResource(ids, source, target)) {
+      const name = entries.find(entry => entry.key === source)?.name ?? 'Resource';
+      setAnnouncement(`${name} moved to position ${ids.indexOf(target) + 1} of ${ids.length}.`);
+    }
+  };
+  if (ordered.length === 0) return null;
+  return (
+    <div className={styles.bar} data-expanded={expanded || undefined} role="group" aria-label="Resources at a glance" aria-busy={data.refreshing || undefined}>
+      <span className={styles.visuallyHidden} role="status">{announcement}</span>
+      {ordered.map((entry, index) => (
+        <div key={entry.key} className={styles.orderItem} data-resource-id={entry.key}
+          data-dragging={dragged === entry.key || undefined} data-drop-target={dropTarget === entry.key || undefined}
+          draggable
+          onDragStart={(event) => {
+            setDragged(entry.key);
+            event.dataTransfer.effectAllowed = 'move';
+            event.dataTransfer.setData('application/x-ashlr-resource', entry.key);
+          }}
+          onDragOver={(event) => {
+            if (dragged !== null && ids.includes(dragged) && dragged !== entry.key) {
+              event.preventDefault(); event.dataTransfer.dropEffect = 'move'; setDropTarget(entry.key);
+            }
+          }}
+          onDrop={(event) => {
+            if (dragged !== null && ids.includes(dragged)) { event.preventDefault(); move(dragged, entry.key); }
+            setDragged(null); setDropTarget(null);
+          }}
+          onDragEnd={() => { setDragged(null); setDropTarget(null); }}
+        >
+          {entry.content}
+          <span className={styles.moveControls}>
+            <button type="button" aria-label={`Move ${entry.name} up`} title={`Move ${entry.name} up`}
+              disabled={index === 0} onClick={() => move(entry.key, ids[index - 1]!)}><span aria-hidden="true">↑</span></button>
+            <button type="button" aria-label={`Move ${entry.name} down`} title={`Move ${entry.name} down`}
+              disabled={index === ordered.length - 1} onClick={() => move(entry.key, ids[index + 1]!)}><span aria-hidden="true">↓</span></button>
+          </span>
+        </div>
+      ))}
     </div>
   );
 }

@@ -9,6 +9,7 @@
  * At 375 px the table becomes one card per repo (a 7-column table does not
  * fit a phone, and a horizontal scroll hides the action).
  */
+import { formatMetric } from '../../../components/charts/format-metric.js';
 import type { FleetLiveSnapshotV1, FleetMirrorSummary, FleetRepoRow, RepoHold } from '../../../../core/fleet/fleet-types.js';
 import { Sparkline } from '../../../components/charts/Sparkline.js';
 import { Button } from '../../../components/primitives/Button.js';
@@ -29,7 +30,7 @@ const HOLD_WORD: Record<RepoHold['kind'], string> = {
 export function holdText(hold: RepoHold, now: number): string {
   const until = hold.until ? Date.parse(hold.until) : NaN;
   const left = Number.isFinite(until) ? Math.max(0, until - now) : null;
-  const tail = left === null ? 'until resumed' : left < 3_600_000 ? `${Math.ceil(left / 60_000)}m left` : `${Math.round(left / 3_600_000)}h left`;
+  const tail = left === null ? 'until resumed' : left < 3_600_000 ? `${formatMetric(Math.ceil(left / 60_000))}m left` : `${formatMetric(Math.round(left / 3_600_000))}h left`;
   return `${HOLD_WORD[hold.kind]} · ${tail}`;
 }
 
@@ -96,8 +97,8 @@ function RepoAction({ row, actions }: { row: FleetRepoRow; actions: SurfaceActio
 function GreenCell({ row }: { row: FleetRepoRow }) {
   return (
     <span className={styles.green}>
-      <span className={styles.greenValue}>{row.greenPct7d === null ? '—' : `${Math.round(row.greenPct7d)}%`}</span>
-      <Sparkline points={row.greenTrend} width={64} height={18} ariaLabel={`${row.repo} post-merge green, 14 days`} describe={(v) => `${Math.round(v)}%`} />
+      <span className={styles.greenValue}>{row.greenPct7d === null ? '—' : `${formatMetric(row.greenPct7d)}%`}</span>
+      <Sparkline points={row.greenTrend} width={64} height={18} ariaLabel={`${row.repo} post-merge green, 14 days`} describe={(v) => `${formatMetric(v)}%`} />
     </span>
   );
 }

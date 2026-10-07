@@ -209,7 +209,7 @@ describe('AppsSection — launch', () => {
     // The exact command is on screen before anything opens.
     expect(within(dialog).getByRole('button', { name: /Copy the Claude Code launch command: ollama launch claude --model qwen3-coder/ })).toBeInTheDocument();
     // No Verse terminal here (no desktop app, no open chat): it says why.
-    expect(within(dialog).getByText(/^Verse terminal: /)).toBeInTheDocument();
+    expect(within(dialog).getByText(/^Phantom terminal: /)).toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: 'Open in Terminal.app' }));
     await waitFor(() => expect(posts(calls)).toHaveLength(1));
     expect(posts(calls)[0]!.body).toEqual({ root: '/Users/op/code/site', via: 'ollama', model: 'qwen3-coder' });
@@ -233,11 +233,11 @@ describe('AppsSection — MCP servers (folded in)', () => {
     await renderPage();
     const mcp = screen.getByRole('region', { name: 'MCP servers' });
     expect(within(mcp).getByText(/Claude and local seats do not load account-configured MCP servers/)).toBeInTheDocument();
-    expect(within(mcp).getByText(/Verse’s own agent tools are controlled separately per chat/)).toBeInTheDocument();
+    expect(within(mcp).getByText(/Phantom’s own agent tools are controlled separately per chat/)).toBeInTheDocument();
     expect(within(mcp).getByText(/Codex and Grok seats load their own account’s config/)).toBeInTheDocument();
     expect(within(mcp).getByText(/refused on a folder that is not enrolled/)).toBeInTheDocument();
     expect(await within(mcp).findByText('loads 1 server')).toBeInTheDocument();
-    expect(within(mcp).getAllByText('loads none — isolated by Verse')).toHaveLength(2);
+    expect(within(mcp).getAllByText('loads none — isolated by Phantom')).toHaveLength(2);
     expect(within(mcp).getByRole('note')).toHaveTextContent('Configured, but unused.');
     await user.click(within(mcp).getByRole('button', { name: 'Show servers' }));
     expect(within(mcp).getByText('ASHLR_TOKEN=<set>')).toBeInTheDocument();

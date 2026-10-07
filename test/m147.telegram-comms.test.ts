@@ -36,6 +36,7 @@ import { EventEmitter } from 'node:events';
 // Injectable response: { ok, result } shaped like Telegram API responses
 let _mockHttpResponse: unknown = { ok: true, result: [] };
 let _mockHttpError: Error | null = null;
+let _mockHttpStatus = 200;
 const _httpCalls: { path: string; body: unknown }[] = [];
 
 vi.mock('node:https', async (importOriginal) => {
@@ -44,14 +45,15 @@ vi.mock('node:https', async (importOriginal) => {
     ...actual,
     request: (
       opts: { path: string; [k: string]: unknown },
-      callback: (res: EventEmitter & { statusCode?: number }) => void,
+      callback: (res: EventEmitter & { statusCode?: number; resume: () => void }) => void,
     ) => {
       const chunks: Buffer[] = [];
       let body = '';
 
       // Fake IncomingMessage
-      const fakeRes = new EventEmitter() as EventEmitter & { statusCode?: number };
-      fakeRes.statusCode = 200;
+      const fakeRes = new EventEmitter() as EventEmitter & { statusCode?: number; resume: () => void };
+      fakeRes.statusCode = _mockHttpStatus;
+      fakeRes.resume = () => {};
 
       // Fake ClientRequest
       const fakeReq = new EventEmitter() as EventEmitter & {
@@ -103,6 +105,10 @@ import {
   pollTelegramUpdates,
   telegramEnabled,
   answerCallbackQuery,
+  editTelegramQuestionKeyboard,
+  telegramQuestionNamespace,
+  setTelegramTransportForTests,
+  setTelegramSendClockForTests,
 } from '../src/core/integrations/telegram.js';
 import {
   postRequest,
@@ -222,12 +228,22 @@ function makeCallbackUpdate(
 
 let _tmpHome: string;
 let _prevHome: string | undefined;
+let _sendNow = 0;
+const _sendSleeps: number[] = [];
 
 beforeEach(() => {
   expect.hasAssertions();
   _httpCalls.length = 0;
   _mockHttpResponse = { ok: true, result: [] };
   _mockHttpError = null;
+  _mockHttpStatus = 200;
+  _sendNow = 0;
+  _sendSleeps.length = 0;
+  setTelegramTransportForTests(null);
+  setTelegramSendClockForTests({
+    now: () => _sendNow,
+    sleep: async (ms) => { _sendSleeps.push(ms); _sendNow += ms; },
+  });
 
   // Isolate ~/.ashlr/comms in a tmp HOME
   _prevHome = process.env.HOME;
@@ -236,6 +252,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setTelegramTransportForTests(null);
+  setTelegramSendClockForTests(null);
   vi.clearAllMocks();
   if (_prevHome === undefined) delete process.env.HOME;
   else process.env.HOME = _prevHome;
@@ -365,6 +383,234 @@ describe('sendTelegramMessage', () => {
     const scrubbed = fakeError.split(BOT_TOKEN).join('[REDACTED]');
     expect(scrubbed).not.toContain(BOT_TOKEN);
     expect(scrubbed).toContain('[REDACTED]');
+  });
+});
+
+// The explicit virtual monotonic clock exercises production pacing, even with
+// the fake Bot API. No transport shortcut, real sleeping or network is used.
+describe('Telegram actual-attempt pacing and known throttles', () => {
+  function recordingTransport(respond: (call: number, method: string, body: Record<string, unknown>) => unknown | Promise<unknown>) {
+    const calls: Array<{ at: number; method: string; body: Record<string, unknown> }> = [];
+    setTelegramTransportForTests(async (method, body) => {
+      calls.push({ at: _sendNow, method, body: structuredClone(body) });
+      return respond(calls.length, method, body);
+    });
+    return calls;
+  }
+
+  it('preserves validated metadata without exposing the provider description or token', async () => {
+    _mockHttpResponse = { ok: false, error_code: 429, description: `Too many requests ${BOT_TOKEN}`, parameters: { retry_after: 17 } };
+    const result = await sendTelegramMessage('hello', undefined, cfgTelegram());
+    expect(result).toEqual({ ok: false, errorCode: 429, retryAfterSeconds: 17 });
+    expect(JSON.stringify(result)).not.toContain(BOT_TOKEN);
+    expect(_httpCalls).toHaveLength(1);
+    expect(_sendSleeps).toEqual([]);
+  });
+
+  it.each([0, -1, 1.5, '2', null, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('does not retry invalid retry_after %s', async (retryAfter) => {
+    const calls = recordingTransport(() => ({ ok: false, error_code: 429, parameters: { retry_after: retryAfter } }));
+    expect(await sendTelegramMessage('hello', undefined, cfgTelegram())).toEqual({ ok: false, errorCode: 429 });
+    expect(calls).toHaveLength(1);
+    expect(_sendSleeps).toEqual([]);
+  });
+
+  it.each([0, -400, 429.5, '429', null, Infinity])('does not fabricate a retry from invalid error_code %s', async (errorCode) => {
+    const calls = recordingTransport(() => ({ ok: false, error_code: errorCode, description: 'parse entities', parameters: { retry_after: 2 } }));
+    expect(await sendTelegramMessage('hello', undefined, cfgTelegram())).toEqual({ ok: false, retryAfterSeconds: 2 });
+    expect(calls).toHaveLength(1);
+  });
+
+  it.each([null, {}, { ok: false, description: 'parse entities' }, { description: 'parse entities', error_code: 429, parameters: { retry_after: 2 } }, { ok: false, error_code: 500, description: 'parse entities' }])('never retries ambiguous acknowledgements or 5xx: %j', async (response) => {
+    const calls = recordingTransport(() => response);
+    const result = await sendTelegramMessage('hello', undefined, cfgTelegram());
+    expect(result.ok).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(_sendSleeps).toEqual([]);
+  });
+
+  it('never repeats an HTTP5xx even when its body claims a known markup rejection', async () => {
+    _mockHttpStatus = 503;
+    _mockHttpResponse = { ok: false, error_code: 400, description: "can't parse entities" };
+    expect(await sendTelegramMessage('<b>hello</b>', { html: true }, cfgTelegram())).toEqual({ ok: false });
+    expect(_httpCalls).toHaveLength(1);
+    expect(_sendSleeps).toEqual([]);
+  });
+
+  it('never retries a thrown transport error that may follow acceptance', async () => {
+    const calls = recordingTransport(() => { throw new Error('response lost'); });
+    expect(await sendTelegramMessage('hello', undefined, cfgTelegram())).toEqual({ ok: false });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('paces all chunks and repeats only the exact rejected chunk, retaining reply/keyboard placement', async () => {
+    const calls = recordingTransport((call) => call === 2
+      ? { ok: false, error_code: 429, parameters: { retry_after: 2 } }
+      : { ok: true, result: { message_id: 100 + call } });
+    const result = await sendTelegramMessage('a'.repeat(4096) + 'b'.repeat(4096) + 'c', {
+      replyToMessageId: 77, buttons: ['Approve'], requestId: 'req-paced',
+    }, cfgTelegram());
+    expect(result).toEqual({ ok: true, messageId: 101, messageIds: [101, 103, 104] });
+    expect(calls.map((call) => call.at)).toEqual([0, 3000, 6000, 9000]);
+    expect(calls[1]!.body).toEqual(calls[2]!.body);
+    expect(calls[0]!.body['reply_parameters']).toEqual({ message_id: 77, allow_sending_without_reply: true });
+    expect(calls.slice(1).every((call) => !('reply_parameters' in call.body))).toBe(true);
+    expect(calls.slice(0, 3).every((call) => !('reply_markup' in call.body))).toBe(true);
+    expect(calls[3]!.body['reply_markup']).toEqual({ inline_keyboard: [[{ text: 'Approve', callback_data: 'req-paced:0' }]] });
+  });
+
+  it('paces the existing plain-text fallback and its one known short 429 retry', async () => {
+    const calls = recordingTransport((call) => call === 1
+      ? { ok: false, error_code: 400, description: "can't parse entities" }
+      : call === 2 ? { ok: false, error_code: 429, parameters: { retry_after: 3 } }
+        : { ok: true, result: { message_id: 43 } });
+    expect(await sendTelegramMessage('<b>hello</b>', { html: true }, cfgTelegram())).toEqual({ ok: true, messageId: 43, messageIds: [43] });
+    expect(calls.map((call) => call.at)).toEqual([0, 3000, 6000]);
+    expect(calls[0]!.body['parse_mode']).toBe('HTML');
+    expect(calls[1]!.body['text']).toBe('hello');
+    expect(calls[1]!.body['parse_mode']).toBeUndefined();
+    expect(calls[2]!.body).toEqual(calls[1]!.body);
+  });
+
+  it('allows at most one short 429 retry across both HTML and plain variants of a chunk', async () => {
+    const calls = recordingTransport((call) => call === 2
+      ? { ok: false, error_code: 400, description: "can't parse entities" }
+      : { ok: false, error_code: 429, parameters: { retry_after: 2 } });
+    expect(await sendTelegramMessage('<b>hello</b>', { html: true }, cfgTelegram())).toEqual({ ok: false, errorCode: 429, retryAfterSeconds: 2 });
+    expect(calls).toHaveLength(3);
+    expect(calls.map((call) => call.at)).toEqual([0, 3000, 6000]);
+    expect(calls[2]!.body['parse_mode']).toBeUndefined();
+  });
+
+  it('retains legacy partial compatibility and metadata without replaying a confirmed prefix', async () => {
+    const calls = recordingTransport((call) => call === 1
+      ? { ok: true, result: { message_id: 81 } }
+      : { ok: false, error_code: 429, parameters: { retry_after: 30 } });
+    expect(await sendTelegramMessage('x'.repeat(5000), undefined, cfgTelegram())).toEqual({
+      ok: true, partial: true, messageId: 81, messageIds: [81], errorCode: 429, retryAfterSeconds: 30,
+    });
+    expect(calls).toHaveLength(2);
+    expect(_sendSleeps).toEqual([3000]);
+  });
+
+  it('serializes actual attempts from concurrent callers for the same bot/chat', async () => {
+    const calls = recordingTransport((call) => ({ ok: true, result: { message_id: call } }));
+    const results = await Promise.all(['first', 'second', 'third'].map((text) => sendTelegramMessage(text, undefined, cfgTelegram())));
+    expect(results.every((result) => result.ok)).toBe(true);
+    expect(calls.map((call) => call.at)).toEqual([0, 3000, 6000]);
+    expect(calls.map((call) => call.body['text'])).toEqual(['first', 'second', 'third']);
+  });
+
+  it('does not turn a concurrent local cooldown refusal into another provider retry', async () => {
+    const calls = recordingTransport((call) => call === 1
+      ? { ok: false, error_code: 429, parameters: { retry_after: 2 } }
+      : { ok: true, result: { message_id: 82 } });
+    const [first, second] = await Promise.all([
+      sendTelegramMessage('first', undefined, cfgTelegram()), sendTelegramMessage('second', undefined, cfgTelegram()),
+    ]);
+    expect(first.ok).toBe(true);
+    expect(second).toEqual({ ok: false, errorCode: 429, retryAfterSeconds: 2 });
+    expect(calls.map((call) => call.body['text'])).toEqual(['first', 'first']);
+    expect(calls.map((call) => call.at)).toEqual([0, 3000]);
+  });
+
+  it('returns long 429 promptly, starts its floor at the response, and makes no early same-process contact', async () => {
+    const calls = recordingTransport((call) => {
+      if (call === 1) { _sendNow = 4000; return { ok: false, error_code: 429, parameters: { retry_after: 10 } }; }
+      return { ok: true, result: { message_id: 83 } };
+    });
+    expect(await sendTelegramMessage('first', undefined, cfgTelegram())).toEqual({ ok: false, errorCode: 429, retryAfterSeconds: 10 });
+    _sendNow = 10000;
+    expect(await sendTelegramMessage('held', undefined, cfgTelegram())).toEqual({ ok: false, errorCode: 429, retryAfterSeconds: 4 });
+    expect(calls).toHaveLength(1);
+    expect(_sendSleeps).toEqual([]);
+    _sendNow = 14000;
+    expect((await sendTelegramMessage('later new send', undefined, cfgTelegram())).ok).toBe(true);
+    expect(calls.map((call) => call.at)).toEqual([0, 14000]);
+  });
+
+  it('keeps a valid enormous provider floor held without arithmetic overflow or long sleeps', async () => {
+    const calls = recordingTransport(() => ({ ok: false, error_code: 429, parameters: { retry_after: Number.MAX_SAFE_INTEGER } }));
+    expect(await sendTelegramMessage('first', undefined, cfgTelegram())).toEqual({ ok: false, errorCode: 429, retryAfterSeconds: Number.MAX_SAFE_INTEGER });
+    _sendNow = 120000;
+    expect(await sendTelegramMessage('held after idle pruning', undefined, cfgTelegram())).toEqual({ ok: false, errorCode: 429, retryAfterSeconds: Number.MAX_SAFE_INTEGER });
+    expect(calls).toHaveLength(1);
+    expect(_sendSleeps).toEqual([]);
+  });
+
+  it('does not share a throttle between distinct bot/chat identities', async () => {
+    const calls = recordingTransport((call) => call === 1
+      ? { ok: false, error_code: 429, parameters: { retry_after: 90 } }
+      : { ok: true, result: { message_id: call } });
+    expect((await sendTelegramMessage('held', undefined, cfgTelegram())).ok).toBe(false);
+    const otherChat = cfgTelegram();
+    otherChat.comms!.telegram!.chatId = 'other-private-chat';
+    expect((await sendTelegramMessage('other chat', undefined, otherChat)).ok).toBe(true);
+    const otherBot = cfgTelegram();
+    otherBot.comms!.telegram!.botToken = 'fake-other-bot';
+    expect((await sendTelegramMessage('other bot', undefined, otherBot)).ok).toBe(true);
+    expect(calls.map((call) => call.at)).toEqual([0, 0, 0]);
+    expect(_sendSleeps).toEqual([]);
+  });
+
+  it('never admits early when the injected monotonic clock rolls backward', async () => {
+    _sendNow = 10000;
+    const calls = recordingTransport((call) => ({ ok: true, result: { message_id: call } }));
+    expect((await sendTelegramMessage('first', undefined, cfgTelegram())).ok).toBe(true);
+    _sendNow = 9000;
+    expect((await sendTelegramMessage('second', undefined, cfgTelegram())).ok).toBe(true);
+    expect(calls.map((call) => call.at)).toEqual([10000, 13000]);
+    expect(_sendSleeps).toEqual([3000, 1000]);
+  });
+
+  it('leaves callback acknowledgements outside an outstanding sendMessage gap', async () => {
+    const calls = recordingTransport((call, method) => method === 'answerCallbackQuery'
+      ? { ok: true } : { ok: true, result: { message_id: call } });
+    let wake!: () => void;
+    let started!: () => void;
+    const sleeping = new Promise<void>((resolve) => { started = resolve; });
+    setTelegramSendClockForTests({ now: () => _sendNow, sleep: () => { started(); return new Promise<void>((resolve) => { wake = resolve; }); } });
+    expect((await sendTelegramMessage('first', undefined, cfgTelegram())).ok).toBe(true);
+    const waiting = sendTelegramMessage('second', undefined, cfgTelegram());
+    await sleeping;
+    await answerCallbackQuery('query-paced', cfgTelegram());
+    expect(calls.map((call) => call.method)).toEqual(['sendMessage', 'answerCallbackQuery']);
+    _sendNow = 3000;
+    wake();
+    expect((await waiting).ok).toBe(true);
+    expect(calls.map((call) => call.method)).toEqual(['sendMessage', 'answerCallbackQuery', 'sendMessage']);
+  });
+
+  it('keeps the paced lane bound to the actual request token/chat across awaits', async () => {
+    _mockHttpResponse = { ok: true, result: { message_id: 99 } };
+    let wake!: () => void;
+    let started!: () => void;
+    const sleeping = new Promise<void>((resolve) => { started = resolve; });
+    setTelegramSendClockForTests({ now: () => _sendNow, sleep: () => { started(); return new Promise<void>((resolve) => { wake = resolve; }); } });
+    const cfg = cfgTelegram();
+    expect((await sendTelegramMessage('first', undefined, cfg)).ok).toBe(true);
+    const waiting = sendTelegramMessage('queued', undefined, cfg);
+    await sleeping;
+    cfg.comms!.telegram!.botToken = 'fake-replacement-bot';
+    cfg.comms!.telegram!.chatId = 'replacement-private-chat';
+    _sendNow = 3000;
+    wake();
+    expect((await waiting).ok).toBe(true);
+    expect(_httpCalls).toHaveLength(2);
+    expect(_httpCalls[1]!.path).toBe(`/bot${BOT_TOKEN}/sendMessage`);
+    expect((_httpCalls[1]!.body as Record<string, unknown>)['chat_id']).toBe(CHAT_ID);
+    expect((await sendTelegramMessage('new identity', undefined, cfg)).ok).toBe(true);
+    expect(_httpCalls[2]!.path).toBe('/botfake-replacement-bot/sendMessage');
+    expect((_httpCalls[2]!.body as Record<string, unknown>)['chat_id']).toBe('replacement-private-chat');
+  });
+
+  it('releases its owned lane after a pacing failure instead of wedging later sends', async () => {
+    const calls = recordingTransport((call) => ({ ok: true, result: { message_id: call } }));
+    setTelegramSendClockForTests({ now: () => _sendNow, sleep: async () => { throw new Error('test sleep failure'); } });
+    expect((await sendTelegramMessage('first', undefined, cfgTelegram())).ok).toBe(true);
+    expect(await sendTelegramMessage('failed wait', undefined, cfgTelegram())).toEqual({ ok: false });
+    _sendNow = 3000;
+    expect((await sendTelegramMessage('later', undefined, cfgTelegram())).ok).toBe(true);
+    expect(calls).toHaveLength(2);
   });
 });
 
@@ -732,5 +978,51 @@ describe('transport channel switch', () => {
     const result = await runCommsCycle(cfg);
     expect(result.sent).toBe(1);
     expect(_httpCalls.some((c) => c.path.includes('sendMessage'))).toBe(true);
+  });
+});
+
+// Typed controls use only the standard markup-edit primitive, never a send or
+// arbitrary method/recipient supplied by a callback.
+describe('typed question transport binding and markup edits', () => {
+  it('binds the exact bot/chat configuration without returning raw identities', () => {
+    const cfg = cfgTelegram(), first = telegramQuestionNamespace(cfg);
+    expect(first).toMatch(/^[a-f0-9]{64}$/);
+    expect(telegramQuestionNamespace(cfg, String(cfg.comms!.telegram!.chatId))).toBe(first);
+    expect(telegramQuestionNamespace(cfg, 'foreign-chat')).toBeNull();
+    const changed = structuredClone(cfg); changed.comms!.telegram!.botToken = 'another-synthetic-bot';
+    expect(telegramQuestionNamespace(changed)).not.toBe(first);
+    changed.comms!.telegram!.chatId = 'another-synthetic-chat';
+    expect(telegramQuestionNamespace(changed)).not.toBe(telegramQuestionNamespace(cfg));
+  });
+
+  it('edits only the exact configured message keyboard and permits explicit removal', async () => {
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    setTelegramTransportForTests(async (method, body) => { calls.push({ method, body }); return { ok: true, result: true }; });
+    const cfg = cfgTelegram();
+    expect(await editTelegramQuestionKeyboard(123, [[{ text: 'Submit', data: 'lt:q:bounded' }]], cfg)).toBe(true);
+    expect(await editTelegramQuestionKeyboard(123, [], cfg)).toBe(true);
+    expect(calls).toEqual([
+      { method: 'editMessageReplyMarkup', body: { chat_id: cfg.comms!.telegram!.chatId, message_id: 123,
+        reply_markup: { inline_keyboard: [[{ text: 'Submit', callback_data: 'lt:q:bounded' }]] } } },
+      { method: 'editMessageReplyMarkup', body: { chat_id: cfg.comms!.telegram!.chatId, message_id: 123,
+        reply_markup: { inline_keyboard: [] } } },
+    ]);
+  });
+
+  it.each([{ ok: false, error_code: 429, parameters: { retry_after: 600 } }, null, { ok: true },
+    { ok: false, error_code: 500 }, { ok: true, result: false }])('does not replay an unknown or refused edit %j', async response => {
+    const transport = vi.fn(async () => response); setTelegramTransportForTests(transport);
+    expect(await editTelegramQuestionKeyboard(123, [], cfgTelegram())).toBe(false);
+    expect(transport).toHaveBeenCalledOnce();
+  });
+
+  it('rejects invalid message IDs, oversized callbacks and URL controls before contact', async () => {
+    const transport = vi.fn(async () => ({ ok: true, result: true })); setTelegramTransportForTests(transport);
+    for (const id of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(await editTelegramQuestionKeyboard(id, [], cfgTelegram())).toBe(false);
+    }
+    expect(await editTelegramQuestionKeyboard(123, [[{ text: 'bad', data: '🚀'.repeat(17) }]], cfgTelegram())).toBe(false);
+    expect(await editTelegramQuestionKeyboard(123, [[{ text: 'bad', url: 'https://example.com' }]], cfgTelegram())).toBe(false);
+    expect(transport).not.toHaveBeenCalled();
   });
 });

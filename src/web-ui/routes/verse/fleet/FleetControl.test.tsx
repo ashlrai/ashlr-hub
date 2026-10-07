@@ -11,6 +11,8 @@ import userEvent from '@testing-library/user-event';
 import { FleetSection } from '../sections/FleetSection.js';
 import { evictAll, getQuerySnapshot, runQuery } from '../../../data/cache.js';
 import { refreshFleetControlReads } from './fleet-control-queries.js';
+import { FleetControl, FLEET_CONTROL_POLL_MS } from './FleetControl.js';
+import { SectionVisibilityProvider } from '../shell/section-visibility.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
 import { fleetControl, fleetLive, grantDraft } from '../command/fixtures.test-support.js';
@@ -117,6 +119,90 @@ describe('shared native readback', () => {
   });
 });
 
+describe('automatic control polling', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); evictAll(); });
+
+  function panel(visible = true) {
+    return <SectionVisibilityProvider visible={visible}>
+      <FleetControl actions={{ act: vi.fn(), busy: false, error: null, clearError: vi.fn(), readOnly: false, dialogs: null }}
+        grantFlow={{ open: vi.fn(), sheet: null }} />
+    </SectionVisibilityProvider>;
+  }
+
+  it('lets a read slower than several poll intervals update the PID without accumulating reads', async () => {
+    const fresh = fleetControl('live');
+    fresh.daemon.pid = 36373;
+    let finish!: (response: Response) => void;
+    const fetcher = vi.fn(() => new Promise<Response>(resolve => { finish = resolve; }));
+    vi.stubGlobal('fetch', fetcher);
+    const { unmount } = render(panel());
+    await act(async () => { await vi.advanceTimersByTimeAsync(3 * FLEET_CONTROL_POLL_MS); });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await act(async () => { finish(json(fresh)); });
+    expect(screen.getByRole('region', { name: 'Fleet control' })).toHaveTextContent('Running · pid 36373');
+    await act(async () => { await vi.advanceTimersByTimeAsync(FLEET_CONTROL_POLL_MS); });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    await act(async () => { finish(json(fresh)); });
+    unmount();
+  });
+
+  it('coalesces while the control read is queued behind other metadata reads', async () => {
+    const releases: (() => void)[] = [];
+    const blockers = Array.from({ length: 4 }, (_, i) => runQuery(`pending-metadata-${i}`, () => new Promise<void>(resolve => { releases.push(resolve); })));
+    const fetcher = vi.fn(() => Promise.resolve(json(fleetControl('live'))));
+    vi.stubGlobal('fetch', fetcher);
+    const { unmount } = render(panel());
+    await act(async () => { await vi.advanceTimersByTimeAsync(3 * FLEET_CONTROL_POLL_MS); });
+    expect(fetcher).not.toHaveBeenCalled();
+    await act(async () => { releases.forEach(release => release()); await Promise.all(blockers); });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('region', { name: 'Fleet control' })).toHaveTextContent('Running · pid 4242');
+    unmount();
+  });
+
+  it.each(['success', 'error'] as const)('keeps a forced completion read current after the old poll %s', async (outcome) => {
+    const old = fleetControl('live');
+    const fresh = fleetControl('live');
+    fresh.daemon.pid = 36373;
+    let finish!: (response: Response) => void;
+    let fail!: (error: Error) => void;
+    const fetcher = vi.fn((_path: string): Promise<Response> => fetcher.mock.calls.length === 1
+      ? new Promise<Response>((resolve, reject) => { finish = resolve; fail = reject; })
+      : Promise.resolve(json(fresh)));
+    vi.stubGlobal('fetch', fetcher);
+    const { unmount } = render(panel());
+    await act(async () => { await vi.advanceTimersByTimeAsync(2 * FLEET_CONTROL_POLL_MS); });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await act(async () => { refreshFleetControlReads(); });
+    // The terminal sweep also refreshes activity; count only the control read.
+    expect(fetcher.mock.calls.filter(([path]) => path === '/api/verse/fleet/control')).toHaveLength(2);
+    expect(screen.getByRole('region', { name: 'Fleet control' })).toHaveTextContent('Running · pid 36373');
+    await act(async () => { if (outcome === 'success') finish(json(old)); else fail(new Error('old read failed')); });
+    expect(screen.getByRole('region', { name: 'Fleet control' })).toHaveTextContent('Running · pid 36373');
+    expect(getQuerySnapshot('verse-fleet-control').status).toBe('success');
+    unmount();
+  });
+
+  it('keeps hidden sections quiet and catches up when shown again', async () => {
+    const fetcher = vi.fn(() => Promise.resolve(json(fleetControl('live'))));
+    vi.stubGlobal('fetch', fetcher);
+    const { rerender, unmount } = render(panel());
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    rerender(panel(false));
+    await act(async () => { await vi.advanceTimersByTimeAsync(3 * FLEET_CONTROL_POLL_MS); });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    rerender(panel());
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    unmount();
+  });
+});
+
 describe('the header', () => {
   it('shows preparation and the last completed tick while no agents are working', async () => {
     const now = Date.now();
@@ -160,7 +246,7 @@ describe('the header', () => {
     expect(region).toHaveTextContent('Running');
     expect(region).toHaveTextContent('2 agents working');
     expect(region).toHaveTextContent('#2 · 2 repos · 20 d left · 2a (2/4)');
-    expect(region).toHaveTextContent('$3.50 of $20.00 cap');
+    expect(region).toHaveTextContent('$3.5 of $20 cap');
     expect(region).toHaveTextContent(/Running · pid 4242/);
     // Start is not needed while it runs; Pause and Stop are.
     expect(within(region).getByRole('button', { name: /^Start/ })).toBeDisabled();

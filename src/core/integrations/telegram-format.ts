@@ -6,10 +6,18 @@
  * parse_mode=HTML, so any `<`, `>` or `&` in model- or user-authored text
  * either renders wrong or makes Telegram reject the whole send ("can't parse
  * entities"). Escaping has to happen exactly once, at the transport edge, and
- * the splitter has to measure the ESCAPED length (Telegram's 4096 limit
- * applies after entity expansion). Keeping these pure (no I/O, no config)
+ * the splitter conservatively bounds the ESCAPED wire length; Telegram's
+ * 4096 limit applies after entity parsing. Keeping these pure (no I/O, no config)
  * also lets tests that mock the transport still use the real formatter.
  */
+
+import { formatLeaderDisplayText } from '../vision/leader-display-text.js';
+import { describeResetAt } from '../verse/seat-readiness.js';
+
+/** Generated Leader prose before Telegram escaping; retains the existing local date wording. */
+export function leaderDisplayText(text: string, nowMs: number = Date.now()): string {
+  return formatLeaderDisplayText(text, (iso) => describeResetAt(iso, nowMs));
+}
 
 /** Telegram's hard cap on a single message's text, in characters. */
 export const TELEGRAM_MAX_MESSAGE = 4096;

@@ -73,6 +73,10 @@ import {
   type LeaderThreadChannel,
   type LeaderThreadKind,
   type LeaderThreadMessage,
+  type LeaderQuestionProjection,
+  type LeaderQuestionSubmission,
+  type SubmitLeaderQuestionResult,
+  parseLeaderQuestionSubmission,
 } from './leader-thread-types.js';
 import { LEADER_FOUNDER_VOICE, LEADER_TELEGRAM_MAX_LINES, guardPersonaText } from './leader-persona.js';
 import {
@@ -84,6 +88,8 @@ import {
   isOperatorDirectiveKind,
   listOperatorDirectives,
   recordLeaderAnswer,
+  recordTypedLeaderAnswer,
+  readLeaderQuestionStrict,
   recordOperatorApproval,
   registerLeaderQuestions,
   setLeaderQuestionMessage,
@@ -615,6 +621,7 @@ export function syncLeaderMemosToThread(): LeaderThreadMessage[] {
     const questions = registerLeaderQuestions(memo, nowMs);
     for (const q of questions) {
       const msg = leaderMessage(nowMs, { channel: 'system', kind: 'question', text: q.text, memoId: memo.id, questionId: q.questionId, delivery: { telegram: 'pending' } });
+      if (q.questionForm) msg.questionForm = q.questionForm;
       out.push(msg);
       if (q.messageId === null) links.push({ questionId: q.questionId, messageId: msg.id });
     }
@@ -965,6 +972,58 @@ export async function appendMasonMessage(
   });
   appendMessages([reply], replyAt);
   return { message, reply, ...(directive ? { directive } : {}) };
+}
+
+/** Exact cached canonical question read; it does not compose, run a memo, or probe resources. */
+export function readLeaderQuestion(questionId: string, nowMs: number = Date.now()): LeaderQuestionProjection | null {
+  if (typeof questionId !== 'string' || !LEADER_QUESTION_ID_RE.test(questionId)) {
+    throw new LeaderThreadError(400, 'questionId is malformed');
+  }
+  if (!Number.isFinite(nowMs)) throw new LeaderThreadError(409, 'Leader question state is unavailable');
+  try { return readLeaderQuestionStrict(questionId); }
+  catch { throw new LeaderThreadError(409, 'Leader question state is unavailable'); }
+}
+
+/** Only canonical recorded-once acceptance may append the human answer and compose. */
+export async function submitLeaderQuestion(
+  questionId: string,
+  submission: LeaderQuestionSubmission,
+  opts: { channel: LeaderThreadChannel; cfg?: AshlrConfig },
+): Promise<SubmitLeaderQuestionResult> {
+  const channel = checkChannel(opts.channel);
+  if (typeof questionId !== 'string' || !LEADER_QUESTION_ID_RE.test(questionId)) {
+    throw new LeaderThreadError(400, 'questionId is malformed');
+  }
+  const parsed = parseLeaderQuestionSubmission(submission);
+  if (!parsed) throw new LeaderThreadError(400, 'The typed answer is malformed');
+  const d = deps();
+  const nowMs = d.now();
+  // Reserve only an inert thread ID: no thread/model effect precedes canonical acceptance.
+  const message = masonMessage(nowMs, { channel, kind: 'answer', text: '', questionId });
+  const accepted = recordTypedLeaderAnswer(questionId, parsed, { channel, messageId: message.id }, nowMs);
+  if (accepted.outcome !== 'recorded') return { ...accepted, message: null, reply: null };
+  const question = accepted.question;
+  if (!question?.answer) return { outcome: 'held', question, message: null, reply: null,
+    reason: 'The saved answer is unavailable; check the question before submitting again.' };
+  message.text = question.answer.text;
+  message.memoId = questionId.slice(0, questionId.lastIndexOf(':'));
+  if (question.messageId) message.replyTo = question.messageId;
+  try {
+    appendMessages([message], nowMs);
+    evidenceCache = null;
+    const { rd, mind } = await loadMind(d, opts.cfg, REPLY_PROMPT_CHARS);
+    const replyText = await composeReply(d, rd, mind, { text: message.text, message,
+      question: { questionId, text: question.text } });
+    const replyAt = d.now();
+    const reply = leaderMessage(replyAt, { channel, kind: 'message', text: replyText,
+      replyTo: message.id, questionId, delivery: replyDelivery(channel) });
+    appendMessages([reply], replyAt);
+    return { outcome: 'recorded', question, message, reply };
+  } catch {
+    // Acceptance remains saved. A replay must not append/compose again after an uncertain handoff.
+    return { outcome: 'held', question, message: null, reply: null,
+      reason: 'The answer is saved, but its thread reply is unconfirmed. Read the question before submitting again.' };
+  }
 }
 
 /**

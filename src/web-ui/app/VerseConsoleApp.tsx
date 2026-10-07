@@ -21,6 +21,7 @@
  * with the old server, so without listening the page would sit until its
  * next 401 → failed renewal → SessionGate → adoption.
  */
+import { PRODUCT_NAME } from './product-brand.js';
 import { lazy, Suspense, useEffect } from 'react';
 import { ToastProvider } from '../components/primitives/Toast.js';
 import { adoptInjectedTokens, markCheckComplete } from '../data/auth-store.js';
@@ -163,11 +164,11 @@ export function VerseConsoleApp() {
     });
     return () => { cancelled = true; };
   }, [phase]);
-  if (phase === 'checking') return <p className={styles.checking} role="status">Checking for an existing Verse session…</p>;
+  if (phase === 'checking') return <p className={styles.checking} role="status">Checking for an existing Phantom session…</p>;
   if (phase === 'unauthenticated') {
     return (
-      <Suspense fallback={<p className={styles.checking} role="status">Checking for an existing Verse session…</p>}>
-        <SessionGate heading="Connect to Ashlr Verse" command="ashlr verse" subject="Ashlr Verse" mutationField />
+      <Suspense fallback={<p className={styles.checking} role="status">Checking for an existing Phantom session…</p>}>
+        <SessionGate heading={`Connect to ${PRODUCT_NAME}`} command="ashlr verse" subject={PRODUCT_NAME} mutationField />
       </Suspense>
     );
   }

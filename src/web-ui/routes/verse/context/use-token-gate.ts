@@ -93,7 +93,7 @@ export function describeContextError(err: unknown): string {
     if (err.code === 'VERSE_SESSION_NOT_FOUND') return 'This chat no longer exists on the server — it may have been deleted. Refresh the chat list.';
     // The server's own words, with any ISO instant in them read as local time.
     if (err.detail) return tidyProse(err.detail);
-    if (err.status === 404) return 'This server does not have that route yet — update Ashlr and restart `ashlr verse`.';
+    if (err.status === 404) return 'This server does not have that route yet — update Phantom and restart `ashlr verse`.';
     if (err.status === 409) return 'A turn is already running in this chat. Wait for it or stop it first.';
     return tidyProse(err.message);
   }

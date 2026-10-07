@@ -24,6 +24,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
+import { evictAll } from '../../../data/cache.js';
 import type {
   VerseControlOption,
   VerseQueueResponse,
@@ -187,6 +188,8 @@ async function renderReady(p: ComposerProps = props()) {
 }
 
 beforeEach(() => {
+  // Each fake server owns a fresh read cache, including lazily loaded playbooks.
+  evictAll();
   localStorage.clear();
   setMutationToken('tok');
   server = installServer();
@@ -538,7 +541,7 @@ describe('footer', () => {
 
   it('the context ring states occupancy in words; unknown is "—", never zero', async () => {
     const view = await renderReady(props({ contextTokens: 50_000, contextWindow: 200_000, autoCompactAt: 167_000 }));
-    expect(screen.getByRole('img', { name: 'Context 25% — 50k of 200k tokens, compacts ≈167k' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Context 25% — 50k of 200k tokens, compacts ≈170k' })).toBeInTheDocument();
     view.rerender(<Composer {...props({ contextTokens: null, contextWindow: null })} />);
     expect(screen.getByRole('img', { name: 'Context — not measured yet' })).toBeInTheDocument();
   });
@@ -738,7 +741,7 @@ describe('footer — context ring', () => {
 
   it('focus shows used / limit tokens and the compaction point', async () => {
     await renderReady(props(reading));
-    const ring = screen.getByRole('img', { name: 'Context 75% — 150k of 200k tokens, compacts ≈167k' });
+    const ring = screen.getByRole('img', { name: 'Context 75% — 150k of 200k tokens, compacts ≈170k' });
     ring.focus();
     const tip = await screen.findByRole('tooltip');
     expect(tip).toHaveTextContent('Context: 150,000 of 200,000 tokens (75%).');

@@ -207,7 +207,7 @@ export function AppsSection({ focusGroup }: { focusGroup?: 'mcp-servers' } = {})
           <header className={styles.header}>
             <div className={styles.headerText}>
               <h2 className={styles.title}>Apps &amp; Accounts</h2>
-              <p className={styles.lede}>Everything Verse can run with on this Mac, and whether it is ready.</p>
+              <p className={styles.lede}>Everything Phantom can run with on this Mac, and whether it is ready.</p>
             </div>
             <div className={styles.headerMeta}>
               {served ? (

@@ -459,7 +459,7 @@ describe('metered spend KPI', () => {
     const days = history.days.map((d) => ({ ...d, meteredCostUsd: 0.5 }));
     const capped = { spend: { meteredUsdPerDay: 2 } } as unknown as Parameters<typeof buildKpis>[0]['policy'];
     const spend = buildKpis({ fleet: null, history: { ...history, days }, learning: null, policy: capped }).find((k) => k.id === 'spend')!;
-    expect(spend.value).toBe('$3.50 / $14');
+    expect(spend.value).toBe('$3.5 / $14');
     expect(spend.trend).toHaveLength(14);
     expect(spend.delta?.value).toBe(0);
     expect(spend.caption).toBe('cap $2/day');

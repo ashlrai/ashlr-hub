@@ -43,10 +43,10 @@ describe('ladderView', () => {
     expect(view.nextLine).toBe('2a lets ashlrcode, fleet-canary merge');
   });
 
-  it('caps the hours bar at its target and keeps a decimal', () => {
+  it('caps the hours bar at its target while formatting the recorded hours', () => {
     const view = ladderView(shadowStatus(NOW, { digests: 3, hours: 14.5 }))!;
     expect(view.bars[0]).toMatchObject({ text: '3 / 5', met: false });
-    expect(view.bars[1]).toMatchObject({ value: 12, text: '14.5 h / 12 h', met: true });
+    expect(view.bars[1]).toMatchObject({ value: 12, text: '15 h / 12 h', met: true });
   });
 
   it('keeps criteria other than the bars as prose', () => {

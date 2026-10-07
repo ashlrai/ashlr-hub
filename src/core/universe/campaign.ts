@@ -9,7 +9,7 @@ import { scheduledVariants, universePath } from './store.js';
 import { canonical, defaultUniverseRoot, digest } from './artifacts.js';
 import {
   appendCampaignEvent, CampaignControlConflictError, campaignDirectory, campaignUniverse, foldCampaignEvents,
-  projectCampaign, readCampaignEvents, readUniverseCampaign, terminalCampaign, validCampaignDispatchId,
+  projectCampaign, readCampaignEvents, readUniverseCampaign, readUniverseCampaignProjection, terminalCampaign, validCampaignDispatchId,
 } from './campaign-store.js';
 import type { UniverseCampaignSummary, UniverseRunOptions } from './types.js';
 
@@ -125,8 +125,9 @@ async function runCampaignWithLease(id: string, options: CampaignOptions, lock: 
   if (dispatchId !== undefined && admissionEvents.some((event) => event.kind === 'started' && event.dispatchId === dispatchId)) {
     throw new CampaignExpectationError('Campaign dispatch identity cannot be reused');
   }
-  const admission = projectCampaign(admissionEvents,
-    campaignUniverse(foldCampaignEvents(admissionEvents).created, options));
+  // Reuse this one under-lease observation only until recovery first awaits.
+  const admissionUniverse = campaignUniverse(foldCampaignEvents(admissionEvents).created, options);
+  const admission = projectCampaign(admissionEvents, admissionUniverse);
   assertUniverseExecution(universePath(resolve(options.root ?? defaultUniverseRoot()), admission.definition.universeId), lock);
   assertExpectation(admission, options.expectedIdentity, true);
   let admissionDigest = options.expectedIdentity ? digest(canonical(admissionEvents)) : undefined;
@@ -159,7 +160,7 @@ async function runCampaignWithLease(id: string, options: CampaignOptions, lock: 
 
     // The common Universe lease excludes other runs while abandoned starts
     // are reconciled. Existing run IDs finalize interruption; they never replay.
-    const universe = campaignUniverse(summary, options);
+    const universe = admissionUniverse;
     for (const step of summary.steps) {
       const prior = universe.runs.find((run) => run.id === step.runId);
       if (prior && prior.finishedAt === null) {
@@ -214,7 +215,8 @@ async function runCampaignWithLease(id: string, options: CampaignOptions, lock: 
 
     while (true) {
       if (!ownsLocalStoreLock(lock)) throw new Error('Campaign execution ownership was lost');
-      summary = readUniverseCampaign(id, options);
+      const projection = readUniverseCampaignProjection(id, options);
+      summary = projection.campaign;
       assertExpectation(summary, options.expectedIdentity, false);
       if (summary.sourceState !== 'healthy') throw new Error('Campaign evidence is degraded');
       if (summary.state === 'pause-requested' || summary.state === 'stop-requested') {
@@ -227,8 +229,8 @@ async function runCampaignWithLease(id: string, options: CampaignOptions, lock: 
       if (exhausted) return finish(exhausted.state, exhausted.reason);
       if (controller.signal.aborted) return finish('paused', 'Campaign paused by caller cancellation');
 
-      const current = campaignUniverse(summary, options);
-      if (current.sourceState !== 'healthy') throw new Error('Universe evidence is degraded');
+      const current = projection.universe;
+      if (current === null || current.sourceState !== 'healthy') throw new Error('Universe evidence is degraded');
       const generation = current.runs.length + 1;
       const previous = summary.steps.at(-1);
       if (previous) {

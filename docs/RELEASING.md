@@ -9,7 +9,7 @@
 > disabled during the Linux dependency quarantine. npm publication uses the
 > maintainer's interactive web 2FA and does not carry CI provenance.
 >
-> The source version is `@ashlr/hub@3.24.2`. Verify its exact-source checks,
+> The source version is `@ashlr/hub@3.24.3`. Verify its exact-source checks,
 > registry version and dist-tags, GitHub release assets and installed runtime
 > independently before reporting those delivery layers as complete. The frozen
 > `release.yml` and `promote.yml`
@@ -123,6 +123,72 @@ an outer sandbox so their process, socket, nested-sandbox, and
 filesystem-semantics tests remain truthful. Those test stages retain the host
 account's authority. See
 [`CONTRACT-M571.md`](contracts/CONTRACT-M571.md) for the exact boundary.
+
+## Qualified CI build handoff
+
+The optional handoff avoids repeating the complete source qualification and
+JavaScript build on the packaging computer. It does not skip native compilation,
+signing, offline installation, resident-work draining, rollback checks or live
+verification. The full `npm run prepublishOnly` remains the fallback when hosted
+evidence is unavailable, expired or rejected. No end-to-end speedup has yet been
+measured for this path.
+
+CI checks out the candidate commit and proves its tree matches the original
+GitHub event tree before running checks. All existing Ubuntu, Windows and native
+checks remain. Four independent Mac jobs run the complete general partitions;
+a fifth job runs every isolated suite serially. Test deadlines remain unchanged.
+Actual Vitest reports retain passed, skipped and todo cases, including repeated
+parameterized titles. Failed or unfinished runs cannot qualify.
+
+The first Ubuntu job captures `dist.tar`, its source/build manifest, the exact
+archive used by its successful npm installation smoke check, and the full web
+report. Each Mac job uploads its actual report closure. After the candidate is
+merged with an identical default-branch tree, dispatch **Attest qualified CI
+build** on `master` with the exact CI run ID, attempt, candidate SHA and producer
+artifact ID. The trusted workflow checks fresh official jobs/artifact metadata,
+complete module coverage and all bytes, then signs the existing build, manifest
+and aggregate qualification. It never executes downloaded source or build bytes.
+
+Download its `ashlr-attested-…` artifact into a private folder and retain all
+contents together. In a clean checkout at the exact candidate commit, verify:
+
+```sh
+node scripts/hosted-build-artifact.mjs verify \
+  --root "$PWD" --sha "$candidate_sha" --bundle "$bundle" \
+  --run "$ci_run_id" --attempt "$ci_run_attempt" \
+  --attestor-sha "$trusted_master_sha" \
+  --attestor-run "$attestor_run_id" --attestor-attempt "$attestor_run_attempt"
+```
+
+Use the same arguments with `adopt` to install verified build output into an
+**absent** `dist` directory. Adoption performs fresh verification in that process;
+a saved success receipt alone cannot authorize it. Existing output is refused
+so the caller can preserve it deliberately before proceeding. Keep the original
+npm archive for exact-byte publication; do not repack it. Dependency Audit and
+all required pull-request checks must also pass before merge. Record native,
+publication, installation and production evidence separately from this source
+qualification.
+
+After adoption, the native compiler can reuse those same JavaScript bytes:
+
+```sh
+node scripts/build-sea.mjs \
+  --hosted-bundle "$bundle" --run "$ci_run_id" --attempt "$ci_run_attempt" \
+  --attestor-sha "$trusted_master_sha" \
+  --attestor-run "$attestor_run_id" --attestor-attempt "$attestor_run_attempt"
+```
+
+This command repeats fresh provenance verification and compares every adopted
+file and mode before native compilation. A missing signature, changed source,
+altered build or incomplete arguments fail rather than skip the build unchecked.
+Without these arguments, `npm run build:binary` still performs its ordinary
+local JavaScript build. Adoption assumes exclusive use of the owned checkout;
+its atomic rename publishes the directory but is not a kernel no-replace
+guarantee against a simultaneous external writer with the same OS user.
+
+The first attestor invocation requires these policy files on `master`. Keep
+existing public downloads and the production site valid during that bootstrap;
+do not claim pre-merge signed admission or promote unpublished download targets.
 
 ## Trusted-publisher configuration used for 3.3.2
 
@@ -784,6 +850,44 @@ activate, or roll back. Even a verified candidate/rollback pair remains
 `observation-only`; the normal protected CI, npm trusted-publisher approval,
 release tag, provenance, runtime installation, launch, and production
 acceptance gates remain separate and mandatory.
+
+## Verify an existing maintainer PR
+
+`ashlr verify-pr <owner/repo> <PR> --confirm-head <full-head-SHA> --json`
+is an explicit host-owned intake for an existing maintainer PR. It writes a
+private verification receipt and, after successful verification, publishes the
+required `ashlr/verify` check through the ruleset-bound GitHub App. It does not
+merge, publish an npm package, deploy a website or install a desktop release.
+The compatible `ashlr` CLI identity remains available under the Phantom brand.
+
+Run it from the compiled release after reviewing that exact head. Prerequisites
+are a current signed grant for the repository, an authenticated GitHub CLI
+account with repository write/maintain/admin permission, custody App access,
+and an active protected-branch rule requiring `ashlr/verify` from one specific
+App. The PR must contain the current default-branch base. A changed authority
+surface requires normal reapproval; this command cannot waive that requirement.
+
+The host acquires the exact base and PR head into its trusted mirror. It derives
+required merge commands from the immutable base, then runs them against the
+exact head tree in a private confined worktree. Required confinement, complete
+command exits and captured scrubbed-output digests, unchanged source, cleanup,
+current base/head/tree, maintainer account, signed policy, Stop epoch and active
+App rules are checked before publication. Stop tracks and aborts the execution
+lease, including queued mirror/fetch work. The final outbound call checks the
+exact fence and live authority after credential acquisition.
+
+Receipts are stored under `~/.ashlr/authority/maintainer-verification/`; they
+record base/head/tree/merge-base/diff/contract/policy bindings and real command
+timings. They are local evidence, not signed producer provenance or an importable
+authorization. Saved JSON cannot create a green check. Duplicate checks are
+recognized only after a fresh successful verification and current pin checks.
+
+Exit 0 confirms the exact App check; exit 1 withholds verification; exit 2 means
+invalid arguments. Missing dependencies or tool caches under confinement remain
+infrastructure failures. Do not retry with weaker confinement or convert local
+builds into a successful App check. After correcting a stale base, failed check
+or unavailable toolchain, review the new exact head and invoke the command
+again. Normal protected CI, merge and release acceptance remain separate.
 
 ## Install channels
 

@@ -9,6 +9,134 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.24.3] — 2026-10-06
+
+### Added
+
+- Present the engineering workbench as Phantom by AshlrAI, using the existing
+  blue ghost across desktop, phone and public pages while preserving package,
+  CLI, saved-data and signed-authority identities.
+- Explore real recorded Fleet runs in an optional ghost world with repository
+  grouping, task inspection and links to existing run controls.
+- Drag resource rows into a saved order or move them with keyboard controls;
+  multiple accounts and Devin cloud, CLI and budget remain distinct.
+- Explore an explicitly illustrated workflow on the landing page, with manual
+  playback, selectable roles and responsive layouts.
+
+- Qualify the complete Mac backend in four independent hosted partitions and
+  one serial isolated lane, retaining case deadlines and recording actual
+  passed, skipped and todo results. Candidate checkouts must match GitHub's
+  original event tree before any checks run.
+- Capture the tested build and exact same-job npm archive for optional local
+  reuse. A separate default-branch workflow verifies full CI coverage and signs
+  the original bytes; the local consumer checks fresh CI results and signatures
+  before adopting into an absent build directory. Native and live gates remain
+  separate; mismatches refuse reuse. End-to-end savings are not yet measured.
+- Answer structured Leader questions with single choice, multiple choice,
+  Select all/Clear, or short text across desktop, phone and Telegram, while
+  keeping the conversation composer available for interjections.
+- Record structured answers once and reconcile uncertain submissions against
+  the saved question; stale controls and another device's answer cannot
+  silently overwrite it.
+- Show native Devin chat context readings when the official CLI reports them,
+  while retaining unknown values when no reading is available.
+- Add opt-in local request size and context-structure diagnostics without
+  recording prompt contents or changing provider token reporting.
+
+### Fixed
+
+- Show resource balances, costs, tokens and performance metrics with two
+  significant figures while retaining exact source readings for inspection.
+- Isolate composer read caches between fake servers and freeze the fleet routing
+  fixture clock so crossing UTC midnight cannot change its quota scenario.
+- Fail local gates on every actual failure, including formerly known failing
+  files, and remove obsolete prose assertions while retaining current contracts.
+
+- Keep default fleet status scoped to builtin resources instead of probing
+  unconfigured providers and local runtimes.
+- Split local exhaustive qualification into four smaller partitions with the
+  same two active workers and all isolated suites. This aims to reduce the
+  last-wave tail; full-run savings are not yet measured.
+- Measure release first-paint budgets from the normal build's emitted Vite
+  manifest instead of rebuilding the UI. Keep standalone budget checks and
+  the existing desktop/phone limits.
+- Run the complete UI suite before the long backend partitions locally and in
+  its existing Ubuntu CI job, retaining every suite and deadline. This improves
+  failure visibility; end-to-end time savings have not yet been measured.
+- Upgrade the bundled MCP SDK to 1.31.0, addressing GHSA-6qxp-vccf-f47h.
+- Keep Codex subscription allowance, credit balances and provider spending holds
+  distinct; unconfirmed credit access remains explicit, and Auto describes its
+  subscription-only selection without authorizing credit-funded turns.
+- Reuse one coherent predecessor campaign and Universe observation per sample,
+  preserving fresh second-sample custody, attribution and drift checks.
+- Run every foreground supervision integration case in the serial local phase
+  and retain bounded trial details on failure without changing its deadlines.
+- Avoid redundant private-directory permission writes and repeated dispatch
+  readiness reads while preserving fresh checks immediately before launch.
+- Preserve cached macOS journal permission checks when the directory is
+  already private; changed permissions and special mode bits still require repair.
+- Release the journal lock before waiting for parent authority to settle,
+  then revalidate current journals and admission without duplicating durable rows.
+- Describe the local coding agent's actual executable tools and distinguish
+  file readback from required host checks that have not yet run.
+- Reuse a coherent campaign observation within each read and foreground iteration,
+  rechecking source bytes on subsequent observations and before execution.
+- Isolate complete admission scenarios from competing local test shards and
+  report actual completed cases during long suites without extending deadlines.
+- Give Telegram Leader summaries readable labels and local dates while
+  preserving exact action controls, literal user text and useful quantities.
+- Make generated Leader notes and action outcomes readable in desktop,
+  Command previews and phone views without rewriting saved conversation text.
+- Name the Leader's selected account from cached labels and keep missing
+  labels explicit instead of displaying machine keys.
+- Retain clipped replies in full and send the saved answer on request with
+  `more`, including long lines and replies longer than the phone summary.
+- Group Telegram help and clarify that pause/resume controls fleet messages.
+- Pace actual Telegram message chunks per bot and chat, honor reported
+  rate-limit waits, and retry a confirmed short rate limit once without
+  replaying a chunk after an ambiguous network response.
+- Retain unresolved Devin session exposure across retries and reconcile reported
+  organization consumption independently of remaining plan quota.
+- Account for native Devin provider contacts across retry attempts rather than
+  treating a retried turn as a single contact.
+- Show installed Devin Fleet readiness using the resident authority observation,
+  preserving precise paused and expired reasons. Session launch and message
+  authority checks remain separate from this read-only display.
+- Let pending Fleet status requests finish before the next automatic poll,
+  so slow responses can update the desktop instead of being superseded forever.
+- Check the selected Claude account throughout autonomous native dispatch,
+  retaining fresh account, grant, role and window checks without allowing an
+  unrelated held account to block it.
+- Keep separately dated Codex credit history in the resource sidebar when a
+  fresh balance is not reported. Current subscription usage remains separate,
+  current zero replaces history, and historical balances never admit spending.
+- Recheck merge authority after custody-token acquisition, and reconcile
+  unanswered merge requests before retrying or crediting a fleet landing.
+- Tie project-group disclosure arrows to the button's expanded state.
+- Update the example website's Oxfmt worker dependency to Tinypool 2.1.2.
+- Patch proxy-address handling and source-map parsing dependencies in the
+  workbench and example website to their maintained security releases.
+- Isolate cancellation, capacity-wait and lock-expiry test clocks from filesystem setup speed,
+  preserving the actual I/O and cancellation, expiry and recovery assertions.
+- Wait for Bash cancellation readiness and avoid incidental sleep children in
+  the escalation fixture, retaining confirmed exit and the original deadlines.
+- Publish supervision fixture readiness atomically, avoiding partial PID reads
+  while retaining independent-worker cancellation and settlement coverage.
+- Load the build-identity API fixture during test collection so its request
+  assertions retain their existing deadlines independently of module loading.
+- Treat structured native CLI errors and cancellations as failed runs even
+  when the process exits successfully, preserving partial changes for review.
+- Count native tool calls across initial attempts, retries and repairs in
+  the run trace without changing provider usage or billing accounting.
+- Run the complete transcript suite after other web workers finish, preserving
+  the streaming performance target, and await effect-driven approval focus.
+- Wait for the review pane's initial file selection before fixture keyboard
+  navigation, retaining the original line-comment and file-switch assertions.
+- Run the complete handoff-recovery fixture in the serial local integration
+  phase, retaining all cases and their original delivery deadlines.
+- Reuse the same CI job's verified build for packaging and run the Windows
+  native-alias suite once, preserving every distinct platform test.
+
 ## [3.24.2] — 2026-10-05
 
 ### Added

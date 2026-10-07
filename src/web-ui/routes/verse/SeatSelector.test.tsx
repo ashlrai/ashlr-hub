@@ -190,9 +190,9 @@ describe('SeatSelector — context per model', () => {
 
   it('shows each model’s own window and compaction point', () => {
     render(<SeatSelector seats={SEATS_V39} value={null} onChange={() => {}} />);
-    expect(screen.getByRole('option', { name: /Claude Max — Fable 5\.1 · 1M ctx · compacts ≈367k$/ })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /Claude Max — Haiku 4\.5 · 200k ctx · compacts ≈167k$/ })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /Work Codex — GPT-6 Astra · 258k ctx · compacts ≈245k$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Claude Max — Fable 5\.1 · 1M ctx · compacts ≈370k$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Claude Max — Haiku 4\.5 · 200k ctx · compacts ≈170k$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Work Codex — GPT-6 Astra · 260k ctx · compacts ≈240k$/ })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /Grok — Grok 4\.7 Fast · 500k ctx · compacts ≈400k$/ })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /qwen3\.8:27b-ctx64k · 64k ctx · compacts ≈33k$/ })).toBeInTheDocument();
   });
@@ -211,7 +211,7 @@ describe('SeatSelector — context per model', () => {
     render(<SeatSelector seats={SEATS_V39} value={null} onChange={() => {}} />);
     const fable = screen.getByRole('option', { name: /Claude Max — Fable 5\.1/ });
     const title = fable.getAttribute('title') ?? '';
-    expect(title).toContain('1M-token window; compacts at about 367k in Standard. Expansive runs to about 967k before compacting.');
+    expect(title).toContain('1M-token window; compacts at about 370k in Standard. Expansive runs to about 970k before compacting.');
     expect(title).toContain('Runs Claude Code 2.1.257.');
     expect(title).toContain(CLAUDE_SKEW_NOTE);
     expect(seatOptionTitle(GROK_CONTEXT_SEAT, GROK_CONTEXT_SEAT.models[0]!, null)).toBe(
@@ -235,9 +235,9 @@ describe('SeatSelector — context per model', () => {
   it('shows the budget of the mode each row would run in', () => {
     render(<SeatSelector seats={SEATS_V39} value={null} onChange={() => {}}
       modeFor={(seat) => (seat.id === 'claude-a' || seat.id === 'grok-a' ? 'expansive' : 'standard')} />);
-    expect(screen.getByRole('option', { name: /Fable 5\.1 · 1M ctx · compacts ≈967k \(expansive\)$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Fable 5\.1 · 1M ctx · compacts ≈970k \(expansive\)$/ })).toBeInTheDocument();
     // A model with no expansive budget falls back to its one real budget.
-    expect(screen.getByRole('option', { name: /Haiku 4\.5 · 200k ctx · compacts ≈167k$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Haiku 4\.5 · 200k ctx · compacts ≈170k$/ })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /Grok 4\.7 Fast · 500k ctx · compacts ≈400k$/ })).toBeInTheDocument();
   });
 

@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { canonical, digest, MAX_ARTIFACT_BYTES, type UniverseArtifactEntry } from './artifacts.js';
@@ -116,16 +117,65 @@ export function deliveryGit(repo: string, deadline = performance.now() + 120_000
     return readBlobs(list, (entry, data) => ({ path: entry.path, executable: entry.executable, data: Buffer.from(data) }));
   }
   function writeTree(snapshot: UniverseArtifactEntry[]): string {
+    if (snapshot.length > MAX_ENTRIES) throw new Error('Delivery snapshot entry limit exceeded');
+    let total = 0;
+    for (const entry of snapshot) {
+      if (!Buffer.isBuffer(entry.data) || entry.data.length > MAX_ARTIFACT_BYTES - total) {
+        throw new Error('Delivery snapshot exceeds its byte envelope');
+      }
+      total += entry.data.length;
+    }
+    // A read-only empty-blob probe supports older Git and empty SHA-256 repos.
+    const empty = oid(['hash-object', '--stdin', '--no-filters'], Buffer.alloc(0));
+    const algorithm = empty.length === 40 ? 'sha1' : 'sha256';
+    const blobOid = (data: Buffer): string => createHash(algorithm).update(`blob ${data.length}\0`).update(data).digest('hex');
+    if (blobOid(Buffer.alloc(0)) !== empty) throw new Error('Delivery Git object format is unsupported');
+    const unique = new Map<string, { entry: UniverseArtifactEntry; oid: string }>();
+    const objectIds = snapshot.map((entry) => {
+      const id = blobOid(entry.data);
+      const previous = unique.get(id);
+      if (previous && !previous.entry.data.equals(entry.data)) throw new Error('Delivery blob identity has conflicting bytes');
+      if (!previous) unique.set(id, { entry, oid: id });
+      return id;
+    });
+    const objects = [...unique.values()];
+    const present: GitTreeEntry[] = [];
+    const missing: typeof objects = [];
+    if (objects.length) {
+      const checked = invoke(['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'],
+        objects.map((object) => object.oid).join('\n') + '\n')!;
+      if (checked.length > MAX_ENTRIES * 100) throw new Error('Delivery Git batch check exceeds its envelope');
+      const rows = checked.toString('utf8').split('\n');
+      if (rows.pop() !== '' || rows.length !== objects.length) throw new Error('Delivery Git batch check is incomplete');
+      for (const [index, object] of objects.entries()) {
+        const row = rows[index]!;
+        if (row === `${object.oid} missing`) { missing.push(object); continue; }
+        const match = /^([a-f0-9]{40}|[a-f0-9]{64}) blob (0|[1-9][0-9]*)$/.exec(row);
+        if (!match || match[1] !== object.oid || Number(match[2]) !== object.entry.data.length) {
+          throw new Error('Delivery Git batch check identity, type or size changed');
+        }
+        present.push({ path: object.entry.path, executable: object.entry.executable, oid: object.oid });
+      }
+    }
+    // Reuse only freshly read, hash-verified objects with exactly these bytes.
+    readBlobs(present, (entry, data) => {
+      if (!data.equals(unique.get(entry.oid)!.entry.data)) throw new Error('Delivery existing blob bytes changed');
+    });
+    for (const object of missing) {
+      if (oid(['hash-object', '-w', '--stdin', '--no-filters'], object.entry.data) !== object.oid) {
+        throw new Error('Delivery written blob identity changed');
+      }
+    }
     interface Directory { files: Array<{ name: string; mode: string; oid: string }>; children: Map<string, Directory> }
     const root: Directory = { files: [], children: new Map() };
-    for (const entry of snapshot) {
+    for (const [index, entry] of snapshot.entries()) {
       const parts = entry.path.split('/');
       let directory = root;
       for (const part of parts.slice(0, -1)) {
         if (!directory.children.has(part)) directory.children.set(part, { files: [], children: new Map() });
         directory = directory.children.get(part)!;
       }
-      directory.files.push({ name: parts.at(-1)!, mode: entry.executable ? '100755' : '100644', oid: oid(['hash-object', '-w', '--stdin', '--no-filters'], entry.data) });
+      directory.files.push({ name: parts.at(-1)!, mode: entry.executable ? '100755' : '100644', oid: objectIds[index]! });
     }
     function write(directory: Directory): string {
       const lines = directory.files.map((entry) => `${entry.mode} blob ${entry.oid}\t${entry.name}\0`);

@@ -20,6 +20,10 @@
  * rest of Mind. Conversational text goes through MessageMarkdown, the chat's
  * sanitising renderer (DOMPurify; links open in a new tab, no HTML survives).
  */
+import { lazy, Suspense } from 'react';
+import type { LeaderQuestionFormProps } from './LeaderQuestionForm.js';
+const TypedQuestionForm = lazy(() => import('./LeaderQuestionForm.js'));
+
 import type { LeaderAction, LeaderStateV1 } from '../../../../core/vision/leader-types.js';
 import { IconCheck } from '../../../components/primitives/icons.js';
 import { MessageMarkdown } from '../MessageMarkdown.js';
@@ -29,7 +33,7 @@ import { scrollToAnchor } from '../command/nav.js';
 import commandStyles from '../command/command.module.css';
 import { expectedDeltaText, memoActions } from '../mind/leader-model.js';
 import { LeaderComposer } from './LeaderComposer.js';
-import { CHANNEL_LABEL, clockTime, previewText, type PendingMessage, type ThreadEntry, type ThreadRow } from './thread-model.js';
+import { CHANNEL_LABEL, clockTime, displayThreadText, previewText, type PendingMessage, type ThreadEntry, type ThreadRow } from './thread-model.js';
 import type { LeaderThreadChannel, LeaderThreadMessage } from './thread-types.js';
 import styles from './leader.module.css';
 
@@ -80,6 +84,7 @@ export interface ThreadContext {
   sendDisabledReason: string | null;
   /** Autonomy is off: memos are dry runs. */
   dormant: boolean;
+  questionFormProps?: (question: LeaderThreadMessage) => LeaderQuestionFormProps;
 }
 
 /** The question an answer closes, by its id or the message it replies to. */
@@ -141,7 +146,7 @@ function MemoCard({ message, ctx }: { message: LeaderThreadMessage; ctx: ThreadC
         </dl>
       ) : (
         <div className={styles.prose}>
-          <MessageMarkdown text={message.text} />
+          <MessageMarkdown text={displayThreadText(message)} />
         </div>
       )}
       {list.length ? (
@@ -160,7 +165,7 @@ function MemoCard({ message, ctx }: { message: LeaderThreadMessage; ctx: ThreadC
         <details className={styles.more}>
           <summary>The Leader’s note</summary>
           <div className={styles.prose}>
-            <MessageMarkdown text={message.text} />
+            <MessageMarkdown text={displayThreadText(message)} />
           </div>
         </details>
       ) : null}
@@ -177,7 +182,11 @@ function QuestionCard({ message, ctx }: { message: LeaderThreadMessage; ctx: Thr
       <div className={styles.prose}>
         <MessageMarkdown text={message.text} />
       </div>
-      {answer ? (
+      {message.questionForm && ctx.questionFormProps ? (
+        <Suspense fallback={<p role="status">Reading the current question…</p>}>
+          <TypedQuestionForm key={message.questionId ?? message.id} {...ctx.questionFormProps(message)} />
+        </Suspense>
+      ) : answer ? (
         <p className={styles.answered}>
           <IconCheck /> Answered{answer.channel !== 'verse' ? ` on ${CHANNEL_LABEL[answer.channel]}` : ''} · <span className={styles.answeredText}>{previewText(answer.text, 120)}</span>
         </p>
@@ -205,7 +214,7 @@ function ActionNote({ message, ctx }: { message: LeaderThreadMessage; ctx: Threa
   return (
     <div className={styles.leaderText}>
       <div className={styles.prose}>
-        <MessageMarkdown text={message.text} />
+        <MessageMarkdown text={displayThreadText(message)} />
       </div>
       {list.length ? (
         <ul className={`${commandStyles.actionList} ${styles.memoActions}`} aria-label="Actions">
@@ -301,7 +310,7 @@ export function ThreadRows({ rows, ctx }: { rows: readonly ThreadRow[]; ctx: Thr
         if (row.type === 'system') {
           return (
             <p key={row.key} className={styles.system} data-message-id={row.entry.message.id}>
-              {row.entry.message.text} <time dateTime={row.entry.message.at}>{clockTime(row.entry.message.at)}</time>
+              {displayThreadText(row.entry.message)} <time dateTime={row.entry.message.at}>{clockTime(row.entry.message.at)}</time>
             </p>
           );
         }

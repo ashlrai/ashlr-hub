@@ -484,7 +484,7 @@ pub fn render(notice: &Notice) -> Rendered {
             };
             Rendered {
                 title,
-                body: "Open Ashlr to review them.".to_string(),
+                body: "Open Phantom to review them.".to_string(),
                 click: focus.as_deref().and_then(ClickTarget::session),
             }
         }
@@ -561,10 +561,10 @@ pub fn render(notice: &Notice) -> Rendered {
                         "terminal command finished",
                         "terminal commands finished",
                     ),
-                    "Open Ashlr to review them.".to_string(),
+                    "Open Phantom to review them.".to_string(),
                 )
             } else if parts.len() == 1 {
-                (parts[0].clone(), "Open Ashlr to review them.".to_string())
+                (parts[0].clone(), "Open Phantom to review them.".to_string())
             } else {
                 (
                     format!(
@@ -720,7 +720,7 @@ pub fn deliver_script(title: &str, body: &str) {
     #[cfg(target_os = "linux")]
     {
         let result = std::process::Command::new("notify-send")
-            .args(["--app-name=Ashlr", "--", title, body])
+            .args(["--app-name=Phantom", "--", title, body])
             .output();
         if result.is_err() {
             eprintln!("[ashlr-desktop] notification (notify-send unavailable): {title}");
@@ -1199,7 +1199,7 @@ mod tests {
             focus: focus.clone(),
         });
         assert_eq!(r.title, "3 terminal commands finished");
-        assert_eq!(r.body, "Open Ashlr to review them.");
+        assert_eq!(r.body, "Open Phantom to review them.");
         assert_eq!(r.click, focus);
 
         let r = render(&Notice::Terminal {

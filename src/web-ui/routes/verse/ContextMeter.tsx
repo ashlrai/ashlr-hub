@@ -732,7 +732,7 @@ export function ContextAdvice({ session, budget, modesAvailable, dispatchEnabled
               {handoff.reasons.map((reason) => <li key={reason}>{reason}</li>)}
             </ul>
             <p className={styles.adviceFine}>
-              Verse drafts a handoff note from this chat&apos;s log — free. Nothing is sent until you press Send in the new chat.
+              Phantom drafts a handoff note from this chat&apos;s log — free. Nothing is sent until you press Send in the new chat.
               {idleExpired ? ' Continuing here instead re-reads the whole context at full cost.' : ''}
             </p>
           </div>

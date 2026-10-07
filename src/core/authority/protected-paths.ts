@@ -78,6 +78,8 @@ export interface ProtectedPathHit {
  *     adoption rests on — a fleet that could edit them could grade itself.
  */
 export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
+  // Pure display projection imported by existing Tier-1 Telegram prose helpers.
+  'src/core/vision/leader-display-text.ts',
   // Authority and daemon
   'src/core/authority/**',
   'src/core/daemon/activation-permit.ts',
@@ -106,6 +108,10 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/fleet/fleet-merge-state.ts',
   // 3.13: posts the host-verified ashlr/verify check G7 and the rulesets trust
   'src/core/fleet/verify-check-run.ts',
+  // Maintainer intake and exact-tree verification decide App acceptance too.
+  'src/core/fleet/maintainer-pr-verification.ts',
+  'src/core/fleet/maintainer-pr-runner.ts',
+  'src/cli/maintainer-verify.ts',
   // 3.13: signs provenance for cloud PRs it ingests into the standing pass
   'src/core/fleet/cloud-intake.ts',
   'src/core/fleet/post-merge-watch.ts',

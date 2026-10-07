@@ -33,12 +33,16 @@ const {
   mockHandleStrategicMessage: vi.fn().mockResolvedValue('Elon reply'),
 }));
 
-vi.mock('../src/core/integrations/telegram.js', () => ({
-  sendTelegramMessage: mockSendTelegramMessage,
-  pollTelegramUpdates: mockPollTelegramUpdates,
-  answerCallbackQuery: mockAnswerCallbackQuery,
-  telegramEnabled: mockTelegramEnabled,
-}));
+vi.mock('../src/core/integrations/telegram.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/integrations/telegram.js')>();
+  return {
+    telegramQuestionNamespace: actual.telegramQuestionNamespace,
+    sendTelegramMessage: mockSendTelegramMessage,
+    pollTelegramUpdates: mockPollTelegramUpdates,
+    answerCallbackQuery: mockAnswerCallbackQuery,
+    telegramEnabled: mockTelegramEnabled,
+  };
+});
 
 vi.mock('../src/core/comms/elon-dialogue.js', () => ({
   handleStrategicMessage: mockHandleStrategicMessage,

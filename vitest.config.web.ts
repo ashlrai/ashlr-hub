@@ -10,15 +10,42 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
+const excludes = ['**/node_modules/**', '**/dist/**'];
+const transcriptTests = 'src/web-ui/routes/verse/Transcript.test.tsx';
+
 export default defineConfig({
   plugins: [react()],
   test: {
     environment: 'jsdom',
-    include: ['src/web-ui/**/*.test.{ts,tsx}'],
-    exclude: ['**/node_modules/**', '**/dist/**'],
+    exclude: excludes,
     setupFiles: ['./src/web-ui/test/setup.ts'],
     css: false,
     clearMocks: true,
     restoreMocks: true,
+    // Vitest 4 unions root and project includes, so keep the include at the
+    // project level. Every Transcript case still runs, after other DOM workers
+    // have stopped, to measure its unchanged streaming budget without contention.
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: 'console',
+          maxWorkers: 4,
+          include: ['src/web-ui/**/*.test.{ts,tsx}'],
+          exclude: [...excludes, transcriptTests],
+          sequence: { groupOrder: 0 },
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'transcript',
+          include: [transcriptTests],
+          exclude: excludes,
+          maxWorkers: 1,
+          sequence: { groupOrder: 1 },
+        },
+      },
+    ],
   },
 });

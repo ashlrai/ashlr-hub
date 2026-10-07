@@ -65,7 +65,7 @@ export function runNativeFleetOp(
   opts: { checkout?: string; onProgress?: (event: NativeFleetEvent) => void; timeoutMs?: number } = {},
 ): Promise<NativeFleetEvent> {
   const b = bridge();
-  if (!b) return Promise.reject(new Error('This needs the Ashlr desktop app.'));
+  if (!b) return Promise.reject(new Error('This needs the Phantom desktop app.'));
   counter += 1;
   const id = `fleet-${Date.now().toString(36)}-${counter}`;
   return new Promise((resolve, reject) => {

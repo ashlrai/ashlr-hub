@@ -23,7 +23,7 @@ beforeEach(() => {
 describe('inVerseAvailability', () => {
   it('needs the pane, the desktop app’s terminal, and an open chat — and says which is missing', () => {
     expect(inVerseAvailability({ slotLanded: false, terminalAvailable: true, terminalReason: null, activeSessionId: 's' }))
-      .toEqual({ available: false, reason: 'This build has no Verse terminal yet.' });
+      .toEqual({ available: false, reason: 'This build has no Phantom terminal yet.' });
     expect(inVerseAvailability({ slotLanded: true, terminalAvailable: false, terminalReason: 'Needs the desktop app.', activeSessionId: 's' }))
       .toEqual({ available: false, reason: 'Needs the desktop app.' });
     expect(inVerseAvailability({ slotLanded: true, terminalAvailable: null, terminalReason: null, activeSessionId: 's' }).available).toBe(false);

@@ -104,7 +104,7 @@ export function LaunchDialog({
               {models.map((m) => <option key={m} value={m}>{m}</option>)}
             </Select>
           ) : (
-            <p className={styles.hint}>No local models are known to Verse, so Ollama will ask which to use.</p>
+            <p className={styles.hint}>No local models are known to Phantom, so Ollama will ask which to use.</p>
           )
         ) : null}
 
@@ -112,7 +112,7 @@ export function LaunchDialog({
           label="Folder (Terminal.app)"
           value={root}
           onChange={(e) => setRoot(e.target.value)}
-          hint={projects.length === 0 ? 'No chat folders or enrolled projects yet.' : 'A Verse tab opens in the chat you have open.'}
+          hint={projects.length === 0 ? 'No chat folders or enrolled projects yet.' : 'A Phantom tab opens in the chat you have open.'}
           disabled={projects.length === 0}
         >
           {projects.length === 0 ? <option value="">—</option> : null}
@@ -127,9 +127,9 @@ export function LaunchDialog({
         ) : null}
 
         {via === 'ollama' && inVerse.available ? (
-          <p className={styles.hint}>In a Verse tab this runs exactly the command above — Verse builds it from what is installed, never from this page.</p>
+          <p className={styles.hint}>In a Phantom tab this runs exactly the command above — Phantom builds it from what is installed, never from this page.</p>
         ) : null}
-        {!inVerse.available && inVerse.reason ? <p className={styles.hint}>Verse terminal: {inVerse.reason}</p> : null}
+        {!inVerse.available && inVerse.reason ? <p className={styles.hint}>Phantom terminal: {inVerse.reason}</p> : null}
         {error ? <p className={styles.error} role="alert">{error}</p> : null}
 
         <div className={styles.dialogActions}>
@@ -148,7 +148,7 @@ export function LaunchDialog({
               disabled={command === null}
               onClick={() => command && onLaunch({ choice, target: 'verse', root: null, command })}
             >
-              Open in Verse terminal
+              Open in Phantom terminal
             </Button>
           ) : null}
         </div>

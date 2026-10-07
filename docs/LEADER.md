@@ -103,6 +103,18 @@ actions.
 **Answer.** Questions in memos can be answered. Answers (for 30 days) and
 approvals (for 14) feed the next memo run.
 
+When the Leader supplies a structured question, it offers one choice, several
+choices, or a short answer. Multiple choice includes **Select all** and
+**Clear**; selecting options does not send them until you submit. The same
+question and saved answer appear on desktop, phone and Telegram. You can use
+the separate conversation composer while leaving a question draft in place.
+
+Structured answers are recorded once. If another device answers first, the
+form shows that saved answer rather than overwriting it. A lost connection or
+an uncertain submission keeps your draft while the app checks the saved
+answer. Buttons expire after 24 hours; you can still reply in plain text.
+Questions without structured choices keep their existing answer box.
+
 ---
 
 ## In Verse: Mind (⌘4)
@@ -111,7 +123,7 @@ Mind opens on the conversation: "One thread · Verse, Telegram, CLI".
 
 - The Directives strip, then the thread: messages with channel badges, memo
   cards with the class chip, the veto countdown and **Approve** / **Veto** (a
-  dry-run memo says so and has no buttons), questions with an answer box.
+  dry-run memo says so and has no buttons), questions with choices or an answer box.
 - The composer at the bottom. Sending asks for the mutation token once; your
   draft is kept. "Leader is thinking…" shows while a reply is pending, and a
   failed send offers Retry and Discard.
@@ -144,6 +156,12 @@ example).
 **Talking.** Send plain text and it joins the thread; the Leader's reply comes
 back as a Telegram reply to your message. Reply to a Leader question to answer
 it. Directive prefixes work here too.
+
+Structured questions use buttons for choices, selection and submission.
+Short answers use a reply prompt. Ordinary messages can be sent while a
+question is open; they do not clear its selections. Old buttons and repeated
+submissions cannot replace an already saved structured answer. Plain-text
+replies remain available for refining an answer.
 
 | Command | What it does |
 |---|---|
@@ -208,7 +226,8 @@ poller's job.
   `comms.maxPingsPerDay` (default 6) ordinary pings a day, 20 minutes apart,
   and at most 4 urgent ones.
 - **Questions.** One at a time; the next waits until you answer, or for 24
-  hours. A yes/no question gets **Yes**, **No** and **Your call** buttons.
+  hours. Structured questions show their supplied choices or a short-answer
+  prompt. Legacy yes/no questions retain **Yes**, **No** and **Your call**.
 
 **What you say, and what it does.** Each message is read as one of status,
 detail ("more"), approve, veto, answer, directive, task or chat. Rules decide,
@@ -239,7 +258,7 @@ Every paid lane still applies its own budget gate at launch.
 Ashlr Verse improvements from recurring retro causes, its own failures,
 Needs-you friction, usage and the open gates in
 `docs/VERSE-COMPETITIVE-ACCEPTANCE.md`, and routes each pick to the cheapest
-capable lane: at most 3 a day, at most 1 paid, a 7-day cooldown per idea, no
+capable lane: no fixed daily launch ceiling, a 7-day cooldown per idea, no
 paid lanes in reserve, nothing enacted in a dry run. The line posts the report
 with Approve and Veto. `foundry.leader.selfImprove: false` turns it off.
 

@@ -51,7 +51,7 @@ export const playbooksQuery: QueryDef<PlaybooksRead> = {
   fetch: async (signal) => {
     try {
       const value = narrowList(await apiGet<unknown>(VERSE_PLAYBOOKS_PATH, signal));
-      return value ? { value, available: true, reason: null } : { value: null, available: true, reason: 'Unrecognized response — update Ashlr.' };
+      return value ? { value, available: true, reason: null } : { value: null, available: true, reason: 'Unrecognized response — update Phantom.' };
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) throw err;
       if (err instanceof DOMException && err.name === 'AbortError') throw err;

@@ -50,6 +50,18 @@ export const EXECUTOR_ROLE: LayerVariants = {
     'Report what you changed, which tests ran and passed, and any remaining uncertainty.',
 };
 
+/** A capability description only; it cannot grant or invoke any tool. */
+export function hostVerifiedExecutorRole(toolNames: readonly string[]): string {
+  const available = [...new Set(toolNames.filter((name) => /^[a-z][a-z0-9_]{0,63}$/.test(name)))];
+  return 'Sandbox execution contract (overrides instructions to run checks yourself):\n' +
+    `- Available executable tools: ${available.length > 0 ? available.join(', ') : 'none'}. Use only these tools.\n` +
+    '- Make complete, scoped changes with supplied edit/write tools; read the affected file first and read back your changes.\n' +
+    '- Shell and network execution are unavailable unless explicitly supplied as tools; do not simulate commands or claim checks ran.\n' +
+    '- The host handles required command checks and verification. Do not claim tests, typecheck or lint ran unless you observed their results; mark unobserved checks pending host verification.\n' +
+    '- Reuse existing helpers. Finish with an accurate change/readback summary; no unfinished or cosmetic edits.\n' +
+    '- If no change is justified, explain why and stop.';
+}
+
 /**
  * Planner role — decompose a goal into a task DAG.
  * VERBATIM source of the run planner prompt (was orchestrator PLANNING_SYSTEM).

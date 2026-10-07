@@ -18,6 +18,7 @@ import {
   type Stats,
 } from 'node:fs';
 import { homedir } from 'node:os';
+import { performance } from 'node:perf_hooks';
 import { basename, dirname, join } from 'node:path';
 import {
   canonicalDispatchRepoIdentity,
@@ -33,7 +34,7 @@ import {
 } from './generated-repair-identity.js';
 import type { EngineId, EngineTier, RepairTreatment, WorkSource } from '../types.js';
 import { isSafeExecutionIdentity } from './attempt-identity.js';
-import { acquireLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
+import { acquireLocalStoreLock, ownsLocalStoreLock, releaseLocalStoreLock } from './local-store-lock.js';
 import { assurePrivateStoragePath, type PrivateStorageMode } from '../util/private-storage.js';
 import { fsyncDirectory as fsyncDirectoryDurably } from '../util/durability.js';
 import {
@@ -521,7 +522,11 @@ function ensurePrivatePath(path: string): BigIntStats {
   if (!safeRepairHandoffDirectory(dirStat)) {
     throw new Error('unsafe repair handoff directory');
   }
-  chmodSync(dir, 0o700);
+  // Keep a current private mode without invalidating Darwin ACL ctime verdicts.
+  // Full permission bits still require repair, including sticky/set-ID bits.
+  if (created || (process.platform !== 'win32' && (dirStat.mode & 0o7777n) !== 0o700n)) {
+    chmodSync(dir, 0o700);
+  }
   assureRepairHandoffStoragePath(
     dir,
     'directory',
@@ -531,6 +536,7 @@ function ensurePrivatePath(path: string): BigIntStats {
   const assuredDirStat = lstatSync(dir, { bigint: true });
   if (
     !safeRepairHandoffDirectory(assuredDirStat) ||
+    (process.platform !== 'win32' && (assuredDirStat.mode & 0o7777n) !== 0o700n) ||
     assuredDirStat.dev !== dirStat.dev || assuredDirStat.ino !== dirStat.ino
   ) throw new Error('unsafe repair handoff directory');
   if (existsSync(path)) {
@@ -547,65 +553,114 @@ function appendObservation(observation: RepairHandoffObservation): boolean {
   const path = observation.schemaVersion === 2
     ? repairHandoffV2JournalPath()
     : repairHandoffJournalPath();
-  try {
-    ensurePrivatePath(path);
-  } catch {
-    return false;
-  }
-  const lock = acquireLocalStoreLock(repairHandoffLockPath(path));
-  if (!lock) return false;
-  let fd: number | undefined;
-  try {
-    const directory = ensurePrivatePath(path);
+  const lockPath = repairHandoffLockPath(path);
+  let acquisitionRemainingMs = 2_000;
+  let preAdmissionProbes = 0;
+  let postDurableProbes = 0;
+  let postDurable = false;
+
+  // Charge every fresh journal/parent sample to the original phase allowances.
+  // Parent degradation is not a transient classification: only a later fully
+  // healthy sample may admit an append or confirm a durable exact replay.
+  const sampleAuthority = () => {
+    if (postDurable) {
+      if (postDurableProbes >= PARENT_AUTHORITY_RETRIES) return null;
+      postDurableProbes += 1;
+    } else {
+      if (preAdmissionProbes >= PARENT_AUTHORITY_RETRIES) return null;
+      preAdmissionProbes += 1;
+    }
     const v1 = readRepairHandoffsInternal(repairHandoffJournalPath(), 1);
     const v2 = readRepairHandoffsInternal(repairHandoffV2JournalPath(), 2);
-    const durable = observation.schemaVersion === 1 ? v1 : v2;
-    const combined = combineRepairHandoffReadsAfterParentSettlement([v1, v2]);
-    if (
-      durable.conflictingIds > 0 || durable.limitExceeded ||
-      combined.sourceState === 'degraded' || combined.conflictingIds > 0 || combined.limitExceeded
-    ) return false;
-    if (hasExactObservation(durable, observation)) {
-      fd = openSync(path, fsConstants.O_RDWR | fsConstants.O_NOFOLLOW);
-      const opened = fstatSync(fd);
-      if (!opened.isFile() || !privateOwner(opened.uid) || opened.nlink !== 1) return false;
-      syncRepairHandoffAuthority(path, fd, directory);
-      closeSync(fd);
-      fd = undefined;
-      return exactObservationHasHealthyAuthority(observation);
-    }
-    if (durable.physicalRows + (durable.tornTail ? 1 : 0) >= MAX_RECORDS) return false;
-    if (!observationAdmissionAllowed(durable, observation)) return false;
-    const before = existsSync(path) ? lstatSync(path) : undefined;
-    fd = openSync(
-      path,
-      fsConstants.O_APPEND | fsConstants.O_RDWR | fsConstants.O_NOFOLLOW |
-        (before ? 0 : fsConstants.O_CREAT | fsConstants.O_EXCL),
-      0o600,
-    );
+    if ([v1, v2].some(read =>
+      read.sourceState === 'degraded' || read.conflictingIds > 0 || read.limitExceeded)) return null;
+    return {
+      durable: observation.schemaVersion === 1 ? v1 : v2,
+      combined: combineRepairHandoffReads([v1, v2]),
+    };
+  };
+
+  for (;;) {
+    try { ensurePrivatePath(path); } catch { return false; }
+    // A zero wait still attempts acquisition in the shared helper. Refuse first
+    // and charge its entire call, including start-identity/private-path work.
+    if (acquisitionRemainingMs <= 0) return false;
+    const started = performance.now();
+    let lock: ReturnType<typeof acquireLocalStoreLock>;
     try {
-      const stat = fstatSync(fd);
-      const bytes = Buffer.from(`\n${JSON.stringify(observation)}\n`, 'utf8');
-      if (!stat.isFile() || !privateOwner(stat.uid) || stat.nlink !== 1 || stat.size + bytes.length > MAX_FILE_BYTES) return false;
-      if (before && (before.dev !== stat.dev || before.ino !== stat.ino)) return false;
-      fchmodSync(fd, 0o600);
-      if (!before) assureRepairHandoffJournalFile(path, 'secure-created', stat);
-      if (bytes.length > MAX_ROW_BYTES) return false;
-      if (writeSync(fd, bytes) !== bytes.length) return false;
-      syncRepairHandoffAuthority(path, fd, directory);
-      return exactObservationHasHealthyAuthority(observation);
+      lock = acquireLocalStoreLock(lockPath, acquisitionRemainingMs);
     } catch {
-      if (fd !== undefined) {
-        try { closeSync(fd); } catch { /* best effort */ }
-        fd = undefined;
-      }
       return false;
     }
-  } catch {
-    return false;
-  } finally {
-    if (fd !== undefined) { try { closeSync(fd); } catch { /* best effort */ } }
-    releaseLocalStoreLock(lock);
+    acquisitionRemainingMs -= Math.max(0, performance.now() - started);
+    if (!lock) return false;
+    let fd: number | undefined;
+    type AttemptOutcome = 'accepted' | 'parent-unsettled' | 'refused';
+    let outcome: AttemptOutcome = 'refused';
+    let released = false;
+    try {
+      outcome = ((): AttemptOutcome => {
+        if (acquisitionRemainingMs <= 0 || !ownsLocalStoreLock(lock)) return 'refused';
+        const directory = ensurePrivatePath(path);
+        const current = sampleAuthority();
+        if (!current || !ownsLocalStoreLock(lock)) return 'refused';
+        if (current.combined.sourceState === 'degraded') return 'parent-unsettled';
+        if (current.combined.conflictingIds > 0 || current.combined.limitExceeded) return 'refused';
+        const exact = hasExactObservation(current.durable, observation);
+        // A durable operation can only reconcile its own complete fingerprint;
+        // it must never append again after an unlocked settlement interval.
+        if (postDurable && !exact) return 'refused';
+        if (!exact) {
+          if (current.durable.physicalRows + (current.durable.tornTail ? 1 : 0) >= MAX_RECORDS) return 'refused';
+          if (!observationAdmissionAllowed(current.durable, observation)) return 'refused';
+        }
+        // Exact historical replay precedes new-row activation/capacity checks.
+        const before = existsSync(path) ? lstatSync(path) : undefined;
+        fd = openSync(
+          path,
+          fsConstants.O_RDWR | fsConstants.O_NOFOLLOW |
+            (exact ? 0 : fsConstants.O_APPEND | (before ? 0 : fsConstants.O_CREAT | fsConstants.O_EXCL)),
+          0o600,
+        );
+        const opened = fstatSync(fd);
+        if (!opened.isFile() || !privateOwner(opened.uid) || opened.nlink !== 1) return 'refused';
+        if (before && (before.dev !== opened.dev || before.ino !== opened.ino)) return 'refused';
+        if (!ownsLocalStoreLock(lock)) return 'refused';
+        if (!exact) {
+          const bytes = Buffer.from(`\n${JSON.stringify(observation)}\n`, 'utf8');
+          if (opened.size + bytes.length > MAX_FILE_BYTES || bytes.length > MAX_ROW_BYTES) return 'refused';
+          fchmodSync(fd, 0o600);
+          if (!before) assureRepairHandoffJournalFile(path, 'secure-created', opened);
+          if (!ownsLocalStoreLock(lock) || writeSync(fd, bytes) !== bytes.length) return 'refused';
+        }
+        syncRepairHandoffAuthority(path, fd, directory);
+        postDurable = true;
+        closeSync(fd);
+        fd = undefined;
+        const final = sampleAuthority();
+        if (!final || !ownsLocalStoreLock(lock) ||
+            !hasExactObservation(final.durable, observation) || final.durable.sourceState !== 'healthy') return 'refused';
+        if (final.combined.sourceState === 'degraded') return 'parent-unsettled';
+        return final.combined.sourceState === 'healthy' &&
+          final.combined.conflictingIds === 0 && !final.combined.limitExceeded ? 'accepted' : 'refused';
+      })();
+    } catch {
+      outcome = 'refused';
+    } finally {
+      if (fd !== undefined) {
+        try { closeSync(fd); } catch { outcome = 'refused'; }
+      }
+      try { released = releaseLocalStoreLock(lock); } catch { released = false; }
+    }
+    // A retained/unknown lease cannot report success or authorize reacquisition.
+    if (!released) return false;
+    if (outcome === 'accepted') return true;
+    if (outcome !== 'parent-unsettled') return false;
+    const probes = postDurable ? postDurableProbes : preAdmissionProbes;
+    if (probes >= PARENT_AUTHORITY_RETRIES || acquisitionRemainingMs <= 0) return false;
+    // No descriptor, lease or authority snapshot crosses this wait. Each retry
+    // revalidates both journals, parent evidence and current new-row admission.
+    Atomics.wait(PARENT_AUTHORITY_RETRY_SLEEP, 0, 0, PARENT_AUTHORITY_RETRY_MS);
   }
 }
 
@@ -625,30 +680,6 @@ function syncRepairHandoffAuthority(path: string, fd: number, directory: BigIntS
     expectedIdentity: { dev: directory.dev, ino: directory.ino },
     beforeFsync: () => repairHandoffJournalFaultForTest?.('append-directory-fsync'),
   });
-}
-
-function exactObservationHasHealthyAuthority(observation: RepairHandoffObservation): boolean {
-  const v1 = readRepairHandoffsInternal(repairHandoffJournalPath(), 1);
-  const v2 = readRepairHandoffsInternal(repairHandoffV2JournalPath(), 2);
-  const durable = observation.schemaVersion === 1 ? v1 : v2;
-  const combined = combineRepairHandoffReadsAfterParentSettlement([v1, v2]);
-  return hasExactObservation(durable, observation) &&
-    durable.sourceState === 'healthy' &&
-    combined.sourceState === 'healthy' &&
-    combined.conflictingIds === 0 &&
-    !combined.limitExceeded;
-}
-
-function combineRepairHandoffReadsAfterParentSettlement(
-  reads: readonly InternalRepairHandoffReadResult[],
-): RepairHandoffReadResult {
-  let combined = combineRepairHandoffReads(reads);
-  if (reads.some((read) => read.sourceState === 'degraded')) return combined;
-  for (let attempt = 1; combined.sourceState === 'degraded' && attempt < PARENT_AUTHORITY_RETRIES; attempt++) {
-    Atomics.wait(PARENT_AUTHORITY_RETRY_SLEEP, 0, 0, PARENT_AUTHORITY_RETRY_MS);
-    combined = combineRepairHandoffReads(reads);
-  }
-  return combined;
 }
 
 function hasExactObservation(

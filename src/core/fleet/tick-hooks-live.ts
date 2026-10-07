@@ -2188,7 +2188,8 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         return { allowed: false, reason: `${engine} is not a fleet lane under the standing grant (per-token APIs and agents whose spend cannot be read never are).` };
       }
       if (lane === DEVIN_CLI_LANE) return devinCliSeatAllows(current);
-      if (opts.itemId !== undefined || lane === 'grok-cli' && opts.seatId !== undefined) {
+      const selectedClaude = lane === 'claude-cli' && opts.seatId !== undefined;
+      if (opts.itemId !== undefined || (lane === 'grok-cli' || selectedClaude) && opts.seatId !== undefined) {
         // Selected-account execution may follow awaited planning or sandbox
         // setup. Re-read its actual authority and telemetry synchronously;
         // never substitute the configured default or an earlier tick reading.
@@ -2221,7 +2222,8 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         }
       }
       const routed = opts.itemId ? current.routeCache.get(opts.itemId) : undefined;
-      if (opts.itemId && (!routed || routed.hold || routed.backend !== engine || (opts.model ?? null) !== (routed.model ?? null))) {
+      if (opts.itemId && (!routed || routed.hold || routed.backend !== engine || (opts.model ?? null) !== (routed.model ?? null) ||
+        selectedClaude && routed.seatDecision?.seatId !== opts.seatId)) {
         return {allowed:false,reason:'The current task engine/model route changed; a fresh admitted route is required.'};
       }
       const taskBudget = budgetForItem(current,opts.itemId,opts.maxPercent);
@@ -2231,10 +2233,10 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       const plan = current.lanes[lane];
       if (plan.slots <= 0) return { allowed: false, reason: plan.capReason ?? `The ${FLEET_LANE_LABEL[lane]} lane has no slots this tick.` };
 
-      // Bound Grok execution reaches only the selected roster account. Legacy
-      // unbound producers retain the all-seat check; no identity is guessed.
+      // Bound Grok/Claude execution reaches only the selected roster account.
+      // Unbound producers retain the all-seat check; no identity is guessed.
       const seats = current.capacity.filter((s) => laneOfSeat(s) === lane &&
-        (lane !== 'grok-cli' || opts.seatId === undefined || s.seatId === opts.seatId));
+        (lane !== 'grok-cli' && !selectedClaude || opts.seatId === undefined || s.seatId === opts.seatId));
       if (seats.length === 0) return { allowed: false, reason: `No ${FLEET_LANE_LABEL[lane]} seat is known, so no usage can be checked.` };
       for (const seat of seats) {
         const grant = standingSeatFor(current.policy.spend, seat.seatId);
@@ -2250,6 +2252,12 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
             allowed: false,
             reason: `Seat ${seat.seatId} is held back by the ${current.budget.mode} budget: ${lowerFirst(assessed.headroom.reasons[0] ?? 'not eligible')}`,
           };
+        }
+        if (selectedClaude) {
+          const used = Math.max(assessed.headroom.sessionUsedPercent ?? 0, assessed.headroom.weeklyUsedPercent ?? 0);
+          if (used >= opts.maxPercent) {
+            return { allowed: false, reason: `${engine} seat ${seat.seatId} window ${Math.round(used)}% used (max ${opts.maxPercent}%)` };
+          }
         }
       }
       // Review c9: a Codex seat the Leader's class-B directive switched on
@@ -2268,10 +2276,11 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         }
         return { allowed: true, reason: `${engine} (${lane}) was enabled by the Leader after its reset and has headroom under the ${current.budget.mode} budget.` };
       }
-      // Master's subscription window gate still applies to claude / codex
-      // (it only ever narrows). grok-cli is judged on its seat above: the
-      // M80 reader has no Grok signal and would refuse it as "unknown".
-      if (lane === 'claude-cli' || lane === 'codex') {
+      // Unbound Claude and Codex retain master's engine-wide window gate.
+      // Bound Claude uses the fresh exact-account windows above; an ambient
+      // default account or an engine-wide shared reading cannot identify it.
+      // The native adapter still proves the selected account and credit policy.
+      if (lane === 'claude-cli' && !selectedClaude || lane === 'codex') {
         let subscription = false;
         try {
           subscription = deps.isSubscriptionEngine(engine);

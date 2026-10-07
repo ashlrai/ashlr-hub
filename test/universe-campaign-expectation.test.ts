@@ -240,6 +240,46 @@ describe('atomic campaign admission checkpoints', () => {
     expect(records[2]).toMatchObject({ kind: 'settled', state: 'interrupted' });
   });
 
+  it.each(['comparator', 'stop'] as const)('rechecks %s after awaiting abandoned-run recovery', async (change) => {
+    const value = fixture(); const at = new Date().toISOString();
+    const runId = '11111111-1111-4111-8111-111111111111';
+    appendCampaignEvent(value.directory, { kind: 'started', at, deadlineAt: new Date(Date.parse(at) + 60_000).toISOString(),
+      owner: { pid: 2_147_000_000, startRef: 'exited-fixture-owner' } });
+    appendCampaignEvent(value.directory, { kind: 'step', at, ordinal: 1, runId, generation: 1,
+      variantIds: ['change'], reservedModelRequests: 0 });
+    const prior: UniverseRun = { id: runId, universeId: 'fixture', generation: 1,
+      manifestDigest: value.expectedIdentity.manifestDigest, comparatorDigest: value.expectedIdentity.comparatorDigest,
+      startedAt: at, finishedAt: null, status: 'running', trials: [], durationMs: 0, tokensUsed: null, costUsd: null,
+      campaign: { id: 'campaign', ordinal: 1, definitionDigest: value.expectedIdentity.definitionDigest } };
+    hooks.universe!.runs.push(prior);
+    value.expectedIdentity.summaryDigest = digest(canonical(readUniverseCampaign('campaign', value)));
+    value.expectedIdentity.recordsDigest = digest(canonical(readCampaignEvents(value.directory)));
+    let entered!: () => void; const recovering = new Promise<void>((resolve) => { entered = resolve; });
+    let resume!: () => void; const released = new Promise<void>((resolve) => { resume = resolve; });
+    hooks.run.mockImplementationOnce(async (_id: string, options: { runId: string }) => {
+      expect(options.runId).toBe(runId);
+      entered(); await released;
+      prior.status = 'interrupted'; prior.finishedAt = new Date().toISOString();
+      return prior;
+    });
+    const pending = runUniverseCampaign('campaign', value);
+    try {
+      await recovering;
+      if (change === 'comparator') hooks.universe!.comparatorDigest = 'e'.repeat(64);
+      else requestUniverseCampaignControl('campaign', 'stop', value);
+      resume();
+      if (change === 'comparator') await expect(pending).rejects.toThrow(/changed after portfolio admission/);
+      else await expect(pending).rejects.toThrow(CampaignControlConflictError);
+      expect(hooks.run).toHaveBeenCalledOnce();
+      const records = readCampaignEvents(value.directory);
+      expect(records.filter((event) => event.kind === 'started')).toHaveLength(1);
+      expect(records.filter((event) => event.kind === 'step')).toHaveLength(1);
+      if (change === 'stop') expect(readUniverseCampaign('campaign', value).state).toBe('stopped');
+    } finally {
+      resume(); await pending.catch(() => undefined);
+    }
+  });
+
   it('rejects a foreign pause after its own recovery settlement without advancing past that control', async () => {
     const value = fixture(); const at = new Date().toISOString();
     appendCampaignEvent(value.directory, { kind: 'started', at, deadlineAt: new Date(Date.parse(at) + 60_000).toISOString(),

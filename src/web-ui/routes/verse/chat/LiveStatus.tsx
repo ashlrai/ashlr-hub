@@ -26,7 +26,8 @@
  */
 import { memo, useEffect, useState } from 'react';
 import type { VerseProgressPhase, VerseStatusKind } from '../../../../core/verse/types.js';
-import { summarizeToolInput } from '../verse-model.js';
+import { formatMetric } from '../../../components/charts/format-metric.js';
+import { formatElapsed, summarizeToolInput } from '../verse-model.js';
 import type { TranscriptItem, VerseLiveState } from '../verse-store.js';
 import { inputPath, useDisplayPath } from './path-display.js';
 import styles from './LiveStatus.module.css';
@@ -74,12 +75,7 @@ const NOTICE_WORD: Record<VerseStatusKind, string> = {
 
 /** "14s" / "1m 3s" / "1h 2m". */
 export function formatLiveElapsed(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return '0s';
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
+  return formatElapsed(ms);
 }
 
 export interface LiveStatusLine {
@@ -104,7 +100,7 @@ export function liveStatusLine(live: VerseLiveState, derived: LivePhase, now: nu
     : live.startedAt !== null ? Math.max(0, now - live.startedAt) : null;
   const detail = phase === 'tool' ? derived.detail ?? progress?.tool ?? null : null;
   const tps = progress?.tokPerSec ?? null;
-  const rate = (phase === 'writing' || phase === 'thinking') && tps !== null && tps > 0 ? `${tps >= 10 ? Math.round(tps) : tps.toFixed(1)} tok/s` : null;
+  const rate = (phase === 'writing' || phase === 'thinking') && tps !== null && Number.isFinite(tps) && tps > 0 ? `${formatMetric(tps)} tok/s` : null;
   return { phase, word: PHASE_WORD[phase], elapsedMs, detail, rate };
 }
 

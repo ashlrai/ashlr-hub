@@ -166,12 +166,22 @@ describe('accountVerdict — credits are independent of the window', () => {
   it('does NOT read as blocked when a 100%-used week still has a spendable balance', () => {
     const withCredits: Account = {
       ...exhaustedCodex,
-      credits: { hasCredits: true, unlimited: false, balance: '2048.4196250000', balanceValue: 2048.419625 },
+      credits: { hasCredits: true, unlimited: false, balance: '2048.4196250000', balanceValue: 2048.419625, spendControlReached: false },
     };
     const verdict = accountVerdict(withCredits, bindingWindow(withCredits));
     expect(verdict.state).toBe('credits');
     expect(verdict.headline).toBe('Usable on credits');
     expect(verdict.detail).toMatch(/credits are independent of the window/);
+  });
+
+  it.each([true, null, undefined])('does not claim credit-only access with spending control %s', (spendControlReached) => {
+    const observed = { ...exhaustedCodex,
+      credits: { hasCredits: true, unlimited: false, balance: '3626.2145675', balanceValue: 3626.2145675, spendControlReached } };
+    expect(accountVerdict(observed, bindingWindow(observed))).toMatchObject({ state: 'unknown',
+      headline: spendControlReached === true ? 'Credit spending held' : 'Credit access unconfirmed' });
+    expect(accountVerdict(observed, null).state).toBe('unknown');
+    const healthy = { ...observed, windows: [win({ id: 'codex', usedPercent: 25 })] };
+    expect(accountVerdict(healthy, bindingWindow(healthy)).state).toBe('available');
   });
 
   it('reads as exhausted when the window is full and there is nothing to spend', () => {

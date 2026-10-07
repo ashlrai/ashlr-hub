@@ -15,6 +15,17 @@ import { validateResourceBindings } from '../src/core/resources/worker.js';
 import { resourcePoolStatus } from '../src/core/resources/pool-runtime.js';
 import { serializeUniverseConsoleOverview } from '../src/core/web/universe-console-public.js';
 
+// These are finite functional-fixture allowances, not production latency targets.
+// Permit the held native contact to be observed and independently evaluated;
+// parent budgets cover two admitted campaigns plus bookkeeping and cleanup.
+const FIXTURE_READINESS_MS = 10_000;
+const FIXTURE_EVALUATION_MS = 3_000;
+const FIXTURE_TRIAL_MS = FIXTURE_READINESS_MS + FIXTURE_EVALUATION_MS + 2_000;
+const FIXTURE_UNIVERSE_MS = FIXTURE_TRIAL_MS + 5_000;
+const FIXTURE_CAMPAIGN_MS = 30_000;
+const FIXTURE_PORTFOLIO_MS = 2 * FIXTURE_CAMPAIGN_MS + 10_000;
+const FIXTURE_CASE_MS = FIXTURE_PORTFOLIO_MS + 20_000;
+
 const scratch: string[] = [];
 const EVALUATOR = [
   "import {readFileSync} from 'node:fs';import {join} from 'node:path';",
@@ -88,13 +99,13 @@ function fixture(specifications: Array<{ name: string; command?: boolean }>,
   ].join('\n'), { mode: 0o600 });
   const pool = validateResourcePool({ schemaVersion: 1, id: 'portfolio-pool', workers: [{
     id: 'inert-codex', provider: 'codex', model: 'inert-fixture', maxConcurrent: 1, reservePercent: 10,
-    maxTasksPerWindow: options.maxTasks ?? 10, taskWindowMs: 60_000, priority: 1,
+    maxTasksPerWindow: options.maxTasks ?? 10, taskWindowMs: FIXTURE_CASE_MS, priority: 1,
   }] });
   const bindings = validateResourceBindings([{ workerId: 'inert-codex', capacityKey: 'one-shared-subscription',
     kind: 'native-cli', command: [process.execPath, workerFile] }], pool);
   const now = Date.now();
   const observations: ResourceObservation[] = [{ workerId: 'inert-codex',
-    observedAt: new Date(now - 1_000).toISOString(), expiresAt: new Date(now + 60_000).toISOString(),
+    observedAt: new Date(now - 1_000).toISOString(), expiresAt: new Date(now + FIXTURE_CASE_MS).toISOString(),
     health: 'ready', retryAfter: null, windows: [{ id: 'weekly', usedPercent: options.usedPercent ?? 20,
       resetsAt: new Date(now + 3_600_000).toISOString() }] }];
   const poolPath = join(base, 'pool.json');
@@ -122,8 +133,8 @@ function fixture(specifications: Array<{ name: string; command?: boolean }>,
     const manifest: UniverseManifest = { schemaVersion: 1, id: `universe-${specification.name}`, name: `Portfolio ${specification.name}`,
       objective: 'Make the integer one under an independent fixed evaluator', seed,
       metric: { name: 'value', direction: 'maximize', minImprovement: 0 },
-      budget: { maxTrials: 1, maxParallel: 1, maxDurationMs: 15_000, trialTimeoutMs: 5_000 },
-      evaluation: { command: [process.execPath, 'evaluate.mjs'], timeoutMs: 3_000 },
+      budget: { maxTrials: 1, maxParallel: 1, maxDurationMs: FIXTURE_UNIVERSE_MS, trialTimeoutMs: FIXTURE_TRIAL_MS },
+      evaluation: { command: [process.execPath, 'evaluate.mjs'], timeoutMs: FIXTURE_EVALUATION_MS },
       variants: [{ id: 'advance', niche: 'value', hypothesis: 'Advance the measured integer',
         ...(specification.command
           ? { command: [process.execPath, '-e', "require('node:fs').writeFileSync('value.json','1\\n')"] }
@@ -131,12 +142,12 @@ function fixture(specifications: Array<{ name: string; command?: boolean }>,
             allowedWorkerIds: ['inert-codex'], files: ['value.json'], maxOutputTokens: 256 } }) }] };
     initUniverse(manifest, { root });
     const definition: UniverseCampaignDefinition = { schemaVersion: 1, id: `campaign-${specification.name}`, universeId: manifest.id,
-      feedback: true, budget: { maxGenerations: 1, maxDurationMs: 30_000, maxModelRequests: specification.command ? 0 : 1,
+      feedback: true, budget: { maxGenerations: 1, maxDurationMs: FIXTURE_CAMPAIGN_MS, maxModelRequests: specification.command ? 0 : 1,
         maxStagnantGenerations: 1, maxReportedTokens: null } };
     initUniverseCampaign(definition, { root }); definitions.push(definition);
   }
   const portfolio = (dependencies: Record<string, string[]> = {}, maxParallel = 2): UniversePortfolioDefinition => ({
-    schemaVersion: 1, id: 'resource-portfolio', maxParallel, maxDurationMs: 20_000,
+    schemaVersion: 1, id: 'resource-portfolio', maxParallel, maxDurationMs: FIXTURE_PORTFOLIO_MS,
     tasks: definitions.map((definition) => ({ campaignId: definition.id, dependsOn: dependencies[definition.id] ?? [] })),
   });
   return { base, root, resourceRuntime, runtime, pool, bindings, observations, ledgerRoot, workspace, seeds, definitions, privateFiles, portfolio,
@@ -161,7 +172,7 @@ function unchangedBoundaries(value: ReturnType<typeof fixture>): void {
 }
 
 async function until(predicate: () => boolean): Promise<void> {
-  const deadline = Date.now() + 8_000;
+  const deadline = Date.now() + FIXTURE_READINESS_MS;
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error('Inert worker did not reach the expected active state');
     await new Promise((resolve) => setTimeout(resolve, 25));
@@ -170,7 +181,7 @@ async function until(predicate: () => boolean): Promise<void> {
 
 // Native worker bytes are inert; candidate/evaluator execution still requires the
 // actual macOS confinement supported by the existing Universe execution lane.
-describe.runIf(process.platform === 'darwin')('resource-backed Universe portfolios', () => {
+describe.runIf(process.platform === 'darwin')('resource-backed Universe portfolios', { timeout: FIXTURE_CASE_MS }, () => {
   it('orders two Universes through one ledger, links measured receipts, and reruns terminal campaigns without contact', async () => {
     const value = fixture([{ name: 'a' }, { name: 'b' }]);
     const definition = value.portfolio({ 'campaign-b': ['campaign-a'] });

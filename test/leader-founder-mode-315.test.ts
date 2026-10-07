@@ -62,6 +62,7 @@ import {
   type ImprovementCandidate,
 } from '../src/core/vision/leader-drive.js';
 import type { LeaderRunDeps } from '../src/core/vision/leader.js';
+import { leaderDisplayText } from '../src/core/integrations/telegram-format.js';
 import { fakeLedger, makeApplyDeps, makePolicy, useTmpHome, type FakeLedger } from './helpers/leader-310b-fakes.js';
 
 const home = useTmpHome();
@@ -181,6 +182,70 @@ describe('persona — a founder-operator that never claims to be a real person',
     expect(fitTelegram('one\n\ntwo', 6)).toEqual({ text: 'one\n\ntwo', truncated: false });
     expect(wantsDetail('explain the bottleneck in detail')).toBe(true);
     expect(wantsDetail('ship it')).toBe(false);
+  });
+
+  it('discloses a clipped single line and keeps complete emoji at the boundary', () => {
+    const full = `${'a'.repeat(398)}😀 tail`;
+    const fit = fitTelegram(full);
+    expect(fit.truncated).toBe(true);
+    expect(fit.text).toBe(`${'a'.repeat(398)}…\n… (say "more" for the rest)`);
+    expect(fit.text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(fitTelegram('😀😀', 6, 4)).toEqual({ text: '😀😀', truncated: false });
+  });
+
+  it('shows readable Leader labels and dates without erasing useful quantities', () => {
+    const memo = 'lm-20260927140000-abcdef';
+    const action = 'la-20260927140000-abcdef-0';
+    const iso = '2026-09-27T14:00:00.000Z';
+    const raw = `Leader memo ${memo}\n• [B] Budget 1,018.63 credits, $0.50, 12,345 tokens, v3.24.2 — scheduled (${action})\nNext ${iso}`;
+    const display = leaderDisplayText(raw, Date.parse(iso));
+    expect(display).toMatch(/^Leader memo\n/);
+    expect(display).not.toContain(memo);
+    expect(display).not.toContain(action);
+    expect(display).not.toContain(iso);
+    expect(display).toContain('Next today ');
+    expect(display).toContain('1,018.63 credits, $0.50, 12,345 tokens, v3.24.2');
+    expect(leaderDisplayText(`Approved ${action}: recorded`)).toBe('Approved action: recorded');
+    expect(leaderDisplayText(`• ${memo} — Merge PR #543`)).toBe('• memo — Merge PR #543');
+  });
+
+  it('leaves exact URLs, filenames, code and quoted task text intact', () => {
+    const id = 'lm-20260927140000-abcdef';
+    const iso = '2026-09-27T14:00:00.000Z';
+    const literals = [
+      `https://example.test/${id}?at=${iso}`,
+      `src/${id}.ts`, `file(${id}).ts`, `filename (${id})`, `logs/${iso}.txt`,
+      `\`Leader memo ${id} at ${iso}\``,
+      `\`\`\`\nMemo ${id}\n${iso}\n\`\`\``,
+      `"Memo ${id} at ${iso}, 12345678901234567890"`,
+      'Invoice 12345678901234567890; credit balance 2499.91; 2026-09-27',
+    ].join('\n');
+    expect(leaderDisplayText(literals, Date.parse(iso))).toBe(literals);
+  });
+
+  it('hides terminal action metadata after literal summaries without changing those literals', () => {
+    const id = 'la-20260927140000-abcdef-0';
+    for (const summary of [
+      'Fix "billing"',
+      `Edit \`src/${id}.ts\``,
+      `Inspect https://example.test/${id}?tokens=12345`,
+      `Keep "Memo ${id}" in the filename`,
+    ]) {
+      const prefix = `• [B] ${summary} — scheduled`;
+      expect(leaderDisplayText(`${prefix} (${id})`)).toBe(prefix);
+      const advisory = ' — Jev suggests class C (advisory; the class above stands)';
+      expect(leaderDisplayText(`${prefix} (${id})${advisory}`)).toBe(`${prefix}${advisory}`);
+    }
+  });
+
+  it('does not mistake literal action-shaped lines or URL suffixes for terminal metadata', () => {
+    const id = 'la-20260927140000-abcdef-0';
+    const line = `• [B] Keep this — scheduled (${id})`;
+    for (const literal of [
+      `"${line}"`, `\`${line}\``, `\`\`\`\n${line}\n\`\`\``,
+      `• [B] Download https://example.test/file(${id})`,
+      `filename (${id})`,
+    ]) expect(leaderDisplayText(literal)).toBe(literal);
   });
 });
 
@@ -533,10 +598,25 @@ describe('self-improvement drive — highest leverage, cheapest lane, bounded by
   });
   const budget = (over: Partial<DriveBudget> = {}): DriveBudget => ({ mode: 'balanced', cloud: { ok: true, reason: null }, devin: { ok: true, reason: null }, fleet: true, ...over });
 
-  it('picks the cheapest capable lane and at most one paid launch a day', () => {
+  it('selects every independent admitted improvement without arbitrary daily ceilings', () => {
     const picks = selectImprovements([cand('a', 9), cand('b', 8), cand('c', 7, 'small'), cand('d', 6)], budget(), [], NOW);
+    expect(picks.map((p) => [p.candidate.id, p.lane])).toEqual([['a', 'cloud'], ['b', 'cloud'], ['c', 'fleet'], ['d', 'cloud']]);
+    expect(DRIVE_LIMITS.maxPerDay).toBeNull();
+    expect(DRIVE_LIMITS.maxPaidPerDay).toBeNull();
+  });
+
+  it('retains explicitly supplied daily and paid limits, including zero', () => {
+    const candidates = [cand('a', 9), cand('b', 8), cand('c', 7, 'small'), cand('d', 6)];
+    const picks = selectImprovements(candidates, budget(), [], NOW, { maxPerDay: 3, maxPaidPerDay: 1 });
     expect(picks.map((p) => [p.candidate.id, p.lane])).toEqual([['a', 'cloud'], ['b', 'backlog'], ['c', 'fleet']]);
-    expect(picks).toHaveLength(DRIVE_LIMITS.maxPerDay);
+    expect(selectImprovements(candidates, budget(), [], NOW, { maxPerDay: 0 })).toEqual([]);
+    expect(selectImprovements(candidates, budget(), [], NOW, { maxPaidPerDay: 0 }).map(p => p.lane)).toEqual(['backlog', 'backlog', 'fleet', 'backlog']);
+    expect(selectImprovements(candidates, budget(), [], NOW, {}).map(p => p.lane)).toEqual(['cloud', 'cloud', 'fleet', 'cloud']);
+  });
+
+  it.each([Infinity, NaN, -1, 1.5])('refuses invalid explicit daily drive limit %s', limit => {
+    expect(() => selectImprovements([cand('a', 1)], budget(), [], NOW, { maxPerDay: limit })).toThrow(RangeError);
+    expect(() => selectImprovements([cand('a', 1)], budget(), [], NOW, { maxPaidPerDay: limit })).toThrow(RangeError);
   });
 
   it('never spends in reserve mode or past a lane gate', () => {
@@ -569,14 +649,14 @@ describe('self-improvement drive — highest leverage, cheapest lane, bounded by
     };
     const first = await runLeaderDrive(runDeps, { sources });
     expect(first.ran).toBe(true);
-    expect(first.selections.map((s) => s.lane)).toEqual(['cloud', 'backlog', 'backlog']);
+    expect(first.selections.map((s) => s.lane)).toEqual(['cloud', 'cloud', 'cloud']);
     // The cloud pick is class B: scheduled behind its veto window, not launched yet.
     expect(first.actions[0]).toMatchObject({ kind: 'cloud.launch', status: 'scheduled' });
     expect(powers.launched).toEqual([]);
-    expect(first.actions.slice(1).every((a) => a.kind === 'backlog.add' && a.status === 'applied')).toBe(true);
+    expect(first.actions.every((a) => a.kind === 'cloud.launch' && a.status === 'scheduled')).toBe(true);
     const report = readDriveState().lastReport!;
     expect(report.text).toMatch(/Self-improvement — 3 moves/);
-    expect(report.actionIds).toEqual([first.actions[0]!.id]);
+    expect(report.actionIds).toEqual(first.actions.map(action => action.id));
     expect(report.postedAt).toBeNull();
 
     const again = await runLeaderDrive(runDeps, { sources });

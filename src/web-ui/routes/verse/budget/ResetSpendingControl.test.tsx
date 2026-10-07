@@ -165,7 +165,7 @@ describe('allowance controls', () => {
     render(<ResetSpendingControl view={null} nowMs={NOW} />);
     expect(screen.getByRole('switch')).toBeDisabled();
     expect(screen.getByText('Allowance setting has not loaded yet.')).toBeInTheDocument();
-    expect(screen.queryByText(/update Ashlr/)).toBeNull();
+    expect(screen.queryByText(/update Phantom/)).toBeNull();
   });
 
   it('a failed readback retains the previous choice and shows what needs review', async () => {

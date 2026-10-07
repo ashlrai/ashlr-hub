@@ -170,7 +170,7 @@ describe.runIf(posix)('runEngineSandboxed with a fake `devin` on PATH', () => {
     expect(existsSync(join(stubDir,'argv'))).toBe(false);
   },60_000);
 
-  it.each(['unchanged', 'host changed', 'repair copy changed'] as const)('verify-to-green uses a fresh Devin copy after initial cleanup: %s', async changed => {
+  it.each(['unchanged', 'host changed', 'repair copy changed', 'expired before repair', 'Stop before repair', 'notification throws'] as const)('verify-to-green uses a fresh Devin copy after initial cleanup: %s', async changed => {
     resetDevinCliAdmissionForTest();
     mkdirSync(join(stubDir,'data','devin'),{recursive:true,mode:0o700});
     writeFileSync(join(stubDir,'data','devin','credentials.toml'), 'fixture-only-login', {mode:0o600});
@@ -182,6 +182,11 @@ describe.runIf(posix)('runEngineSandboxed with a fake `devin` on PATH', () => {
         : 'Available models (1 family)\nSWE-2 (swe-2)\n  swe-2-high  Fixture  [262K context, Free]\n',
     });
     expect(binding).not.toBeNull();
+    const controller = new AbortController();
+    const notifications = vi.fn((model, issuedBinding) => {
+      expect(model).toBe('swe-2-high'); expect(issuedBinding).toBe(binding);
+      if (changed === 'notification throws') throw new Error('synthetic observer failure');
+    });
     // Only the launcher/agent/verification transports are fake. Preparation,
     // credential-copy epochs, disposal, worktree capture and filing are real.
     vi.spyOn(confinement,'buildSandboxLauncher').mockReturnValue({bin:'/usr/bin/env',prefixArgs:[]});
@@ -196,6 +201,9 @@ describe.runIf(posix)('runEngineSandboxed with a fake `devin` on PATH', () => {
         writeFileSync(join(prepared[1]!.overlay.set['XDG_DATA_HOME']!,'devin','credentials.toml'),'different-copy');
       }
       if (opts?.selectedOutcomeAdmission?.() === false) return {ok:false,output:'',terminationReason:'cancelled'};
+      // This hermetic transport reports the owned-child spawn event only after
+      // the real final identity/Stop/private-copy admission succeeds.
+      opts?.onSpawn?.();
       contacts++;
       expect(existsSync(prepared.at(-1)!.runDir)).toBe(true);
       writeFileSync(join(cmd.cwd!, 'fixed.ts'), `export const fixed = ${contacts};\n`);
@@ -206,6 +214,8 @@ describe.runIf(posix)('runEngineSandboxed with a fake `devin` on PATH', () => {
       expect(existsSync(prepared[0]!.runDir)).toBe(false);
       if (++gates === 1) {
         if (changed === 'host changed') writeFileSync(credentials,'different-host-login');
+        if (changed === 'expired before repair') vi.spyOn(Date, 'now').mockReturnValue(binding!.validUntil);
+        if (changed === 'Stop before repair') controller.abort();
         return {pass:false,reason:'fixture repair required'};
       }
       return {pass:true};
@@ -216,15 +226,20 @@ describe.runIf(posix)('runEngineSandboxed with a fake `devin` on PATH', () => {
     try {
       const {runEngineSandboxed} = await freshSandboxedEngine();
       const result = await runEngineSandboxed('devin-cli','fix fixture',conf,{
-        sourceRepo:sourceRepo(),propose:true,model:'swe-2-high',signal:new AbortController().signal,
+        sourceRepo:sourceRepo(),propose:true,model:'swe-2-high',signal:controller.signal,
         selectedDevinAdmission:() => binding,
+        onSelectedDevinSpawn:notifications,
       });
-      expect(gates).toBe(changed === 'unchanged' ? 2 : 1);
-      expect(contacts).toBe(changed === 'unchanged' ? 2 : 1);
-      expect(transport).toHaveBeenCalledTimes(changed === 'host changed' ? 1 : 2);
-      expect(prepared).toHaveLength(changed === 'host changed' ? 1 : 2);
+      const continues = changed === 'unchanged' || changed === 'notification throws';
+      const preparesRepair = continues || changed === 'repair copy changed';
+      expect(gates).toBe(continues ? 2 : 1);
+      expect(contacts).toBe(continues ? 2 : 1);
+      expect(notifications).toHaveBeenCalledTimes(contacts);
+      expect(transport).toHaveBeenCalledTimes(preparesRepair ? 2 : 1);
+      expect(prepared).toHaveLength(preparesRepair ? 2 : 1);
       expect(prepared.every(spawn => !existsSync(spawn.runDir))).toBe(true);
-      if (changed === 'unchanged') expect(result.proposalId).toBeDefined();
+      if (changed !== 'Stop before repair') expect(result.state.usage.steps).toBe(contacts);
+      if (continues) expect(result.proposalId).toBeDefined();
       else expect(result.proposalId).toBeUndefined();
     } finally { resetDevinCliAdmissionForTest(); }
   },60_000);

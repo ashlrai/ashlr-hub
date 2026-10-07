@@ -241,7 +241,6 @@ describe('M134 agent-loop: adaptivePrompts ON', () => {
     await runTask(makeTask(), client, makeCtx(true));
 
     const sys = capturedMessages()[0]!;
-    const profile = resolveModelProfile('qwen2.5-coder:32b');
     // The roleHint should appear in the system content (may be truncated to cap)
     // We check for a distinctive substring from the coder roleHint
     expect(sys.content).toContain('READ');
@@ -261,6 +260,58 @@ describe('M134 agent-loop: adaptivePrompts ON', () => {
     await runTask(task, client, makeCtx(true));
     expect(task.status).toBe('done');
     expect(task.result).toBe('done');
+  });
+});
+
+describe('local sandbox host-verification prompt contract', () => {
+  it.each([true, false])('uses effective executable capabilities with adaptive=%s', async (adaptivePrompts) => {
+    const { client, capturedMessages } = makeMockClient('qwen2.5-coder:32b');
+    const read = vi.fn(async () => 'file content');
+    const write = vi.fn(async () => 'written');
+    await runTask(makeTask('make a scoped change'), client, {
+      ...makeCtx(adaptivePrompts), hostVerification: true,
+      tools: [{ name: 'read_file', fn: read }, { name: 'write_file', fn: write },
+        { name: 'bash' }], // A spec without an executor cannot become a promised capability.
+    });
+    const system = capturedMessages()[0]!.content;
+    expect(system).toContain('Available executable tools: read_file, write_file.');
+    expect(system).toContain('host handles required command checks');
+    expect(system).toContain('Do not claim tests, typecheck or lint ran');
+    expect(system).toContain('read back your changes');
+    expect(system).not.toContain('after every substantive edit, run');
+    if (adaptivePrompts) expect(system.length).toBeLessThanOrEqual(resolveModelProfile(client.model).promptCharCap);
+    expect(read).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it.each(['qwen2.5:1.5b', 'qwen2.5:7b', 'qwen2.5-coder:32b'])(
+    'retains the complete host contract within the %s profile', async (model) => {
+      const { client, capturedMessages } = makeMockClient(model);
+      const execute = vi.fn(async () => 'observed');
+      const toolNames = ['read_file', 'glob', 'grep', 'write_file', 'edit_file'];
+      await runTask(makeTask('make a scoped change'), client, {
+        ...makeCtx(true), hostVerification: true,
+        tools: toolNames.map((name) => ({ name, fn: execute })),
+      });
+      const system = capturedMessages()[0]!.content;
+      expect(system.length).toBeLessThanOrEqual(resolveModelProfile(model).promptCharCap);
+      expect(system).toContain(`Available executable tools: ${toolNames.join(', ')}.`);
+      expect(system).toContain('The host handles required command checks and verification.');
+      expect(system).toContain('mark unobserved checks pending host verification.');
+      expect(system).toContain('If no change is justified, explain why and stop.');
+      expect(system).not.toContain('…');
+      expect(execute).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not advertise tool capabilities when the client cannot call tools', async () => {
+    const { client, capturedMessages } = makeMockClient('qwen2.5-coder:32b');
+    client.supportsTools = false;
+    const write = vi.fn(async () => 'written');
+    await runTask(makeTask(), client, { ...makeCtx(true), hostVerification: true,
+      tools: [{ name: 'write_file', fn: write }] });
+    expect(capturedMessages()[0]!.content).toContain('Available executable tools: none.');
+    expect(write).not.toHaveBeenCalled();
   });
 });
 

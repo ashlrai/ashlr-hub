@@ -256,7 +256,11 @@
 /* One per MOUNTED surface. Only the current one is visible; the others keep
    their state behind it (`hidden` + `inert`, set by VerseApp). `[hidden]`
    must be restated: an author `display` beats the UA's `display: none`. */
+/* The mode row already occupies the native titlebar band. Child headers and
+   drag handles must not reserve it again below that row. In focus mode the
+   mode row is hidden, so restore the native inset for the exposed surface. */
 .surface {
+  --app-titlebar-height: 0px;
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -264,6 +268,7 @@
   min-height: 0;
 }
 .surface[hidden] { display: none; }
+.shell[data-focus='on'] .surface { --app-titlebar-height: inherit; }
 .surface > * { min-height: 0; }
 
 /* ---- phone: the rail becomes a bottom bar ------------------------------
@@ -327,8 +332,11 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1);
+  align-items: center;
+  min-height: max(var(--strip-height), var(--app-titlebar-height, 0px));
   padding: var(--space-2) var(--space-3);
-  padding-top: calc(var(--space-2) + var(--app-titlebar-height, 0px));
+  /* Share the titlebar row with controls beside, never over, the lights. */
+  padding-left: max(var(--space-3), calc(var(--app-traffic-light-inset, 0px) - var(--rail-width, 56px) + var(--space-2)));
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-canvas);
 }

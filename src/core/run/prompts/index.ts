@@ -16,7 +16,7 @@ import {
   OUTPUT_CONTRACT,
   pick,
 } from './layers.js';
-import { EXECUTOR_ROLE, PLANNER_ROLE, SYNTHESIZER_ROLE } from './roles.js';
+import { EXECUTOR_ROLE, PLANNER_ROLE, SYNTHESIZER_ROLE, hostVerifiedExecutorRole } from './roles.js';
 import { composeWithinBudget, type BudgetPart } from './budget.js';
 
 export type { PromptRole, AssembleOptions, AssembledPrompt } from './types.js';
@@ -52,7 +52,8 @@ export function assembleSystemPrompt(opts: AssembleOptions): AssembledPrompt {
     }
     parts.push({ key: 'tool', text: toolText, essential: true });
     parts.push({ key: 'output', text: pick(OUTPUT_CONTRACT, v), essential: true });
-    parts.push({ key: 'role', text: pick(EXECUTOR_ROLE, v), essential: true });
+    parts.push({ key: 'role', text: opts.hostVerificationTools !== undefined
+      ? hostVerifiedExecutorRole(opts.hostVerificationTools) : pick(EXECUTOR_ROLE, v), essential: true });
     if (opts.memory) parts.push({ key: 'memory', text: opts.memory, essential: false });
   } else {
     // planner / synthesizer: memory first (context), role contract last.

@@ -1,3 +1,5 @@
+import { VerseMark } from '../routes/verse/rail-icons.js';
+import { PRODUCT_NAME } from './product-brand.js';
 import { useEffect } from 'react';
 import { SessionGate } from '../components/auth/SessionGate.js';
 import { clearReadSession, markCheckComplete } from '../data/auth-store.js';
@@ -42,9 +44,7 @@ function ScopedWorkspace() {
       <header className={styles.scopeBar}>
         <div className={styles.scope}>
           <div className={styles.brand}>
-            <svg className={styles.brandMark} viewBox="54 67 146 124" aria-hidden="true" focusable="false">
-              <path fill="currentColor" d="M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z" /><path fill="#2563EB" d="M110 121H143L133 152H120Z" />
-            </svg><strong>Ashlrverse</strong><span className={styles.workspace}>Experiments</span>
+            <VerseMark size={24} /><strong>{PRODUCT_NAME}</strong><span className={styles.workspace}>Experiments</span>
           </div>
           <span className={styles.badge}>Read-only observation</span>
           {scope.data ? <details className={styles.store}><summary>Universe store</summary>
@@ -84,7 +84,7 @@ export function UniverseConsoleApp() {
 
   if (phase === 'checking') return <p className={styles.checking} role="status">Checking for an existing console session…</p>;
   if (phase === 'unauthenticated') return <SessionGate
-    heading="Connect to Ashlrverse"
+    heading={`Connect to ${PRODUCT_NAME}`}
     command="ashlr universe console --root /absolute/universe-store"
   />;
   return <ScopedWorkspace />;

@@ -39,6 +39,8 @@ function cloudOverview(now: number) {
 
 describe('Shadow decisions on Fleet', () => {
   it('lists each decision with gate chips, why, size, stage and links; regressions sit above, loud', async () => {
+    // Load the real lazy view before timing its rendered data and interactions.
+    await import('./ShadowDecisions.js');
     const now = Date.now();
     const regressedAt = new Date(now - 3 * 3_600_000).toISOString();
     stubSurfaceFetch({

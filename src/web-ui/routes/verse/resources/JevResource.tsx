@@ -30,7 +30,7 @@ export function JevResource() {
   if (!body) {
     return (
       <li className={styles.card} data-resource="jev" data-jev="unrecognised">
-        <p className={styles.subtle}>{read.data.reason ?? 'Unrecognized response — update Ashlr.'}</p>
+        <p className={styles.subtle}>{read.data.reason ?? 'Unrecognized response — update Phantom.'}</p>
       </li>
     );
   }

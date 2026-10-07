@@ -84,7 +84,7 @@ export function VoiceInput({
 
   if (voice.backend === 'none') {
     return (
-      <Tooltip label="Dictation needs the Ashlr desktop app, or a browser with speech recognition" placement="top">
+      <Tooltip label="Dictation needs the Phantom desktop app, or a browser with speech recognition" placement="top">
         <button type="button" className={`${styles.mic} ${className ?? ''}`} disabled aria-disabled="true" data-surface={surface}>
           <MicIcon />
           <span className="visually-hidden">Dictation unavailable</span>

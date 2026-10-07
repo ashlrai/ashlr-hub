@@ -401,7 +401,7 @@ export function describeGitError(err: unknown): string {
     if (e.name === 'VerseMutationLockedError') return 'Unlock actions with the mutation token first.';
     if (e.status === 401) return 'The mutation token was rejected. Unlock again with the token `ashlr verse` printed.';
     if (e.detail) return e.detail;
-    if (e.status === 404) return 'This server has no git routes yet. Update Ashlr and restart `ashlr verse`.';
+    if (e.status === 404) return 'This server has no git routes yet. Update Phantom and restart `ashlr verse`.';
     if (e.status === 409) return 'Git is busy in this repository. Try again in a moment.';
   }
   return 'The git action failed. The terminal will show why.';

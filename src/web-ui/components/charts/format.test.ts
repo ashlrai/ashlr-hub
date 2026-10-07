@@ -48,24 +48,34 @@ describe('formatDayLabel', () => {
 
 describe('shared chart number and timestamp formatting', () => {
   it.each([
-    [0, '0'], [1.25, '1.3'], [1284, '1,284'], [12_900, '13K'],
+    [0, '0'], [1.25, '1.3'], [1284, '1.3K'], [12_900, '13K'],
     [4_200_000, '4.2M'], [12_900_000, '13M'], [-12_900, '-13K'],
   ])('formats count %s as %s', (value, label) => {
     expect(formatCompact(value)).toBe(label);
   });
 
-  it.each([[4.2, '$4.20'], [1200, '$1.2K'], [4_200_000, '$4.2M'], [-4.2, '-$4.20'], [0, '$0.00']])(
+  it.each([[4.2, '$4.2'], [1200, '$1.2K'], [4_200_000, '$4.2M'], [-4.2, '-$4.2'], [0, '$0']])(
     'formats USD %s as %s', (value, label) => { expect(formatUsd(value)).toBe(label); },
   );
 
-  it('preserves percentage precision and signed compact conventions', () => {
+  it('keeps percentage displays at two significant figures and signed compact conventions', () => {
     expect(formatPercent(0.125)).toBe('13%');
-    expect(formatPercent(0.125, 1)).toBe('12.5%');
+    expect(formatPercent(0.125, 1)).toBe('13%');
     expect(formatPercent(-0.05)).toBe('-5%');
     expect(formatSignedCompact(12)).toBe('+12');
     expect(formatSignedCompact(-3)).toBe('-3');
     expect(formatSignedCompact(0)).toBe('0');
     expect(formatSignedCompact(12_900)).toBe('+13K');
+  });
+
+  it.each([
+    [0.01234, '1.2%'], [0.00001234, '0.0012%'],
+    [-0.00001234, '-0.0012%'], [0.000000001234, '0.00000012%'], [0, '0%'],
+  ])('preserves fractional and tiny nonzero percentages %s as %s', (fraction, label) => {
+    expect(formatPercent(fraction)).toBe(label);
+    expect(formatPercent(fraction, 0)).toBe(label);
+    expect(formatPercent(fraction, 1)).toBe(label);
+    expect(formatPercent(fraction, 10)).toBe(label);
   });
 
   it.each([NaN, Infinity, -Infinity])('does not manufacture numeric labels for %s', (value) => {

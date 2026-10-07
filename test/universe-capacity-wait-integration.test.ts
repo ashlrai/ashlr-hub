@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { initUniverse, initUniverseCampaign, readUniverseCampaign, readUniverseOverview,
   type UniverseCampaignDefinition, type UniverseManifest } from '../src/core/universe/index.js';
 import { runUniversePortfolio } from '../src/core/universe/portfolio.js';
@@ -176,9 +177,10 @@ async function until(predicate: () => boolean): Promise<void> {
     await new Promise((done) => setTimeout(done, 20));
   }
 }
-async function bothWaits(value: ReturnType<typeof fixture>, observed: ReturnType<typeof watchContention>): Promise<void> {
+async function bothWaits(value: ReturnType<typeof fixture>, observed: ReturnType<typeof watchContention>,
+  onMetadataReleased?: () => void): Promise<void> {
   await until(() => value.contacts('metadata').length === 1 && observed.quota() > 0);
-  expect(value.contacts('exec')).toEqual([]); value.releaseMetadata();
+  expect(value.contacts('exec')).toEqual([]); value.releaseMetadata(); onMetadataReleased?.();
   await until(() => observed.slots() > 0);
   expect(value.contacts('metadata')).toHaveLength(2); expect(value.contacts('exec')).toHaveLength(1);
   expect(value.status().attempts).toHaveLength(1); expect(value.status().attempts[0]!.status).toBe('reserved');
@@ -280,10 +282,15 @@ describe.runIf(process.platform === 'darwin')('bounded capacity waiting across a
   });
 
   it('exhausts the bounded capacity wait without retrying metadata or starting another worker', async () => {
+    // Check one shared elapsed allowance across real metadata and slot contention,
+    // rather than host startup latency. Date, timers and private worker IO stay real.
+    let elapsed = 100;
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
     const value = fixture({ capacityWaitMs: 2000 }); const observed = watchContention(value); const controller = new AbortController();
     const pending = runUniversePortfolio(value.portfolio, { root: value.root, resourceRuntime: value.resourceRuntime, signal: controller.signal });
     try {
-      await bothWaits(value, observed);
+      await bothWaits(value, observed, () => { elapsed += 1000; });
+      elapsed += 1001;
       await until(() => ['a', 'b'].some((name) => readUniverseCampaign(`campaign-${name}`, value).state === 'paused'));
       value.releaseExec(); const result = await pending;
       expect(result.status).toBe('incomplete'); expect(result.outcomes.map((outcome) => outcome.status).sort()).toEqual(['completed', 'paused']);

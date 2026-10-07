@@ -102,8 +102,8 @@ describe('jev-model', () => {
     expect(jevHeadline(status({ enabled: false, disabledBy: 'ASHLR_JEV_DISABLE is set' }) as never).word).toBe('Off');
     expect(jevHeadline(status({ callsToday: 1500 }) as never).word).toBe('Budget spent');
     expect(formatUsd(0)).toBe('$0');
-    expect(formatUsd(0.004)).toBe('<$0.01');
-    expect(formatUsd(1.234)).toBe('$1.23');
+    expect(formatUsd(0.004)).toBe('$0.004');
+    expect(formatUsd(1.234)).toBe('$1.2');
     expect(formatUsd(null)).toBe('unknown');
     expect(formatUsd(NaN)).toBe('unknown');
     expect(jevHeadline(status({ dailyCallBudget: null, callsToday: 1501 }) as never).word).toBe('Configured');

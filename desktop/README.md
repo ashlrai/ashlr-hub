@@ -4,7 +4,7 @@ A Tauri v2 desktop app that wraps **Ashlr Verse** (the operator console at
 `/verse/`, see `../docs/VERSE.md`) in a native macOS window. Opening it starts
 the console; resident autonomy requires its separate local setup and grant.
 
-The versioned [v3.24.2 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.2/Ashlr_3.24.2_aarch64_locally-signed.dmg)
+The versioned [v3.24.3 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.3/Ashlr_3.24.3_aarch64_locally-signed.dmg)
 is the versioned installer link. Check the release artifacts before installing.
 It is locally signed, not Apple Developer ID notarized. macOS may require **Open
 Anyway** on first launch. The desktop CI workflow remains disabled during the
@@ -17,13 +17,13 @@ sidecar (~100 MiB), Rust executable and web assets.
 
 ## Install
 
-After release publication, download the [macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.2/Ashlr_3.24.2_aarch64_locally-signed.dmg)
+After release publication, download the [macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.3/Ashlr_3.24.3_aarch64_locally-signed.dmg)
 or use the [npm/CLI quickstart](../docs/QUICKSTART.md) on macOS, Linux and Windows.
 Other desktop formats remain subject to the draft artifact policy below.
 
 | Platform | Availability |
 |----------|-----------------------|
-| macOS arm64 | Locally signed v3.24.2 `.dmg` linked above |
+| macOS arm64 | Locally signed v3.24.3 `.dmg` linked above |
 | Windows | `.msi` / `.exe` draft only |
 | Linux | Not produced while quarantined |
 
@@ -818,13 +818,15 @@ npm run build:binary                        # → dist-bin/ashlr + dist-bin/publ
 node desktop/scripts/prepare-sidecar.mjs    # → desktop/src-tauri/binaries/ashlr-aarch64-apple-darwin
                                             #   desktop/src-tauri/resources/public/
 
-# 3. (Once, or after editing icons/icon.svg.)
+# 3. (Once, or after editing the Phantom icon source icons/icon.svg.)
 cd desktop && npm run icons                 # = cargo tauri icon src-tauri/icons/icon.svg
 
 # 4. Release build — the .app and the .dmg.
 #    beforeBundleCommand runs the bundle policy assertion, then dmg-preflight.
 cd desktop && cargo tauri build
 ```
+
+The native app icon is generated from the tracked Phantom ghost SVG on the existing rounded-square canvas. The five bundle icon outputs are generated locally, not checked in; the monochrome `tray.png` remains a separate tracked template icon. See [icon generation and provenance](src-tauri/icons/PLACEHOLDER.md). This artwork change preserves the compatible `Ashlr.app` bundle identity and signing.
 
 Timing on this Mac: about 6 minutes cold (the release profile is `lto = true`,
 `codegen-units = 1`, `panic = "abort"`), about 90 seconds when only the bundling

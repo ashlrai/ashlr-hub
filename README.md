@@ -1,12 +1,14 @@
 <a id="ashlr-universe"></a>
 
-# Ashlr Verse
+# Phantom
+
+**The engineering agent workbench · by [AshlrAI](https://ashlr.ai).**
 
 **Work with agents. Let agents work for you. One open-source workbench for your accounts, local models, chats and engineering fleet.**
 
 **[verse.ashlr.ai](https://verse.ashlr.ai)**
 
-[Install](#install) · [See the workbench](#what-it-is) · [Benchmarks](#benchmarks-and-traces) · [Read the guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) · [Explore the ecosystem](https://verse.ashlr.ai/ecosystem) · [Star Verse on GitHub](https://github.com/ashlrai/ashlr-hub)
+[Install](#install) · [See the workbench](#what-it-is) · [Benchmarks](#benchmarks-and-traces) · [Read the guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) · [Explore the ecosystem](https://verse.ashlr.ai/ecosystem) · [Star Phantom on GitHub](https://github.com/ashlrai/ashlr-hub)
 
 [![CI](https://github.com/ashlrai/ashlr-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/ashlr-hub/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
@@ -16,32 +18,35 @@
 
 ## Install
 
-Verse 3.24.2 (after release publication):
+Phantom 3.24.3 (after release publication):
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.2/ashlr-hub-3.24.2.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.3/ashlr-hub-3.24.3.tgz   # the `ashlr` CLI; Node.js 22.15+ and Git; macOS, Linux, Windows
 ashlr verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 On an Apple silicon Mac, download the
-[v3.24.2 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.2/Ashlr_3.24.2_aarch64_locally-signed.dmg).
+[v3.24.3 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.3/Ashlr_3.24.3_aarch64_locally-signed.dmg).
 It is locally signed, not Apple notarized; macOS may require **Open Anyway** on
 first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
 [first-run guide](docs/QUICKSTART.md#open-verse).
 
-![Work with me: the Ashlr Verse 3.22 chat workbench with collapsed projects and the active chat preserved, using labeled sample accounts](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/verse-work-with-me-3.22-demo.jpg)
+![Phantom 3.24.3 Work with me: read-only Demo chat with labeled sample accounts and provider-inactive conversation.](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/verse-work-with-me-3.24.3-demo.jpg)
 
-![Work for me: the Ashlr Verse 3.22 Fleet view with an inline verification and GitHub timeline, unknown CI and deployment coverage](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/verse-work-for-me-3.22-demo.jpg)
+![Phantom 3.24.3 Work for me: read-only Command overview with labeled Demo accounts and an illustrative Leader memo.](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/verse-work-for-me-3.24.3-demo.jpg)
 
-*Actual compiled 3.22 browser workbench with labeled demo accounts, sample usage and synthetic execution timelines.
-No provider ran and no fleet was active for these screenshots. They show the web UI, not native app chrome.*
+*Actual compiled 3.24.3 browser UI with labeled Demo accounts, a sample conversation and an illustrative Leader memo. No provider ran and no fleet was active. Verification, merge and production are separate records; CI is unknown and release/deployment is unrecorded. These screenshots show the browser UI, not native app chrome.*
+
+![Phantom agent world: an interactive illustration with provider logos and three colorful engineering agents.](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/phantom-agent-world-3.24.3-demo.jpg)
+
+*Explore the [interactive agent world](https://verse.ashlr.ai/#phantom-world): subscriptions, API credits, local models and MCP/CLI tools. This illustration does not launch agents.*
 
 ---
 
 ## What it is
 
-**Ashlr Verse** is an operator console for coding agents. Every Claude Code,
+**Phantom** is an operator console for coding agents. Every Claude Code,
 Codex, Devin and Grok account you own becomes a *seat*, and so does every
 tool-capable local model. Claude Code, Codex and Devin are equal partners:
 routing picks among them by fit, headroom, cost and latency, never by brand. You
@@ -50,7 +55,7 @@ sessions, which keep running remotely on your signed-in Claude account, and to
 Devin sessions. Eligible promotional credits are used first, then included plan
 usage where available; paid-only models and enabled over-limit usage can use
 purchased credits. A **Leader** plans the fleet's work
-and talks with you in Verse, on Telegram or in the terminal. And the fleet works
+and talks with you in Phantom, on Telegram or in the terminal. And the fleet works
 your enrolled repositories only inside a standing grant you sign with Touch ID:
 it starts in shadow, recording what it would merge, and climbs a rollout ladder
 from there.
@@ -60,15 +65,16 @@ serves the same console in a browser on macOS, Linux and Windows. Under the
 console is the Hub kernel: the CLI, the Universe experiment runtime and
 account-aware resource pools.
 
-Names stay compatible. The repository is `ashlr-hub`, the package is
+Phantom was formerly Ashlr Verse. Names stay compatible. The repository is `ashlr-hub`, the package is
 `@ashlr/hub`, the command is `ashlr`, and experiments remain `ashlr universe`
-with the `@ashlr/hub/universe` SDK. "Ashlrverse" is the wider project; existing
-manifests, schemas and stores need no naming migration.
+with the `@ashlr/hub/universe` SDK. Existing manifests, schemas and stores need no naming migration. The compatible native installation currently remains `Ashlr.app`; see [branding and compatibility](https://github.com/ashlrai/ashlr-hub/blob/master/docs/PHANTOM-BRAND.md).
 
 The user guide is [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
 See [Automatic work](docs/AUTOMATIC-OUTCOMES.md) for chat routing, editable outcomes and recovery.
 
-### What's in Verse 3.24
+<a id="whats-in-verse-324"></a>
+
+### What's in Phantom 3.24
 
 **See what is running, what was measured and what still needs permission.**
 The desktop can request that the host stay awake during observed local chat and
@@ -196,14 +202,14 @@ model calls.
 
 ## The desktop app (macOS)
 
-The desktop app is a native window around Verse, with a menu-bar item,
+The desktop app is a native window around Phantom, with a menu-bar item,
 notifications while it is hidden, a Dock badge for Needs-you items and the
 Terminal pane in the chat dock. It bundles the `ashlr` CLI, so it needs no
 separate Node.js install to run.
 
 ### Install
 
-Use the [v3.24.2 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.24.2)
+Use the [v3.24.3 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.24.3)
 for the versioned arm64 DMG. It is locally signed, not Apple Developer ID notarized,
 so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
@@ -232,7 +238,7 @@ The local build is signed with "Ashlr Local", not Apple Developer ID notarized.
 macOS may still require right-click **Open** or **Open Anyway** on first launch.
 The first signing setup may also ask for your login password and **Always Allow**
 for the signing key. A small launch window says what is
-happening while the bundled server starts on `127.0.0.1:7777`. The Verse window
+happening while the bundled server starts on `127.0.0.1:7777`. The Phantom window
 then opens with its tokens already handed over, so there is nothing to paste.
 Closing the window hides it to the menu bar; **Quit** stops the server.
 
@@ -242,7 +248,7 @@ there is a local model, and the three ways to stop things.
 ### Sign in your seats
 
 A seat is one account and the CLI that drives it, pinned to its own profile so a
-turn can never land on the wrong account. Verse never asks for or stores a
+turn can never land on the wrong account. Phantom never asks for or stores a
 credential; each vendor CLI signs itself in.
 
 1. **Prepare a private profile** for each account. For the Claude seat the cloud
@@ -273,7 +279,7 @@ credential; each vendor CLI signs itself in.
    }
    ```
 
-4. **Reopen Verse.** The account appears as a seat in the composer and in
+4. **Reopen Phantom.** The account appears as a seat in the composer and in
    **Apps & Accounts**, which shows its health, windows and resets. A background
    sweep checks every seat every 10 minutes with status commands only.
    **Reconnect** opens the seat's own login in Terminal.
@@ -291,7 +297,7 @@ The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.2/ashlr-hub-3.24.2.tgz
+npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.3/ashlr-hub-3.24.3.tgz
 ashlr --version
 ashlr verse                 # start the server and open http://127.0.0.1:7777/verse/
 ```
@@ -311,7 +317,7 @@ ID).
 
 ## Quickstart
 
-1. **Install** the desktop app or the CLI (above), and open Verse.
+1. **Install** the desktop app or the CLI (above), and open Phantom.
 2. **Sign in your seats** (above). Start `ollama serve` for local seats.
 3. **Open a project.** **New chat** (⌘N) picks a seat and a folder; in the
    desktop app **Choose folder…** opens the native picker. Saving a folder as a
@@ -323,7 +329,7 @@ ID).
    opens Needs you.
 5. **Optionally run the local fast lane.** `ashlr local-runtime start --slots 4`
    starts llama-server with batching slots, and
-   `ASHLR_VERSE_LOCAL_DISPATCH=llama-server` in Verse's environment sends local
+   `ASHLR_VERSE_LOCAL_DISPATCH=llama-server` in the workbench's environment sends local
    turns to it. Model discovery stays on Ollama.
 6. **Optionally hand work to the cloud or to Devin.** **New cloud task** on
    Command, or `ashlr cloud launch "<task>" --repo owner/name`
@@ -375,7 +381,9 @@ the provider's own mark: Anthropic's Claude, OpenAI, xAI's Grok or Ollama. Hover
 and the share kept for you, or click it to open the drawer. **Hide resource bar** is in the drawer's footer and in
 ⌘K.
 
-## Working on Verse itself
+<a id="working-on-verse-itself"></a>
+
+## Working on Phantom itself
 
 ```sh
 npm run gate          # minutes, not half an hour: static checks + the tests your change can reach
@@ -387,7 +395,7 @@ Then `npm publish` the tarball `ship:local` prints. `npm run gate:full` runs eve
 
 ## The cloud and Devin lanes
 
-Verse can hand a task to a **Claude Code cloud session** (`ashlr cloud launch
+Phantom can hand a task to a **Claude Code cloud session** (`ashlr cloud launch
 "<task>"`) or, off by default, to **Devin** (`ashlr devin connect`, then
 `ashlr devin launch "<task>"`). Each task is asked to deliver one draft PR, and
 nothing in the cloud lane merges. Overview: [Cloud and Devin lanes](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD-LANES.md);
@@ -475,7 +483,7 @@ repository or changelog state alone is not publication evidence.
 
 ## The Ashlr ecosystem
 
-Verse is the flagship workbench. These related open-source projects solve
+Phantom is the flagship workbench. These related open-source projects solve
 different parts of a developer's workflow and remain useful on their own:
 
 Explore the [interactive ecosystem page](https://verse.ashlr.ai/ecosystem) for a
@@ -483,8 +491,8 @@ dated, GitHub-sourced star history of these six repositories and their sum.
 
 | Project | What it helps with |
 |---------|--------------------|
-| **[Ashlr Verse](https://github.com/ashlrai/ashlr-hub)** | Coordinate coding agents, accounts, local models and guarded fleet work from one console. |
-| **[Phantom](https://github.com/ashlrai/phantom-secrets)** | Keep real API keys out of agent context with local tokens and a network-edge proxy. |
+| **[Phantom](https://github.com/ashlrai/ashlr-hub)** | Coordinate coding agents, accounts, local models and guarded fleet work from one console. |
+| **[Phantom Secrets](https://github.com/ashlrai/phantom-secrets)** | Keep real API keys out of agent context with local tokens and a network-edge proxy. |
 | **[Locus](https://github.com/ashlrai/locus)** | Pin the account and workspace identity under which an agent acts. |
 | **[Lexicon](https://github.com/ashlrai/lexicon)** | Correct names and technical terms that speech-to-text gets wrong before they reach an agent. |
 | **[AshlrCode](https://github.com/ashlrai/ashlrcode)** | Run a multi-provider coding agent in the terminal. |
@@ -501,7 +509,7 @@ Star and source-maintainer references. Start with these canonical guides:
 
 | Doc | What it covers |
 |-----|----------------|
-| [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) | The Verse user guide: every surface and shortcut, chat workbench, seats, Resources, Lessons, the repo wiki, autonomy, the cloud and Devin lanes, the desktop app |
+| [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) | The Phantom user guide: every surface and shortcut, chat workbench, seats, Resources, Lessons, the repo wiki, autonomy, the cloud and Devin lanes, the desktop app |
 | [`docs/HUB-REFERENCE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md) | The Hub underneath the console: Universe experiments, resource pools, the legacy fleet and its activation runbook, kill switch, backends, sandboxing, command reference, safety model, configuration |
 | [`docs/AUTONOMY-SETUP.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTONOMY-SETUP.md) | The autonomy commissioning path, what a grant allows, and budget modes |
 | [`docs/CLOUD-LANES.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD-LANES.md) | Overview of the Claude Code cloud lane and the Devin lane |

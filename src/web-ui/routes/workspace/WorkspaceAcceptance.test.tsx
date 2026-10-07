@@ -147,10 +147,10 @@ describe('independent workspace acceptance boundaries', () => {
     const user = userEvent.setup(); render(<ResourcePoolConsoleApp />);
     await screen.findByLabelText('Task prompt'); fillDraft();
     await user.click(screen.getByRole('button', { name: 'Disconnect' }));
-    await screen.findByRole('heading', { name: 'Connect to Ashlrverse resources' });
+    await screen.findByRole('heading', { name: 'Connect to Phantom resources' });
     expect(screen.queryByLabelText('Task prompt')).not.toBeInTheDocument();
     expect(screen.queryByText('Preserve this scoped draft.')).not.toBeInTheDocument();
-    await user.type(screen.getByLabelText('Read token'), 'a'.repeat(64));
+    fireEvent.change(screen.getByLabelText('Read token'), { target: { value: 'a'.repeat(64) } });
     await user.click(screen.getByRole('button', { name: 'Connect' }));
     expect(await screen.findByLabelText('Task prompt')).toHaveValue('');
     expect(request.mock.calls.some(([path]) => path === '/api/resources/tasks')).toBe(false);

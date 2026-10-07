@@ -9,14 +9,15 @@
  * Cycle time and lift carry no sparkline on purpose: their sources hold one
  * current figure, not a daily series, and none is invented for the glance.
  */
+import { formatMetric, formatMetricUsd } from '../../../components/charts/format-metric.js';
 import { StatTile } from '../../../components/charts/StatTile.js';
 import type { Kpi } from './command-model.js';
 import styles from './command.module.css';
 
 const DESCRIBE_TREND: Partial<Record<Kpi['id'], (v: number) => string>> = {
-  merged: (v) => `${Math.round(v)} merged`,
-  green: (v) => `${Math.round(v)}%`,
-  spend: (v) => `$${v.toFixed(2)}`,
+  merged: (v) => `${formatMetric(v)} merged`,
+  green: (v) => `${formatMetric(v)}%`,
+  spend: (v) => formatMetricUsd(v),
 };
 
 export function KpiRow({ kpis }: { kpis: Kpi[] }) {

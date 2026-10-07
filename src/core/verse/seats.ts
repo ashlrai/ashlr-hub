@@ -543,7 +543,7 @@ function telemetryOf(record: VerseAccountRecord, evidenceSource: VerseSeatEviden
   const bindingId = record.binding?.id ?? null;
   const binding = bindingId === null ? null : windows.find((w) => w.id === bindingId) ?? null;
   return {
-    ...(record.observedAt === null && record.lastKnownUsage ? { lastKnownUsage: structuredClone(record.lastKnownUsage) } : {}),
+    ...(record.lastKnownUsage ? { lastKnownUsage: structuredClone(record.lastKnownUsage) } : {}),
     health: {
       state: seatHealthState(record),
       summary: windowsSummary(windows),

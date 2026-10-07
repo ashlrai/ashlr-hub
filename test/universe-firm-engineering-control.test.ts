@@ -55,7 +55,7 @@ function git(cwd: string, ...args: string[]): string {
     encoding: 'utf8', timeout: 10_000, env: { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', LC_ALL: 'C' },
   }).trim();
 }
-async function fixture(options: { allInvalid?: boolean; graphDurationMs?: number; driftRuntimeAfterFirst?: boolean; hang?: boolean } = {}) {
+async function fixture(options: { allInvalid?: boolean; graphDurationMs?: number; driftRuntimeAfterFirst?: boolean; hang?: boolean; evaluatorExecutable?: string } = {}) {
   const root = join(base, 'universe'); const graphRoot = join(base, 'graph'); const repo = join(base, 'source');
   const workspace = join(base, 'sterile-transport');
   for (const path of [graphRoot, repo, workspace]) mkdirSync(path, { mode: 0o700 });
@@ -105,7 +105,7 @@ async function fixture(options: { allInvalid?: boolean; graphDurationMs?: number
     objective: 'Correct the measured integer under the fixed evaluator', seed: { repo, revision },
     metric: { name: 'value', direction: 'maximize', minImprovement: 0 },
     budget: { maxTrials: 1, maxParallel: 1, maxDurationMs: options.hang ? 30_000 : 15_000, trialTimeoutMs: options.hang ? 20_000 : 5000 },
-    evaluation: { command: [process.execPath, 'evaluate.mjs'], timeoutMs: 3000 },
+    evaluation: { command: [options.evaluatorExecutable ?? process.execPath, 'evaluate.mjs'], timeoutMs: 3000 },
     variants: [{ id: 'repair', niche: 'value', hypothesis: 'Use evaluator feedback to correct the value', generation: {
       kind: 'resource-pool', poolId: pool.id, poolDigest: digest(canonical({ pool, bindings })), allowedWorkerIds: ['local-worker'],
       files: ['value.json'], maxOutputTokens: 256, fileOperations: { schemaVersion: 1, contextFiles: [] } } }] };
@@ -261,6 +261,23 @@ describe.runIf(process.platform === 'darwin')('firm engineering adapter integrat
     save(f.resourceRuntime, { ...f.runtime, root: changedRoot });
     const result = await f.run(); expect(result.nodes[0]!.state).toBe('rejected'); expect(f.requests).toEqual([]);
     expect(existsSync(f.runtime.root)).toBe(false); expect(existsSync(changedRoot)).toBe(false);
+  });
+
+  it.each(['seed', 'executable'] as const)('rechecks changed %s bytes on new binding and effect invocation', async (mode) => {
+    // This owned executable is only pinned. Refusal must precede evaluator or resource execution.
+    const executable = join(base, 'fixture-evaluator');
+    writeFileSync(executable, '#!/bin/sh\nexit 97\n', { mode: 0o700 });
+    const f = await fixture({ evaluatorExecutable: executable });
+    const changed = mode === 'executable' ? executable : join(f.root, 'universes', f.manifest.id, 'seed', 'value.json');
+    chmodSync(changed, 0o600);
+    writeFileSync(changed, mode === 'executable' ? '#!/bin/sh\nexit 98\n' : '99\n');
+    if (mode === 'executable') chmodSync(changed, 0o700);
+    expect(() => createFirmEngineeringControlHandler(f.host)).toThrow(/healthy confined resource-pool/);
+    const result = await f.run();
+    expect(result.nodes[0]!.state).toBe('rejected');
+    expect(f.requests).toEqual([]); expect(f.fixtureErrors).toEqual([]);
+    expect(existsSync(f.runtime.root)).toBe(false);
+    expect(git(f.repo, 'branch', '--list', f.branch)).toBe('');
   });
 
   it.each([false, true])('refuses to attribute a previously completed controller with held execution lock=%s to a new graph intent', async (held) => {

@@ -67,7 +67,7 @@ export const devinQuery: QueryDef<OptionalRead<DevinOverviewResponse>> = {
   fetch: async (signal) => {
     try {
       const value = narrowDevinOverview(await apiGet<unknown>(VERSE_DEVIN_PATH, signal));
-      if (value === null) return { value: null, available: true, reason: 'Unrecognized response — update Ashlr.' };
+      if (value === null) return { value: null, available: true, reason: 'Unrecognized response — update Phantom.' };
       return { value, available: true, reason: null };
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) throw err;

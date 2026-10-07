@@ -50,7 +50,7 @@ function mount() {
 const key = (k: string, mods: Partial<Record<'metaKey' | 'shiftKey' | 'ctrlKey' | 'altKey', boolean>> = {}, code?: string) =>
   act(() => { fireEvent.keyDown(document, { key: k, code, ctrlKey: true, ...mods }); });
 
-const rail = () => screen.getByRole('navigation', { name: 'Verse sections' });
+const rail = () => screen.getByRole('navigation', { name: 'Phantom sections' });
 const surface = (id: string) => document.querySelector<HTMLElement>(`[data-surface="${id}"]`);
 
 /**
@@ -61,6 +61,12 @@ const surface = (id: string) => document.querySelector<HTMLElement>(`[data-surfa
  */
 beforeAll(async () => {
   await Promise.all(Object.values(SECTION_MODULES).map((load) => load()));
+  // A section import does not resolve its own child chunks. These shell/overlay
+  // tests start with ready content; cold transform latency is not their contract.
+  await Promise.all([
+    import('./sections/ChatSection.js').then((module) => module.preloadChatSurface()),
+    import('./resources/ResourcesChrome.js').then((module) => module.preloadResourcesDrawer()),
+  ]);
 }, 30_000);
 
 let net: ShellFetch;
@@ -155,6 +161,9 @@ describe('work intents', () => {
     await screen.findByRole('navigation', { name: 'Chats' });
     act(() => openVerseSession('vs_1'));
     await waitFor(() => expect(getVerseUiState().activeSessionId).toBe('vs_1'));
+    // Selecting a session precedes the lazy Workspace/Composer mount. Exercise
+    // Review after its draft is visible, so mount autofocus cannot race Escape.
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Message' })).toHaveValue('Keep this mobile review draft.'));
     expect(getVerseUiState().sidebarCollapsed).toBe(false);
     const button = screen.getByRole('button', { name: /^Review$/ });
     await user.click(button);

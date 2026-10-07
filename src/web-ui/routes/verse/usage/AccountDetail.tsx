@@ -21,10 +21,11 @@
  * one-point "trend" or back-filling a shape nobody measured.
  */
 import { useEffect, useRef, type ReactNode } from 'react';
+import { formatDecimalMetric, formatMetric } from '../../../components/charts/format-metric.js';
 import { StatusBadge, type Tone } from '../../../components/primitives/StatusBadge.js';
 import { relativePhrase } from '../context/context-model.js';
 import { ENGINE_LABEL } from '../verse-model.js';
-import type { AccountCardModel, AccountVerdictState } from './accounts-model.js';
+import { accountCreditDetail, type AccountCardModel, type AccountVerdictState } from './accounts-model.js';
 import { WindowMeter } from './WindowMeter.js';
 import styles from './usage.module.css';
 
@@ -196,13 +197,11 @@ export function AccountDetail({
                 {credits.unlimited
                   ? 'unlimited'
                   : credits.balanceValue !== null
-                    ? credits.balanceValue.toLocaleString('en-US', { maximumFractionDigits: 2 })
-                    : (credits.balance ?? 'not reported')}
+                    ? formatDecimalMetric(credits.balance) ?? formatMetric(credits.balanceValue)
+                    : (formatDecimalMetric(credits.balance) ?? credits.balance ?? 'not reported')}
               </span>
               <p className={styles.reason}>
-                {historical
-                  ? 'Prior balance for context only; current access and spendability are unconfirmed.'
-                  : 'Separate from the windows above; shown as the provider reports it.'}
+                {accountCreditDetail(credits, historical)}
               </p>
             </div>
           ) : null}

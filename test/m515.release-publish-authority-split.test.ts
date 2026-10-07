@@ -439,7 +439,7 @@ describe('release publish authority split', () => {
 
       const broken = evaluate(filter.replaceAll('.[0].files', '.files'));
       expect(broken.status).not.toBe(0);
-      expect(broken.stderr).toContain('Cannot index array with string "files"');
+      expect(broken.stderr.trim()).toMatch(/^jq: error \(at <stdin>:\d+\): Cannot index array with string (?:"files"|\("files"\))$/u);
     },
   );
 

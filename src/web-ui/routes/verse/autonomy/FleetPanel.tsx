@@ -92,7 +92,7 @@ export function FleetPanel({ read, runtime, loading = false }: FleetPanelProps):
       ) : fleet === null ? (
         <p className={styles.empty}>
           <span className={styles.emptyStrong}>Unreadable reading. </span>
-          {read.reason ?? 'Unrecognized response — update Ashlr.'}
+          {read.reason ?? 'Unrecognized response — update Phantom.'}
         </p>
       ) : (
         <>

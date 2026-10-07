@@ -57,7 +57,12 @@ async function setup(mobileAssets = false, withPush = false) {
     generateAuthenticationOptions, generateRegistrationOptions, verifyRegistrationResponse, verifyAuthenticationResponse,
   } });
   const mutations: { path: string; body: string; headers: Record<string, unknown> }[] = [];
+  const reads: { path: string; headers: Record<string, unknown> }[] = [];
   const hub = createServer(async (req, res) => {
+    if (req.method === 'GET' && req.headers['x-ashlr-token'] === READ_TOKEN) {
+      reads.push({ path: req.url ?? '', headers: { ...req.headers } });
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ read: true })); return;
+    }
     if (req.method === 'POST' && req.headers['x-ashlr-token'] === ACT_TOKEN) {
       let body = '';
       for await (const chunk of req) body += String(chunk);
@@ -91,7 +96,7 @@ async function setup(mobileAssets = false, withPush = false) {
       outgoing.on('error', reject); outgoing.end(bytes);
     });
   }
-  return { gateway, pairing, devices, push, mutations, send, verifyAuthenticationResponse, root };
+  return { gateway, pairing, devices, push, mutations, reads, send, verifyAuthenticationResponse, root };
 }
 
 describe('remote pairing and one-use WebAuthn HTTP writes', () => {
@@ -192,6 +197,11 @@ describe('remote pairing and one-use WebAuthn HTTP writes', () => {
       const logged = await login.json() as { csrfToken: string; capabilities: { writes: boolean } };
       expect(logged.capabilities.writes).toBe(true);
       const authCookie = login.headers.get('set-cookie')!.split(';', 1)[0]!;
+      const questionPath = '/api/verse/leader/questions/lm-20260927120000-abcdef:0';
+      expect((await f.send('GET', questionPath)).status).toBe(401);
+      expect((await f.send('GET', questionPath, authCookie)).status).toBe(200);
+      expect(f.reads.at(-1)).toMatchObject({ path: questionPath, headers: { 'x-ashlr-token': READ_TOKEN } });
+      expect(f.reads.at(-1)?.headers.cookie).toBeUndefined();
       const pushConfig = await f.send('GET', '/remote/push/config', authCookie);
       expect(await pushConfig.json()).toEqual({ publicKey: f.push!.publicKey });
       const subscription = { endpoint: 'https://web.push.apple.com/QvMqW-123456789012345678901234567890',
@@ -238,7 +248,17 @@ describe('remote pairing and one-use WebAuthn HTTP writes', () => {
         expect(f.mutations.at(-1)).toMatchObject({ path: guarded.path, body: exact.body });
       }
       expect(f.mutations).toHaveLength(4);
+      const submission = { schemaVersion: 1, formRevision: Array(8).fill('aaaaaaaa').join('-'), kind: 'options', optionIndices: [0] };
+      expect((await f.send('POST', `${questionPath}/answer`, authCookie, '', { submission })).status).toBe(403);
+      expect((await f.send('POST', `${questionPath}/answer`, authCookie, logged.csrfToken, { submission, actor: 'owner' })).status).toBe(400);
+      expect((await f.send('POST', `${questionPath}/answer`, authCookie, logged.csrfToken, { submission })).status).toBe(200);
+      expect(f.mutations.at(-1)).toMatchObject({ path: `${questionPath}/answer`, body: JSON.stringify({ submission }), headers: { 'x-ashlr-token': ACT_TOKEN } });
+      expect(f.mutations.at(-1)?.headers.cookie).toBeUndefined();
+      expect(f.mutations).toHaveLength(5);
       f.devices.revoke(approved.id, Date.now());
+      expect((await f.send('GET', questionPath, authCookie)).status).toBe(401);
+      expect((await f.send('POST', `${questionPath}/answer`, authCookie, logged.csrfToken, { submission })).status).toBe(403);
+      expect(f.mutations).toHaveLength(5);
       expect((await f.send('POST', '/api/verse/leader/thread', authCookie, logged.csrfToken, { text: 'After revoke' })).status).toBe(403);
       expect((await f.send('GET', '/remote/push/config', authCookie)).status).toBe(401);
       expect(await f.push!.send('needs-you')).toEqual({ attempted: 0, delivered: 0, retired: 0 });

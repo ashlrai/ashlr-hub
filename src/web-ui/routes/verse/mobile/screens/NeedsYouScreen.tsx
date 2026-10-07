@@ -25,6 +25,8 @@
  * (needs-you-model splitCoverage) and nothing is hidden here.
  */
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useId,
@@ -36,6 +38,10 @@ import {
 } from 'react';
 import type { NeedsYouAction, NeedsYouActionKind, NeedsYouItem, NeedsYouKind, NeedsYouSeverity } from '../../../../../core/verse/workbench-types.js';
 import { isRemoteMobileMode } from '../../../../data/remote-mode.js';
+import type { QuestionFormStore } from '../../leader/LeaderQuestionForm.js';
+const TypedQuestionForm = lazy(() => import('../../leader/LeaderQuestionForm.js'));
+
+import { MobileComposer } from '../MobileComposer.js';
 import { answerLeaderQuestion } from '../../leader/thread-data.js';
 import { needsYouQuestionText, questionIdOfNeedsYouItem } from '../../leader/question-id.js';
 import { runNeedsYouAction } from '../../shell/needs-you-actions.js';
@@ -51,7 +57,6 @@ import {
 import { markResolved, useResolvedIds } from '../../shell/resolved-store.js';
 import type { NeedsYouSplit } from '../../verse-ui-store.js';
 import { sinceText } from '../connectivity.js';
-import { MicButton } from '../MicButton.js';
 import { runMobileAction } from '../mobile-actions.js';
 import { canShowActions, useMobile } from '../mobile-context.js';
 import { showMobileToast } from '../mobile-toast.js';
@@ -465,9 +470,7 @@ export function NeedsYouScreen() {
   const [split, setSplit] = useState<NeedsYouSplit>('all');
   const [undo, setUndo] = useState<{ id: string; title: string } | null>(null);
   const [answering, setAnswering] = useState<NeedsYouItem | null>(null);
-  const [drafts, setDrafts] = useState<Readonly<Record<string, string>>>({});
-  const [interim, setInterim] = useState('');
-  const answerId = useId();
+  const questionForms = useRef<QuestionFormStore>(new Map());
 
   const canAct = canShowActions(permissions);
   const offline = reachability === 'offline' || reachability === 'unreachable';
@@ -511,7 +514,6 @@ export function NeedsYouScreen() {
       }
       // A Leader question's Answer has no route of its own: the phone collects the words here.
       if (item.kind === 'leader-question' && action.request === null && questionIdOfNeedsYouItem(item.id)) {
-        setInterim('');
         setAnswering(item);
         return;
       }
@@ -525,43 +527,15 @@ export function NeedsYouScreen() {
     setUndo({ id: item.id, title: needsYouRowView(item).title });
   }, []);
 
-  const sendAnswer = () => {
+  const sendLegacyAnswer = async (text: string): Promise<boolean> => {
     const item = answering;
     const questionId = item ? questionIdOfNeedsYouItem(item.id) : null;
-    const text = item ? (drafts[item.id] ?? '').trim() : '';
-    if (!item || !questionId || !text) return;
-    // Close first so the token sheet (if the hold lapsed) has the stage; a
-    // failure reopens this sheet with the words still in it.
-    setAnswering(null);
-    runMobileAction({
-      title: 'Answer the Leader',
-      consequences: 'Sends your answer to the Leader.',
-      confirmLabel: 'Send answer',
-      confirm: false,
-      run: async () => {
-        try {
-          await answerLeaderQuestion(questionId, text);
-        } catch (err) {
-          setAnswering(item);
-          throw err;
-        }
-      },
-      success: 'Answer sent to the Leader',
-      onDone: () => {
-        setDrafts((d) => {
-          const next = { ...d };
-          delete next[item.id];
-          return next;
-        });
-        markResolved(item.id);
-        void refreshActivity();
-      },
-    });
-  };
-
-  const draft = answering ? (drafts[answering.id] ?? '') : '';
-  const setDraft = (value: string) => {
-    if (answering) setDrafts((d) => ({ ...d, [answering.id]: value }));
+    if (!item || !questionId || !text.trim()) return false;
+    const result = await answerLeaderQuestion(questionId, text);
+    if (!result) return false;
+    markResolved(item.id); void refreshActivity();
+    showMobileToast('Answer sent to the Leader', 'success');
+    return true;
   };
 
   let body;
@@ -569,7 +543,7 @@ export function NeedsYouScreen() {
     if (activity.status === 'idle' || activity.status === 'loading') {
       body = <SkeletonList rows={3} label="Loading what needs you" />;
     } else if (activity.status === 'unavailable' && !activity.error) {
-      body = <ErrorState title="Needs you isn’t available" reason="Verse on your Mac does not serve Needs you in this build. Update Ashlr on the Mac." onRetry={() => void refreshActivity()} />;
+      body = <ErrorState title="Needs you isn’t available" reason="Phantom on your Mac does not serve Needs you in this build. Update Phantom on the Mac." onRetry={() => void refreshActivity()} />;
     } else {
       body = <ErrorState title="Couldn’t load Needs you" reason={activity.error ?? 'Your Mac did not answer.'} onRetry={() => void refreshActivity()} />;
     }
@@ -606,7 +580,6 @@ export function NeedsYouScreen() {
     );
   }
 
-  const answerText = interim ? `${draft}${draft && !draft.endsWith(' ') ? ' ' : ''}${interim}` : draft;
 
   return (
     <Screen
@@ -659,34 +632,19 @@ export function NeedsYouScreen() {
         </p>
       ) : null}
 
-      <BottomSheet
-        open={answering !== null}
-        onClose={() => setAnswering(null)}
-        title="Answer the Leader"
-        footer={(
-          <>
-            <Button variant="primary" block disabled={draft.trim().length === 0 || offline} onClick={sendAnswer}>Send answer</Button>
-            <Button variant="plain" block onClick={() => setAnswering(null)}>Cancel</Button>
-          </>
-        )}
-      >
-        {answering ? <p className={ui.consequence}>{needsYouQuestionText(answering)}</p> : null}
-        <div className={ui.field}>
-          <label className={ui.label} htmlFor={answerId}>Your answer</label>
-          <textarea
-            id={answerId}
-            className={ui.textarea}
-            value={answerText}
-            onChange={(e) => {
-              setInterim('');
-              setDraft(e.target.value);
-            }}
-          />
-        </div>
-        <MicButton onInterim={setInterim} onFinal={(phrase) => setDraft(`${draft}${draft && !draft.endsWith(' ') ? ' ' : ''}${phrase}`)} />
-        <p className={ui.faint}>
-          {offline ? 'Your Mac isn’t answering, so this can’t be sent yet. The words stay here.' : 'Goes to the same Leader thread as Mind and Telegram.'}
-        </p>
+      <BottomSheet open={answering !== null} onClose={() => setAnswering(null)} title="Answer the Leader"
+        footer={<Button variant="plain" block onClick={() => setAnswering(null)}>Close</Button>}>
+        {answering && questionIdOfNeedsYouItem(answering.id) ? <Suspense fallback={<p role="status">Reading the current question…</p>}>
+          <TypedQuestionForm key={answering.id} questionId={questionIdOfNeedsYouItem(answering.id)!}
+            store={questionForms.current} renderWrittenAnswer={props => <MobileComposer value={props.value} onChange={props.onChange}
+              onSubmit={props.onSend} label={props.label} placeholder={props.placeholder} submitLabel="Send answer"
+              disabled={props.disabledReason != null} hint={props.disabledReason} />} showQuestion fallbackText={needsYouQuestionText(answering)}
+            disabledReason={offline ? 'Your Mac is not answering. Your draft is kept.' : !canAct ? permissions.actReason ?? 'This phone is read-only.' : null}
+            requestSubmit={run => { runMobileAction({ title: 'Answer the Leader', consequences: 'Records the selected answer to this question.',
+              confirmLabel: 'Submit answer', confirm: false, run }); }}
+            onReconciled={() => { markResolved(answering.id); void refreshActivity(); }}
+            onResult={() => { markResolved(answering.id); void refreshActivity(); }} onLegacyAnswer={sendLegacyAnswer} />
+        </Suspense> : null}
       </BottomSheet>
     </Screen>
   );

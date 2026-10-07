@@ -17,6 +17,7 @@ const thread = vi.hoisted(() => ({
   delivered: [] as Array<{ id: string; ok: boolean }>,
   posted: [] as Array<Record<string, unknown>>,
   answerLeaderQuestion: vi.fn(),
+  readLeaderQuestion: vi.fn(),
   appendMasonMessage: vi.fn(),
   approveLeaderAction: vi.fn(),
 }));
@@ -24,6 +25,7 @@ const thread = vi.hoisted(() => ({
 vi.mock('../src/core/vision/leader-thread.js', () => ({
   appendMasonMessage: thread.appendMasonMessage,
   answerLeaderQuestion: thread.answerLeaderQuestion,
+  readLeaderQuestion: thread.readLeaderQuestion,
   approveLeaderAction: thread.approveLeaderAction,
   leaderNarrativeLine: vi.fn(async () => null),
   postLeaderMessage: vi.fn((m: Record<string, unknown>) => {
@@ -37,7 +39,7 @@ vi.mock('../src/core/vision/leader-thread.js', () => ({
   }),
 }));
 
-import { setTelegramTransportForTests } from '../src/core/integrations/telegram.js';
+import { setTelegramSendClockForTests, setTelegramTransportForTests } from '../src/core/integrations/telegram.js';
 import { composeBrief, gatherBriefFacts, type BriefSources } from '../src/core/comms/leader-brief.js';
 import {
   dueBrief,
@@ -149,7 +151,16 @@ function lineDeps(over: Partial<LeaderLineDeps> = {}): Partial<LeaderLineDeps> {
   };
 }
 
+let telegramNow = 0;
+
 beforeEach(() => {
+  telegramNow = 0;
+  // Exercise actual-attempt pacing with a virtual monotonic clock, not a
+  // fake-transport bypass or larger timeout.
+  setTelegramSendClockForTests({
+    now: () => telegramNow,
+    sleep: async (ms) => { telegramNow += ms; },
+  });
   home = mkdtempSync(join(tmpdir(), 'ashlr-line315-'));
   process.env['HOME'] = home;
   calls = [];
@@ -158,6 +169,12 @@ beforeEach(() => {
   thread.delivered = [];
   thread.posted = [];
   thread.answerLeaderQuestion.mockReset();
+  // This suite's briefSources explicitly supplies a legacy canonical question.
+  // Missing mock exports are unavailable capability, not a valid legacy row.
+  thread.readLeaderQuestion.mockReset();
+  thread.readLeaderQuestion.mockImplementation((questionId: string) => ({ questionId,
+    text: 'Should we move the budget to balanced?', askedAt: new Date(ET('06:30')).toISOString(),
+    messageId: null, answered: false, answer: null }));
   thread.appendMasonMessage.mockReset();
   thread.approveLeaderAction.mockReset();
   setTelegramTransportForTests(fakeTransport);
@@ -166,6 +183,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setTelegramTransportForTests(null);
+  setTelegramSendClockForTests(null);
   setLeaderLineDepsForTest(null);
   process.env['HOME'] = savedHome;
   rmSync(home, { recursive: true, force: true });
@@ -272,6 +290,20 @@ describe('pacing — quiet hours, caps, one question at a time', () => {
 // ---------------------------------------------------------------------------
 
 describe('runLeaderLine — briefs and reports on schedule, never nagging', () => {
+  it.each(['typed', 'missing'] as const)('does not consume a %s canonical question as a legacy brief prompt', async state => {
+    setLeaderLineDepsForTest(lineDeps({ now: () => ET('08:05'),
+      thread: async () => ({ readLeaderQuestion: () => state === 'missing' ? null : {
+        questionForm: { schemaVersion: 1, revision: Array(8).fill('a'.repeat(8)).join('-'), mode: 'single', options: ['Yes'],
+          expiresAt: new Date(ET('08:05') + 60_000).toISOString() },
+      } }) as never,
+    }));
+    expect((await runLeaderLine(cfg())).brief).toBe('morning');
+    expect(texts()[0]).not.toMatch(/^Q: /m);
+    expect(readLineState().question).toBeNull();
+    expect(thread.delivered).toEqual([]);
+    expect(keyboardData(sends()[0]!).some(data => data.startsWith('lt:y:'))).toBe(false);
+  });
+
   it('sends the morning brief once, with Approve / Veto for the pending launch', async () => {
     setLeaderLineDepsForTest(lineDeps({ now: () => ET('08:05') }));
     const first = await runLeaderLine(cfg());
@@ -343,6 +375,51 @@ describe('routing Mason\'s texts', () => {
     expect(texts()[0]).toContain('point 10');
   });
 
+  it('More sends the complete stored long-line and >30-line answer through the existing splitter', async () => {
+    const full = [
+      '&😀'.repeat(250),
+      ...Array.from({ length: 45 }, (_, i) => `point ${i + 1}: ${'detail '.repeat(12)}`.trimEnd()),
+      'Full tail: 2499.91 credits, 12,345 tokens, $0.50 😀',
+    ].join('\n');
+    const state = readLineState();
+    state.lastFull = { text: full, at: new Date().toISOString() };
+    writeLineState(state, Date.now());
+    await converseWithLeader(textEvent('more', 93), 'more', cfg());
+    expect(sends().length).toBeGreaterThan(1);
+    expect(texts().join('\n')).toBe(full);
+    for (const call of sends()) expect(String(call.body['text']).length).toBeLessThanOrEqual(4096);
+    expect(sends()[0]!.body['reply_parameters']).toMatchObject({ message_id: 93 });
+    expect(sends().slice(1).every((call) => call.body['reply_parameters'] === undefined)).toBe(true);
+    expect(readLineState().lastFull).toEqual(state.lastFull);
+    expect(thread.appendMasonMessage).not.toHaveBeenCalled();
+    expect(thread.posted).toHaveLength(0);
+  });
+
+  it('a partial More send consumes the intent without replay, composition or clearing the full answer', async () => {
+    // Ordinary prose reaches splitting; long base64-looking runs are scrubbed
+    // as possible secrets before any transport contact.
+    const first = 'first '.repeat(580).trimEnd();
+    const second = 'second '.repeat(585).trimEnd();
+    const state = readLineState();
+    state.lastFull = { text: `${first}\n${second}\nUnsent tail 😀`, at: new Date().toISOString() };
+    writeLineState(state, Date.now());
+    setTelegramTransportForTests(async (method, body) => {
+      if (method === 'sendMessage' && sends().length === 1) {
+        calls.push({ method, body });
+        return { ok: false, error_code: 500, description: 'synthetic unavailable' };
+      }
+      return fakeTransport(method, body);
+    });
+    await converseWithLeader(textEvent('more'), 'more', cfg());
+    expect(sends()).toHaveLength(2);
+    expect(texts()[0]).toBe(first);
+    expect(texts().join('\n')).not.toContain('Unsent tail');
+    expect(thread.appendMasonMessage).not.toHaveBeenCalled();
+    expect(thread.posted).toHaveLength(0);
+    expect(readLineState().lastFull).toEqual(state.lastFull);
+    expect(readLineState().watches).toHaveLength(0);
+  });
+
   it('chat still goes to the Leader thread (and the reply is kept phone-sized)', async () => {
     thread.appendMasonMessage.mockResolvedValue({
       message: { id: 'lt-20260927140000-bbbbbb' },
@@ -354,6 +431,19 @@ describe('routing Mason\'s texts', () => {
     expect(sent.split('\n').length).toBeLessThanOrEqual(8);
     expect(sent).toMatch(/say "more"/);
     expect(readLineState().lastFull?.text).toContain('l12');
+  });
+
+  it('a clipped one-line reply retains the full answer for the existing More route', async () => {
+    const full = `${'x'.repeat(398)}😀 remaining 12,345 tokens at $0.50`;
+    thread.appendMasonMessage.mockResolvedValue({
+      message: { id: 'lt-20260927140000-bbbbbb' },
+      reply: { id: 'lt-20260927140000-cccccc', from: 'leader', channel: 'telegram', kind: 'message', text: full },
+    });
+    await converseWithLeader(textEvent('explain the result'), 'explain the result', cfg());
+    expect(texts()[0]).toContain('say "more"');
+    expect(texts()[0]).not.toContain('remaining');
+    expect(readLineState().lastFull?.text).toBe(`Leader:\n${full}`);
+    expect(thread.appendMasonMessage).toHaveBeenCalledWith('explain the result', expect.objectContaining({ channel: 'telegram' }));
   });
 
   it('"go build X" becomes a real launch at once, acknowledged in one line, with a result ping later', async () => {

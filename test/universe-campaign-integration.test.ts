@@ -116,7 +116,14 @@ describe.runIf(process.platform === 'darwin')('Universe campaigns through native
       disposition: 'attention-required', reasonCode: 'generation-attention-required', automaticAction: 'none' });
     restored = true;
     const resumed = await runUniverseCampaign('campaign', value);
-    expect(resumed.state, JSON.stringify(resumed)).toBe('completed');
+    // Preserve settled phase facts before teardown without prompt or candidate payloads.
+    const trial = readUniverseOverview(value).universes[0]?.runs.at(-1)?.trials.at(-1);
+    const generation = trial?.generation;
+    expect(resumed.state, JSON.stringify({ campaign: resumed, fixtureRequestCount: value.requests.length,
+      trial: trial === undefined ? null : { status: trial.status, error: trial.error ?? null, durationMs: trial.durationMs,
+        generation: generation === undefined ? null : { status: generation.status, error: generation.error ?? null,
+          requestStarted: generation.requestStarted, durationMs: generation.durationMs,
+          responseRecorded: generation.responseDigest !== null, usage: generation.usage } } })).toBe('completed');
     expect(resumed.startedAt).toBe(paused.startedAt);
     expect(resumed.deadlineAt).toBe(paused.deadlineAt);
     expect(resumed.progress).toMatchObject({ attempts: 3, completedRuns: 3, reservedModelRequests: 3,
@@ -151,7 +158,14 @@ describe.runIf(process.platform === 'darwin')('Universe campaigns through native
       ? { value: 0, content: 'not valid JSON edits' } : { value: index });
     initUniverseCampaign(value.definition, value);
     const result = await runUniverseCampaign('campaign', value);
-    expect(result.state, JSON.stringify(result)).toBe('completed');
+    // Preserve settled phase facts before teardown without prompt or candidate payloads.
+    const trial = readUniverseOverview(value).universes[0]?.runs.at(-1)?.trials.at(-1);
+    const generation = trial?.generation;
+    expect(result.state, JSON.stringify({ campaign: result, fixtureRequestCount: value.requests.length,
+      trial: trial === undefined ? null : { status: trial.status, error: trial.error ?? null, durationMs: trial.durationMs,
+        generation: generation === undefined ? null : { status: generation.status, error: generation.error ?? null,
+          requestStarted: generation.requestStarted, durationMs: generation.durationMs,
+          responseRecorded: generation.responseDigest !== null, usage: generation.usage } } })).toBe('completed');
     expect(result.progress).toMatchObject({ attempts: 3, reservedModelRequests: 3, reportedTokens: 90, usageComplete: true });
     expect(value.requests).toHaveLength(3);
     const first = readUniverseOverview(value).universes[0]!.runs[0]!.trials[0]!;

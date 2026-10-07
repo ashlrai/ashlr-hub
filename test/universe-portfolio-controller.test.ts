@@ -59,6 +59,19 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+// Observe the actual source-owned check under the real controller record lock.
+// This does not replace the immutable publication or manufacture an intent.
+function atIntentPublication(observe: (campaignId: string, check: () => void) => void) {
+  const original = controllerStore.appendPortfolioControllerEvent;
+  return vi.spyOn(controllerStore, 'appendPortfolioControllerEvent').mockImplementation((directory, input, options) => {
+    const beforeIntent = options?.beforeIntent;
+    if (input.kind !== 'intent' || !beforeIntent) return original(directory, input, options);
+    return original(directory, input, { ...options, beforeIntent: (records) => {
+      observe(input.campaignId, () => beforeIntent(records));
+    } });
+  });
+}
+
 // Campaign projections and execution below are deliberately synthetic. The
 // controller's immutable record store and execution lock remain real private IO.
 function fixture(ids = ['a'], maxParallel = 1) {
@@ -169,6 +182,11 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
   });
 
   it('settles a delivery-only post-intent cancellation without pretending the campaign was attempted', async () => {
+    // Cancellation at persisted intent is the contract; private ledger IO must
+    // not consume this synthetic campaign's unrelated wall/monotonic allowance.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-09T12:00:00.000Z'));
+    vi.spyOn(performance, 'now').mockReturnValue(100);
     const f = fixture(['a', 'b']); f.finish('a'); f.definition.tasks[1]!.dependsOn = ['a'];
     f.readiness.get('a')!.resourceRuntimeRequired = true;
     hooks.runtime.mockReturnValue({ status: 'invalid', checks: [{ code: 'runtime', status: 'failed' }] });
@@ -181,6 +199,7 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
       return next;
     });
     const result = await runUniversePortfolioController(f.definition, { ...f.options, deliveryPlan, signal: caller.signal, resourceRuntime: '/private/runtime.json' });
+    expect(caller.signal.aborted).toBe(true);
     expect(result).toMatchObject({ status: 'cancelled', sourceState: 'healthy', outcomes: [
       { campaignId: 'a', state: 'held', attempted: false, reasonCode: 'dispatch-not-started', deliveryDigest: null },
       { campaignId: 'b', state: 'held', attempted: false, reasonCode: 'dependency-held' },
@@ -223,6 +242,13 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
     const directory = portfolioControllerDirectory(f.definition.id, f.options);
     const entered = deferred<void>();
     let transactionLock: locks.LocalStoreLock | undefined;
+    let checking = false;
+    const publicationRecords: (string | null)[] = [];
+    hooks.readiness.mockImplementation((id: string) => {
+      const current = structuredClone(f.readiness.get(id)!);
+      if (checking) publicationRecords.push(current.recordsDigest);
+      return current;
+    });
     const original = controllerStore.appendPortfolioControllerEvent;
     vi.spyOn(controllerStore, 'appendPortfolioControllerEvent').mockImplementation((target, input, options) => {
       if (input.kind === 'intent' && !transactionLock) {
@@ -231,7 +257,12 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
         if (acquired.state !== 'acquired') throw new Error('Could not hold fixture admission transaction');
         transactionLock = acquired.lock; entered.resolve();
       }
-      return original(target, input, options);
+      const beforeIntent = options?.beforeIntent;
+      return original(target, input, input.kind === 'intent' && beforeIntent ? { ...options,
+        beforeIntent: (records) => {
+          checking = true;
+          try { beforeIntent(records); } finally { checking = false; }
+        } } : options);
     });
     const caller = new AbortController();
     const pending = runUniversePortfolioController(f.definition, { ...f.options, deliveryPlan, signal: caller.signal });
@@ -245,6 +276,7 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
       expect(hooks.acquire).not.toHaveBeenCalled();
       expect(hooks.run).not.toHaveBeenCalled();
       expect(hooks.deliver).not.toHaveBeenCalled();
+      expect(publicationRecords).toEqual(['d'.repeat(64)]);
       expect(f.events()).toEqual(before);
       expect(f.events().some((event) => event.kind === 'intent')).toBe(false);
     } finally {
@@ -303,12 +335,20 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
   });
 
   it('cancels contention waiting promptly without consuming intent or renewing restart allowance', async () => {
+    // This checks cancellation and preserved restart allowance, not host IO latency.
+    // Keep real wakeup timers and private lock IO; advance both behavior clocks before restart.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-09T12:00:00.000Z'));
+    let monotonicMs = 100;
+    vi.spyOn(performance, 'now').mockImplementation(() => monotonicMs);
     const f = fixture(); const controller = new AbortController();
     hooks.acquire.mockReturnValue({ state: 'contended', lock: null });
     const running = runUniversePortfolioController(f.definition, { ...f.options, signal: controller.signal });
     const before = f.events(); controller.abort();
     const cancelled = await running;
     expect(cancelled.status).toBe('cancelled'); expect(f.events()).toEqual(before);
+    vi.setSystemTime(new Date('2026-09-09T12:00:01.000Z'));
+    monotonicMs += 1_000;
     hooks.acquire.mockReturnValue({ state: 'acquired', lock: f.executionLock });
     const resumed = await runUniversePortfolioController(f.definition, f.options);
     expect(resumed).toMatchObject({ status: 'completed', deadlineAt: cancelled.deadlineAt, createdAt: cancelled.createdAt });
@@ -332,6 +372,134 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
     expect((await runUniversePortfolioController(f.definition, f.options)).status).toBe('unavailable');
     expect(release).toHaveBeenCalledWith(f.executionLock);
     expect(f.events().some((event) => event.kind === 'intent')).toBe(false); expect(hooks.run).not.toHaveBeenCalled();
+  });
+
+  it('reads the admission target once after its dependencies while preserving public report order', async () => {
+    const f = fixture(['target', 'dependency']); f.finish('dependency');
+    f.definition.tasks[0]!.dependsOn = ['dependency'];
+    const observations: string[][] = []; let currentReads: string[] | null = null;
+    hooks.readiness.mockImplementation((id: string) => {
+      currentReads?.push(id);
+      return structuredClone(f.readiness.get(id)!);
+    });
+    atIntentPublication((id, check) => {
+      expect(id).toBe('target');
+      const reads: string[] = []; currentReads = reads;
+      try { check(); } finally { currentReads = null; observations.push(reads); }
+    });
+    const result = await runUniversePortfolioController(f.definition, f.options);
+    expect(result.status).toBe('completed');
+    expect(observations).toEqual([['dependency', 'target']]);
+    expect(hooks.run.mock.calls.map(([id]) => id)).toEqual(['target']);
+    expect(result.outcomes.map(row => row.campaignId)).toEqual(['target', 'dependency']);
+    const publicReads: string[] = [];
+    hooks.readiness.mockImplementation((id: string) => {
+      publicReads.push(id);
+      return { ...structuredClone(f.readiness.get(id)!), recordsDigest: 'f'.repeat(64) };
+    });
+    const readback = readUniversePortfolioController(f.definition.id, f.options);
+    expect(publicReads).toEqual(['target', 'dependency']);
+    expect(readback.outcomes.map(row => row.campaignId)).toEqual(['target', 'dependency']);
+    expect(readback.reasons).toEqual(['target:campaign-evidence-changed', 'dependency:campaign-evidence-changed']);
+  });
+
+  it.each(['records', 'summary'] as const)('rejects target %s changed during dependency observation before intent', async (changed) => {
+    const f = fixture(['target', 'dependency']); f.finish('dependency');
+    f.definition.tasks[0]!.dependsOn = ['dependency'];
+    const release = vi.spyOn(locks, 'releaseLocalStoreLock');
+    const reads: string[] = []; let checking = false;
+    hooks.readiness.mockImplementation((id: string) => {
+      if (checking) {
+        reads.push(id);
+        if (id === 'dependency') {
+          const target = f.readiness.get('target')!;
+          if (changed === 'records') target.recordsDigest = 'f'.repeat(64);
+          else target.expectedIdentity!.summaryDigest = 'f'.repeat(64);
+        }
+      }
+      return structuredClone(f.readiness.get(id)!);
+    });
+    atIntentPublication((id, check) => {
+      expect(id).toBe('target'); checking = true;
+      try { check(); } finally { checking = false; }
+    });
+    const result = await runUniversePortfolioController(f.definition, f.options);
+    expect(result.status).toBe('unavailable');
+    expect(result.reasons).toContain('controller-admission-evidence-changed');
+    expect(reads).toEqual(['dependency', 'target']);
+    expect(release).toHaveBeenCalledWith(f.executionLock);
+    expect(f.events().some(event => event.kind === 'intent')).toBe(false);
+    expect(hooks.run).not.toHaveBeenCalled();
+  });
+
+  it.each(['records', 'branch', 'base', 'digest'] as const)('rejects %s drift during delivered dependency IO before the final target read', async (changed) => {
+    const f = fixture(['target', 'dependency']); f.finish('dependency');
+    f.definition.tasks[0]!.dependsOn = ['dependency'];
+    const release = vi.spyOn(locks, 'releaseLocalStoreLock');
+    const receipt = { schemaVersion: 1 as const, id: 'synthetic-receipt', universeId: 'universe-dependency',
+      trialId: 'synthetic-trial', runId: 'synthetic-run', niche: 'synthetic', manifestDigest: HASH,
+      comparatorDigest: HASH, artifactDigest: HASH, repo: '/synthetic/repository', branch: 'codex/dependency',
+      baseCommit: 'a'.repeat(40), commit: 'b'.repeat(40), tree: 'c'.repeat(40), changedFiles: ['value.mjs'],
+      status: 'delivered' as const, createdAt: new Date().toISOString(), completedAt: new Date().toISOString() };
+    const deliveryPlan = { schemaVersion: 1 as const,
+      deliveries: [{ campaignId: 'dependency', branch: receipt.branch, baseCommit: receipt.baseCommit }] };
+    let delivered = false; let checking = false;
+    const reads: string[] = [];
+    hooks.deliver.mockImplementation(async (id: string) => {
+      expect(id).toBe('dependency'); delivered = true;
+      return { campaign: structuredClone(f.summaries.get(id)!), delivery: { status: 'delivered', receipt } };
+    });
+    hooks.readiness.mockImplementation((id: string) => {
+      if (checking) reads.push(`readiness:${id}`);
+      return structuredClone(f.readiness.get(id)!);
+    });
+    hooks.deliveries.mockImplementation((universeId: string) => {
+      const current = structuredClone(receipt);
+      if (checking) {
+        expect(universeId).toBe('universe-dependency'); reads.push('delivery:dependency');
+        if (changed === 'records') f.readiness.get('target')!.recordsDigest = 'f'.repeat(64);
+        else if (changed === 'branch') current.branch = 'codex/changed';
+        else if (changed === 'base') current.baseCommit = 'd'.repeat(40);
+        else current.tree = 'd'.repeat(40);
+      }
+      return { sourceState: 'healthy', deliveries: delivered ? [current] : [] };
+    });
+    atIntentPublication((id, check) => {
+      checking = id === 'target';
+      try { check(); } finally { checking = false; }
+    });
+    const result = await runUniversePortfolioController(f.definition, { ...f.options, deliveryPlan });
+    expect(result.status).toBe('unavailable');
+    expect(result.reasons).toContain(changed === 'records'
+      ? 'controller-admission-evidence-changed' : 'controller-dependency-evidence-changed');
+    expect(reads).toEqual(['readiness:dependency', 'delivery:dependency', 'readiness:target']);
+    expect(release).toHaveBeenCalledWith(f.executionLock);
+    expect(f.events().filter(event => event.kind === 'intent').map(event => event.campaignId)).toEqual(['dependency']);
+    expect(hooks.deliver).toHaveBeenCalledOnce(); expect(hooks.run).not.toHaveBeenCalled();
+  });
+
+  it.each(['signal', 'parent'] as const)('honors %s Stop observed during the final target read before intent', async (kind) => {
+    const f = fixture(['target', 'dependency']); f.finish('dependency');
+    f.definition.tasks[0]!.dependsOn = ['dependency'];
+    const caller = new AbortController(); const release = vi.spyOn(locks, 'releaseLocalStoreLock');
+    let checking = false; let parentStopped = false; let targetReads = 0;
+    hooks.readiness.mockImplementation((id: string) => {
+      if (checking && id === 'target') {
+        targetReads++;
+        if (kind === 'signal') caller.abort(); else parentStopped = true;
+      }
+      return structuredClone(f.readiness.get(id)!);
+    });
+    atIntentPublication((id, check) => {
+      expect(id).toBe('target'); checking = true;
+      try { check(); } finally { checking = false; }
+    });
+    const result = await runUniversePortfolioController(f.definition, { ...f.options,
+      signal: caller.signal, isExecutionStopped: () => parentStopped });
+    expect(result.status).toBe('cancelled'); expect(targetReads).toBe(1);
+    expect(release).toHaveBeenCalledWith(f.executionLock);
+    expect(f.events().some(event => event.kind === 'intent')).toBe(false);
+    expect(hooks.run).not.toHaveBeenCalled();
   });
 
   it('releases acquired ownership when cancellation arrives before intent', async () => {
@@ -390,6 +558,11 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
     ['request-budget-exhausted', 'paused', 'budget-exhausted'],
     ['duration-budget-exhausted', 'paused', 'budget-exhausted'],
   ] as const)('persists verified %s without replaying held work or changing graph scheduling', async (reasonCode, state, disposition) => {
+    // This checks durable holds across restart, not elapsed downtime. Keep
+    // private ledger IO from exhausting the unrelated synthetic allowance.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-09T12:00:00.000Z'));
+    vi.spyOn(performance, 'now').mockReturnValue(100);
     const f = fixture(['a', 'b', 'c']);
     f.definition.tasks[1]!.dependsOn = ['a'];
     const options = { ...f.options, deliveryPlan: { schemaVersion: 1 as const,

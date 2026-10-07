@@ -3,7 +3,7 @@
  * scripts/build-sea.mjs — Bun single-executable build for the Tauri sidecar.
  *
  * What it does:
- *   1. Runs `npm run build` (tsc + assets + identity) to ensure dist/ is fresh.
+ *   1. Runs `npm run build`, or freshly verifies explicitly adopted CI bytes.
  *   2. Writes a thin shim entry (dist-bin/_entry.js) that sets
  *      ASHLR_WEB_PUBLIC to the sibling `public/` dir before importing the CLI.
  *      This means the compiled binary self-configures the asset path at runtime
@@ -17,6 +17,7 @@
  * Usage:
  *   node scripts/build-sea.mjs
  *   # or: npm run build:binary
+ *   # Verified CI reuse: see docs/RELEASING.md#qualified-ci-build-handoff.
  *
  * Output:
  *   dist-bin/ashlr          — self-contained native binary (~10–15 MB)
@@ -32,9 +33,10 @@
 import { execSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { javascriptStringLiteral } from './build-identity.mjs';
+import { createBuildIdentity, javascriptStringLiteral } from './build-identity.mjs';
+import { validateAdoptedArtifact, verifyArtifact } from './hosted-build-artifact.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(join(here, '..'));
@@ -179,7 +181,36 @@ export function createSeaCompileArgs({
     ...(fleetHistoryWorkerEntry ? [fleetHistoryWorkerEntry] : []), ...(outcomesWorkerEntry ? [outcomesWorkerEntry] : []), '--outfile', outBin];
 }
 
+export function parseHostedBuildArguments(args) {
+  if (args.length === 0) return null;
+  const allowed = ['--hosted-bundle', '--run', '--attempt', '--attestor-sha', '--attestor-run', '--attestor-attempt'];
+  const flags = {};
+  for (let i = 0; i < args.length; i += 2) {
+    if (!allowed.includes(args[i]) || typeof args[i + 1] !== 'string' || !args[i + 1] || Object.hasOwn(flags, args[i])) throw new Error('Invalid hosted build arguments');
+    flags[args[i]] = args[i + 1];
+  }
+  if (allowed.some((key) => !Object.hasOwn(flags, key)) || !isAbsolute(flags['--hosted-bundle']) || !/^[a-f0-9]{40}$/.test(flags['--attestor-sha'])) throw new Error('Complete hosted build identity required');
+  for (const key of ['--run', '--attempt', '--attestor-run', '--attestor-attempt']) {
+    if (!/^[1-9][0-9]*$/.test(flags[key]) || !Number.isSafeInteger(Number(flags[key]))) throw new Error('Invalid hosted run identity');
+  }
+  return { bundle: flags['--hosted-bundle'], runId: Number(flags['--run']), runAttempt: Number(flags['--attempt']),
+    attestorSha: flags['--attestor-sha'], attestorRun: Number(flags['--attestor-run']), attestorAttempt: Number(flags['--attestor-attempt']) };
+}
+
+export function ensureSeaBuild({ args, root, build = () => execSync('npm run build', { cwd: root, stdio: 'inherit' }),
+  identity = createBuildIdentity, verify = verifyArtifact, validate = validateAdoptedArtifact }) {
+  const hosted = parseHostedBuildArguments(args);
+  if (!hosted) { build(); return { mode: 'local' }; }
+  const current = identity({ repoRoot: root });
+  if (current.provenance !== 'git' || current.dirty !== false || !current.revision) throw new Error('Clean source identity required for hosted native build');
+  const { bundle, ...policy } = hosted;
+  const receipt = verify({ root, revision: current.revision, bundle, policy });
+  validate(receipt);
+  return { mode: 'hosted', receipt };
+}
+
 async function main() {
+parseHostedBuildArguments(process.argv.slice(2));
 
 // ── locate bun ───────────────────────────────────────────────────────────────
 const BUN = process.env.ASHLR_BUN_PATH ??
@@ -206,8 +237,9 @@ if (!BUN) {
 console.log(`[build-sea] Using bun: ${BUN}`);
 
 // ── 1. Ensure dist/ is fresh ─────────────────────────────────────────────────
-console.log('[build-sea] Running npm run build (tsc + assets + identity)…');
-execSync('npm run build', { cwd: repoRoot, stdio: 'inherit' });
+console.log('[build-sea] Preparing source-bound JavaScript build…');
+const prepared = ensureSeaBuild({ args: process.argv.slice(2), root: repoRoot });
+console.log(`[build-sea] ${prepared.mode === 'hosted' ? 'Verified adopted CI bytes; native compilation follows' : 'Local npm build complete'}`);
 
 if (!existsSync(distWeb)) {
   console.error(`ERROR: dist/core/web/public not found after build: ${distWeb}`);

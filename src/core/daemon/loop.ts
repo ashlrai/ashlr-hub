@@ -6894,7 +6894,11 @@ export async function tick(
           // router, and the fabric gateway cannot drift apart.
           const maxPct = resolveSubscriptionMaxPercent(liveCfg);
           // V3.10 (U5) seam: hooks.seatAllows (default: subscriptionAllows, same arguments).
-          const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct, ...(standingTick ? {itemId:item.id,model:selectedModel ?? null} : {}), ...(standingTick && fleetLaneOf(backend, routingCfg) === 'grok-cli' && routed.seatDecision?.seatId ? { seatId: routed.seatDecision.seatId } : {}) });
+          const routedSeatId = routed.seatDecision?.seatId;
+          const routedLane = fleetLaneOf(backend, routingCfg);
+          const boundAccount = standingTick && routedSeatId && (routedLane === 'grok-cli' ||
+            routedLane === 'claude-cli' && engineOfSeatId(routedSeatId) === 'claude');
+          const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct, ...(standingTick ? {itemId:item.id,model:selectedModel ?? null} : {}), ...(boundAccount ? { seatId: routedSeatId } : {}) });
           if (!subCheck.allowed) {
             // M334: shadow the BLOCKED legacy decision — a gateway that would
             // have dispatched here is the safety-relevant divergence class.
@@ -7093,7 +7097,7 @@ export async function tick(
         }
       }
       // The routed account is forwarded to the producer. Grok command/profile
-      // resolution binds this exact roster ID; Codex retains its engine-ID guard.
+      // resolution binds this exact roster ID; Claude and Codex retain engine-ID guards.
       // Absent bindings retain the legacy engine-specific admission behavior.
       const standingSeatId: string | undefined = (() => {
         if (!standingTick) return undefined;
@@ -7101,6 +7105,7 @@ export async function tick(
         const seatId = standingRoute?.seatDecision?.seatId;
         if (typeof seatId !== 'string' || seatId.length === 0) return undefined;
         if (lane === 'grok-cli') return seatId;
+        if (lane === 'claude-cli' && engineOfSeatId(seatId) === 'claude') return seatId;
         return lane === 'codex' && engineOfSeatId(seatId) === 'codex' ? seatId : undefined;
       })();
       // Every new provider contact keeps the same task scope and rechecks current allowance policy.
@@ -7119,7 +7124,7 @@ export async function tick(
       if (standingTick || isSubscriptionEngine(backend)) {
         const maxPct = resolveSubscriptionMaxPercent(routingCfg);
         // V3.10 (U5) seam: hooks.seatAllows (default: subscriptionAllows, same arguments).
-        const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct, ...(standingTick ? {itemId:item.id,model:selectedModel ?? null} : {}), ...(fleetLaneOf(backend, routingCfg) === 'grok-cli' && standingSeatId ? { seatId: standingSeatId } : {}) });
+        const subCheck = hooks.seatAllows(backend, { maxPercent: maxPct, ...(standingTick ? {itemId:item.id,model:selectedModel ?? null} : {}), ...(['grok-cli', 'claude-cli'].includes(fleetLaneOf(backend, routingCfg) ?? '') && standingSeatId ? { seatId: standingSeatId } : {}) });
         if (!subCheck.allowed) {
           audit({
             action: 'daemon:tick',
@@ -7425,6 +7430,10 @@ export async function tick(
         });
         if (stopRequested()) return stopRequestedOutcome(item, attemptId);
 
+        // Awaited strategy preparation cannot reuse a now-stale native price seal.
+        const preparedDollarRefusal = dollarAdmissionRefusal();
+        if (preparedDollarRefusal) return preparedDollarRefusal;
+
         // M170: best-of-N dispatch — when cfg.foundry.bestOfN > 1, generate N
         // candidates and let the critic pick the winner. Flag-off: bestOfN absent
         // or 1 → single runGoal call, byte-identical to pre-M170 behavior.
@@ -7559,6 +7568,15 @@ export async function tick(
           : undefined;
         const selectedDevinBinding = fleetLaneOf(backend, routingCfg) === 'devin-cli'
           ? peekDevinCliExecutionBinding(selectedModel ?? resolveDevinCliFleetModel(routingCfg.devin)) : null;
+        let qualifiedDevinSpawns = 0;
+        const onSelectedDevinSpawn: import('../types.js').RunOptions['onSelectedDevinSpawn'] = selectedDevinBinding
+          ? (model, binding) => {
+            // The native runner notifies only after its existing current seal,
+            // private-copy and Stop checks admitted an actual owned child. Keep
+            // that launch fact beyond the TTL; it never admits another contact.
+            if ((backend as string | undefined) === 'devin-cli' && model === selectedModel && binding === selectedDevinBinding
+              && !Object.prototype.hasOwnProperty.call(routingCfg.foundry?.engines ?? {}, 'devin-cli')) qualifiedDevinSpawns++;
+          } : undefined;
         const selectedDevinAdmission = fleetLaneOf(backend, routingCfg) === 'devin-cli'
           ? (model: string) => {
             if (!stillOwnsTick() || stopRequested() || dispatchSignal.aborted || !devinCliBindingCurrent(selectedDevinBinding, model)) return null;
@@ -7741,6 +7759,7 @@ export async function tick(
               ...(standingSeatId ? { seatId: standingSeatId } : {}),
               ...(selectedGrokAdmission ? { selectedGrokAdmission } : {}),
               ...(selectedDevinAdmission ? { selectedDevinAdmission } : {}),
+              ...(onSelectedDevinSpawn ? { onSelectedDevinSpawn } : {}),
               ...(selectedClaudeAdmission ? { selectedClaudeAdmission } : {}),
               ...(outcomeDispatch || selectedTaskAdmission ? { selectedOutcomeAdmission: selectedDispatchAdmission } : {}),
               ...(dispatchHarness ? { harness: dispatchHarness } : {}),
@@ -7761,7 +7780,9 @@ export async function tick(
           // never a reported fallback whose economics or seat were not checked.
           const exactZeroProducer = runState.engine === backend
             && ((backend as string | undefined) !== 'devin-cli' || runState.engineModel === `${backend}:${selectedModel}`)
-            && zeroDollarProducer(backend, routingCfg, selectedModel);
+            && ((backend as string | undefined) === 'devin-cli'
+              ? qualifiedDevinSpawns > 0 && qualifiedDevinSpawns === runState.usage?.steps
+              : zeroDollarProducer(backend, routingCfg, selectedModel));
           if (zeroDollarOnlyTick && !exactZeroProducer) zeroCostProducerViolation = true;
           if (!stillOwnsTick()) {
             swarmSpent = exactZeroProducer ? 0 : (runState.usage?.estCostUsd ?? 0);
@@ -7909,7 +7930,9 @@ export async function tick(
         swarmSpent = bonBillable !== null
           ? bonBillable
           : runState.engine === backend && ((backend as string | undefined) !== 'devin-cli' || runState.engineModel === `${backend}:${selectedModel}`)
-            && zeroDollarProducer(backend, routingCfg, selectedModel)
+            && ((backend as string | undefined) === 'devin-cli'
+              ? qualifiedDevinSpawns > 0 && qualifiedDevinSpawns === runState.usage?.steps
+              : zeroDollarProducer(backend, routingCfg, selectedModel))
             ? 0
             : (runState.usage?.estCostUsd ?? 0);
         tickSpent += swarmSpent;
@@ -10553,12 +10576,14 @@ function msUntilUtcTimestamp(targetMs: number, nowMs = Date.now()): number {
  * builtin runs a model swarm, so its generic policy classification is insufficient.
  * Trust tier alone never makes a custom API or CLI a subscription seat.
  */
-export function zeroDollarProducer(engine: string | undefined, cfg: AshlrConfig, _model?: string | null): boolean {
+export function zeroDollarProducer(engine: string | undefined, cfg: AshlrConfig, model?: string | null): boolean {
   if (!engine || engine === 'builtin') return false;
-  // Historical SWE-2 ids do not prove current account pricing: the free offer
-  // is plan-dependent and expires. Without fresh account-bound price evidence,
-  // Devin CLI cannot bypass exhausted USD; its positive-headroom lane is unchanged.
-  if (engine === 'devin-cli') return false;
+  // Model IDs, config overrides and roster labels never establish free pricing.
+  // Only the existing host-issued current native seal admits a new contact.
+  if (engine === 'devin-cli') {
+    if (Object.prototype.hasOwnProperty.call(cfg.foundry?.engines ?? {}, engine)) return false;
+    return peekDevinCliExecutionBinding(resolveDevinCliFleetModel(cfg.devin, model ?? undefined)) !== null;
+  }
   const spec = resolveEngineSpec(engine, cfg);
   if (!spec) return false;
   if (spec.kind === 'api-model') return engineMeteredness(engine, cfg) === 'free';
@@ -10644,7 +10669,10 @@ export function buildItemGoal(item: WorkItem): string {
   // executor role and TITRR already provide broader context.
   parts.push(
     'Make the smallest focused change that fully addresses this. ' +
-    'Match existing conventions. Run/keep tests green. ' +
+    'Match existing conventions. Keep tests green. ' +
+    'Run command checks only with supplied executable tools. When those tools are ' +
+    'unavailable, the host handles required checks; do not claim they ran, and ' +
+    'identify unobserved checks as pending host verification. ' +
     'If on inspection this is NOT actionable as a code change ' +
     '(e.g. a platform-gated or intentionally-skipped test, an issue requiring ' +
     'product decisions, or already done), make NO changes and stop — ' +
@@ -10663,9 +10691,10 @@ export function buildItemGoal(item: WorkItem): string {
     'Do not delete, regenerate, or wholesale-rewrite a file to make this change — ' +
     'edit only what the task requires. A diff that removes unrelated dependencies, ' +
     'scripts, or content is treated as destructive and rejected outright, even when ' +
-    'the stated intent was minor. If you cannot produce a complete diff that passes ' +
-    'this repo’s tests, typecheck, and lint within the available budget, produce NO ' +
-    'diff and stop — a filed partial/unverified change is worse than no proposal.',
+    'the stated intent was minor. Produce a complete scoped diff for this repo’s tests, ' +
+    'typecheck, and lint verification; host checks must pass before acceptance. If you ' +
+    'cannot complete the change within the available budget, produce NO diff and stop ' +
+    '— a filed unfinished change is worse than no proposal.',
   );
 
   return parts.join('\n\n');

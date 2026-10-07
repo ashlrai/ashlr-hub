@@ -1,3 +1,5 @@
+import { formatDecimalMetric } from '../../../components/charts/format-metric.js';
+import { usedPercentText } from '../percent-text.js';
 import type { CreditPoolReadView, CreditPoolRowView } from '../../../../core/resources/credit-pool-types.js';
 
 const MAX_BYTES = 1024 * 1024;
@@ -89,7 +91,7 @@ export function creditPoolDisplay(row: CreditPoolRowView, nowMs: number): Credit
   const amountText = row.identityState === 'unknown' ? 'Balance hidden · account not verified'
     : row.identityState === 'mismatch' ? 'Balance hidden · account changed'
       : row.amount === null ? row.kind === 'subscription-allowance' ? 'Usage unknown' : 'Balance unknown'
-        : row.unit === 'USD' ? `$${row.amount} last recorded` : `${row.amount}% used${historical ? ' · last recorded' : ''}`;
+        : row.unit === 'USD' ? `$${formatDecimalMetric(row.amount)} last recorded` : `${usedPercentText(/^100(?:\.0+)?$/u.test(row.amount) ? 100 : Math.min(99.999, Number(row.amount)))} used${historical ? ' · last recorded' : ''}`;
   return { title, amountText, capturedAt: row.capturedAt, expiresAt: row.expiresAt,
     sourceText: row.source.kind === 'verified-manual' ? 'Verified account UI capture · historical reading' : historical ? 'Native metadata · historical reading' : 'Native metadata · last reading',
     expiryText: row.expiresAt === null ? 'Expiry unknown' : Date.parse(row.expiresAt) <= nowMs ? 'Recorded deadline has passed'

@@ -255,7 +255,7 @@ function safePolicy(deps: DevinServiceDeps): EffectivePolicy | null {
   }
 }
 
-export async function devinStatus(deps: DevinServiceDeps = {}, tasks: readonly DevinTaskV1[] = listDevinTasks()): Promise<DevinStatus> {
+export async function devinStatus(deps: DevinServiceDeps = {}, tasks: readonly DevinTaskV1[] = listDevinTasks(Number.MAX_SAFE_INTEGER)): Promise<DevinStatus> {
   const section = readConfig(deps);
   const enabled = devinEnabled(section);
   const connection = readDevinConnection();
@@ -671,7 +671,8 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
 /** Cheap: reads disk (+ a cached Keychain presence check). No Devin API call. */
 export async function devinOverview(deps: DevinServiceDeps = {}): Promise<DevinOverviewResponse> {
   const now = (deps.now ?? (() => new Date()))();
-  const tasks = listDevinTasks();
+  // Admission uses every tracked session; only the response history is bounded.
+  const tasks = listDevinTasks(Number.MAX_SAFE_INTEGER);
   const probe: Pick<DevinCliProbe, 'state'> & { cliPath?: string | null } = await (deps.cliProbe ?? (() => probeDevinCli()))();
   let models: DevinOverviewResponse['models'];
   if (probe.state !== 'missing') {

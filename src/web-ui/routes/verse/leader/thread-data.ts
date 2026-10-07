@@ -115,3 +115,6 @@ export async function retireLeaderDirective(id: string): Promise<void> {
   invalidate(LEADER_THREAD_KEYS.directives);
   invalidate(LEADER_THREAD_KEYS.thread);
 }
+
+/** Shared mutation-token boundary for lazy typed-question requests. */
+export { post as postLeaderRequest };

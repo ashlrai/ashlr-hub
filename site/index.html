@@ -1,24 +1,24 @@
 <!doctype html>
 <html lang="en">
 <head>
+<link rel="icon" href="/assets/phantom-mark.svg" type="image/svg+xml">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="description" content="Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.">
+<meta name="description" content="One coding-agent workbench for individual engineers and engineering teams. Use your accounts and local models, review changes, and add signed fleet work when ready.">
 <meta name="color-scheme" content="light dark">
 <link rel="canonical" href="https://verse.ashlr.ai/">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='54 55 146 146'%3E%3Cpath fill='%231A2B3C' d='M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z'/%3E%3Cpath fill='%232563EB' d='M110 121H143L133 152H120Z'/%3E%3C/svg%3E">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://verse.ashlr.ai/">
-<meta property="og:title" content="Ashlr Verse — one workbench for coding agents">
-<meta property="og:site_name" content="Ashlr Verse">
-<meta property="og:description" content="Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.">
-<meta property="og:image" content="https://verse.ashlr.ai/assets/work-with-me-3.22-demo.jpg">
-<meta property="og:image:alt" content="Ashlr Verse 3.22 browser chat with collapsed project groups and labeled demo accounts">
-<meta name="twitter:title" content="Ashlr Verse — one workbench for coding agents">
-<meta name="twitter:description" content="Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.">
-<meta name="twitter:image:alt" content="Ashlr Verse 3.22 browser chat with collapsed project groups and labeled demo accounts">
+<meta property="og:title" content="Phantom — the engineering agent workbench">
+<meta property="og:site_name" content="Phantom">
+<meta property="og:description" content="One coding-agent workbench for individual engineers and engineering teams. Use your accounts and local models, review changes, and add signed fleet work when ready.">
+<meta property="og:image" content="https://verse.ashlr.ai/assets/work-with-me-3.24.3-demo.jpg">
+<meta property="og:image:alt" content="Phantom 3.24.3 compiled browser Demo chat with labeled sample accounts; no provider ran">
+<meta name="twitter:title" content="Phantom — the engineering agent workbench">
+<meta name="twitter:description" content="One coding-agent workbench for individual engineers and engineering teams. Use your accounts and local models, review changes, and add signed fleet work when ready.">
+<meta name="twitter:image:alt" content="Phantom 3.24.3 compiled browser Demo chat with labeled sample accounts; no provider ran">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:image" content="https://verse.ashlr.ai/assets/work-with-me-3.22-demo.jpg">
+<meta name="twitter:image" content="https://verse.ashlr.ai/assets/work-with-me-3.24.3-demo.jpg">
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -26,18 +26,18 @@
     {
       "@type": "WebSite",
       "@id": "https://verse.ashlr.ai/#website",
-      "name": "Ashlr Verse",
+      "name": "Phantom",
       "url": "https://verse.ashlr.ai/"
     },
     {
       "@type": "SoftwareApplication",
       "@id": "https://verse.ashlr.ai/#application",
-      "name": "Ashlr Verse",
+      "name": "Phantom",
       "url": "https://verse.ashlr.ai/",
-      "description": "Work with coding agents in a chat or delegate to your fleet. Bring Claude Code, Codex, Grok and local models together with review, account controls and signed autonomy.",
+      "description": "One coding-agent workbench for individual engineers and engineering teams. Use your accounts and local models, review changes, and add signed fleet work when ready.",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "macOS, Linux, Windows",
-      "softwareVersion": "3.24.2",
+      "softwareVersion": "3.24.3",
       "license": "https://github.com/ashlrai/ashlr-hub/blob/master/LICENSE",
       "isAccessibleForFree": true,
       "sameAs": "https://github.com/ashlrai/ashlr-hub",
@@ -70,7 +70,7 @@
     }
     @media (prefers-color-scheme: dark) { .shot img { border-color: var(--line); } }
 </style>
-<title>Ashlr Verse — one workbench for coding agents</title>
+<title>Phantom — the engineering agent workbench</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
@@ -138,7 +138,7 @@
   a:focus-visible, button:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
   .skip-link { position: fixed; z-index: 30; top: -100px; left: var(--gutter); padding: 10px 14px; background: var(--ink); color: var(--surface); border-radius: 3px; font-weight: 600; text-decoration: none; }
   .skip-link:focus { top: max(12px, env(safe-area-inset-top)); }
-  main, section, #mobile-index { scroll-margin-top: 72px; }
+  main, section, #mobile-index, #start-individual, #start-team, #install-verse { scroll-margin-top: 72px; }
 
   /* masthead */
   .masthead {
@@ -147,9 +147,8 @@
     backdrop-filter: blur(10px); border-bottom: 1px solid var(--line-soft);
   }
   .masthead .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 14px; }
-  .brand { display: flex; align-items: center; gap: 10px; font-family: var(--f-display); font-weight: 700; font-size: var(--step-1); letter-spacing: -0.03em; }
+  .brand { white-space: nowrap; flex-shrink: 0; display: flex; align-items: center; gap: 10px; font-family: var(--f-display); font-weight: 700; font-size: var(--step-1); letter-spacing: -0.03em; }
   .brand .mark { flex: none; }
-  .brand .mark .legs { fill: var(--ink); } /* Ashlr.AI keystone A: ink legs, brand-blue core */
   .brand .sub { color: var(--faint); font-weight: 500; }
   .masthead nav { display: flex; gap: 20px; font-size: var(--step--1); }
   .masthead nav a { color: var(--muted); text-decoration: none; }
@@ -372,17 +371,19 @@
   .status .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--live); margin-right: 7px; vertical-align: 1px; }
   kbd { font-family: var(--f-mono); font-size: .8125em; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 5px; background: var(--surface); }
   .sub-h { font-size: var(--step-1); margin: 38px 0 14px; }
-  .note a, .status a { color: var(--accent); text-underline-offset: 2px; }
+  .note a:not(.btn), .status a { color: var(--accent); text-underline-offset: 2px; }
 
 </style>
 
+<link rel="stylesheet" href="/assets/phantom-world.css">
 </head>
 <body>
 <a class="skip-link" href="#main-content">Skip to content</a>
 <header class="masthead">
   <div class="wrap">
-    <div class="brand"><svg class="mark" viewBox="54 67 146 124" width="24" height="24" role="img" aria-label="Ashlr.AI"><path class="legs" d="M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z"/><path fill="#2563EB" d="M110 121H143L133 152H120Z"/></svg>Ashlr&nbsp;<span class="sub">Verse</span></div>
+    <div class="brand"><img class="mark" src="/assets/phantom-mark.svg" width="24" height="24" alt="" />Phantom&nbsp;<span class="sub">by AshlrAI</span></div>
     <nav aria-label="Page sections">
+      <a href="#phantom-world">Agent world</a>
       <a href="#leader">Leader</a>
       <a href="#autonomy">Autonomy</a>
       <a href="#workbench">Workbench</a>
@@ -403,24 +404,26 @@
   <div class="wrap hero">
     <div class="hero-grid">
       <div class="intro">
-        <p class="eyebrow">Ashlr Verse 3.24 &middot; The coding agent workbench</p>
-        <h1>Work with me.<br>Work for me.</h1>
+        <p class="eyebrow">Phantom &middot; by <a href="https://ashlr.ai">AshlrAI</a></p>
+        <h1>Your coding agents.<br>One workbench.</h1>
         <p class="lede">
-          Bring Claude Code, Codex, Grok, local models and Devin into one workbench.
-          Start an Automatic chat, or give the fleet a desired outcome. Shared accounts and projects connect both workspaces.
+          For individual engineers and engineering teams. Work with your agents in a chat,
+          or give eligible fleet work a clear outcome. Bring your own accounts, local models and projects.
         </p>
-        <p class="lede-tail">Keep your chats, drafts and tools close. Let eligible fleet agents land verified work within the scope you sign once with Touch ID, including the change-volume limits you choose.</p>
+        <p class="lede-tail">Start with one project and a small, checkable task. Review the changes and results; add signed unattended work when you are ready. Both modes use your accounts and projects.</p>
         <div class="cta-row">
-          <a class="btn btn-primary" href="#start">Install Verse</a>
-          <a class="btn btn-ghost" href="https://github.com/ashlrai/ashlr-hub">Explore the source</a>
+          <a class="btn btn-primary" href="#start-individual">Start on your own</a>
+          <a class="btn btn-primary" href="#start-team">Start with your team</a>
+          <a class="btn" href="#phantom-world">Explore the agent world <span aria-hidden="true">↗</span></a>
         </div>
+        <p class="lede-tail">Formerly Ashlr Verse. Existing commands and saved projects stay compatible. <a href="https://github.com/ashlrai/ashlr-hub">Explore the source</a></p>
       </div>
       <div class="journey" role="region" aria-labelledby="journey-heading">
-        <div class="journey-top"><span><span class="journey-light" aria-hidden="true"></span><strong>Verse / work in motion</strong></span><span>3.24</span></div>
+        <div class="journey-top"><span><span class="journey-light" aria-hidden="true"></span><strong>Phantom / work in motion</strong></span><span>3.24</span></div>
         <div class="journey-body">
           <p class="journey-kicker">Choose a workflow</p>
           <h2 id="journey-heading">See how the work moves.</h2>
-          <div class="journey-tabs" role="tablist" aria-label="Verse workflow examples">
+          <div class="journey-tabs" role="tablist" aria-label="Phantom workflow examples">
             <button type="button" id="journey-tab-ask" role="tab" aria-controls="journey-ask" aria-selected="true" tabindex="0">Work with me</button>
             <button type="button" id="journey-tab-build" role="tab" aria-controls="journey-build" aria-selected="false" tabindex="-1">Work for me</button>
           </div>
@@ -444,9 +447,9 @@
     </div>
 
     <nav id="mobile-index" class="mobile-index" aria-label="Explore page sections">
-      <span class="label">Explore Verse</span>
+      <span class="label">Explore Phantom</span>
       <div class="links">
-        <a href="#leader">Leader</a><a href="#autonomy">Autonomy</a>
+        <a href="#phantom-world">Agent world</a><a href="#leader">Leader</a><a href="#autonomy">Autonomy</a>
         <a href="#workbench">Workbench</a><a href="#phone">Phone</a>
         <a href="#knowledge">Wiki &amp; lessons</a>
         <a href="#lanes-cloud">Cloud &amp; Devin</a><a href="#measured">Measured</a>
@@ -487,14 +490,133 @@
   </div>
 
 
-  <section id="leader">
+  <!-- Illustrative scene; resource selection never connects or dispatches an account. -->
+<section id="phantom-world" class="phantom-world" aria-labelledby="pw-title" data-stage="0">
+  <div class="pw-heading">
+    <div>
+      <h2 id="pw-title">Your resources.<br>One extraordinary team.</h2>
+      <p>Bring your subscriptions, API credits and local models into one engineering workbench. Give your agents the tools to turn an idea into a result.</p>
+    </div>
+    <span class="pw-demo-label">Interactive demo · no agents are running</span>
+  </div>
+  <div class="pw-mode" role="group" aria-label="Choose the demonstrated way of working">
+    <button type="button" data-mode="with" aria-pressed="false" disabled>Work with me</button>
+    <button type="button" data-mode="for" aria-pressed="true" disabled>Work for me</button>
+  </div>
+  <p class="pw-disclaimer" data-mode-description>The illustrative team moves through the task and brings you the result.</p>
+  <div class="pw-resource-console">
+    <div class="pw-resource-tabs" role="group" aria-label="Explore resource types">
+      <button type="button" data-resource="subscription" aria-pressed="true" disabled>Subscriptions</button>
+      <button type="button" data-resource="api" aria-pressed="false" disabled>API credits</button>
+      <button type="button" data-resource="local" aria-pressed="false" disabled>Local models</button>
+      <button type="button" data-resource="tools" aria-pressed="false" disabled>MCP &amp; CLI tools</button>
+    </div>
+    <div class="pw-provider-grid" aria-label="Provider and tool identities">
+      <div class="pw-provider" data-provider-kind="subscription api"><img src="/assets/provider-claude.svg" width="25" height="25" alt="" loading="lazy"><span>Anthropic<small>Claude Code</small></span></div>
+      <div class="pw-provider" data-provider-kind="subscription api"><img src="/assets/provider-codex.svg" width="25" height="25" alt="" loading="lazy"><span>OpenAI<small>Codex</small></span></div>
+      <div class="pw-provider" data-provider-kind="subscription api"><img src="/assets/provider-grok.svg" width="25" height="25" alt="" loading="lazy"><span>xAI<small>Grok</small></span></div>
+      <div class="pw-provider" data-provider-kind="api"><img src="/assets/devin-mark.svg" width="25" height="25" alt="" loading="lazy"><span>Devin<small>Cloud &amp; CLI</small></span></div>
+      <div class="pw-provider" data-provider-kind="local"><img src="/assets/provider-local.svg" width="25" height="25" alt="" loading="lazy"><span>On your machine<small>Local models</small></span></div>
+      <div class="pw-provider" data-provider-kind="tools"><img src="/assets/provider-vercel.svg" width="25" height="25" alt="" loading="lazy"><span>Vercel<small>Deployment tools</small></span></div>
+      <div class="pw-provider" data-provider-kind="tools"><img src="/assets/provider-supabase.svg" width="25" height="25" alt="" loading="lazy"><span>Supabase<small>Database tools</small></span></div>
+    </div>
+    <p class="pw-resource-description" data-resource-description>Connect your supported CLI accounts. Each account keeps its own subscription window and usage reading.</p>
+  </div>
+  <div class="pw-layout">
+    <div class="pw-scene" role="group" aria-label="Illustrated demo team: select an agent to inspect its task">
+      <svg class="pw-ground" viewBox="0 0 600 445" aria-hidden="true" focusable="false">
+        <defs>
+          <pattern id="pw-grid" width="28" height="28" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#bad0e8" opacity=".6"/></pattern>
+        </defs>
+        <path d="M42 239 301 105 564 240 301 378Z" fill="url(#pw-grid)"/>
+        <path class="pw-bridge" d="M190 204 300 257 404 190 M300 257 300 312"/>
+        <path class="pw-path" d="M190 204 300 257 404 190 M300 257 300 312"/>
+        <path class="pw-current pw-current-blue" d="M190 204 300 257 404 190"/>
+        <path class="pw-current pw-current-mint" d="M404 190 300 257 300 312"/>
+        <path class="pw-current pw-current-violet" d="M300 312 300 257 190 204"/>
+        <circle class="pw-node" cx="300" cy="257" r="7"/>
+        <g>
+          <path class="pw-tile-side" d="M69 208 144 250 227 208V222L144 263 69 222Z"/>
+          <path class="pw-tile-top" d="M69 208 147 166 227 208 144 250Z"/>
+          <path class="pw-tile-inset" d="M97 208 147 181 198 208 147 234Z"/>
+          <path d="M124 185 148 172 168 182 144 196Z" fill="#bacee6"/>
+          <path d="M124 185V197L144 208V196Z" fill="#a8bfdc"/>
+        </g>
+        <g>
+          <path class="pw-tile-side" d="M360 193 438 235 519 193V207L438 248 360 207Z"/>
+          <path class="pw-tile-top" d="M360 193 440 151 519 193 438 235Z"/>
+          <path class="pw-tile-inset" d="M387 193 440 166 491 193 440 220Z"/>
+          <path d="M416 170 441 157 462 168 437 181Z" fill="#bacee6"/>
+          <path d="M416 170V182L437 193V181Z" fill="#a8bfdc"/>
+        </g>
+        <g>
+          <path class="pw-tile-side" d="M223 337 301 379 382 337V351L301 392 223 351Z"/>
+          <path class="pw-tile-top" d="M223 337 303 295 382 337 301 379Z"/>
+          <path class="pw-tile-inset" d="M250 337 303 310 354 337 303 364Z"/>
+          <path d="M279 314 304 301 325 312 300 325Z" fill="#bacee6"/>
+          <path d="M279 314V326L300 337V325Z" fill="#a8bfdc"/>
+        </g>
+      </svg>
+      <button type="button" class="pw-agent" data-agent="scout" aria-label="Inspect Scout: investigate the retry failure" aria-pressed="true" disabled>
+        <span class="pw-avatar"><img src="/assets/phantom-mark.svg" alt="" width="72" height="72" loading="lazy" decoding="async"></span>
+        <strong>Scout</strong><small>Find the cause</small>
+      </button>
+      <button type="button" class="pw-agent" data-agent="builder" aria-label="Inspect Builder: prepare a focused patch" aria-pressed="false" disabled>
+        <span class="pw-avatar"><img src="/assets/phantom-mark.svg" alt="" width="72" height="72" loading="lazy" decoding="async"></span>
+        <strong>Builder</strong><small>Make the change</small>
+      </button>
+      <button type="button" class="pw-agent" data-agent="reviewer" aria-label="Inspect Reviewer: verify and review the change" aria-pressed="false" disabled>
+        <span class="pw-avatar"><img src="/assets/phantom-mark.svg" alt="" width="72" height="72" loading="lazy" decoding="async"></span>
+        <strong>Reviewer</strong><small>Check the result</small>
+      </button>
+      <span class="pw-task-token" aria-hidden="true" data-token>Retry fix</span>
+      <span class="pw-island-label">Illustrated handoffs · one shared task</span>
+      <span class="pw-orbit pw-orbit-one" aria-hidden="true"></span><span class="pw-orbit pw-orbit-two" aria-hidden="true"></span>
+    </div>
+    <div class="pw-inspector" aria-label="Demo task inspector">
+      <p class="pw-inspector-label" data-workflow-label>Delegated workflow · a retry fix</p>
+      <h3 data-stage-title>Find the cause before changing the code</h3>
+      <p class="pw-inspector-description" data-stage-description>Scout follows a reported retry failure to a small, reproducible case. The task and its context stay visible while the rest of the team gets ready.</p>
+      <dl class="pw-facts">
+        <dt>Selected agent</dt><dd data-role-name>Scout</dd>
+        <dt>Task</dt><dd data-role-task>Investigate the retry failure</dd>
+        <dt>Context</dt><dd data-role-context>Report and reproduction</dd>
+      </dl>
+      <div class="pw-evidence"><strong>What you would inspect</strong><span data-evidence>A reproducible case and a short explanation of the suspected cause.</span></div>
+    </div>
+  </div>
+  <ol class="pw-stage-list" aria-label="Inspect the demo stages">
+    <li><button type="button" data-step="0" aria-current="step" disabled><span class="pw-stage-number" aria-hidden="true">1</span>Investigate</button></li>
+    <li><button type="button" data-step="1" disabled><span class="pw-stage-number" aria-hidden="true">2</span>Build</button></li>
+    <li><button type="button" data-step="2" disabled><span class="pw-stage-number" aria-hidden="true">3</span>Verify</button></li>
+    <li><button type="button" data-step="3" disabled><span class="pw-stage-number" aria-hidden="true">4</span>Review</button></li>
+    <li><button type="button" data-step="4" disabled><span class="pw-stage-number" aria-hidden="true">5</span>Result</button></li>
+  </ol>
+  <div class="pw-controls" role="group" aria-label="Control illustrative replay">
+    <button type="button" data-action="play" aria-pressed="false" disabled>Play demo</button>
+    <button type="button" data-action="next" disabled>Next stage</button>
+    <button type="button" data-action="restart" disabled>Reset demo</button>
+    <p class="pw-playback-status" role="status" aria-live="polite" aria-atomic="true" data-playback-status>1 of 5 · Investigate · Ready</p>
+  </div>
+  <div class="pw-toolkit" aria-label="Open-source engineering toolkit">
+    <div><span class="pw-toolkit-label">The open-source toolkit</span><p>Tools with a job. One place to bring them together.</p></div>
+    <a href="https://github.com/ashlrai/phantom-secrets"><img src="/assets/phantom-mark.svg" width="24" height="24" alt="">Phantom Secrets<span>Keep secrets out of model context</span></a>
+    <a href="https://github.com/ashlrai/locus"><span class="pw-tool-icon" aria-hidden="true">◎</span>Locus<span>Bind tools to the right account</span></a>
+    <a href="https://github.com/ashlrai/lexicon"><span class="pw-tool-icon" aria-hidden="true">≈</span>Lexicon<span>Make technical voice input clearer</span></a>
+    <a href="/ecosystem">Explore the ecosystem<span>Independent projects. Shared purpose.</span></a>
+  </div>
+  <p class="pw-disclaimer">Provider logos identify resources. MCP servers and ecosystem tools need configuration.</p>
+  <noscript><p class="pw-disclaimer">The static scene shows the first stage. Enable JavaScript to explore the illustrative replay.</p></noscript>
+</section>
+
+<section id="leader">
     <div class="wrap">
       <div class="sec-head">
         <p class="eyebrow">New in 3.14 &middot; The Leader</p>
         <h2>One brain, one thread, wherever you are.</h2>
         <p>
           The Leader reads what the fleet actually did and writes memos: the bottleneck, one move with
-          an expected result and a date, and questions for you. Now you can answer. Verse, Telegram and
+          an expected result and a date, and questions for you. Now you can answer. Phantom, Telegram and
           the CLI all read and write the same conversation, so a directive you send from your phone is
           in force at your desk.
         </p>
@@ -502,11 +624,11 @@
 
       <div class="two">
         <figure class="convo">
-          <div class="convo-head"><span><b>Mind &#8984;4</b> &middot; One thread &middot; Verse, Telegram, CLI</span><span>illustrative</span></div>
+          <div class="convo-head"><span><b>Mind &#8984;4</b> &middot; One thread &middot; Phantom, Telegram, CLI</span><span>illustrative</span></div>
           <div class="thread">
             <div class="msg me"><span class="who">You <span class="chan tg">Telegram</span></span><div class="bubble">focus: the flaky retry test in binshield before anything new</div></div>
             <div class="msg sys"><span class="who">System</span><div class="bubble">Standing directive recorded: Focus on the flaky retry test in binshield before anything new</div></div>
-            <div class="msg"><span class="who">Leader <span class="chan">Verse</span></span>
+            <div class="msg"><span class="who">Leader <span class="chan">Phantom</span></span>
               <div class="memo">
                 <span class="t">Memo &middot; verify keeps failing on binshield</span>
                 <p>Move: one repair goal on a Grok seat. Expected: verify green on the retry suite within 48&nbsp;h.</p>
@@ -614,14 +736,14 @@
       </div>
 
       <figure class="shot">
-        <img src="assets/work-with-me-3.22-demo.jpg" width="1280" height="720" loading="lazy" decoding="async"
-             alt="Ashlr Verse 3.22 Work with me: collapsed saved projects and chat groups preserve the active conversation. Labeled demo accounts." />
-        <figcaption>Work with me: the actual compiled 3.22 browser workbench with collapsible projects and a demo conversation. No provider ran.</figcaption>
+        <img src="assets/work-with-me-3.24.3-demo.jpg" width="1440" height="900" loading="lazy" decoding="async"
+             alt="Phantom 3.24.3 Work with me: read-only Demo chat with labeled sample accounts and provider-inactive conversation." />
+        <figcaption>Work with me: actual compiled 3.24.3 browser UI with labeled Demo accounts and a sample conversation. No provider ran and no fleet was active.</figcaption>
       </figure>
       <figure class="shot">
-        <img src="assets/work-for-me-3.22-demo.jpg" width="1280" height="720" loading="lazy" decoding="async"
-             alt="Ashlr Verse 3.22 Work for me: inline verification, GitHub PR and merge timeline with unknown CI and unrecorded deployment. Synthetic demo data." />
-        <figcaption>Work for me: actual compiled 3.22 timeline with synthetic verification and GitHub stages. CI stays unknown and release/deployment is unrecorded. No fleet was active, no provider or GitHub service ran. These are browser captures, not native app chrome.</figcaption>
+        <img src="assets/work-for-me-3.24.3-demo.jpg" width="1440" height="900" loading="lazy" decoding="async"
+             alt="Phantom 3.24.3 Work for me: read-only Command overview with labeled Demo accounts and an illustrative Leader memo." />
+        <figcaption>Work for me: actual compiled Phantom 3.24.3 Command overview with labeled Demo accounts and an illustrative Leader memo. No provider ran and no fleet was active.</figcaption>
       </figure>
 
       <div class="seats">
@@ -688,7 +810,7 @@
         <p class="eyebrow">Optional phone access</p>
         <h2>Your fleet, in your pocket.</h2>
         <p>
-          Open Verse in an iPhone browser from anywhere after you opt in on your Mac. A separate
+          Open Phantom in an iPhone browser from anywhere after you opt in on your Mac. A separate
           phone gateway sits behind Cloudflare Access; only a Mac-approved passkey can pair a device.
           The main console and its tokens stay on the Mac.
         </p>
@@ -770,9 +892,9 @@ ashlr wiki ask "where are standing grants verified?"</pre>
       </div>
 
       <figure>
-        <svg viewBox="0 0 700 220" width="100%" role="img" aria-label="Verse launches a Claude cloud session or a Devin session. Each delivers one pull request from its own branch with a report. Pull requests are triaged in Needs you or taken into the standing gates. Cloud Devin pull requests need two judges from different families; eligible Devin CLI work can use a signed elite-direct grant.">
+        <svg viewBox="0 0 700 220" width="100%" role="img" aria-label="Phantom launches a Claude cloud session or a Devin session. Each delivers one pull request from its own branch with a report. Pull requests are triaged in Needs you or taken into the standing gates. Cloud Devin pull requests need two judges from different families; eligible Devin CLI work can use a signed elite-direct grant.">
           <rect x="8" y="80" width="112" height="54" rx="3" fill="var(--surface-2)" stroke="var(--line)"/>
-          <text x="64" y="103" text-anchor="middle" font-size="12" fill="var(--ink)">Verse</text>
+          <text x="64" y="103" text-anchor="middle" font-size="12" fill="var(--ink)">Phantom</text>
           <text x="64" y="120" text-anchor="middle" font-size="9" fill="var(--muted)">chat, Command, CLI</text>
 
           <path d="M120 100 L196 62" stroke="var(--accent)" stroke-width="1.5" fill="none"/>
@@ -806,14 +928,14 @@ ashlr wiki ask "where are standing grants verified?"</pre>
 
           <text x="350" y="208" text-anchor="middle" font-size="10" fill="var(--faint)">tracked with gh &middot; merged only by the gates or by you &middot; never by the session</text>
         </svg>
-        <figcaption>Verse cannot read a session back, so each task delivers on its own branch with a PR and a report. Failed launches and missing PRs stay visible as their own states.</figcaption>
+        <figcaption>Phantom cannot read a session back, so each task delivers on its own branch with a PR and a report. Failed launches and missing PRs stay visible as their own states.</figcaption>
       </figure>
 
       <div class="two" style="margin-top:30px">
         <div class="note">
           <h3>Claude cloud sessions</h3>
           <p>
-            Start one from a chat, from Command or with <code>ashlr cloud launch</code>, or let Verse work
+            Start one from a chat, from Command or with <code>ashlr cloud launch</code>, or let Phantom work
             through its own improvement backlog under a daily cap. Claude does not expose the credit balance,
             so spend is a labelled estimate you correct on claude.ai. Under a standing grant, a cloud PR on a
             granted repo lands only through the gates.
@@ -822,14 +944,14 @@ ashlr wiki ask "where are standing grants verified?"</pre>
         <div class="note cool">
           <div class="devin-heading"><img src="assets/devin-mark.svg" width="23" height="23" alt=""><h3>Devin CLI, powered by SWE-2</h3></div>
           <p>
-            Connect a signed-in Devin CLI as a Verse seat. It defaults to Cognition <b>SWE-2 High</b>;
-            Medium and Max are also in Devin's model picker. CLI chat stays in Verse; a PR link it prints
+            Connect a signed-in Devin CLI as a Phantom seat. It defaults to Cognition <b>SWE-2 High</b>;
+            Medium and Max are also in Devin's model picker. CLI chat stays in Phantom; a PR link it prints
             appears in Needs you. Fleet CLI work follows the separate proposal and gate path.
           </p>
           <p style="margin-top:12px">
             <b>Devin cloud is separate.</b> Connect its API key in the macOS Keychain with
             <code>ashlr devin connect</code>, then use <b>Run in Devin</b> or <code>ashlr devin launch</code>.
-            Sessions have ACU caps and a reserve. Verse does not identify their underlying model as SWE-2.
+            Sessions have ACU caps and a reserve. Phantom does not identify their underlying model as SWE-2.
           </p>
           <p style="margin-top:12px">
             Cloud PRs need <b>two independent model families</b> before a granted stage may merge them.
@@ -900,7 +1022,7 @@ ashlr wiki ask "where are standing grants verified?"</pre>
         <p class="eyebrow">Historical local-model measurements</p>
         <h2>One bug was costing 23,500 tokens a turn.</h2>
         <p>
-          Claude Code appends a token counter to every request, and it changes each turn. Verse was
+          Claude Code appends a token counter to every request, and it changes each turn. Phantom was
           folding that into the system prompt, ahead of the whole conversation, so the prompt prefix
           changed on every request and llama.cpp could reuse none of its cache. Every turn
           reprocessed the entire context. The work was correct the whole time. It was just slow.
@@ -965,7 +1087,7 @@ ashlr wiki ask "where are standing grants verified?"</pre>
         than running the same agents one after another. That is a property of one piece of silicon,
         not a limit of the local console. Seats on different accounts can run
         in parallel when their providers and resources allow it. Separate machines can run
-        independent Verse workspaces; coordinated multi-machine control is not shipped.
+        independent Phantom workspaces; coordinated multi-machine control is not shipped.
       </p>
       <p style="color:var(--muted);max-width:64ch;margin-top:18px">
         The large win above was the cache fix, and it helps a single agent just as much.
@@ -1020,7 +1142,7 @@ ashlr wiki ask "where are standing grants verified?"</pre>
       <figure>
         <svg viewBox="0 0 700 220" width="100%" role="img" aria-label="A turn goes from the console to either Ollama or llama-server. Model discovery always goes to Ollama, which reports installed tags, context window and tool support. Turn dispatch optionally goes to llama-server through a normalising proxy, which holds four batching slots.">
           <rect x="8" y="86" width="118" height="48" rx="3" fill="var(--surface-2)" stroke="var(--line)"/>
-          <text x="67" y="106" text-anchor="middle" font-size="12" fill="var(--ink)">Verse</text>
+          <text x="67" y="106" text-anchor="middle" font-size="12" fill="var(--ink)">Phantom</text>
           <text x="67" y="122" text-anchor="middle" font-size="12" fill="var(--ink)">console</text>
 
           <path d="M126 100 H210" stroke="var(--live)" stroke-width="1.5" fill="none"/>
@@ -1063,7 +1185,7 @@ ashlr wiki ask "where are standing grants verified?"</pre>
           <h3>Why discovery stays put</h3>
           <p>
             Which models you have, their context window, and whether they can call tools at all come
-            from Ollama. A model without tool support cannot drive an agent session, so Verse hides
+            from Ollama. A model without tool support cannot drive an agent session, so Phantom hides
             it rather than letting you pick something that fails on the first turn.
           </p>
         </div>
@@ -1116,7 +1238,7 @@ ashlr wiki ask "where are standing grants verified?"</pre>
         </figure>
 
         <div class="guards" style="align-self:stretch">
-          <div class="guard"><dt>Standard or expansive</dt><dd>New Claude chats on a 1M model compact at &asymp;367k. Expansive restores the full window and is one click away; its menu puts the cost at about 2.6&times; on Claude, the ratio of the two compaction points. Verse may suggest it, but never switches it on.</dd></div>
+          <div class="guard"><dt>Standard or expansive</dt><dd>New Claude chats on a 1M model compact at &asymp;367k. Expansive restores the full window and is one click away; its menu puts the cost at about 2.6&times; on Claude, the ratio of the two compaction points. Phantom may suggest it, but never switches it on.</dd></div>
           <div class="guard"><dt>Compaction you can see</dt><dd>Each native compaction becomes a divider in the transcript (&ldquo;Auto-compacted 967k &rarr; 19k in 1m 58s&rdquo;). The meter warns at 80% and 95% of the compaction point, not of the window.</dd></div>
           <div class="guard"><dt>Continue in a fresh chat</dt><dd>A handoff note is built from the session's own log: goal, latest asks, files, commands, errors and <code>git diff --stat</code>. There is no model call. The new chat can run on any seat, and nothing is sent until you press send.</dd></div>
           <div class="guard"><dt>Shared project memory</dt><dd>One private directory per project, shared by every seat, with a fixed instruction block that keeps the prompt cache intact. It is on by default and can be turned off per project, because on a paid seat it is not free.</dd></div>
@@ -1187,16 +1309,44 @@ ashlr wiki ask "where are standing grants verified?"</pre>
     <div class="wrap">
       <div class="sec-head">
         <p class="eyebrow">Get started</p>
-        <h2>Open the console. Talk to the Leader. Turn on autonomy when you are ready.</h2>
+        <h2>Start with useful work. Add autonomy when you are ready.</h2>
       </div>
+
+      <div class="two" style="margin-bottom:44px">
+        <article class="note" id="start-individual" aria-labelledby="start-individual-heading">
+          <p class="eyebrow">For individual engineers</p>
+          <h3 id="start-individual-heading">Your first useful task.</h3>
+          <p>Open an owned project with an existing coding CLI or a tool-capable local model. Describe a small change, inspect its tools and diff, and review the result.</p>
+          <div class="cta-row">
+            <a class="btn btn-primary" href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/QUICKSTART.md#make-your-first-useful-turn">Open your first project</a>
+          </div>
+          <p style="margin-top:14px"><a href="#install-verse">Install Phantom</a>, then follow the guide with your own accounts.</p>
+        </article>
+        <article class="note" id="start-team" aria-labelledby="start-team-heading">
+          <p class="eyebrow">For engineering teams</p>
+          <h3 id="start-team-heading">Prove one repository together.</h3>
+          <p>Choose a repository, a maintainer and a clear definition of done. Each engineer uses their own permitted accounts. Coordinate changes through your existing GitHub pull requests, checks and review.</p>
+          <ol>
+            <li>Agree one small task and its reviewer.</li>
+            <li>Install Phantom and open the project.</li>
+            <li>Produce a change, check the evidence and review it.</li>
+          </ol>
+          <div class="cta-row">
+            <a class="btn btn-primary" href="#install-verse">Start a repository pilot</a>
+          </div>
+          <p style="margin-top:14px">AshlrAI is the first team pilot for this path. We’ll measure reviewed changes and completed work before sharing results.</p>
+          <p style="margin-top:14px">For optional unattended work, read <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTOMATIC-OUTCOMES.md">Automatic work</a> and <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTHORITY.md">autonomy setup</a>.</p>
+        </article>
+      </div>
+      <p class="evidence-note">Chats and agent tools use the context you provide to your configured providers. Account readings keep their source and billing qualifiers; see <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESOURCE-EVIDENCE.md">resource evidence</a>. This page adds no signup or tracking.</p>
 
       <div class="two" style="gap:44px">
         <div class="steps">
           <div class="step"><span class="n"></span><div>
-            <h3>Install and open the console</h3>
-            <p>Inspect reported tools and context in each chat, and open source-line evidence from the local module map. Install Verse 3.24.2 with the same CLI command on all three platforms. On an Apple silicon Mac, you can also download the <a href="https://github.com/ashlrai/ashlr-hub/releases/tag/v3.24.2">Verse 3.24.2 desktop DMG</a>. It is locally signed, not Apple Developer ID notarized, so macOS may require Open Anyway on first launch.</p>
+            <h3 id="install-verse">Install and open the console</h3>
+            <p>Inspect reported tools and context in each chat, and open source-line evidence from the local module map. After release publication and download verification, install Phantom 3.24.3 with the same CLI command on all three platforms. On an Apple silicon Mac, the release also provides the <a href="https://github.com/ashlrai/ashlr-hub/releases/tag/v3.24.3">Phantom 3.24.3 desktop DMG</a>. It is locally signed, not Apple Developer ID notarized, so macOS may require Open Anyway on first launch.</p>
             <p>New in 3.24: Automatic awake during observed local desktop work, reported Devin consumption and source-qualified Growth measurements. Reset controls retain signed reserves and hold allowance taper when the execution account is unconfirmed. Automatic chat and editable fleet outcomes remain available.</p>
-            <pre id="install-command">npm i -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.2/ashlr-hub-3.24.2.tgz
+            <pre id="install-command">npm i -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.3/ashlr-hub-3.24.3.tgz
 ashlr verse</pre>
             <button class="copy-command" type="button" data-copy="install-command">Copy commands</button><span class="copy-status" role="status" aria-live="polite"></span>
           </div></div>
@@ -1208,13 +1358,13 @@ ashlr verse</pre>
   --executable /path/to/claude</pre>
           </div></div>
           <div class="step"><span class="n"></span><div>
-            <h3>Talk to the Leader</h3>
+            <h3>Optional: talk to the Leader</h3>
             <p>Open Mind with <kbd>&#8984;4</kbd>, or from the terminal. Add Telegram for a two-way line on your phone, or configure the separate <a href="#phone">phone gateway</a> for browser access.</p>
             <pre>ashlr leader say "focus: the flaky retry test"
 ashlr comms setup-telegram</pre>
           </div></div>
           <div class="step"><span class="n"></span><div>
-            <h3>Set up resident autonomy once</h3>
+            <h3>Optional: set up unattended work</h3>
             <p>macOS only. Setup does what it can and stops for what only you may do: the custody install, Touch ID, two GitHub clicks. Then you start the resident daemon in your own terminal. The default signed ladder begins in shadow; a separately signed elite-direct grant can begin verified merges immediately.</p>
             <pre>ashlr authority setup --dry-run
 ashlr authority setup
@@ -1242,12 +1392,13 @@ ashlr devin budget --acu 50</pre>
             that.
           </p>
           <p style="margin-top:14px">
-            Verse never asks for your provider credentials. It drives each CLI with its own pinned profile.
+            Native accounts authenticate through the vendor's official CLI, each with its own pinned profile.
+            Optional Devin cloud setup asks for an API key at a hidden prompt and stores it in the macOS Keychain.
             The main console is loopback-only and requires its startup token; optional phone access uses
             a separate Access-protected gateway and a Mac-approved device.
           </p>
           <p style="margin-top:14px">
-            Guides: <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md">Verse</a>,
+            Guides: <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md">Phantom</a>,
             <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md">the Leader</a>,
             <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTHORITY.md">autonomy</a>,
             <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md">cloud</a> and
@@ -1261,7 +1412,7 @@ ashlr devin budget --acu 50</pre>
 
 <footer>
   <div class="wrap">
-    <p>Ashlr Verse 3.24 &middot; verse.ashlr.ai</p>
+    <p>Phantom 3.24 &middot; by AshlrAI</p>
     <span><a href="/ecosystem">Ecosystem</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md">User guide</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md">Leader</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md">Devin</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub/blob/master/CHANGELOG.md">Changelog</a> &middot; <a href="https://github.com/ashlrai/ashlr-hub">github.com/ashlrai/ashlr-hub</a></span>
   </div>
 </footer>
@@ -1307,5 +1458,7 @@ ashlr devin budget --acu 50</pre>
     });
   });
 </script>
+<p class="fine" style="text-align:center;padding:12px 24px">Vercel is a trademark of Vercel Inc. Provider marks belong to their respective owners.</p>
+<script defer src="/assets/phantom-world.js"></script>
 </body>
 </html>

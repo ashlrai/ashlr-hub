@@ -87,7 +87,7 @@ export function ResetSpendingControl({ view: incoming, nowMs, onReviewGrant, rea
       <div className={styles.copy}>
         <h3 id={id} className={styles.title}>Use allowance before resets</h3>
         <p className={styles.secondary}>{!control.view ? 'Allowance setting has not loaded yet.'
-          : !status ? 'Controls unavailable — update Ashlr to manage this setting.'
+          : !status ? 'Controls unavailable — update Phantom to manage this setting.'
           : legacy ? 'Routing favors upcoming resets; reserve shrinking is not enabled.'
           : status.mode === 'disabled' ? 'Off · reset priority and reserve shrinking are disabled.'
           : 'Saved On · useful work may release reserve when its verified task fit permits.'}</p>

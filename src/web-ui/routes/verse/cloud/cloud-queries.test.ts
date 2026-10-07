@@ -48,7 +48,7 @@ describe('the overview read', () => {
     const odd = await cloudQuery.fetch();
     expect(odd.value).toBeNull();
     expect(odd.available).toBe(true);
-    expect(odd.reason).toBe('Unrecognized response — update Ashlr.');
+    expect(odd.reason).toBe('Unrecognized response — update Phantom.');
     vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
     expect((await cloudQuery.fetch()).reason).toBe('The cloud lane could not be reached.');
     vi.stubGlobal('fetch', vi.fn(async () => json({ error: 'boom' }, 503)));
@@ -135,7 +135,7 @@ describe('writes', () => {
   it('never splices an id that is not a task id into a path', async () => {
     setMutationToken(TOKEN);
     const { posted } = stubCloudFetch(overview());
-    await expect(dismissCloudTask('../budget')).rejects.toThrow('That task id is not one Verse issued, so nothing was sent.');
+    await expect(dismissCloudTask('../budget')).rejects.toThrow('That task id is not one Phantom issued, so nothing was sent.');
     expect(posted).toEqual([]);
   });
 

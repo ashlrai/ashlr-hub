@@ -15,7 +15,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { setTelegramTransportForTests } from '../src/core/integrations/telegram.js';
+import { setTelegramSendClockForTests, setTelegramTransportForTests } from '../src/core/integrations/telegram.js';
 import { DIRECTIVES_EMPTY_HTML, TELEGRAM_HELP_TEXT, directivesHtml, handleSlashCommand } from '../src/core/comms/telegram-channel.js';
 import { OPERATOR_DIRECTIVE_MAX } from '../src/core/vision/leader-thread-types.js';
 import { OPERATOR_LIMITS, addOperatorDirective, retireOperatorDirective } from '../src/core/vision/leader-operator.js';
@@ -31,9 +31,21 @@ import { fakeLedger, makeApplyDeps, makePolicy, useTmpHome } from './helpers/lea
 
 const home = useTmpHome();
 
-beforeEach(() => home.setup());
+let telegramNow = 0;
+
+beforeEach(() => {
+  telegramNow = 0;
+  // Exercise actual-attempt pacing with a virtual monotonic clock, not a
+  // fake-transport bypass or larger timeout.
+  setTelegramSendClockForTests({
+    now: () => telegramNow,
+    sleep: async (ms) => { telegramNow += ms; },
+  });
+  home.setup();
+});
 afterEach(() => {
   setTelegramTransportForTests(null);
+  setTelegramSendClockForTests(null);
   setLeaderThreadDepsForTest(null);
   home.teardown();
 });

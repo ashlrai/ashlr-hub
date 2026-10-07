@@ -229,7 +229,12 @@ function assureLockDirectory(
     if (
       initial.isSymbolicLink() || !initial.isDirectory() || !owned(initial.uid)
     ) return null;
-    if (created || process.platform !== 'win32') chmodSync(path, PRIVATE_DIRECTORY_MODE);
+    // Avoid invalidating private-storage ctime verdicts with an unchanged mode.
+    // Full permission bits still require repair, including sticky/set-ID bits.
+    if (created || (process.platform !== 'win32' &&
+      (initial.mode & 0o7777n) !== BigInt(PRIVATE_DIRECTORY_MODE))) {
+      chmodSync(path, PRIVATE_DIRECTORY_MODE);
+    }
     const before = lstatSync(path, { bigint: true });
     if (
       before.isSymbolicLink() || !before.isDirectory() || !owned(before.uid) ||
@@ -940,9 +945,14 @@ function hasVerifiedLiveOwner(path: string, directory: LockDirectory): boolean {
     if (bytes.toString('utf8') !== canonical) return false;
     try { process.kill(Number(owner.pid), 0); } catch { return false; }
     const recordedStart = canonicalStartEpochSecond(owner.startRef, owner.startRefSource);
-    const observedStart = verifiedProcessStartIdentity(owner.pid);
-    if (recordedStart === undefined || !observedStart ||
-      Math.abs(recordedStart - observedStart.epochSecond) > 1) return false;
+    // This process already owns the writer's immutable start identity. Reuse it
+    // for contention classification; other owners still require a native probe.
+    const selfStart = owner.pid === process.pid ? currentStartIdentity() : null;
+    const observedStart = owner.pid === process.pid
+      ? (selfStart ? canonicalStartEpochSecond(selfStart.ref, selfStart.source) : undefined)
+      : verifiedProcessStartIdentity(owner.pid)?.epochSecond;
+    if (recordedStart === undefined || observedStart === undefined ||
+      Math.abs(recordedStart - observedStart) > 1) return false;
     return hasExpectedToken(
       path,
       { ...named, token: owner.token },

@@ -16,6 +16,7 @@
  * Every write goes through the surface's guarded action (token first) and
  * the lists are re-read from the server afterwards.
  */
+import { formatMetric } from '../../../components/charts/format-metric.js';
 import { useEffect, useId, useState } from 'react';
 import type { FleetLiveRun, FleetLiveSnapshotV1 } from '../../../../core/fleet/fleet-types.js';
 import type { FleetControlQueueV1, FleetRunLogV1 } from '../../../../core/fleet/fleet-control-types.js';
@@ -149,7 +150,7 @@ function RunRow({ run, actions, now, onChanged }: { run: FleetLiveRun; actions: 
         <p className={styles.rowTitle}>
           {run.title}
           <span className={styles.rowMeta}>
-            {' '}· {repoDisplayName(run.repo)} · {run.engine ?? run.lane ?? 'engine ?'} · {run.phase}{minutes !== null ? ` · ${minutes} min` : ''}
+            {' '}· {repoDisplayName(run.repo)} · {run.engine ?? run.lane ?? 'engine ?'} · {run.phase}{minutes !== null ? ` · ${formatMetric(minutes)} min` : ''}
           </span>
         </p>
         <span className={styles.rowControls}>

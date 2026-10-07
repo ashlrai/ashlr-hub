@@ -1,6 +1,8 @@
 # site/
 
-The landing page and ecosystem page for **verse.ashlr.ai**.
+The Phantom by AshlrAI landing page and ecosystem page at **verse.ashlr.ai**.
+The domain, CLI, package and installation names stay compatible; see
+[the product naming guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/PHANTOM-BRAND.md).
 
 Two standalone HTML pages (`index.html` and `ecosystem.html`). No source build,
 runtime dependencies, or framework; Vercel's root configuration skips package
@@ -45,9 +47,57 @@ keyboard-operated date slider, and the repository links. If JavaScript is
 unavailable, the project descriptions and links remain readable; if the data
 is missing or invalid, the page must show an error instead of a false zero.
 
-## Release 3.24.2 copy
+## Interactive Phantom world
 
-The current software metadata and install targets name 3.24.2. Its GitHub
+The illustrated world uses local HTML, SVG, CSS and `assets/phantom-world.js`;
+it has no provider calls, agent dispatch, sign-in or telemetry. Resource cards
+explain connection types rather than reporting live account availability. The
+Work with me and Work for me controls choose example workflows, and each stage
+shows illustrative task evidence. Preserve the visible demo label and result
+statement: no repository changed and no tests or releases ran.
+
+Playback starts only when requested and stops at the last stage. It pauses when
+the page is hidden or the scene leaves the viewport, and tears down timers and
+listeners on page exit. Returning from the browser cache restores an idle scene.
+Reduced motion removes animation; stage buttons and text remain available.
+Without JavaScript, the first stage and resource descriptions remain readable.
+Keep local image dimensions and the scene aspect ratio reserved to avoid layout
+shifts. Check keyboard controls, visible focus and provider-label contrast at
+phone and desktop widths before deployment.
+
+This public demo is separate from the in-app Fleet world, which shows recorded
+run membership and task evidence. Neither surface should invent collaboration
+edges or turn an illustrative result into a claim of live work.
+
+## Individual and team entry paths
+
+Both hero buttons use the same visual treatment and lead to separate first-run
+cards. Individuals begin with an owned project and a reviewed change; teams
+begin with one repository, a named maintainer and their existing GitHub review
+workflow. Each engineer uses their own permitted accounts. This is not a claim
+of hosted shared workspaces, invitations, SSO, team billing or shared credentials.
+The Work with me / Work for me tabs still describe workflows, not audience tiers.
+Leader, resident autonomy and Devin cloud setup stay optional.
+
+AshlrAI is the internal first-team pilot, not an external customer endorsement.
+Before adding results, record actual work by two engineers using their own
+permitted accounts, a tested accepted change and a review handoff. Count runs,
+proposals and remote landings separately. The static page adds no telemetry,
+forms or signup; any future pilot data collection needs explicit opt-in.
+
+At desktop and 390 px, check equal CTA prominence, no horizontal overflow,
+keyboard order and the individual/team/install anchors with and without
+JavaScript. Keep the existing journey tabs, arrow-key controls and install-copy
+feedback working. Validate the Quickstart section and optional guide links.
+Run the existing documentation checker with `site/README.md` as an explicit
+entrypoint; its default operator-document set does not include this directory.
+Current public downloads are 3.24.2. The unchanged 3.24.3 candidate targets below
+must be publicly verified before this branch is deployed; a local preview does
+not establish publication or installed behavior.
+
+## Release 3.24.3 copy
+
+The current software metadata and install targets name 3.24.3. Its GitHub
 release and downloads must exist and pass release checks before publishing this
 page. A source link or prepared download target is not publication evidence.
 
@@ -69,8 +119,8 @@ and isolated filesystem tools; deployment and live account acceptance remain
 separate. Aggressive reset-time reserve shrinking still requires a verified
 subscription-only execution boundary. Purchased balances are excluded.
 
-Keep the existing 3.22 images and captions labeled as browser demos. They do not
-show the new 3.24 controls or prove current provider activity.
+Keep historical 3.22 image leaves unchanged. Current 3.24.3 images are compiled
+browser demos; they do not prove current provider activity or native behavior.
 
 ## What the numbers on it mean
 
@@ -181,17 +231,27 @@ snippets; metadata does not prove indexing or ranking. Primary guidance:
 
 ## Current workbench images
 
-The two `work-*-3.22-demo.jpg` assets capture the actual compiled 3.22 browser UI.
-Both Work with me and Work for me are 1280 × 720. The private 3.22
-`screenshot-fixture-preparation/candidate-capture-acceptance.json` receipt binds
-the captures to the candidate source manifest and compiled assets. The build
-uses the dirty draft at `26b389dfa7797e16cdad5b284d2bc4d1f1ae46b5`; these images
-are browser demonstrations, not final release validation or native app chrome.
+The two `work-*-3.24.3-demo.jpg` assets are unedited 1280 × 720 captures of the
+actual compiled browser UI from clean source
+`93491b7f8ae75a123d2f2a0c608cc8af357e3831`, with build identity and the complete
+4,465-entry compiled inventory checked before and after capture. The same image
+bytes appear in `docs/images/` for the repository README. Earlier versioned
+captures remain unchanged historical images.
 
-A read-only local adapter supplied labeled demo accounts, usage, a conversation,
-and synthetic verification, GitHub PR, merge and post-merge stages. The timeline
-retains unknown CI and unrecorded release/deployment. No provider or GitHub
-service ran, no fleet was active, and all mutations were refused. Separate
-390-pixel browser checks verified the timeline and historical credit views
-without horizontal overflow. The same image bytes appear in `docs/images/`
-for the repository README. Earlier versioned captures remain historical images.
+A private GET-only localhost adapter supplied labeled Demo accounts, a sample
+conversation and synthetic verification/PR/merge history. All mutations were
+refused, no provider ran and no fleet was active. The Work for me image is a
+scrolled history excerpt, not an outcome-creation flow or real successful run.
+Verification, merge and production are separate records: CI stays unknown and
+release/deployment is unrecorded. These images show browser UI, not native app
+chrome, installed account readiness or resident autonomy.
+
+Supporting Resources, collapsed-group and 390 × 844 captures remain private.
+The phone chat image has its sidebar open and qualifies drawer/overflow state,
+not an unobstructed chat or Leader bubble. The fixture lacked the New outcome
+and git-status routes; five git-status warnings were retained. This capture used
+the existing base Demo fixture and does not qualify the separate Leader
+memo/action display fixture. Actual source/build, DTO/helper hashes, screenshots,
+accessibility observations and owned-server cleanup are bound in private capture
+and independent review receipts. The release's full gate remains separate;
+public deployment stays held until release artifacts are accepted and public.

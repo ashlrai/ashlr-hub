@@ -12,7 +12,7 @@ describe('reported tools and context evidence', () => {
     ['mcp__plugin_ashlr_ashlr__ashlr__edit', 'Ashlr MCP: Edit'],
     ['mcp__ashlr__ashlr__read', 'Ashlr MCP: Read'],
     ['mcp:ashlr-efficiency.ashlr__read', 'Ashlr efficiency MCP: Read'],
-    ['mcp__ashlr-verse__exec_command', 'Verse MCP: Command'],
+    ['mcp__ashlr-verse__exec_command', 'Phantom MCP: Command'],
     ['mcp:other.read', 'Other MCP: Read'],
   ])('recognizes a reported envelope without asserting server loading: %s', (name, label) => {
     expect(reportedTool(name, done)).toEqual({ label, mcp: true, state: 'completed' });

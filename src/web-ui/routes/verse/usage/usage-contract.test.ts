@@ -235,6 +235,18 @@ describe('projectAccountsSnapshot against the real VerseAccountsSnapshot', () =>
     expect(borrowed?.collectorNote).toBe('ashlr resource-console owns the quota-refresh lease.');
   });
 
+
+  it.each([true, false, null, undefined, 'false'])(
+    'preserves native credit spending control %s without inventing permission', (spendControlReached) => {
+      const row = claudeRecord({ provider: 'codex' });
+      const projected = projectAccountsSnapshot({ ...snapshot(), accounts: [{ ...row,
+        credits: { hasCredits: true, unlimited: false, balance: '3626.2145675', spendControlReached },
+      }] });
+      expect(projected!.accounts[0]!.credits).toMatchObject({ balance: '3626.2145675',
+        spendControlReached: typeof spendControlReached === 'boolean' ? spendControlReached : null });
+    },
+  );
+
   it('projects Codex credits verbatim, independent of the window', () => {
     const projected = projectAccountsSnapshot(
       snapshot({

@@ -268,7 +268,7 @@ function MemoryPanelBody({ projectPath, refreshKey }: { projectPath: string; ref
       </p>
 
       {unsupported ? (
-        <p className={styles.hint}>This server has no project memory yet — update Ashlr and restart <code>ashlr verse</code>.</p>
+        <p className={styles.hint}>This server has no project memory yet — update Phantom and restart <code>ashlr verse</code>.</p>
       ) : memory.status === 'loading' || (memory.status === 'idle' && !data) ? (
         <div aria-busy="true"><SkeletonLine width="80%" /><SkeletonLine width="60%" /><SkeletonLine width="70%" /></div>
       ) : !data ? (
@@ -303,7 +303,7 @@ function MemoryPanelBody({ projectPath, refreshKey }: { projectPath: string; ref
               <p id={counterId} className={`${styles.hint} ${styles.counter} ${overCap || overBody ? styles.counterOver : ''}`}>
                 {formatBytes(draftBytes)} of {formatBytes(VERSE_MEMORY_MAX_BYTES)}
                 {overCap ? ' — over the limit; trim it to save.' : ''}
-                {overBody ? ` — ${formatBytes(requestBytes)} once line breaks and quotes are encoded for sending, over the ${formatBytes(MEMORY_BODY_MAX_BYTES)} request limit; trim it to save.` : ''}
+                {overBody ? ` — ${formatBytes(requestBytes)} once line breaks and quotes are encoded for sending, over the ${MEMORY_BODY_MAX_BYTES / 1024} KB request limit; trim it to save.` : ''}
               </p>
               {secret ? (
                 <p className={styles.warn} role="alert">

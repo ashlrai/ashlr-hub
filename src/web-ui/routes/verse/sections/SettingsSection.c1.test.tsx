@@ -175,7 +175,7 @@ describe('Settings ▸ Desktop', () => {
     renderSettings();
     const desktop = panel('Desktop');
     expect(within(desktop).queryByRole('switch')).not.toBeInTheDocument();
-    expect(within(desktop).getByText(/available in the Verse desktop app/)).toBeInTheDocument();
+    expect(within(desktop).getByText(/available in the Phantom desktop app/)).toBeInTheDocument();
   });
 
   it('renders from the reported state, and a change waits for native’s answer', async () => {

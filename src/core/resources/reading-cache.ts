@@ -10,7 +10,8 @@ import { readResourceAccountLocalEpoch, resourceAccountProfileDigest, resourceId
   type ResourceAccountIdentityWitness, type ResourceAccountLocalEpoch, type ResourceAccountIdentitySnapshot } from './account-identity-witness.js';
 import type { ResourceConnectionConfig } from './connection-monitor.js';
 import type { ResourceAccountConnection, ResourceConnectionQuotaWindow } from './connection-types.js';
-import type { ResourceLastKnownUsage } from './reading-cache-types.js';
+import { normalizeCodexCredits } from './codex-credits.js';
+import type { ResourceCodexCreditHistory, ResourceLastKnownUsage } from './reading-cache-types.js';
 
 export const RESOURCE_READING_CACHE_FILENAME = '.resource-last-known-readings.json';
 export const RESOURCE_READING_CACHE_MAX_BYTES = 2 * 1024 * 1024;
@@ -18,6 +19,7 @@ type Account = ResourceConnectionConfig['accounts'][number];
 interface CachedReading {
   accountId: string; provider: Account['provider']; accountDigest: string; profileDigest: string;
   epochDigest: string | null; displayIdentityDigest?: string; observedAt: string; expiresAt: string; windows: ResourceConnectionQuotaWindow[];
+  creditHistory?: ResourceCodexCreditHistory;
 }
 export interface ResourceReadingCache {
   captureEpoch(account: Account): ResourceAccountLocalEpoch | null;
@@ -65,6 +67,16 @@ function windows(value: unknown): ResourceConnectionQuotaWindow[] {
   }
   return structuredClone(value) as ResourceConnectionQuotaWindow[];
 }
+function creditHistory(value: unknown): ResourceCodexCreditHistory {
+  if (!record(value) || !exact(value, ['reading', 'observedAt', 'expiresAt', 'planType']) ||
+    !resourceIdentityInstant(value.observedAt) || !resourceIdentityInstant(value.expiresAt) ||
+    Date.parse(value.observedAt) > Date.now() || Date.parse(value.expiresAt) <= Date.parse(value.observedAt) ||
+    Date.parse(value.expiresAt) - Date.parse(value.observedAt) > 60_000 ||
+    !(value.planType === null || text(value.planType, 128))) throw new Error();
+  const reading = normalizeCodexCredits(value.reading);
+  if (reading === null) throw new Error();
+  return { reading, observedAt: value.observedAt, expiresAt: value.expiresAt, planType: value.planType as string | null };
+}
 /** This digest qualifies historical quota display only. It never replaces the
  * stricter file epoch used by native/financial identity witnesses. */
 function claudeDisplayIdentityDigest(profileDigest: string, accountDigest: string): string {
@@ -80,7 +92,7 @@ function checked(value: unknown): CachedReading[] {
     value.scope !== 'historical-display-only' || !dense(value.readings, Math.floor(RESOURCE_READING_CACHE_MAX_BYTES / 2))) throw new Error();
   const ids = new Set<string>();
   return value.readings.map(v => {
-    if (!record(v) || !exact(v, ['accountId', 'provider', 'accountDigest', 'profileDigest', 'epochDigest', 'observedAt', 'expiresAt', 'windows'], ['displayIdentityDigest']) ||
+    if (!record(v) || !exact(v, ['accountId', 'provider', 'accountDigest', 'profileDigest', 'epochDigest', 'observedAt', 'expiresAt', 'windows'], ['displayIdentityDigest', 'creditHistory']) ||
       typeof v.accountId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(v.accountId) || ids.has(v.accountId) ||
       typeof v.provider !== 'string' || !['codex', 'claude', 'grok'].includes(v.provider) || !hash(v.accountDigest) || !hash(v.profileDigest) ||
       !(v.epochDigest === null || hash(v.epochDigest)) ||
@@ -88,20 +100,22 @@ function checked(value: unknown): CachedReading[] {
         v.displayIdentityDigest !== claudeDisplayIdentityDigest(v.profileDigest as string, v.accountDigest as string)) || !resourceIdentityInstant(v.observedAt) || !resourceIdentityInstant(v.expiresAt) ||
       Date.parse(v.observedAt) > Date.now() || Date.parse(v.expiresAt) <= Date.parse(v.observedAt) || Date.parse(v.expiresAt) - Date.parse(v.observedAt) > 60_000) throw new Error();
     ids.add(v.accountId);
-    return { ...v, windows: windows(v.windows) } as unknown as CachedReading;
+    if (Object.hasOwn(v, 'creditHistory') && v.provider !== 'codex') throw new Error();
+    return { ...v, windows: windows(v.windows), ...(Object.hasOwn(v, 'creditHistory') ? { creditHistory: creditHistory(v.creditHistory) } : {}) } as unknown as CachedReading;
   });
 }
 
 /** Public projection refuses additional fields instead of leaking private cache bindings. */
 export function normalizeResourceLastKnownUsage(value: unknown): ResourceLastKnownUsage | null {
   try {
-    if (!record(value) || !exact(value, ['observedAt', 'expiresAt', 'windows', 'source', 'identitySource']) ||
+    if (!record(value) || !exact(value, ['observedAt', 'expiresAt', 'windows', 'source', 'identitySource'], ['creditHistory']) ||
       !resourceIdentityInstant(value.observedAt) || !resourceIdentityInstant(value.expiresAt) ||
       Date.parse(value.observedAt) > Date.now() || Date.parse(value.expiresAt) <= Date.parse(value.observedAt) ||
       Date.parse(value.expiresAt) - Date.parse(value.observedAt) > 60_000 || value.source !== 'native-account-checked-history' ||
       typeof value.identitySource !== 'string' || !['native-account-checked', 'native-account-checked-local-epoch', 'native-account-checked-display-identity'].includes(value.identitySource)) return null;
     return { observedAt: value.observedAt, expiresAt: value.expiresAt, windows: windows(value.windows),
-      source: 'native-account-checked-history', identitySource: value.identitySource as ResourceLastKnownUsage['identitySource'] };
+      source: 'native-account-checked-history', identitySource: value.identitySource as ResourceLastKnownUsage['identitySource'],
+      ...(Object.hasOwn(value, 'creditHistory') ? { creditHistory: creditHistory(value.creditHistory) } : {}) };
   } catch { return null; }
 }
 
@@ -231,6 +245,16 @@ export function createResourceReadingCache(options: { root: string; accountsRoot
               displayIdentityDigest: claudeDisplayIdentityDigest(resourceAccountProfileDigest(a), hint),
             } : {}) };
         if (preserve) { record.observedAt = previous.observedAt; record.expiresAt = previous.expiresAt; record.windows = previous.windows; }
+        if (a.provider === 'codex') {
+          const credits = normalizeCodexCredits(row.codexCredits);
+          if (credits !== null) record.creditHistory = { reading: credits, observedAt: row.observedAt,
+            expiresAt: row.expiresAt, planType: row.planType };
+          else if (previous?.creditHistory && previous.accountDigest === hint && previous.profileDigest === record.profileDigest &&
+            previous.epochDigest !== null && previous.epochDigest === stable) {
+            // An optional omitted balance is not a new zero and cannot renew its timestamp.
+            record.creditHistory = structuredClone(previous.creditHistory);
+          }
+        }
         rows.set(a.id, record);
         native.set(a.id, { provider: a.provider, accountId: a.id, accountDigest: hint, profileDigest: record.profileDigest, generation,
           observedAt: row.observedAt, expiresAt: row.expiresAt, source: 'native-account-checked' });
@@ -265,7 +289,8 @@ export function createResourceReadingCache(options: { root: string; accountsRoot
       // Never expose this fallback through witness() or financial snapshots.
       if (!current && !displayIdentityMatches(row, epoch(a))) return null;
       return { observedAt: row.observedAt, expiresAt: row.expiresAt, windows: structuredClone(row.windows),
-        source: 'native-account-checked-history', identitySource: current?.source ?? 'native-account-checked-display-identity' };
+        source: 'native-account-checked-history', identitySource: current?.source ?? 'native-account-checked-display-identity',
+        ...(row.creditHistory ? { creditHistory: structuredClone(row.creditHistory) } : {}) };
     },
     async flush() { while (pending) await pending; },
   };

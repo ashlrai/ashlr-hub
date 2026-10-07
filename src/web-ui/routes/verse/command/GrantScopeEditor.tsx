@@ -151,7 +151,7 @@ export function GrantScopeEditor({ draft, busy, onPreview, onReset, edited, onAc
 
   const ids = { metered: useId(), days: useId(), mode: useId() };
   if (!base) {
-    return <p className={styles.scopeMeta}>This server cannot edit a draft yet — update Ashlr to choose repos and engines here.</p>;
+    return <p className={styles.scopeMeta}>This server cannot edit a draft yet — update Phantom to choose repos and engines here.</p>;
   }
   const meteredN = Number(metered);
   const daysN = Number(days);

@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { setTelegramTransportForTests } from '../src/core/integrations/telegram.js';
+import { setTelegramSendClockForTests, setTelegramTransportForTests } from '../src/core/integrations/telegram.js';
 import { runCommsCycle } from '../src/core/comms/dispatch.js';
 import { lookupTelegramMessage } from '../src/core/comms/telegram-thread-map.js';
 import { writeLeaderMemo } from '../src/core/vision/leader-memo.js';
@@ -44,7 +44,16 @@ function memo(): LeaderMemo {
   };
 }
 
+let telegramNow = 0;
+
 beforeEach(() => {
+  telegramNow = 0;
+  // Exercise actual-attempt pacing with a virtual monotonic clock, not a
+  // fake-transport bypass or larger timeout.
+  setTelegramSendClockForTests({
+    now: () => telegramNow,
+    sleep: async (ms) => { telegramNow += ms; },
+  });
   home = mkdtempSync(join(tmpdir(), 'ashlr-tg314-real-'));
   process.env['HOME'] = home;
   calls.length = 0;
@@ -58,6 +67,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setTelegramTransportForTests(null);
+  setTelegramSendClockForTests(null);
   process.env['HOME'] = savedHome;
   rmSync(home, { recursive: true, force: true });
 });
@@ -70,10 +80,12 @@ describe('Telegram drain × real Leader thread', () => {
     const first = await runCommsCycle(cfg, fast);
     expect(first.sent).toBe(2);
     const [memoSend, questionSend] = sends();
-    expect(String(memoSend!.body['text'])).toMatch(new RegExp(`^Leader memo ${m.id}`));
+    expect(String(memoSend!.body['text'])).toMatch(/^Leader memo\n/);
+    expect(String(memoSend!.body['text'])).not.toContain(m.id);
     expect(String(memoSend!.body['text'])).toContain('Reviews &lt;slow&gt;');
     expect(JSON.stringify(memoSend!.body['reply_markup'])).toContain('lt:d:');
     expect(String(questionSend!.body['text'])).toContain('Keep codex lanes off this week?');
+    expect(lookupTelegramMessage(nextId - 2)).toMatchObject({ kind: 'memo', memoId: m.id });
     expect(lookupTelegramMessage(nextId - 1)).toMatchObject({ kind: 'question', questionId: `${m.id}:0` });
 
     const thread = listThread();

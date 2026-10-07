@@ -15,6 +15,7 @@
  * shell and hashed assets — never an /api/ response, so no read data is left
  * on the phone.
  */
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 import { VERSE_MOBILE_PATH } from '../../../app/console-mode.js';
 
 export const VERSE_MOBILE_SW_URL = `${VERSE_MOBILE_PATH}sw.js`;
@@ -55,7 +56,7 @@ function link(doc: Document, rel: string, href: string): void {
 /** Idempotent: safe to call on every mount. */
 export function installMobileHead(doc: Document = document): void {
   if (!doc.head) return;
-  doc.title = 'Ashlr Verse';
+  doc.title = PRODUCT_NAME;
   meta(doc, 'viewport', VIEWPORT);
   link(doc, 'manifest', VERSE_MOBILE_MANIFEST_HREF);
   link(doc, 'apple-touch-icon', VERSE_MOBILE_TOUCH_ICON_HREF);
@@ -63,7 +64,7 @@ export function installMobileHead(doc: Document = document): void {
   meta(doc, 'mobile-web-app-capable', 'yes');
   // Content runs under the status bar; the shell pads by env(safe-area-inset-top).
   meta(doc, 'apple-mobile-web-app-status-bar-style', 'black-translucent');
-  meta(doc, 'apple-mobile-web-app-title', 'Verse');
+  meta(doc, 'apple-mobile-web-app-title', PRODUCT_NAME);
   meta(doc, 'theme-color', THEME_COLORS.light, { media: '(prefers-color-scheme: light)' });
   meta(doc, 'theme-color', THEME_COLORS.dark, { media: '(prefers-color-scheme: dark)' });
   // Phone numbers and dates in agent output are not links to dial.
@@ -108,7 +109,7 @@ export function supportsIphoneHomeScreenPush(
 /** Only called from an explicit tap after the paired gateway advertises push. */
 export async function enableRemotePush(publicKey: string): Promise<PushSubscription> {
   if (!supportsIphoneHomeScreenPush()) {
-    throw new Error('Notifications require Verse installed on an iPhone Home Screen with Web Push support.');
+    throw new Error('Notifications require Phantom installed on an iPhone Home Screen with Web Push support.');
   }
   if (Notification.permission === 'denied') throw new Error('Notifications are blocked in this phone’s settings.');
   const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission();

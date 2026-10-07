@@ -41,7 +41,7 @@ const ACCOUNTS = {
       authentication: 'signed-in',
       planType: 'pro',
       windows: [{ id: 'codex', usedPercent: 100, resetsAt: '2026-09-25T23:06:56.000Z' }],
-      credits: { hasCredits: true, unlimited: false, balance: '2048.4196250000' },
+      credits: { hasCredits: true, unlimited: false, balance: '2048.4196250000', spendControlReached: false },
     },
     {
       id: 'codex-b',
@@ -242,9 +242,10 @@ describe('UsageSection — accounts', () => {
     const codex = card('Personal Codex');
     expect(within(codex).getByText('Usable on credits')).toBeInTheDocument();
     expect(within(codex).queryByText('Window exhausted')).not.toBeInTheDocument();
-    expect(within(codex).getByText('2,048.42')).toBeInTheDocument();
+    expect(within(codex).getByText('2,000')).toBeInTheDocument();
     expect(within(codex).getByText('pro plan')).toBeInTheDocument();
-    expect(within(codex).getByText(/spendable even when the window is full/)).toBeInTheDocument();
+    expect(within(codex).getByText(/provider reports credits available/)).toBeInTheDocument();
+    expect(within(codex).getByText(/automatic credit spending is not enabled/)).toBeInTheDocument();
   });
 
   it('renders Grok as an actionable signed-out state, not a zero meter', async () => {
@@ -611,7 +612,7 @@ describe('UsageSection — degraded, empty, error and unauthorized states', () =
     await waitFor(() => expect(screen.getByText('Dispatch limits')).toBeInTheDocument());
     expect(screen.getByText('50 / 200')).toBeInTheDocument();
     expect(screen.getByText('configured 10')).toBeInTheDocument();
-    expect(screen.getByText('$4.25')).toBeInTheDocument();
+    expect(screen.getByText('$4.3')).toBeInTheDocument();
   });
 
   it('does not draw the daemon tick ledger a second time when the real series is on screen', async () => {
@@ -673,7 +674,7 @@ describe('UsageSection — the capacity strip', () => {
     render(<UsageSection />);
     await waitFor(() => expect(screen.getByText('Local headroom')).toBeInTheDocument());
     // 128 GB budget, 64 GB resident.
-    expect(screen.getByText(/free of 128 GB/)).toBeInTheDocument();
+    expect(screen.getByText(/free of 130 GB/)).toBeInTheDocument();
   });
 
   it('counts the models that can actually drive a session, apart from the rest', async () => {
@@ -717,7 +718,7 @@ describe('UsageSection — per-account depth on demand', () => {
     await userEvent.click(within(card('Personal Codex')).getByRole('button', { name: /Personal Codex/ }));
     const detail = (await screen.findByText('Probe evidence')).closest('section');
     expect(detail).not.toBeNull();
-    expect(within(detail!).getByText('2,048.42')).toBeInTheDocument();
+    expect(within(detail!).getByText('2,000')).toBeInTheDocument();
   });
 
   it('closes the detail again', async () => {
@@ -823,7 +824,7 @@ describe('UsageSection — context efficiency per seat', () => {
     // Chats, turns, prompt tokens, cache hit (900k / 1.001M — not the 45%
     // a mean of the two chats' ratios would say), compactions, expansive,
     // and the fullest context against its window.
-    expect(cells.slice(1)).toEqual(['2', '202', '1M', '90%', '3', '1', '600k / 1M · 60%']);
+    expect(cells.slice(1)).toEqual(['2', '200', '1M', '90%', '3', '1', '600k / 1M · 60%']);
     expect(within(grok).getByText('none reported')).toBeInTheDocument();
     expect(within(table).queryByText('0%')).not.toBeInTheDocument();
   });

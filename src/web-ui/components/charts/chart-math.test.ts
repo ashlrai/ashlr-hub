@@ -259,13 +259,24 @@ describe('axisTicks — labels at the precision of the step', () => {
   // spend under half a cent sat on a $0.00–$1.00 axis, ~0.6 px off the
   // baseline — a flat zero. A decade coarser at a time prints it faithfully.
   it('coarsens a decade at a time before it resorts to integer ticks', () => {
-    const usd = axisTicks(0, 0.004, { count: 4, format: formatUsd });
+    // A fixed-cent formatter still requires coarsening; significant-digit USD
+    // can print sub-cent ticks accurately and should keep the tighter domain.
+    const fixedCents = (v: number) => `$${v.toFixed(2)}`;
+    const usd = axisTicks(0, 0.004, { count: 4, format: fixedCents });
     expect(usd.ticks).toEqual([0, 0.01]);
     expect(usd.labels).toEqual(['$0.00', '$0.01']);
+    const fineUsd = axisTicks(0, 0.004, { count: 4, format: formatUsd });
+    expect(fineUsd.ticks).toEqual([0, 0.001, 0.002, 0.003, 0.004]);
+    expect(fineUsd.labels).toEqual(['$0', '$0.001', '$0.002', '$0.003', '$0.004']);
+    expect(labelsFaithful(fineUsd.ticks, fineUsd.labels)).toBe(true);
+    expect(new Set(fineUsd.labels).size).toBe(fineUsd.ticks.length);
     // Passed bare: a formatter with an optional second parameter
     // (formatPercent's digits) is called with the value alone.
     const pct = axisTicks(0, 0.004, { count: 4, format: formatPercent });
-    expect(pct.labels).toEqual(['0%', '1%']);
+    expect(pct.ticks).toEqual([0, 0.001, 0.002, 0.003, 0.004]);
+    expect(pct.labels).toEqual(['0%', '0.1%', '0.2%', '0.3%', '0.4%']);
+    expect(labelsFaithful(pct.ticks, pct.labels)).toBe(true);
+    expect(new Set(pct.labels).size).toBe(pct.ticks.length);
     for (const max of [0.0004, 0.003, 0.004, 0.009, 0.012, 0.03, 0.4, 7.5]) {
       const a = axisTicks(0, max, { count: 4, format: formatUsd });
       const top = a.ticks[a.ticks.length - 1]!;

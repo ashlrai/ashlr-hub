@@ -220,8 +220,9 @@ describe('release workflow', () => {
     const parsedCi = parseYaml(ciWorkflow) as {
       jobs?: {
         ci?: {
+          env?: Record<string, string>;
           strategy?: { matrix?: { include?: Array<Record<string, unknown>> } };
-          steps?: Array<{ name?: string; run?: string; if?: string }>;
+          steps?: Array<{ name?: string; run?: string; if?: string; env?: unknown }>;
         };
       };
     };
@@ -258,6 +259,26 @@ describe('release workflow', () => {
       .toBe(`matrix.label == '${sharedChecksLabel}'`);
     expect(ciSteps.find((step) => step.name === 'Build')?.run).toBe('npm run build');
     expect(ciSteps.find((step) => step.name === 'Build')?.if).toBeUndefined();
+    const snapshot = ciSteps.find((step) => step.name === 'Capture pack smoke build snapshot');
+    const packSmoke = ciSteps.find((step) => step.name === 'Pack smoke (exports map)');
+    expect(snapshot?.if).toBe("matrix.label == 'ubuntu, authority 1/3'");
+    expect(ciSteps.indexOf(snapshot!)).toBe(ciSteps.findIndex((step) => step.name === 'Build') + 1);
+    expect(ciSteps.indexOf(snapshot!)).toBeLessThan(ciSteps.findIndex((step) => step.name === 'Test (hermetic)'));
+    expect(snapshot?.run).toContain('node --test .github/tests/ci-pack-smoke.test.mjs');
+    expect(snapshot?.run).toContain('node .github/scripts/ci-pack-smoke.mjs capture "$RUNNER_TEMP"');
+    expect(packSmoke?.if).toBe("matrix.label == 'ubuntu, authority 1/3'");
+    expect(packSmoke?.run).toContain('RUNNER_TEMP="$SMOKE_DIR" node .github/scripts/ci-pack-smoke.mjs pack "$ASHLR_PACK_SMOKE_SNAPSHOT"');
+    expect(packSmoke?.run).not.toMatch(/(?:^|\n)\s*npm pack\b/);
+    expect(packSmoke?.run).not.toContain('ashlr-hub-*.tgz');
+    expect(packSmoke?.run).toContain('npm install "$TARBALL" > /dev/null');
+    expect(packSmoke?.run).toContain('./node_modules/.bin/ashlr help > /dev/null');
+    expect(packSmoke?.run).toContain("import('@ashlr/hub/types')");
+    expect(packSmoke?.run).toContain("import('@ashlr/hub/core')");
+    expect(packSmoke?.run).toContain("typeof m.loadConfig !== 'function'");
+    expect(packSmoke?.run).toContain('trap cleanup EXIT');
+    expect(packSmoke?.run).toContain('node .github/scripts/ci-pack-smoke.mjs verify "$ASHLR_PACK_SMOKE_SNAPSHOT"');
+    expect(packSmoke?.run?.indexOf('verify "$ASHLR_PACK_SMOKE_SNAPSHOT"'))
+      .toBeGreaterThan(packSmoke?.run?.indexOf("import('@ashlr/hub/core')") ?? -1);
     expect(ciSteps.find((step) => step.name === 'Test (hermetic)')?.run)
       .toBe('npm run test:ci -- ${{ matrix.test_args }}');
     expect(ciSteps.find((step) => step.name === 'Test (hermetic)')?.if).toBeUndefined();
@@ -266,6 +287,38 @@ describe('release workflow', () => {
     expect(ledgerSteps[0]?.if).toBe("matrix.label == 'ubuntu, authority 3/3'");
     expect(ledgerSteps[0]?.run?.trim()).toBe('npm run test:ci -- --maxWorkers=1 --fileParallelism=false test/m342.dispatch-production-ledger.test.ts');
     expect(ciSteps.indexOf(ledgerSteps[0]!)).toBeGreaterThan(ciSteps.findIndex((step) => step.name === 'Test (hermetic)'));
+    const ci = ciJob!;
+    const windows = (ci.strategy?.matrix?.include ?? []).filter(entry => entry['label'] === 'windows, portability 2/3');
+    expect(windows).toHaveLength(1);
+    expect(windows[0]?.['os']).toBe('windows-latest');
+    expect((windows[0]?.['test_args'] as string).trim().split(/\s+/)).toEqual([
+      'test/m21.worktree.test.ts', 'test/m23.apply.test.ts',
+      'test/m100.web-open.test.ts', 'test/m119.quality-metrics.test.ts',
+      'test/m332.outcome-watcher.test.ts', 'test/m405.apply-mutation-fence.test.ts',
+      'test/m406.daemon-stop-quiescence.test.ts', 'test/m411.local-merge-reconciliation.test.ts',
+      'test/m412.sandbox-pre-effect-recovery.test.ts', 'test/m413.engineer-run-mutation-fence.test.ts',
+      'test/m417.sandbox-cleanup-quiescence.test.ts', 'test/m424.legacy-swarm-mutation-fence.test.ts',
+      'test/m425.persistence-private-temp.test.ts', 'test/sandbox-reservation-recovery.test.ts',
+    ]);
+    const alias = ciSteps.filter(step => step.name === 'Test native alias authority (hermetic)');
+    expect(alias).toHaveLength(1);
+    expect(alias[0]?.if).toBe("matrix.os == 'macos-latest' || matrix.label == 'windows, portability 2/3'");
+    // No filter, alternate environment or wrapper: every case keeps the same
+    // platform, timeout and private HOME semantics, including native ACL proof.
+    expect(alias[0]?.run).toBe('npm run test:ci -- test/m426.sandbox-reservation-identity.test.ts test/h7.rollback.test.ts');
+    expect(alias[0]?.env).toBeUndefined();
+    expect(ciSteps.find(step => step.name === 'Test (hermetic)')?.env).toBeUndefined();
+    expect(ci.env).toEqual({
+      ASHLR_VITEST_TEST_TIMEOUT_MS: "${{ matrix.os == 'windows-latest' && '30000' || '5000' }}",
+      ASHLR_RUN_NATIVE_LAUNCHD_TEST: "${{ matrix.native_launchd || '0' }}",
+    });
+    const mainFiles = (windows[0]?.['test_args'] as string).trim().split(/\s+/);
+    const aliasFiles = alias[0]!.run!.trim().split(/\s+/).filter(arg => arg.startsWith('test/'));
+    // Both dispatches retain all sixteen distinct files. The old placement
+    // listed M426 twice (15 + 2); the dedicated complete invocation now owns it.
+    expect(mainFiles.length + aliasFiles.length).toBe(16);
+    expect(new Set([...mainFiles, ...aliasFiles]).size).toBe(16);
+    expect([...mainFiles, ...aliasFiles].filter(file => file === 'test/m426.sandbox-reservation-identity.test.ts')).toHaveLength(1);
     expect(verifyJob['runs-on']).toBeUndefined();
     expect(verifyJob.steps).toBeUndefined();
     expect(verifyJob.environment).toBeUndefined();

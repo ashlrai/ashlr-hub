@@ -408,7 +408,7 @@ export function Workspace(props: WorkspaceProps) {
     menuItems.push({
       id: 'agent-tools',
       label: 'Agent tools…',
-      description: 'Let this chat\'s agent use Verse terminals, the Browser pane and apps.',
+      description: 'Let this chat\'s agent use Phantom terminals, the Browser pane and apps.',
       onSelect: () => setAgentToolsOpen(true),
     });
     menuItems.push({

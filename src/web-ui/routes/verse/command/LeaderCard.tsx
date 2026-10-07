@@ -104,7 +104,7 @@ export function ActionRow({ action, actions, compact = false, approve = false, d
   );
 }
 
-export function LeaderCard({ read, loading, actions }: { read: OptionalRead<LeaderStateV1> | undefined; loading: boolean; actions: SurfaceActions }) {
+export function LeaderCard({ read, loading, actions, seatNames }: { read: OptionalRead<LeaderStateV1> | undefined; loading: boolean; actions: SurfaceActions; seatNames?: ReadonlyMap<string, string> }) {
   const state = read?.value ?? null;
   const memo = state?.latest ?? null;
   const list = memoActions(state);
@@ -113,7 +113,7 @@ export function LeaderCard({ read, loading, actions }: { read: OptionalRead<Lead
   return (
     <Card
       title="Leader"
-      caption={memo ? `Memo ${formatRelative(memo.at)}${memo.seatId ? ` · ${memo.seatId}` : ''}${state?.nextRunAt ? ` · next run ${new Date(state.nextRunAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : ''}` : undefined}
+      caption={memo ? `Memo ${formatRelative(memo.at)}${memo.seatId ? ` · ${seatNames?.get(memo.seatId)?.trim() || 'Account unavailable'}` : ''}${state?.nextRunAt ? ` · next run ${new Date(state.nextRunAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : ''}` : undefined}
       actions={
         <>
           {memo?.dryRun ? <span className={styles.dryRun}>Dry run</span> : null}

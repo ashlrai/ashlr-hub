@@ -105,7 +105,7 @@ describe('StatusHeader', () => {
   it('says "<1%" of the budget for a sliver of real spend, never "0%"', () => {
     const snapshot = controlSnapshot({ spend: { ...controlSnapshot().spend!, todayUsd: 0.05 } });
     render(<StatusHeader snapshot={snapshot} />);
-    expect(screen.getByText('$0.05 of $25.00 today · <1%')).toBeInTheDocument();
+    expect(screen.getByText('$0.05 of $25 today · <1%')).toBeInTheDocument();
   });
 });
 

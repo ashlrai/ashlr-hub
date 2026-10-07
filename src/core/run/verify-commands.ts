@@ -298,8 +298,9 @@ export function filterVerifyCommandsForProfile(
 export function detectVerifyCommands(
   workspaceRoot: string,
   profile?: VerifyCommandProfile,
+  opts?: Parameters<typeof detectRepoExecutionProfile>[1],
 ): VerifyCommand[] {
-  const commands = detectRepoExecutionProfile(workspaceRoot).verifyCommands;
+  const commands = detectRepoExecutionProfile(workspaceRoot, opts).verifyCommands;
   return profile ? filterVerifyCommandsForProfile(commands, profile) : commands;
 }
 

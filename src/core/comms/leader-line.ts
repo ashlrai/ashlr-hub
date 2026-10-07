@@ -45,16 +45,17 @@ import { homedir } from 'node:os';
 
 import type { AshlrConfig } from '../types.js';
 import { sendTelegramMessage, telegramEnabled, type InboundEvent, type TelegramButton, type TelegramSendOpts, type TelegramSendResult } from '../integrations/telegram.js';
+import { leaderDisplayText } from '../integrations/telegram-format.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
-import { LEADER_TELEGRAM_DETAIL_MAX_LINES, fitTelegram } from '../vision/leader-persona.js';
 import { classifyOperatorText, jevChooseLane, jevWorthInterrupting, type OperatorIntent, type TaskLane, type TaskRequest } from '../vision/leader-intent.js';
 import { zonedParts } from '../vision/leader-drive.js';
 import type { LeaderApplyDeps } from '../vision/leader-apply.js';
 import type { LeaderAction } from '../vision/leader-types.js';
 import type { LeaderThreadMessage } from '../vision/leader-thread.js';
 import { briefFactsText, composeBrief, gatherBriefFacts, type BriefKind, type BriefSources } from './leader-brief.js';
-import { lookupTelegramMessage, recordTelegramMessages, registerButtonTarget, type TelegramThreadEntry } from './telegram-thread-map.js';
+import { lookupTelegramMessage, recordTelegramMessages, registerButtonTarget, type TelegramThreadEntry,
+  type TelegramQuestionDraft } from './telegram-thread-map.js';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -302,6 +303,20 @@ export function questionKeyboard(target: { questionId: string; threadId?: string
   ]];
 }
 
+/** Explicit typed forms only: every tap names the visible draft revision. */
+export function typedQuestionKeyboard(draft: TelegramQuestionDraft): TelegramButton[][] {
+  const data = (verb: string, index?: number): string =>
+    `lt:q:${draft.token}:${draft.revision.toString(36)}:${verb}${index === undefined ? '' : `:${index}`}`;
+  if (draft.claim) return [];
+  const rows: TelegramButton[][] = (draft.form.options ?? []).map((label, index) => [{
+    text: `${draft.selected.includes(index) ? '✓ ' : '○ '}${label}`, data: data('o', index),
+  }]);
+  if (draft.form.mode === 'multiple') rows.push([{ text: 'Select all', data: data('a') }, { text: 'Clear', data: data('c') }]);
+  if (draft.form.mode !== 'short-answer') rows.push([{ text: 'Submit', data: data('s') }, { text: 'Write an answer', data: data('w') }]);
+  else rows.push([{ text: 'Write an answer', data: data('w') }]);
+  return rows;
+}
+
 function actionKeyboard(actionIds: readonly string[]): TelegramButton[][] {
   const token = registerButtonTarget({ actionIds: [...actionIds] });
   return [[
@@ -453,7 +468,7 @@ function sentIds(res: TelegramSendResult): number[] {
 }
 
 async function send(text: string, cfg: AshlrConfig, opts: TelegramSendOpts, record: Omit<TelegramThreadEntry, 'tg' | 'at'>): Promise<boolean> {
-  const res = await sendTelegramMessage(scrubSecrets(text), opts, cfg);
+  const res = await sendTelegramMessage(leaderDisplayText(scrubSecrets(text)), opts, cfg);
   if (res.ok) recordTelegramMessages(sentIds(res), record);
   return res.ok;
 }
@@ -508,9 +523,30 @@ async function deliverBrief(
     question = null;
   }
   const opts: TelegramSendOpts = {};
+  let legacyQuestionControls = true;
+  if (question) {
+    try {
+      const mod = await d.thread();
+      if (typeof mod?.readLeaderQuestion === 'function') {
+        const current = mod.readLeaderQuestion(question.questionId);
+        legacyQuestionControls = current !== null && !current.questionForm;
+        if (!legacyQuestionControls) {
+          // Typed prompts must leave through the real thread delivery path,
+          // which binds their actual bot message and owns the draft. A brief
+          // must not mark that pending prompt delivered without its controls.
+          text = text.split('\n').filter(line => !line.startsWith('Q: ')).join('\n');
+          question = null;
+        }
+      }
+    } catch {
+      legacyQuestionControls = false;
+      text = text.split('\n').filter(line => !line.startsWith('Q: ')).join('\n');
+      question = null;
+    }
+  }
   if (typeof replyToMessageId === 'number') opts.replyToMessageId = replyToMessageId;
   if (brief.pendingActionIds.length > 0) opts.keyboard = actionKeyboard(brief.pendingActionIds.slice(0, 10));
-  else if (question && isYesNoQuestion(question.text)) opts.keyboard = questionKeyboard({ questionId: question.questionId });
+  else if (question && legacyQuestionControls && isYesNoQuestion(question.text)) opts.keyboard = questionKeyboard({ questionId: question.questionId });
   const ok = await send(text, cfg, opts, {
     kind: question ? 'question' : 'update',
     ...(question ? { questionId: question.questionId } : {}),
@@ -682,7 +718,7 @@ export async function threadLineHooks(cfg: AshlrConfig): Promise<ThreadLineHooks
   let dirty = false;
   return {
     gate: (msg) => gateThreadMessage(msg, d.now(), lc, state, (id) => d.isAnswered(id)),
-    questionKeyboard: (msg) => (msg.kind === 'question' && msg.questionId && isYesNoQuestion(msg.text)
+    questionKeyboard: (msg) => (msg.kind === 'question' && msg.questionId && !msg.questionForm && isYesNoQuestion(msg.text)
       ? questionKeyboard({ questionId: msg.questionId, threadId: msg.id })
       : null),
     sent: (msg) => {
@@ -703,7 +739,7 @@ export async function threadLineHooks(cfg: AshlrConfig): Promise<ThreadLineHooks
 
 async function replyTo(event: InboundEvent, text: string, cfg: AshlrConfig, extra: TelegramSendOpts = {}): Promise<TelegramSendResult> {
   const opts: TelegramSendOpts = { ...extra, ...(typeof event.messageId === 'number' ? { replyToMessageId: event.messageId } : {}) };
-  return sendTelegramMessage(scrubSecrets(text), opts, cfg);
+  return sendTelegramMessage(leaderDisplayText(scrubSecrets(text)), opts, cfg);
 }
 
 /** Remember a long reply so "more" can send the rest. */
@@ -766,7 +802,7 @@ export function taskAckText(action: LeaderAction, lane: TaskLane, repo: string, 
       return `${prefix}On it. ${lane === 'cloud' ? 'Cloud' : 'Devin'} session launched on ${repo}: "${title}".${detail}\nI'll ping when the PR is up.`;
     }
     case 'scheduled':
-      return `${prefix}Scheduled: "${title}" launches ${action.applyAfter ? hhmmIn(action.applyAfter, tz) : 'soon'} unless you veto (${action.id}).${action.statusReason ? ` ${action.statusReason}` : ''}`;
+      return `${prefix}Scheduled: "${title}" launches ${action.applyAfter ? hhmmIn(action.applyAfter, tz) : 'soon'} unless you veto.${action.statusReason ? ` ${action.statusReason}` : ''}`;
     case 'escalated':
       return `Can't start "${title}": ${action.statusReason ?? 'it is outside the standing grant'} Widen the grant (ashlr authority), or tell me a different lane.`;
     case 'refused':
@@ -865,10 +901,10 @@ async function approveOrVeto(event: InboundEvent, intent: OperatorIntent, cfg: A
     for (const id of ids) {
       try {
         const res = await thread.approveLeaderAction(id, { channel: 'telegram', cfg });
-        lines.push(`${res.ok ? 'Approved' : 'Not approved'} ${id}: ${res.message}`);
+        lines.push(`${res.ok ? 'Approved' : 'Not approved'} action: ${res.message}`);
         if (res.thread?.reply?.id) ackIds.push(res.thread.reply.id);
       } catch (err) {
-        lines.push(`Not approved ${id}: ${err instanceof Error && err.name === 'LeaderThreadError' ? err.message : 'the Leader is unreachable right now'}`);
+        lines.push(`Not approved action: ${err instanceof Error && err.name === 'LeaderThreadError' ? err.message : 'the Leader is unreachable right now'}`);
       }
     }
     const sent = await replyTo(event, lines.join('\n'), cfg);
@@ -879,7 +915,7 @@ async function approveOrVeto(event: InboundEvent, intent: OperatorIntent, cfg: A
   const deps = await lineDeps().apply();
   for (const id of ids) {
     const r = await apply.vetoLeaderAction(deps, id, 'Vetoed from Telegram');
-    lines.push(r.ok ? `Vetoed ${id}: ${r.message}` : `Could not veto ${id}: ${r.message}`);
+    lines.push(r.ok ? `Vetoed action: ${r.message}` : `Could not veto action: ${r.message}`);
   }
   await replyTo(event, lines.join('\n') || 'Nothing to veto.', cfg);
 }
@@ -906,7 +942,10 @@ export async function routeLeaderText(event: InboundEvent, text: string, cfg: As
       }
       case 'detail': {
         const full = readLineState().lastFull;
-        await replyTo(event, full ? fitTelegram(full.text, LEADER_TELEGRAM_DETAIL_MAX_LINES).text : 'Nothing longer on file — that was the whole answer.', cfg);
+        // More is one human-requested reply, not a queued delivery: the
+        // transport splits the stored answer, and even a partial send consumes
+        // this intent without a model fallback, replay or clearing the answer.
+        await replyTo(event, full ? full.text : 'Nothing longer on file — that was the whole answer.', cfg);
         return true;
       }
       case 'approve':

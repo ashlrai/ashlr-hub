@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
-import { initUniverse, manifestRecord, projectUniverse } from '../src/core/universe/store.js';
+import { appendRecord, initUniverse, manifestRecord, newRun, projectUniverse } from '../src/core/universe/store.js';
 import { initUniverseCampaign, readUniverseCampaign } from '../src/core/universe/campaign-store.js';
 import { runUniverseCampaign } from '../src/core/universe/campaign.js';
 import { deliverCompletedUniverseCampaign } from '../src/core/universe/campaign-delivery.js';
@@ -16,6 +16,9 @@ import { checkResourceEngineeringSuccessorPreparation, prepareResourceEngineerin
 import * as privateFiles from '../src/core/util/private-file-write.js';
 import * as evaluator from '../src/core/universe/fixed-evaluator.js';
 import * as handoff from '../src/core/universe/campaign-handoff.js';
+import * as campaigns from '../src/core/universe/campaign-store.js';
+import * as recovery from '../src/core/universe/campaign-delivery-recovery.js';
+import { verifiedProcessStartRef } from '../src/core/fleet/local-store-lock.js';
 
 
 // macOS-only: the campaign's real Universe run requires macOS sandbox-exec. Other hosts skip
@@ -107,6 +110,42 @@ describe('campaign-delivery successor preparation', () => {
     unlinkSync(prepared.paths.receipt); const incomplete = tree(f.base);
     await expect(prepareResourceEngineeringSuccessorBundle({ ...f.options, expectedPlanDigest: plan.planDigest })).rejects.toThrow('Incomplete preparation');
     expect(tree(f.base)).toEqual(incomplete);
+  });
+
+  it.skipIf(NOT_MACOS)('refuses an unrelated active run introduced between the initial campaign and fresh receipt reads', async () => {
+    const f = await fixture(); const options = { root: f.sourceRoot };
+    const directory = join(f.sourceRoot, 'universes', 'upstream');
+    const campaign = readUniverseCampaign(f.options.source.campaignId, options);
+    const initial = projectUniverse(directory); expect(initial.activeRun).toBeNull();
+    const ownerStart = verifiedProcessStartRef(process.pid); expect(ownerStart).toBeDefined();
+    if (!ownerStart) throw new Error('Fixture requires a verified live Universe owner');
+    const original = campaigns.readUniverseCampaign; let startedRunId: string | null = null;
+    const read = vi.spyOn(campaigns, 'readUniverseCampaign').mockImplementation((id, store) => {
+      const observed = original(id, store);
+      if (startedRunId === null && id === f.options.source.campaignId) {
+        const run = newRun(manifestRecord(directory), initial.runs.length + 1);
+        appendRecord(directory, { id: `${run.id}.start`, kind: 'start', run,
+          ownerPid: process.pid, ownerStart });
+        startedRunId = run.id;
+      }
+      return observed;
+    });
+    const samples: Array<NonNullable<ReturnType<typeof recovery.readCompletedCampaignDeliveryProjection>>> = [];
+    const originalProjection = recovery.readCompletedCampaignDeliveryProjection;
+    const projected = vi.spyOn(recovery, 'readCompletedCampaignDeliveryProjection').mockImplementation((...args) => {
+      const result = originalProjection(...args); if (result) samples.push(result); return result;
+    });
+    try {
+      expect(() => handoff.readUniverseCampaignDeliverySource(f.options.source, 'a'.repeat(64)))
+        .toThrow('Campaign successor source is not healthy and idle');
+      expect(startedRunId).not.toBeNull(); expect(projected).toHaveBeenCalledOnce();
+      expect(samples).toHaveLength(1);
+      expect(samples[0]!.receipt).toEqual(f.receipt); expect(samples[0]!.universe.activeRun?.id).toBe(startedRunId);
+    } finally { read.mockRestore(); projected.mockRestore(); }
+    expect(canonical(readUniverseCampaign(f.options.source.campaignId, options))).toBe(canonical(campaign));
+    expect(projectUniverse(directory).activeRun?.id).toBe(startedRunId);
+    expect(recovery.readCompletedCampaignDelivery(campaign, f.options.source.delivery, options)).toEqual(f.receipt);
+    expect(existsSync(f.options.output)).toBe(false); expect(existsSync(f.ledger)).toBe(false);
   });
 
   it.skipIf(NOT_MACOS)('rejects changed source pins and recipe-supplied seed identity without destination writes', async () => {

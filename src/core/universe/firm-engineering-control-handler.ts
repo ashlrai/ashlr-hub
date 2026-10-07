@@ -5,7 +5,7 @@ import { validateResourcePool } from '../resources/pool-policy.js';
 import { readResourceJson } from '../resources/pool-runtime.js';
 import { validateResourceBindings } from '../resources/worker.js';
 import { canonical, digest, inspectPrivateDirectory } from './artifacts.js';
-import { campaignUniverse, readUniverseCampaign } from './campaign-store.js';
+import { campaignUniverse, readUniverseCampaign, readUniverseCampaignProjection } from './campaign-store.js';
 import { readCompletedCampaignDelivery } from './campaign-delivery-recovery.js';
 import { validateUniverseCampaignDeliveryPlan, type UniverseCampaignDeliveryPlan } from './campaign-delivery.js';
 import type { ControlGraphHandlerRegistration, ControlHandlerContext, ControlHandlerResult, ControlGraphRecoveryHandler, ControlGraphContinuationHandler } from './control-graph.js';
@@ -79,9 +79,8 @@ function runtime(host: FirmEngineeringControlHost) {
 }
 function campaignPins(host: FirmEngineeringControlHost, pool: { poolId: string; poolDigest: string }) {
   return host.definition.tasks.map(({ campaignId }) => {
-    const campaign = readUniverseCampaign(campaignId, { root: host.root });
-    const universe = campaignUniverse(campaign, { root: host.root });
-    if (campaign.sourceState !== 'healthy' || universe.sourceState !== 'healthy' ||
+    const { campaign, universe } = readUniverseCampaignProjection(campaignId, { root: host.root });
+    if (campaign.sourceState !== 'healthy' || universe === null || universe.sourceState !== 'healthy' ||
       universe.manifestDigest !== campaign.manifestDigest || universe.comparatorDigest !== campaign.comparatorDigest ||
       universe.manifest.variants.some((variant) => !variant.generation || variant.generation.kind !== 'resource-pool' ||
         !variant.generation.fileOperations || variant.generation.poolId !== pool.poolId || variant.generation.poolDigest !== pool.poolDigest)) {

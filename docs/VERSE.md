@@ -1,9 +1,17 @@
-# Ashlr Verse
+<a id="ashlr-verse"></a>
 
-Verse is the operator console for the whole Ashlr hub. One window: chat with an
-agent that can edit your repos, delegate work to the autonomous fleet,
-review what it produced while you were away, and see what every
-account and local model is costing you.
+# Phantom user guide
+
+Phantom by AshlrAI, formerly Ashlr Verse, is the operator console for the Ashlr
+hub. One window: chat with an agent that can edit your repos, delegate work to
+the autonomous fleet, review what it produced while you were away, and see what
+every account and local model is costing you.
+
+The CLI remains `ashlr` and `ashlr verse`, the package remains `@ashlr/hub`,
+and routes remain `/verse/`. The compatible macOS installation is still
+`Ashlr.app`; its window and menus display Phantom. Older screenshots and
+historical references retain their captured names. See
+[the product naming guide](PHANTOM-BRAND.md).
 
 The two primary workspaces are **Work with me** and **Work for me**.
 Work with me opens Chat for interactive engineering: guide a model, inspect
@@ -96,7 +104,7 @@ grant new authority or reuse a consumer subscription. See the
 
 [OpenAI Dots](https://help.openai.com/en/articles/20001530-getting-started-with-your-dot)
 are managed agents in ChatGPT. A public fleet-dispatch contract has not been
-verified, so Verse does not treat a Dot as an executable seat. Likewise,
+verified, so Phantom does not treat a Dot as an executable seat. Likewise,
 [Grok Bot](https://docs.x.ai/grok-bot/overview) is distinct from the Grok CLI
 seat and the xAI API engine; a connected CLI account does not establish a Bot
 integration.
@@ -118,7 +126,7 @@ integration.
   everything autonomy may do without you.
 - The cloud lane (Claude Code cloud sessions, their budget and delivery
   contract): [`docs/CLOUD.md`](CLOUD.md).
-- Talking to the Leader from Verse, Telegram and the CLI:
+- Talking to the Leader from Phantom, Telegram and the CLI:
   [`docs/LEADER.md`](LEADER.md).
 - Devin as chat seats, a lane and a fleet producer (setup, budget, delivery,
   the two-judge rule, limits): [`docs/DEVIN.md`](DEVIN.md).
@@ -127,8 +135,9 @@ integration.
 - The Jev decision layer, its call sites and its bounds:
   [`docs/JEV-INTEGRATION.md`](JEV-INTEGRATION.md).
 
-This page is the user guide for the Verse 3.21 release candidate. Sections marked 3.15 describe
-features introduced in that release and retained here.
+This guide describes the current source. Version labels mark when a feature was
+introduced; they do not establish release publication or resident activation.
+Confirm your installed version and its release artifacts before relying on it.
 
 **At a glance.**
 
@@ -137,7 +146,7 @@ features introduced in that release and retained here.
 | ⌘1 **Command** | What needs you, the autonomy switch and rollout ladder, the Leader's memo, seat burn-downs, the Cloud card |
 | ⌘2 **Fleet** | What runs where, the gate funnel, every shadow decision with its G0–G7 chips |
 | ⌘3 **Growth** | Whether output compounds, and **Lessons**: retros and the knowledge you approved |
-| ⌘4 **Mind** | The **Leader conversation**: one thread with Verse, Telegram and the CLI, directives, memos to approve or veto |
+| ⌘4 **Mind** | The **Leader conversation**: one thread with Phantom, Telegram and the CLI, directives, memos to approve or veto |
 | ⌘5 **Chat** | The workbench: Claude Code, Codex, Grok, local and Devin seats, with a panel for Terminal, Browser, Changes, Files, Sources and Reasoning, and Run in cloud and Run in Devin |
 | ⌘J **Needs you** | Everything waiting on you, including cloud and Devin PRs to land or close |
 | ⌘. **Resources** | Every account, local runtime, cloud credits and Devin, each with a Chat and a Fleet readiness line |
@@ -157,7 +166,7 @@ ashlr verse --no-open            # do not open a browser tab
 ashlr verse --no-open --json     # print one machine-readable JSON line instead of the banner
 ```
 
-`ashlr verse` is `ashlr serve --allow-dispatch` plus the Verse entry point. It
+`ashlr verse` is `ashlr serve --allow-dispatch` plus the workbench entry point. It
 prints the same two tokens `ashlr serve` prints:
 
 | Token | Used for | Where it goes |
@@ -184,7 +193,7 @@ left switches between them, and ⌘1–⌘5 do the same.
 | ⌘1 | **Command** | What needs me, and is the company producing? The autonomy switch, Stop, the budget pill and the grant chip; while a grant is active, the **rollout ladder** ("Shadow · 1 of 8", progress bars toward the next stage, what happened last) and the grant countdown with Re-approve under 7 days; a one-line verdict ("Autonomous · 5 building · 7 merged today · 0 reverts · Claude 46% reserved for you"); Needs you; the Leader's memo; five KPIs; a burn-down per seat; the Cloud card; a 12-hour swimlane. |
 | ⌘2 | **Fleet** | What is running where, and why that seat? A live swimlane by lane and phase, **Shadow decisions** (every proposal with G0–G7 chips, the outcome and why), the gate funnel with refusal reasons, "why this seat" for each dispatch, parked work, the repo table with pause and resume, and Overnight. The 3.9 Autonomy panels live under **Fleet ▸ Advanced**. |
 | ⌘3 | **Growth** | Is the output compounding? Merges per week, cost per merge, model outcomes, a calendar of merges, the harness history, the experiment results, and **Lessons** (3.15). |
-| ⌘4 | **Mind** | Talk to the Leader. The **conversation** (3.14): one thread across Verse, Telegram and the CLI, with directives, memo cards to approve or veto, and its questions to answer. Below it, the Leader's hit-rate and the reasoning insights. |
+| ⌘4 | **Mind** | Talk to the Leader. The **conversation** (3.14): one thread across Phantom, Telegram and the CLI, with directives, memo cards to approve or veto, and its questions to answer. Below it, the Leader's hit-rate and the reasoning insights. |
 | ⌘5 | **Chat** | The interactive workbench: sessions, transcript, composer and a panel of tabs and splits (Terminal, Browser, Changes, Files, Sources, Reasoning, Tasks, Context), with **Run in cloud** and **Run in Devin** in its ⋯ sheet. |
 
 The **gear** at the foot of the rail holds Settings (⌘,), **Apps & Accounts**,
@@ -221,11 +230,11 @@ that were not measured. An unmeasured value is shown as "—", never as zero.
 
 **Seat burn-down history.** Command's per-seat burn-downs keep the whole
 window across reloads. Each seat's 5-hour and weekly readings are logged to
-`~/.ashlr/routing/capacity-history.jsonl` (0600) by the Verse server and by the
+`~/.ashlr/routing/capacity-history.jsonl` (0600) by the workbench server and by the
 daemon, and served from `GET /api/verse/budget/history`. The log holds at least
 8 days and stays under about 2 MiB; once it is full, older readings are thinned
 per seat before any are dropped. To stop recording, set
-`ASHLR_CAPACITY_HISTORY=0` in the environment of the Verse server and the
+`ASHLR_CAPACITY_HISTORY=0` in the environment of the workbench server and the
 daemon. Both then stop writing, and the burn-downs keep only what the page
 reads while it is open plus whatever the log already holds.
 
@@ -276,7 +285,7 @@ small pulsing dot. The sidebar's search box does two things with one query: it
 filters chat titles and project paths instantly, and, a moment later, lists the
 chats whose **messages** match — your messages and the assistant's, every word
 required, recent chats ranked higher — each with a snippet around the match.
-That second half is a bounded scan of Verse's own session files on this
+That second half is a bounded scan of the workbench's own session files on this
 machine; nothing is sent to a model and nothing spends.
 
 The transcript is a single 720px reading column. Your turn is a quiet rounded
@@ -323,7 +332,7 @@ It turns amber at 80 % of the compaction point and red at 95 % — *before* the
 CLI compacts, not after — and shows a reading past the window as over-window
 rather than pinning at 100 %. `n/a` means the window is unknown, not zero.
 
-- **Codex** readings are exact once Verse has read the seat's own session file
+- **Codex** readings are exact once Phantom has read the seat's own session file
   (it re-reads it every 2 s during a turn). Until then the figure is an upper
   bound and is prefixed `≤`.
 - When the CLI compacts, the transcript shows a divider —
@@ -367,7 +376,7 @@ Expansive → Standard is free while the session is below the Standard compactio
 point; above it (a Claude chat at 600k, a Codex chat at 500k) the CLI compacts on
 the **next turn** — a summary of the whole context that spends usage on a paid
 seat, replaces early turns and starts a new prompt cache. The menu warns before
-you switch. Verse may suggest it — after repeated compactions, or when
+you switch. Phantom may suggest it — after repeated compactions, or when
 the reachable code only fits expansive — but never switches it on for you. The
 new-chat dialog sets the mode for a new session and can make it the seat's
 default. Why the default is not the full window: `docs/VERSE-CONTEXT.md` §2.
@@ -518,7 +527,7 @@ closed.
 
 - **Command blocks.** In zsh, bash and fish, each command becomes a block with
   its command line, folder, duration, exit code and output (the tail, up to
-  256 KB per block and 4 MB per tab). Verse wires this up without editing your
+  256 KB per block and 4 MB per tab). Phantom wires this up without editing your
   dotfiles; other shells start as before, without blocks. A dot on each
   prompt line opens the block's actions, ⌘↑ / ⌘↓ jump between commands, and
   ⇧⌘K opens the **Blocks** view: Copy output, Send to chat, Explain and fix
@@ -549,7 +558,7 @@ action after the turn read an outside page ask you first; secret fields,
 uploads and downloads are never touched; clicking in the page yourself pauses
 the agent. Details: [VERSE-BROWSER.md](VERSE-BROWSER.md).
 
-**Changes and checkpoints.** Before every agent turn, on every seat, Verse
+**Changes and checkpoints.** Before every agent turn, on every seat, Phantom
 snapshots each repository the chat can reach into a hidden commit
 (`refs/ashlr/checkpoints/<chat>/<turn>/<root>/pre`), and again after it
 (`…/post`). Your index, stash, HEAD and branches are never touched. Files over
@@ -647,7 +656,7 @@ number comes from, is `docs/VERSE-CONTEXT.md` §1.
 Codex and Grok models are read from the seat's **own** model catalog
 (`native-state/models_cache.json` beside its launcher), so a seat offers exactly
 what its account and CLI version serve. A Codex seat that has never run a turn
-has no catalog yet; it shows Verse's built-in list and says so.
+has no catalog yet; it shows the workbench's built-in list and says so.
 
 The model picker shows each model's window and compaction point. A model the
 seat cannot run is listed but disabled, with the reason — most often **binary
@@ -659,7 +668,7 @@ pinned to 2.1.257. The seat shows its CLI version and a note with the fix:
 profile's three files as `.prev` copies, which together restore the old pin.
 (Verse 3.5–3.8 offered Opus 5.5 as `claude-opus-5.5`; the CLI resolved that id to
 Opus 5, so those sessions ran Opus 5. They keep their recorded id, but their next
-turns ask for the real Opus 5.5 — so on a seat still pinned below 2.1.280 Verse
+turns ask for the real Opus 5.5 — so on a seat still pinned below 2.1.280 Phantom
 refuses the turn with the reason (`VERSE_MODEL_UNAVAILABLE`) instead of starting
 a CLI that cannot run it. Re-pin the seat, or continue the chat in a fresh session
 on another model.)
@@ -697,18 +706,18 @@ order (details and evidence in `docs/VERSE-CONTEXT.md` §1.5):
    length;
 3. otherwise Ollama's own default for an unpinned request — the
    `OLLAMA_CONTEXT_LENGTH` or VRAM-based default the running server logged, else
-   `OLLAMA_CONTEXT_LENGTH` in Verse's environment, and only then the loaded
+   `OLLAMA_CONTEXT_LENGTH` in the workbench's environment, and only then the loaded
    context from `/api/ps` (which another app may have loaded at its own size) —
    which depends on the machine, so a tag that serves 256k here may serve far
    less on a smaller Mac;
 4. only when `/api/show` fails, a `ctxNNk` suffix in the tag (`:ctx64k` or
    `-ctx64k`), else 65,536 tokens.
 
-Verse passes that window to the CLI (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`), which
+Phantom passes that window to the CLI (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`), which
 otherwise assumes 200k for a model it does not know and never compacts before a
 64k runner overflows. With it, a 64k seat compacts at ≈32.5k — its fixed prompt
 already takes about 15k, so pick a larger-window tag for long local sessions.
-Before each turn Verse re-checks the tag's window and updates the chat's stored
+Before each turn Phantom re-checks the tag's window and updates the chat's stored
 one if it changed, so the CLI and the meter always use the same, current number.
 A tag whose window is under 56k is listed but disabled, with the reason: Claude
 Code would compact on every turn.
@@ -825,7 +834,7 @@ only (`auth status`, `login status`, `--version`, a local `/api/version`). It
 detects signed-out, exhausted and expiring sessions and a CLI build that no
 longer matches the seat's pin. A seat that cannot run a turn refuses before the
 CLI starts (409 `seat-not-ready`, with the reason) instead of failing
-mid-turn. **Reconnect** opens the seat's own login in Terminal; Verse never
+mid-turn. **Reconnect** opens the seat's own login in Terminal; Phantom never
 types, reads or stores a credential.
 
 ### The Leader
@@ -876,8 +885,9 @@ launch a cloud or Devin task, add backlog work, keep its own notes, and save a
 new playbook or automation version, each with its class and veto window. On
 Telegram it sends a morning brief and an evening recap, answers "status" at
 once from recorded state, turns "go build X" into work, and asks one question
-at a time. Once a day it may pick up to three Ashlr Verse improvements of its
-own (at most one paid). Jev may add an advisory note to a memo when it thinks
+at a time. Its daily self-improvement pass may select every independent
+improvement admitted by the live resource, reserve and signed-authority gates.
+Explicit caller-supplied launch limits still apply. Jev may add an advisory note to a memo when it thinks
 an action deserves a stricter class; the class the policy set always stands.
 Details: [LEADER.md](LEADER.md#founder-mode-315).
 
@@ -996,7 +1006,7 @@ cited Reference section.
 - **Fresh and bounded.** "Generated at abc1234 · 3 pages stale" comes from git
   blob ids; only pages whose inputs changed are rebuilt, within a page budget
   (default 8) and a token budget (default 60k) per run. Builds run in the
-  background. Existing wikis refresh one stale repo at a time in the Verse
+  background. Existing wikis refresh one stale repo at a time in the workbench
   background (`foundry.wiki.autoRefresh=false` stops it).
 - **Steering.** `.ashlr/wiki.json` (include, exclude, focus, notes, ignorePaths,
   pages, maxPages, localOnly). `.devin/wiki.json` is also read, so a
@@ -1051,7 +1061,7 @@ gets exactly the prompt it got before.
   `work.dispatch` carry the playbook, and every run records `id@version`, so
   the Playbooks section can show merged, refused, reverted and failed counts
   per version.
-- **In Verse.** Gear ▸ **Playbooks** lists them with a version picker, shows
+- **In Phantom.** Gear ▸ **Playbooks** lists them with a version picker, shows
   each as an engine reads it with its outcomes, and saves an edit as a new
   version ("Edit from vN" restores an older one). **Run…** writes the macro
   into the message box. Typing `!` in the composer suggests macros, the ⋯
@@ -1093,7 +1103,7 @@ covers the repo, the automation's own limits (in flight, per day, a monthly
 spend cap) and then the lane's gates. The same source item makes one task per
 automation, remembered for 30 days. Optional Jev triage may pick a lane from
 an allowed list, a playbook, or send a doubtful item to review; it can never
-drop work. Verse checks triggers every minute on the live console
+drop work. Phantom checks triggers every minute on the live console
 (`ASHLR_AUTOMATIONS_AUTO=0` turns that off). Firings are recorded in
 `~/.ashlr/automations/firings.jsonl` with links to the source and the lane's
 task.
@@ -1200,11 +1210,13 @@ picker and the Resources drawer all read it.
 - **Provider marks.** Engine tiles, the seat chip, the chat header, ⌘K, the tasks pane and chart lane labels show
   the provider's own mark: Anthropic's Claude, OpenAI, xAI's Grok or Ollama (path data from @lobehub/icons, MIT).
   The account's name is always written beside the mark.
-- The rail head, the app icon, the menu-bar icon and verse.ashlr.ai carry the Ashlr.AI keystone "A".
+- The rail head and public site use the first-party Phantom ghost. The compatible
+  installation remains `Ashlr.app`; native bundle identity and installer migration
+  are separate from the presentation. See [the naming guide](PHANTOM-BRAND.md).
 
 ## Cloud lane (3.11)
 
-Verse can start **Claude Code cloud sessions** (claude.ai/code) and follow what
+Phantom can start **Claude Code cloud sessions** (claude.ai/code) and follow what
 they deliver. They run on your Claude account, including its cloud credits, so
 work continues after the subscription's weekly window is spent. The mechanics,
 the delivery contract, the budget math and every failure code are in
@@ -1215,19 +1227,19 @@ the delivery contract, the budget math and every failure code are in
   typed prompt, for the chat's project), or `ashlr cloud launch "<task>"`.
   Run in cloud is disabled, with the reason in its tooltip, when the project
   has no GitHub origin or the seat is not ready.
-- **What a task delivers.** Verse cannot read a session back. Every task is
+- **What a task delivers.** Phantom cannot read a session back. Every task is
   told to push the branch `ashlr-cloud/<taskId>` and open a **draft** PR
   titled `[ashlr-cloud] <title>`, ending in an `ashlr-cloud-report` block
-  (status, summary, tests run, risks). Verse checks GitHub with `gh` every 10
+  (status, summary, tests run, risks). Phantom checks GitHub with `gh` every 10
   minutes, or now with **Refresh**. A task with an open PR shows in Needs you
   as "Cloud task ready for review", with its report summary.
 - **Nothing merges from the lane.** A cloud PR goes through the custody gates
-  above, or waits for you. Dismissing a task in Verse marks it closed and does
+  above, or waits for you. Dismissing a task in Phantom marks it closed and does
   not touch GitHub.
 - **The seat.** Sessions launch only as the `claude-a` seat's native profile,
   signed in with a claude.ai account. Cloud sessions refuse API keys, so the
   `claude` on your `PATH` is never used. The seat counts as ready when its
-  profile's `command.json` exists and holds an argv array. Verse does not run the CLI to check sign-in,
+  profile's `command.json` exists and holds an argv array. Phantom does not run the CLI to check sign-in,
   so a signed-out seat shows up as an `auth` failure at launch.
 
 **Spend is an estimate, and is always labelled as one.** Claude does not expose
@@ -1238,8 +1250,8 @@ budget** (also in Settings ▸ Usage ▸ Cloud credits, and
 `ashlr cloud budget`) sets the total, the adjustment, the per-session
 estimate, at most 4 sessions at once and 20 a day.
 
-**Improve Verse.** Verse keeps a backlog of work on itself: built-in briefs
-plus items you or the Leader add. **Improve Verse** launches the next item now.
+**Improve Phantom.** Phantom keeps a backlog of work on itself: built-in briefs
+plus items you or the Leader add. **Improve Phantom** launches the next item now.
 With self-improvement on (the default), the server also launches one on its own
 two minutes after start and then hourly, at most 4 a day, and stops when
 estimated credits fall below the $40 reserve. The Cloud card's switch, or
@@ -1260,7 +1272,7 @@ binary is installed.
 
 - **Chat seats.** **Devin (cloud)** runs one Devin session per chat, with its
   replies, status, PR cards and ACU reading in the transcript. **Devin (CLI)**
-  drives the `devin` agent on this Mac; Verse checks that it is installed and
+  drives the `devin` agent on this Mac; Phantom checks that it is installed and
   logged in before each turn and says what to run if not. The Auto seat line
   is hidden on Devin chats.
 - **A lane.** **Run in Devin** in the composer's ⋯ sheet and in ⌘K, or `ashlr
@@ -1404,7 +1416,7 @@ tokens used. Plus the local-vs-cloud split for the period, `localSavingsUsd`
 framed as money not spent, and dispatch-ledger usage against each configured
 per-engine limit. Each seat card also aggregates its chat sessions' context
 efficiency — cache-hit ratio and compactions — computed in the browser from
-usage Verse already stores.
+usage the workbench already stores.
 
 Where a number does not exist, it says so. Claude has no local utilization
 signal and Grok's probe is not on `/api/usage`; both render as **unknown**
@@ -1423,7 +1435,7 @@ panel's account view. Rows are grouped:
   windows with reset times, and "Reserved for you 40 %". Actions: Reconnect,
   Fix (shows the exact command), Edit budget.
 - **Desktop:** Claude Desktop's "Use Ollama models" (shown off, with Restore;
-  Verse's local seat already routes to Ollama) and Hermes Desktop. Turning
+  the workbench's local seat already routes to Ollama) and Hermes Desktop. Turning
   either on confirms first and shows the command.
 - **Terminal agents:** Claude Code, Codex, Grok, Hermes, Aider, Goose,
   OpenCode, Droid, Pi and Cline, each with its installed version (or "not
@@ -1435,7 +1447,7 @@ panel's account view. Rows are grouped:
   llama-server's health, LM Studio.
 - **MCP servers**, per seat, with the same add flow as before. Claude and local
   seats load no MCP servers (`--strict-mcp-config`); the page says so. The one
-  exception is Verse's own browser tools, on a chat where you switched agent
+  exception is the workbench's own browser tools, on a chat where you switched agent
   access on in the Browser pane ([VERSE-BROWSER.md](VERSE-BROWSER.md)).
 
 Nothing on this page spends: it runs status commands and loopback reads only,
@@ -1522,13 +1534,13 @@ Desktop app only, from the macOS menu bar:
 
 ⌘1–⌘5, ⌘K and ⌘N are deliberately **not** bound in the native menu so they reach
 the page. ⌃⌥Space is a system-wide hotkey the desktop app registers (off by
-default; Settings ▸ Desktop): it brings Verse forward and focuses the composer.
+default; Settings ▸ Desktop): it brings Phantom forward and focuses the composer.
 
 ---
 
 ## Desktop app (macOS)
 
-The Tauri app in `desktop/` is a native window around Verse plus a menu-bar
+The Tauri app in `desktop/` is a native window around Phantom plus a menu-bar
 item. It is locally buildable and installable; there is no notarized public
 installer (see
 `DESKTOP.md`). Full detail, including the native↔web shell contract, is in
@@ -1545,7 +1557,7 @@ What it does on launch:
    `ashlr verse --port 7777 --no-open --json`, reads the single JSON startup
    line, takes `readToken` and `token`, and drops the line. It is never
    forwarded to the event bus, to stderr, or to the launch window.
-4. Creates the **Ashlr Verse** window at `http://127.0.0.1:7777/verse/` with
+4. Creates the **Phantom** window at `http://127.0.0.1:7777/verse/` with
    `window.__ASHLR_TOKENS__` already set, so the SessionGate never asks for a
    paste. The window has an overlay title bar with the traffic lights inset into
    the console's own 48px header strip, remembers its size and position in
@@ -1554,7 +1566,7 @@ What it does on launch:
 5. If the bundled CLI does not know `verse` yet, it falls back once to
    `ashlr serve --port 7777 --allow-dispatch --json`.
 
-Closing the window hides it to the menu bar. **Quit** — ⌘Q, the Ashlr menu, or
+Closing the window hides it to the menu bar. **Quit** — ⌘Q, the Phantom menu, or
 the menu-bar item — kills the sidecar and exits.
 
 The sidecar is reaped on every exit path, so no orphan server is left behind:
@@ -1578,7 +1590,7 @@ tray and the Dock badge are the reliable signals there. Details:
 
 ### Install it on this Mac
 
-There is no notarized public installer, but building Ashlr for your own Mac
+There is no notarized public installer, but building the compatible Ashlr app for your own Mac
 and keeping it in the Dock is supported. Use a clean release checkout:
 
 ```sh
@@ -1597,7 +1609,7 @@ app with Apple Developer ID. The first signing setup may ask for your login
 password and **Always Allow** for the signing key. If Gatekeeper blocks the
 first open, right-click (or Control-click) `Ashlr.app` → **Open**, or use
 System Settings → Privacy & Security → **Open Anyway**.
-With Ashlr running, right-click its Dock icon → **Options → Keep in Dock**.
+With Phantom running, right-click its Dock icon → **Options → Keep in Dock**.
 
 **To update:** repeat the build and `ship:local --native` from the new clean
 release checkout, then verify the installed version. The script backs up the
@@ -1728,7 +1740,7 @@ launches the staged sidecar, so run steps 1–2 first.
   Switching either starts a new chat; **Continue in a fresh chat** carries a
   deterministic handoff note across. Beyond that note and the shared project
   memory, a session knows only what its own vendor conversation holds.
-- Permission modes are Plan, Accept edits (default), Auto and Bypass. Verse does
+- Permission modes are Plan, Accept edits (default), Auto and Bypass. Phantom does
   not surface per-tool approval prompts yet; use
   the CLI directly when you want to approve each tool call.
 - The Terminal pane needs the desktop app (Bun's pseudo-terminal). Under plain
@@ -1747,8 +1759,8 @@ launches the staged sidecar, so run steps 1–2 first.
 - `!macro` runs a playbook in any chat, but a chat never auto-matches one.
 - Devin (CLI) chats report no usage, so they are not counted in the Devin
   budget, and their PRs get only Dismiss in Needs you.
-- Verse never compacts, summarizes or switches context mode on its own. The
-  CLIs compact themselves; Verse shows it. **Compact now** is the operator's, on
+- Phantom never compacts, summarizes or switches context mode on its own. The
+  CLIs compact themselves; Phantom shows it. **Compact now** is the operator's, on
   Claude and local sessions only; it was verified headless on a local seat and not
   run on a paid one, where it spends.
 - Codex can compact somewhat before the meter's tick (its check also counts
@@ -1802,7 +1814,7 @@ launches the staged sidecar, so run steps 1–2 first.
   required code checks (for example, `CI, Typecheck`). An unset or malformed
   setting holds every automatic merge. A green Vercel preview alone does not
   count as code verification.
-- Verse reads those checks again on the PR's current head immediately before
+- Phantom reads those checks again on the PR's current head immediately before
   its SHA-pinned squash merge. Each named check must appear exactly once and
   have succeeded. GitHub branch protection should require the same checks;
   a check name by itself does not authenticate which GitHub App reported it.

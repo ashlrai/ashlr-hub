@@ -11,7 +11,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Verse transcribes your voice on this Mac when you hold the dictation key.</string>
+	<string>Phantom transcribes your voice on this Mac when you hold the dictation key.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

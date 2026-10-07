@@ -10,6 +10,7 @@
  * evaluates, in parallel with the session probe, and it renders synchronously
  * once in. On a warm launch (service worker cache) that is the same frame.
  */
+import { PRODUCT_NAME } from '../../../../app/product-brand.js';
 import { Suspense } from 'react';
 import { preloadedLazy } from '../../shell/preloaded.js';
 import { canShowActions, useMobile } from '../mobile-context.js';
@@ -42,7 +43,7 @@ export function HomeScreen() {
   const onRefresh = () => Promise.all([refreshActivity(), loadBody().then((m) => m.refreshHome())]);
   return (
     <Screen
-      title="Verse"
+      title={PRODUCT_NAME}
       large
       subtitle={permissions.act === 'unavailable' ? 'Read-only on this device' : undefined}
       onRefresh={onRefresh}

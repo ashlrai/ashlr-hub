@@ -340,10 +340,10 @@ describe('Workspace header — the workbench bar (3.16)', () => {
     const { container } = render(<Workspace {...props({ view: opened({ turnCount: 3 }) })} />);
     const readout = within(header(container)).getByTestId('chat-usage');
     // 1,200 in + 300 out — one quiet figure, no invented dollars.
-    expect(readout).toHaveAccessibleName('Tokens used: 2k');
+    expect(readout).toHaveAccessibleName('Tokens used: 1.5k');
     expect(readout.textContent).not.toMatch(/\$/);
     await user.hover(readout);
-    expect(await screen.findByRole('tooltip')).toHaveTextContent('This chat so far: 1k in · 300 out · 3 turns');
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('This chat so far: 1.2k in · 300 out · 3 turns');
   });
 
   it('draws a toggle for each registered pane that asks for one, from the registry', () => {

@@ -156,7 +156,7 @@ export function optionalQuery<T>(key: string, path: string | (() => string), wha
         const value = guard(raw);
         if (value === null) {
           // Nothing is shown rather than guessed from an unknown shape.
-          return { value: null, available: true, reason: 'Unrecognized response — update Ashlr.' };
+          return { value: null, available: true, reason: 'Unrecognized response — update Phantom.' };
         }
         return { value, available: true, reason: null };
       } catch (err) {

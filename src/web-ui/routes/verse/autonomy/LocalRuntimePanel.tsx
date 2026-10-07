@@ -18,6 +18,7 @@
  * (StatusBadge) and a sentence.
  */
 import { useCallback, useState, useSyncExternalStore } from 'react';
+import { formatMetric } from '../../../components/charts/format-metric.js';
 import type { ReactNode } from 'react';
 import { getQuerySnapshot, subscribeQuery } from '../../../data/cache.js';
 import { StatusBadge, type Tone } from '../../../components/primitives/StatusBadge.js';
@@ -201,7 +202,7 @@ export function LocalRuntimePanel({
       ) : runtime === null ? (
         <p className={styles.empty}>
           <span className={styles.emptyStrong}>Unreadable reading. </span>
-          {read.reason ?? 'Unrecognized response — update Ashlr.'}
+          {read.reason ?? 'Unrecognized response — update Phantom.'}
         </p>
       ) : (
         <>
@@ -432,7 +433,7 @@ function ConcurrencyEvidence({
               <tr key={row.runtime}>
                 <th scope="row">{row.runtime}</th>
                 <td className={styles.evidenceNums}>{row.perRequestSeconds.join(' · ')}</td>
-                <td className={styles.evidenceNums}>{row.wallSeconds.toFixed(1)}</td>
+                <td className={styles.evidenceNums} title={String(row.wallSeconds)}>{formatMetric(row.wallSeconds)}</td>
                 <td>{row.verdict}</td>
               </tr>
             ))}

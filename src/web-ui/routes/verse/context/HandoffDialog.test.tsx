@@ -223,17 +223,17 @@ describe('where it continues', () => {
     expect(JSON.parse(picker.value)).toEqual(['claude-a', 'claude-fable-5-1']);
     const modes = screen.getByRole('radiogroup', { name: 'Context mode' });
     expect(within(modes).getByRole('radio', { name: 'Standard' })).toHaveAttribute('aria-checked', 'true');
-    expect(screen.getByText(/1M window · compacts ≈367k/)).toBeInTheDocument();
+    expect(screen.getByText(/1M window · compacts ≈370k/)).toBeInTheDocument();
     expect(screen.getByText(/^Fits:/)).toBeInTheDocument();
 
     await user.click(within(modes).getByRole('radio', { name: 'Expansive' }));
-    expect(screen.getByText(/1M window · compacts ≈967k/)).toBeInTheDocument();
+    expect(screen.getByText(/1M window · compacts ≈970k/)).toBeInTheDocument();
     expect(screen.getByText(/each turn costs more usage/)).toBeInTheDocument();
 
     // A 200k model has no expansive budget: no mode control at all.
     await user.selectOptions(picker, JSON.stringify(['claude-a', 'claude-haiku-4-5-20251001']));
     expect(screen.queryByRole('radiogroup', { name: 'Context mode' })).toBeNull();
-    expect(screen.getByText(/200k window · compacts ≈167k/)).toBeInTheDocument();
+    expect(screen.getByText(/200k window · compacts ≈170k/)).toBeInTheDocument();
   });
 
   it('sizes the fit with the TARGET seat’s estimated fixed prompt, and says it is an estimate', async () => {

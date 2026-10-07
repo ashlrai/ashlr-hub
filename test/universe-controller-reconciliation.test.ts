@@ -21,6 +21,10 @@ vi.mock('../src/core/universe/campaign.js', async (original) => ({
 }));
 vi.mock('../src/core/universe/campaign-store.js', async (original) => ({
   ...await original<typeof import('../src/core/universe/campaign-store.js')>(), readUniverseCampaign: hooks.campaign, campaignUniverse: hooks.universe,
+  readUniverseCampaignProjection: (id: string, options: unknown) => {
+    const campaign = hooks.campaign(id, options);
+    return { campaign, universe: hooks.universe(campaign, options) };
+  },
 }));
 vi.mock('../src/core/universe/store.js', async (original) => ({
   ...await original<typeof import('../src/core/universe/store.js')>(), manifestRecord: hooks.manifest,

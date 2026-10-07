@@ -38,18 +38,14 @@ export function Icon({ size = 16, children, ...rest }: IconProps & { children: R
   );
 }
 
-/**
- * The mark in the rail head: the Ashlr.AI keystone "A" (traced from the brand
- * mark, ashlar-landing public/logos/ashlar-mark.png). The legs take the ink
- * colour so it reads in light and dark themes; the core keeps the brand blue
- * (#2563EB). Not a section icon — it never gets a color state.
- */
+/** Phantom ghost geometry from the first-party MIT asset; see docs/PHANTOM-BRAND.md. */
 export function VerseMark(props: IconProps) {
   const { size = 20, ...rest } = props;
   return (
-    <svg viewBox="54 67 146 124" width={size} height={size} aria-hidden="true" focusable="false" {...rest}>
-      <path fill="currentColor" d="M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z" />
-      <path fill="#2563EB" d="M110 121H143L133 152H120Z" />
+    <svg viewBox="0 0 32 32" width={size} height={size} aria-hidden="true" focusable="false" {...rest}>
+      <path fill="currentColor" d="M16 2C10.5 2 6 6.5 6 12v10.5c0 .8.7 1.5 1.5 1.5H10c0-2 1.3-3.5 2.5-3.5S15 22 15 24h2c0-2 1.3-3.5 2.5-3.5S22 22 22 24h2.5c.8 0 1.5-.7 1.5-1.5V12c0-5.5-4.5-10-10-10z" />
+      <circle cx="12.5" cy="13.5" r="2.2" fill="var(--bg-canvas, #fafafa)" />
+      <circle cx="19.5" cy="13.5" r="2.2" fill="var(--bg-canvas, #fafafa)" />
     </svg>
   );
 }

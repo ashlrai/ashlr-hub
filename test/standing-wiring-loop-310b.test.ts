@@ -217,6 +217,78 @@ describe('U7 — standing best-of-N comes from the plan, never the config', () =
   });
 });
 
+describe('selected Claude account — standing producer forwarding', () => {
+  const model = 'claude:claude-opus-4-8';
+
+  function selectedHooks(seatId: string | null, plan?: PlanFn): TickHooks {
+    const hooks = standingHooks({ backend: 'claude', plan });
+    hooks.route = () => ({
+      backend: 'claude' as EngineId, tier: 'frontier', model, reason: 'selected account', hold: null,
+      seatDecision: { seatId, candidates: seatId ? [seatId] : [], exclusions: [], why: 'selected account', mode: 'balanced' },
+    });
+    return hooks;
+  }
+
+  it.each(['single', 'best-of-N'] as const)('forwards the routed account and fresh admission to %s', async (path) => {
+    fx.makeRepo().enroll();
+    const controller = new AbortController();
+    const hooks = selectedHooks('claude:connected-account', path === 'best-of-N' ? () => PLAN : undefined);
+    const gate = vi.fn(() => ({ allowed: true, reason: 'current authority' }));
+    hooks.seatAllows = gate;
+    let observed = false;
+    let admission: (() => boolean) | undefined;
+    const observe = (_goal: unknown, _cfg: unknown, opts: { seatId?: string; selectedClaudeAdmission?: () => boolean }) => {
+      expect(opts.seatId).toBe('claude:connected-account');
+      expect(opts.selectedClaudeAdmission).toBeTypeOf('function');
+      admission = opts.selectedClaudeAdmission;
+      // The initial gate must use this account too, before any runner starts.
+      expect(gate.mock.calls.length).toBeGreaterThan(0);
+      for (const [, checked] of gate.mock.calls as unknown as [string, { seatId?: string }][]) {
+        expect(checked.seatId).toBe('claude:connected-account');
+      }
+      expect(admission!()).toBe(true);
+      expect(gate).toHaveBeenLastCalledWith('claude', expect.objectContaining({
+        seatId: 'claude:connected-account', itemId: expect.any(String), model,
+      }));
+      gate.mockReturnValueOnce({ allowed: false, reason: 'account held' });
+      expect(admission!()).toBe(false);
+      gate.mockImplementationOnce(() => { throw new Error('current proof unavailable'); });
+      expect(admission!()).toBe(false);
+      controller.abort();
+      const calls = gate.mock.calls.length;
+      expect(admission!()).toBe(false);
+      expect(gate).toHaveBeenCalledTimes(calls);
+      observed = true;
+    };
+    const target = path === 'single' ? mockRunGoal : mockRunBestOfN;
+    const original = target.getMockImplementation()!;
+    target.mockImplementation(async (...args: unknown[]) => {
+      observe(args[0], args[1], args[2] as Parameters<typeof observe>[2]);
+      return original(...args);
+    });
+    await tick(cfgFor({ allowedBackends: ['claude'] }), {
+      dryRun: false, activationCapability: STANDING, hooks, signal: controller.signal,
+    });
+    expect(observed).toBe(true);
+    expect(target).toHaveBeenCalledTimes(1);
+    // A retained callback cannot admit another contact after this tick ends.
+    expect(admission!()).toBe(false);
+  });
+
+  it.each([null, '', 'codex:other-account', 'grok:other-account', 'devin:other-account', 'local:other-account'])(
+    'does not forward an absent or other-engine account (%s)', async (seatId) => {
+      fx.makeRepo().enroll();
+      await tick(cfgFor({ allowedBackends: ['claude'] }), {
+        dryRun: false, activationCapability: STANDING, hooks: selectedHooks(seatId),
+      });
+      expect(mockRunGoal).toHaveBeenCalledTimes(1);
+      const opts = mockRunGoal.mock.calls[0]![2] as { seatId?: string; selectedClaudeAdmission?: () => boolean };
+      expect(opts.seatId).toBeUndefined();
+      expect(opts.selectedClaudeAdmission).toBeUndefined();
+    },
+  );
+});
+
 describe('B-U9 — the harness producer prompt reaches a standing dispatch', () => {
   it('appends the active harness overlay to the goal on a standing tick only', async () => {
     fx.makeRepo().enroll();

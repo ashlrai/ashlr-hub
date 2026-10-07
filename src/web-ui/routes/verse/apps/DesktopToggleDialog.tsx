@@ -52,7 +52,7 @@ export function DesktopToggleDialog({
         {row.detail ? <p>{row.detail}</p> : null}
         {enable && row.id === 'claude-desktop' ? (
           <p>
-            Recommended: leave this off. Claude Desktop would run local models instead of its own, and Verse’s local
+            Recommended: leave this off. Claude Desktop would run local models instead of its own, and Phantom’s local
             seats already use Ollama.
           </p>
         ) : null}
@@ -65,7 +65,7 @@ export function DesktopToggleDialog({
           <CopyPill text={commandText(undo)} what={enable ? 'the restore command' : 'the command that turns it on'} />
         </div>
         <p>
-          It opens in a Terminal window so you can answer its prompts. Verse does not answer them for you, and nothing
+          It opens in a Terminal window so you can answer its prompts. Phantom does not answer them for you, and nothing
           changes until you do.
         </p>
         {error ? <p className={styles.error} role="alert">{error}</p> : null}

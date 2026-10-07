@@ -19,7 +19,7 @@
  * activation permit and the standing capability are test seams.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, renameSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 const mockLoadConfig = vi.hoisted(() => vi.fn());
@@ -149,6 +149,8 @@ import type { DaemonActivationCapability } from '../src/core/daemon/activation-p
 import type { AshlrConfig, DaemonTick, EngineId, WorkItem } from '../src/core/types.js';
 import type { DispatchOutcome } from '../src/core/fleet/fleet-types.js';
 import { makeCfg, makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
+import { refreshDevinCliExecutionBinding, resetDevinCliAdmissionForTest } from '../src/core/devin/cli-admission.js';
+import * as gateway from '../src/core/fabric/gateway.js';
 
 let fx: H1Fixture;
 
@@ -312,6 +314,35 @@ describe('standing Grok selected-account forwarding', () => {
 });
 
 describe('positive USD exhaustion preserves only proven zero-dollar standing production', () => {
+  afterEach(() => { resetDevinCliAdmissionForTest(); vi.restoreAllMocks(); });
+
+  async function nativeFreeFixture() {
+    const data = join(realpathSync(fx.home), 'native-data');
+    mkdirSync(join(data, 'devin'), { recursive: true, mode: 0o700 });
+    const credentials = join(data, 'devin', 'credentials.toml');
+    const executable = join(realpathSync(fx.home), 'devin');
+    writeFileSync(executable, '#!/bin/sh\nexit 0\n', { mode: 0o755 }); chmodSync(executable, 0o755);
+    writeFileSync(credentials, 'synthetic-not-a-login', { mode: 0o600 }); chmodSync(credentials, 0o600);
+    vi.stubEnv('XDG_DATA_HOME', data);
+    // A non-promotional synthetic ID proves admission uses the current catalog,
+    // not a hardcoded SWE ID. No native account or executable is contacted.
+    const model = 'fixture-native-free';
+    const binding = await refreshDevinCliExecutionBinding(model, { cliPath: executable, credentialsPath: credentials,
+      runMetadata: async (_bin, args) => args[0] === 'auth'
+        ? 'Logged in\n  User ID: synthetic-native-user\n  API server: https://server.codeium.com\n  Devin API: https://api.devin.ai\n'
+        : `Available models (1 family)\nFixture (fixture)\n  ${model}  Fixture  [262K context, Free]\n`,
+    });
+    expect(binding).not.toBeNull();
+    return { model, binding: binding!, credentials, executable };
+  }
+
+  function nativeRun(opts: { engine: string; runId: string; budget: unknown; model: string }, steps = 1) {
+    return { id: opts.runId, goal: 'fixture', engine: opts.engine, engineModel: `${opts.engine}:${opts.model}`,
+      status: 'done', tasks: [], steps: [], usage: { tokensIn: 10, tokensOut: 20, steps, estCostUsd: 7 },
+      budget: opts.budget, provider: 'test', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      proposalOutcome: { kind: 'no-diff' } };
+  }
+
   function prepare(engine: EngineId = 'codex', overrides: Partial<NonNullable<AshlrConfig['daemon']>> = {}) {
     const repo = fx.makeRepo(); repo.enroll();
     const cfg = cfgFor(overrides);
@@ -361,6 +392,97 @@ describe('positive USD exhaustion preserves only proven zero-dollar standing pro
     expect(mockRunGoal).toHaveBeenCalledTimes(1);
     expect(result.spentUsd).toBe(0);
     expect(loadDaemonState().todaySpentUsd).toBe(1);
+  });
+
+  it('admits exact host-qualified native Free at exhausted cash and preserves launch accounting after its TTL', async () => {
+    let now = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const native = await nativeFreeFixture();
+    const { cfg, hooks } = prepare('devin-cli' as EngineId, { perTickItems: 1 });
+    cfg.devin = { enabled: true, fleet: true, fleetModel: native.model };
+    hooks.bestOfNPlan = () => ({ run: true, candidates: [{ engine: 'devin-cli' as EngineId }, { engine: 'codex' }] });
+    seedMidTickSpend({ spentUsd: 1, running: false });
+    expect(zeroDollarProducer('devin-cli', cfg, native.model)).toBe(true);
+    mockRunGoal.mockImplementation(async (_goal, _cfg, opts) => {
+      expect(opts.selectedDevinAdmission(native.model)).toBe(native.binding);
+      opts.onSelectedDevinSpawn(native.model, native.binding);
+      now += 60_001;
+      expect(opts.selectedDevinAdmission(native.model)).toBeNull();
+      return nativeRun(opts);
+    });
+    const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(mockRunGoal).toHaveBeenCalledOnce(); expect(mockRunBestOfN).not.toHaveBeenCalled();
+    expect(mockRunGoal.mock.calls[0]![2].budget.maxTokens).toBe(50_000);
+    expect(result.spentUsd).toBe(0); expect(loadDaemonState().todaySpentUsd).toBe(1);
+    expect(readDaemonSpendGuard().exists).toBe(false);
+    expect(zeroDollarProducer('devin-cli', cfg, native.model)).toBe(false);
+  });
+
+  it.each(['no spawn', 'forged binding', 'different model', 'unproven second contact', 'fallback engine', 'fallback model'] as const)(
+    'retains estimated cash for %s rather than borrowing native Free launch proof', async scenario => {
+      const native = await nativeFreeFixture();
+      const { cfg, hooks } = prepare('devin-cli' as EngineId, { perTickItems: 1 });
+      cfg.devin = { enabled: true, fleet: true, fleetModel: native.model };
+      mockRunGoal.mockImplementation(async (_goal, _cfg, opts) => {
+        if (scenario !== 'no spawn') opts.onSelectedDevinSpawn(scenario === 'different model' ? 'different-model' : native.model,
+          scenario === 'forged binding' ? { ...native.binding } : native.binding);
+        const run = nativeRun(opts, scenario === 'unproven second contact' ? 2 : 1);
+        return { ...run, ...(scenario === 'fallback engine' ? { engine: 'unknown-executor' } : {}),
+          ...(scenario === 'fallback model' ? { engineModel: 'devin-cli:other-model' } : {}) };
+      });
+      const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+      expect(mockRunGoal).toHaveBeenCalledOnce(); expect(result.spentUsd).toBe(7);
+    },
+  );
+
+  it('retains the exhausted-cash journal when an exact-looking run has no actual native spawn evidence', async () => {
+    const native = await nativeFreeFixture();
+    const { cfg, hooks } = prepare('devin-cli' as EngineId, { perTickItems: 1 });
+    cfg.devin = { enabled: true, fleet: true, fleetModel: native.model };
+    seedMidTickSpend({ spentUsd: 1, running: false });
+    mockRunGoal.mockImplementation(async (_goal, _cfg, opts) => ({ ...nativeRun(opts), usage: { tokensIn: 0, tokensOut: 0, steps: 1, estCostUsd: 0 } }));
+    const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(mockRunGoal).toHaveBeenCalledOnce(); expect(result.reason).toBe('state-persistence-failed');
+    expect(loadDaemonState().todaySpentUsd).toBe(1);
+    expect(readDaemonSpendGuard().guard).toMatchObject({ zeroCostOnly: true, reservedUsd: 0 });
+  });
+
+  it.each(['stale', 'credentials', 'executable', 'override', 'seat', 'Stop', 'daily-off', 'pessimistic'] as const)(
+    'does not contact a native Free producer after %s refuses it', async scenario => {
+      let now = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const native = await nativeFreeFixture();
+      const { cfg, hooks } = prepare('devin-cli' as EngineId, { perTickItems: 1, ...(scenario === 'daily-off' ? { dailyBudgetUsd: 0 } : {}) });
+      cfg.devin = { enabled: true, fleet: true, fleetModel: native.model };
+      const state = seedMidTickSpend({ spentUsd: 1, running: false });
+      if (scenario === 'stale') now += 60_000;
+      if (scenario === 'credentials') writeFileSync(native.credentials, 'changed synthetic login');
+      if (scenario === 'executable') writeFileSync(native.executable, '#!/bin/sh\nexit 1\n');
+      if (scenario === 'override') cfg.foundry!.engines = { 'devin-cli': { kind: 'api-model', tier: 'local', api: {
+        defaultBaseUrl: 'http://127.0.0.1:8080/v1', defaultModel: native.model,
+      } } };
+      if (scenario === 'seat') hooks.seatAllows = () => ({ allowed: false, reason: 'selected grant or seat held' });
+      if (scenario === 'Stop') fx.setKill(true);
+      if (scenario === 'pessimistic') saveDaemonState({ ...state, spendGuardAccounting: {
+        budgetDay: state.todayDate!, accountingId: '11111111-1111-4111-8111-111111111111', budgetExhausted: true,
+      } });
+      await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+      expect(mockRunGoal).not.toHaveBeenCalled(); expect(mockRunSwarm).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rechecks native pricing after awaited shadow preparation before dispatch', async () => {
+    let now = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const native = await nativeFreeFixture();
+    const { cfg, hooks } = prepare('devin-cli' as EngineId, { perTickItems: 1 });
+    cfg.devin = { enabled: true, fleet: true, fleetModel: native.model };
+    cfg.foundry!.fabric = { gatewayShadow: true };
+    seedMidTickSpend({ spentUsd: 1, running: false });
+    const shadow = vi.spyOn(gateway, 'decide').mockImplementation(async () => {
+      await Promise.resolve(); now += 60_000;
+      return { backend: 'devin-cli', tier: 'frontier', model: native.model, reason: 'fixture shadow' } as Awaited<ReturnType<typeof gateway.decide>>;
+    });
+    const result = await tick(cfg, { dryRun: false, activationCapability: STANDING, hooks });
+    expect(shadow).toHaveBeenCalled(); expect(mockRunGoal).not.toHaveBeenCalled();
+    expect(result.dispatches).toContainEqual(expect.objectContaining({ backend: 'devin-cli', dispatched: false, skipReason: 'budget-cap' }));
   });
 
   it.each(['stop', 'pessimistic', 'legacy', 'unresolved'] as const)('fails closed for %s', async (scenario) => {

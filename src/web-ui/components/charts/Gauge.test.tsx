@@ -21,10 +21,11 @@ describe('Gauge', () => {
     expect(container.querySelector('[data-role="fill"]')).toBeNull();
   });
 
-  it('prints overages as they are while drawing a full arc', () => {
+  it('rounds displayed overages while retaining full arc and limit state', () => {
     render(<Gauge title="Cap" value={1.12} />);
     expect(screen.getByRole('meter')).toHaveAttribute('aria-valuenow', '1');
-    expect(screen.getByText('112%')).toBeInTheDocument();
+    expect(screen.getByText('110%')).toBeInTheDocument();
+    expect(screen.getByRole('meter')).toHaveAttribute('aria-valuetext', 'Cap: 110%, at the limit');
     expect(screen.getByText('at the limit')).toBeInTheDocument();
   });
 });

@@ -85,6 +85,18 @@ describe('buildItemGoal', () => {
       expect(goal).toContain(NO_PARTIAL_FILING_SENTINEL);
     });
 
+    it('keeps literal task details while separating unavailable command checks from acceptance', () => {
+      const detail = 'Preserve the literal instruction: npm test -- --runInBand';
+      const goal = buildItemGoal(makeItem({ detail }));
+      expect(goal).toContain(detail);
+      expect(goal).toContain('Run command checks only with supplied executable tools');
+      expect(goal).toContain('do not claim they ran');
+      expect(goal).toContain('pending host verification');
+      expect(goal).toContain('host checks must pass before acceptance');
+      expect(goal).toContain(NO_PARTIAL_FILING_SENTINEL);
+      expect(goal).toContain(NOOP_SENTINEL);
+    });
+
     it('mentions tests, typecheck, and lint as the verification bar', () => {
       const goal = buildItemGoal(makeItem({}));
       expect(goal).toContain('tests');

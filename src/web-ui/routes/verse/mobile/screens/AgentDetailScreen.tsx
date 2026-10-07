@@ -477,7 +477,7 @@ function ChangesPane({ sessionId, version }: { sessionId: string; version: strin
   if (load.state === 'loading') return <SkeletonList rows={3} label="Loading changes" />;
   if (load.state === 'error') return <ErrorState title="Couldn’t load the changes" reason={load.message} onRetry={() => setRetry((n) => n + 1)} />;
   if (load.state === 'empty') {
-    return <EmptyState title="No checkpoint for this chat yet" body={load.reason ?? 'Verse snapshots a git repository when a turn starts there; changes show up after the first one.'} />;
+    return <EmptyState title="No checkpoint for this chat yet" body={load.reason ?? 'Phantom snapshots a git repository when a turn starts there; changes show up after the first one.'} />;
   }
 
   const allFiles = load.roots.flatMap((r) => r.diff.files);

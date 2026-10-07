@@ -3,6 +3,7 @@
  * brief item 3), reading NAV_GROUPS from app/nav-config.ts so it can never
  * drift from what the command palette offers.
  */
+import { VerseMark } from '../../routes/verse/rail-icons.js';
 import { NavLink } from 'react-router-dom';
 import { NAV_GROUPS } from '../../app/nav-config.js';
 import styles from './Sidebar.module.css';
@@ -12,9 +13,9 @@ export function Sidebar() {
     <nav className={styles.sidebar} aria-label="Primary">
       <div className={styles.brand}>
         <span className={styles.brandMark} aria-hidden="true">
-          ▲
+          <VerseMark size={20} />
         </span>
-        <span className={styles.brandName}>ashlr</span>
+        <span className={styles.brandName}>Phantom</span>
       </div>
       {NAV_GROUPS.map((group) => (
         <div key={group.id} className={styles.group}>

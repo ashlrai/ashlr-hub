@@ -28,7 +28,7 @@ var HASHED_ASSET_RE = /^\/next\/assets\/[^/]+-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/;
 var OFFLINE_HTML =
   '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
   '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">' +
-  '<meta name="color-scheme" content="light dark"><title>Ashlr Verse — Mac unreachable</title>' +
+  '<meta name="color-scheme" content="light dark"><title>Phantom — Mac unreachable</title>' +
   '<style>' +
   ':root{color-scheme:light dark;font:-apple-system-body;font-family:system-ui,-apple-system,sans-serif}' +
   'body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:Canvas;color:CanvasText;' +
@@ -37,7 +37,7 @@ var OFFLINE_HTML =
   'a{display:inline-flex;align-items:center;justify-content:center;min-height:2.75rem;padding:0 1.5rem;border-radius:999px;' +
   'background:rgb(37 99 235);color:white;text-decoration:none;font-weight:600}' +
   '</style></head><body><main><h1>Can’t reach your Mac</h1>' +
-  '<p>Verse runs on your Mac. It may be asleep, offline, or the connection to it is down. Nothing was sent.</p>' +
+  '<p>Phantom runs on your Mac. It may be asleep, offline, or the connection to it is down. Nothing was sent.</p>' +
   '<a href="/verse/m/">Try again</a></main></body></html>';
 
 self.addEventListener('install', function (event) {
@@ -193,9 +193,9 @@ self.addEventListener('push', function (event) {
     if (payload && (payload.kind === 'needs-you' || payload.kind === 'completed')) kind = payload.kind;
   } catch { /* malformed payload gets a generic alert */ }
   var completed = kind === 'completed';
-  event.waitUntil(self.registration.showNotification('Ashlr Verse', {
-    body: completed ? 'A run completed. Open Verse for details.' : kind === 'needs-you'
-      ? 'Something needs you. Open Verse for details.' : 'Verse has an update. Open the app to see it.',
+  event.waitUntil(self.registration.showNotification('Phantom', {
+    body: completed ? 'A run completed. Open Phantom for details.' : kind === 'needs-you'
+      ? 'Something needs you. Open Phantom for details.' : 'Phantom has an update. Open the app to see it.',
     tag: 'ashlr-verse-update',
     icon: '/next/verse-m/icon-192.png',
     data: { path: completed ? '/verse/m/#/' : '/verse/m/#/needs' },

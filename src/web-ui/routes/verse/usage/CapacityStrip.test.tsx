@@ -6,7 +6,7 @@
  * in dark (token-probe contrast of the colours the strip uses).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { BudgetView } from '../../../../core/routing/policy.js';
 import { contrastRatio } from '../../../design/contrast.js';
@@ -22,6 +22,8 @@ import {
   UNREAD_SEAT,
 } from '../seat-fixtures.test-support.js';
 import { CapacityStrip } from './CapacityStrip.js';
+import { buildCapacityRows } from './capacity-strip-model.js';
+import { barRows } from '../resources/ResourcesBar.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -75,8 +77,62 @@ describe('CapacityStrip', () => {
 
   it('shows credits as a separate fact, never folded into the window', () => {
     render(<CapacityStrip seats={[CODEX_CREDITS_SEAT]} />);
-    expect(screen.getByText('2048.4196250000 credits available')).toBeInTheDocument();
+    expect(screen.getByText('2,000 credits available')).toHaveAttribute('title', 'Exact native balance: 2048.4196250000 credits.');
     expect(screen.getByText('limit reached')).toBeInTheDocument();
+  });
+
+  it('keeps exact raw balances on separate account titles while shortening the visible units', () => {
+    const seats = ['412.8921985000', '62497.7860000000', '0.000001'].map((balance, index) => ({
+      ...CODEX_CREDITS_SEAT, id: `codex-readable-${index}`, accountId: `codex-readable-${index}`,
+      label: `Codex ${index}`, capacity: { ...CODEX_CREDITS_SEAT.capacity!,
+        credits: { hasCredits: true, unlimited: false, balance },
+      },
+    }));
+    render(<CapacityStrip seats={seats} />);
+    for (const [display, raw] of [['410', '412.8921985000'], ['62,000', '62497.7860000000'], ['0.000001', '0.000001']]) {
+      expect(screen.getByText(`${display} credits available`)).toHaveAttribute('title', `Exact native balance: ${raw} credits.`);
+    }
+    expect(screen.getAllByText('limit reached')).toHaveLength(3);
+  });
+
+  it('expires current credit availability on the visible clock without replacing the cached seats', () => {
+    vi.useFakeTimers();
+    const now = Date.parse('2026-10-06T21:00:00.000Z');
+    vi.setSystemTime(now);
+    const expiresAt = new Date(now + 60_000).toISOString();
+    const seats = [{ ...CODEX_CREDITS_SEAT,
+      capacity: { ...CODEX_CREDITS_SEAT.capacity!, creditsExpiresAt: expiresAt },
+      lastKnownUsage: { source: 'native-account-checked-history' as const, identitySource: 'native-account-checked' as const,
+        observedAt: new Date(now).toISOString(), expiresAt, windows: [],
+        creditHistory: { reading: CODEX_CREDITS_SEAT.capacity!.credits!, observedAt: new Date(now).toISOString(), expiresAt, planType: 'pro' },
+      },
+    }];
+    try {
+      render(<CapacityStrip seats={seats} />);
+      expect(screen.getByText('2,000 credits available')).toBeInTheDocument();
+      act(() => { vi.advanceTimersByTime(60_000); });
+      expect(screen.queryByText('2,000 credits available')).not.toBeInTheDocument();
+      expect(screen.queryByText(/limit reached · credits available/)).not.toBeInTheDocument();
+      expect(screen.getByText('limit reached')).toBeInTheDocument();
+      // The same cached evidence remains intact, but only the separately dated history can describe it.
+      const sidebar = barRows(buildCapacityRows(seats, { now: Date.now() }), { healthRead: true, now: Date.now() })[0]!;
+      expect(sidebar.creditLabel).toBe('Credits ≈$82 · last');
+      expect(sidebar.detail.join(' ')).toContain('current balance and availability are unconfirmed');
+      expect(seats[0]!.capacity.credits!.balance).toBe('2048.4196250000');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('preserves a caller-supplied fixed evidence clock rather than advancing it with real time', () => {
+    vi.useFakeTimers();
+    const now = Date.parse('2026-10-06T21:00:00.000Z');
+    vi.setSystemTime(now);
+    const seats = [{ ...CODEX_CREDITS_SEAT, capacity: { ...CODEX_CREDITS_SEAT.capacity!,
+      creditsExpiresAt: new Date(now + 60_000).toISOString() } }];
+    try {
+      render(<CapacityStrip seats={seats} accounts={{ healthRead: true, now }} />);
+      act(() => { vi.advanceTimersByTime(60_000); });
+      expect(screen.getByText('2,000 credits available')).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
   });
 
   it('compact density: one line per seat, binding window only, no reset text', () => {

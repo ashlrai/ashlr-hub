@@ -96,7 +96,7 @@ describe('MoreScreen — rows and settings', () => {
     })));
     await probeRemoteSession();
     mount();
-    expect(screen.getByText(/Notifications require Verse installed on an iPhone Home Screen/)).toBeInTheDocument();
+    expect(screen.getByText(/Notifications require Phantom installed on an iPhone Home Screen/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Enable notifications' })).not.toBeInTheDocument();
   });
   it('goes to Fleet, New agent and Needs you', () => {
@@ -143,7 +143,7 @@ describe('MoreScreen — rows and settings', () => {
     Object.defineProperty(window.navigator, 'standalone', { configurable: true, value: true });
     try {
       mount();
-      expect(await screen.findByText(/Installed — Verse is running from your Home Screen/)).toBeInTheDocument();
+      expect(await screen.findByText(/Installed — Phantom is running from your Home Screen/)).toBeInTheDocument();
     } finally {
       Object.defineProperty(window.navigator, 'standalone', { configurable: true, value: undefined });
     }

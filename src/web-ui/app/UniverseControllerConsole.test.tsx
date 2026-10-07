@@ -42,7 +42,7 @@ describe('controller inspector console isolation', () => {
     expect(screen.getByRole('heading', { name: 'Universe records unavailable' })).toBeInTheDocument();
     expired = true;
     await user.click(screen.getByRole('button', { name: 'Refresh controller' }));
-    await screen.findByRole('heading', { name: 'Connect to Ashlrverse' });
+    await screen.findByRole('heading', { name: 'Connect to Phantom' });
     expect(screen.queryByRole('heading', { name: 'Evidence for fleet' })).not.toBeInTheDocument();
     expect(EventSource).not.toHaveBeenCalled();
   });

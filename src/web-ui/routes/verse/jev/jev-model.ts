@@ -6,6 +6,7 @@
  * "Unrecognized response" rather than a guessed number. Dollar figures are
  * estimates from recorded usage and pricing; missing coverage stays unknown.
  */
+import { formatMetric, formatMetricUsd } from '../../../components/charts/format-metric.js';
 import type { JevResponse } from '../../../../core/decide/jev-types.js';
 import type { JevKindStats, JevStatus } from '../../../../core/decide/types.js';
 
@@ -64,48 +65,46 @@ export function jevHeadline(status: JevStatus): { word: string; tone: JevTone; d
 
 export function formatPercent(fraction: number | null): string {
   if (fraction === null || !Number.isFinite(fraction)) return '—';
-  return `${Math.round(fraction * 100)}%`;
+  return `${formatMetric(fraction * 100)}%`;
 }
 
 export function formatConfidence(value: number | null): string {
-  return value === null || !Number.isFinite(value) ? '—' : value.toFixed(2);
+  return formatMetric(value);
 }
 
 export function formatUsd(value: number | null): string {
   if (value === null || !Number.isFinite(value) || value < 0) return 'unknown';
-  if (value === 0) return '$0';
-  if (value < 0.01) return '<$0.01';
-  return `$${value.toFixed(2)}`;
+  return formatMetricUsd(value);
 }
 
 export function formatLatency(ms: number | null): string {
   if (ms === null || !Number.isFinite(ms)) return '—';
-  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+  return ms < 1000 ? `${formatMetric(ms)} ms` : `${formatMetric(ms / 1000)} s`;
 }
 
 /** "12 decisions · 5 calls · 42% fell back" */
 export function jevTodayLine(status: JevStatus): string {
   const d = status.decisionsToday;
   if (d === 0) return 'No decisions yet today.';
-  return `${d} decision${d === 1 ? '' : 's'} · ${status.callsToday} call${status.callsToday === 1 ? '' : 's'} · ${formatPercent(status.fallbackRateToday)} fell back`;
+  return `${formatMetric(d)} decision${d === 1 ? '' : 's'} · ${formatMetric(status.callsToday)} call${status.callsToday === 1 ? '' : 's'} · ${formatPercent(status.fallbackRateToday)} fell back`;
 }
 
 /** New evidence is optional on older servers. Do not manufacture successful calls or price coverage. */
 export function jevEvidenceLines(status: JevStatus): string[] {
   const raw = status as unknown as Record<string, unknown>;
-  const lines = [`${status.byKind.reduce((n, k) => n + k.cached, 0)} cached decisions · ${status.byKind.reduce((n, k) => n + k.fallback, 0)} deterministic fallbacks today.`];
+  const lines = [`${formatMetric(status.byKind.reduce((n, k) => n + k.cached, 0))} cached decisions · ${formatMetric(status.byKind.reduce((n, k) => n + k.fallback, 0))} deterministic fallbacks today.`];
   const success = raw['lastSuccessfulCallAt'];
   lines.push(success === null ? 'No successful Jev call recorded in available history.'
     : typeof success === 'string' && Number.isFinite(Date.parse(success)) ? `Last successful call: ${new Date(success).toLocaleString()}. Historical evidence, not a live connection check.`
       : 'Successful-call history unavailable on this server.');
   const coverage = raw['costCoverage'];
   if (isRecord(coverage) && count(coverage['pricedCalls']) && count(coverage['unknownCalls'])) {
-    lines.push(`Estimated cost ${formatUsd(status.estCostUsdToday)} · ${coverage['pricedCalls']} recorded cost estimates · ${coverage['unknownCalls']} calls with unknown cost.`);
+    lines.push(`Estimated cost ${formatUsd(status.estCostUsdToday)} · ${formatMetric(coverage['pricedCalls'])} recorded cost estimates · ${formatMetric(coverage['unknownCalls'])} calls with unknown cost.`);
   } else lines.push(`Estimated cost ${formatUsd(status.estCostUsdToday)} · price coverage unavailable on this server.`);
   const usage = raw['usageCoverage'];
   if (isRecord(usage) && count(usage['reportedCalls']) && count(usage['unknownCalls'])) {
     const input = raw['inputTokensToday'], output = raw['outputTokensToday'];
-    lines.push(`Reported input/output tokens: ${count(input) ? input.toLocaleString() : 'unknown'} / ${count(output) ? output.toLocaleString() : 'unknown'} · ${usage['reportedCalls']} calls with usage · ${usage['unknownCalls']} calls with unknown usage.`);
+    lines.push(`Reported input/output tokens: ${count(input) ? formatMetric(input) : 'unknown'} / ${count(output) ? formatMetric(output) : 'unknown'} · ${formatMetric(usage['reportedCalls'])} calls with usage · ${formatMetric(usage['unknownCalls'])} calls with unknown usage.`);
   }
   return lines;
 }

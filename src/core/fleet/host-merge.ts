@@ -1122,6 +1122,19 @@ function persist(state: FleetMergeStateV1): boolean {
   return writeFleetMergeState(state);
 }
 
+/** No repeat contact while a request may already have landed remotely. */
+export function mergeAttemptNeedsReconciliation(state: FleetMergeStateV1): boolean {
+  const attempt = state.merge;
+  if (!attempt) return false;
+  if (attempt.phase === 'consumed' || attempt.phase === 'merged') return true;
+  // Historical code recorded failed after unanswered/server/malformed-200
+  // replies. Hold those memos without relabelling them; only authenticated
+  // exact consumption plus remote commit evidence can credit a landing.
+  return attempt.phase === 'failed' &&
+    (attempt.error === 'GitHub did not answer (network error or timeout)' ||
+      /^GitHub answered HTTP (?:200|5\d\d)(?:$|:)/.test(attempt.error ?? ''));
+}
+
 /**
  * prepare → arm → [fence: recheck, Stop / policy epoch unchanged] → consume →
  * PUT. Consume is a compare-and-swap in a file-locked protocol record, so a
@@ -1140,6 +1153,9 @@ export async function mergeFleetPrPinned(input: PinnedMergeInput, deps: HostMerg
   ): PinnedMergeOutcome => ({ ok: false, code, reason: scrubSecrets(reason).slice(0, 400), retryable, mergeCalled });
   if (!pr || pr.state !== 'open') return fail('protocol', 'there is no open fleet PR to merge', false);
   if (pr.ownerLane) return fail('protocol', 'an owner-lane PR is never auto-merged', false);
+  if (mergeAttemptNeedsReconciliation(state)) {
+    return fail('protocol', 'prior merge outcome requires exact reconciliation; no repeat PUT', false);
+  }
 
   const nowMs = deps.nowMs();
   const identity: HostMergeRevocationIdentityV1 = {
@@ -1248,19 +1264,39 @@ export async function mergeFleetPrPinned(input: PinnedMergeInput, deps: HostMerg
       return fail('revoked', `the merge authority was revoked before it could be consumed (${why})`, true);
     }
     state.merge.phase = 'consumed';
-    persist(state);
+    if (!persist(state)) return fail('protocol', 'consumed merge authority could not be recorded; merge not sent', true);
     if (!ownsOutwardMutationFence(fence) || deps.killActive()) {
       state.merge.phase = 'failed';
       state.merge.error = 'Stop landed after consume and before the merge call';
       persist(state);
       return fail('killed', 'Stop is on; the merge was not sent', true);
     }
-    const reply = await gh(deps, state.repo, 'PUT', `/pulls/${pr.number}/merge`, {
+    let contacted = false;
+    let contactRefusal: PinnedMergeOutcome | null = null;
+    // gh awaits custody token acquisition. Recheck the existing authority at
+    // the actual transport boundary, with no await between check and contact.
+    const contactDeps: HostMergeDeps = { ...deps, transport: (call) => {
+      if (!ownsOutwardMutationFence(fence)) contactRefusal = fail('fence', 'outward mutation fence lost before contact', true);
+      else if (deps.killActive() || deps.killEpoch() !== identity.killEpoch) contactRefusal = fail('killed', 'Stop changed before contact', true);
+      else if (policyEpochDigest(deps.policy(), state.repo) !== identity.policyEpoch ||
+        input.currentPolicyEpoch() !== identity.policyEpoch) contactRefusal = fail('recheck', 'standing policy changed before contact', true);
+      else if (deps.nowMs() >= Date.parse(identity.expiresAt)) contactRefusal = fail('revoked', 'merge authority expired before contact', true);
+      if (contactRefusal) throw new Error('merge contact refused');
+      contacted = true;
+      return deps.transport(call);
+    } };
+    const reply = await gh(contactDeps, state.repo, 'PUT', `/pulls/${pr.number}/merge`, {
       sha: pr.headSha,
       merge_method: 'squash',
       commit_title: untrustedText(input.commitTitle, 250, true),
       commit_message: input.commitMessage,
     });
+    if (!contacted) {
+      state.merge.phase = 'failed';
+      state.merge.error = 'merge request not sent';
+      persist(state);
+      return contactRefusal ?? fail('github', githubMessage(reply), true);
+    }
     const body = obj(reply.body);
     if (reply.status === 200 && body?.['merged'] === true && sha(body['sha'])) {
       const mergeSha = sha(body['sha'])!;
@@ -1269,8 +1305,16 @@ export async function mergeFleetPrPinned(input: PinnedMergeInput, deps: HostMerg
       persist(state);
       return { ok: true, mergeSha, landedAt: new Date(deps.nowMs()).toISOString() };
     }
-    state.merge.phase = 'failed';
-    state.merge.error = githubMessage(reply);
+    // A lost/malformed answer or server error may follow a real merge. Keep
+    // consumed durable until an exact remote read settles it; never retry blind.
+    const unresolved = reply.status === 0 || reply.status >= 500 ||
+      (reply.status === 200 && body?.['merged'] !== false);
+    state.merge.phase = unresolved ? 'consumed' : 'failed';
+    // A new explicit decline is retryable; historical generic HTTP 200 errors
+    // remain ambiguous because those memos did not preserve merged:false.
+    state.merge.error = reply.status === 200 && body?.['merged'] === false
+      ? 'GitHub definitively declined merge (merged:false)'
+      : githubMessage(reply);
     persist(state);
     if (reply.status === 409) return fail('head-changed', `the PR head moved off ${pr.headSha.slice(0, 12)} (${githubMessage(reply)})`, false, true);
     if (reply.status === 405 || reply.status === 422) return fail('not-mergeable', githubMessage(reply), true, true);

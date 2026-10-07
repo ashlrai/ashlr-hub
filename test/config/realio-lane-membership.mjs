@@ -190,6 +190,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-core.test.ts', // real Git snapshots and confined experiment subprocesses
   'test/universe-delivery.test.ts', // real Git object/ref delivery and private receipts
   'test/universe-delivery-git-entries.test.ts', // bounded real Git blob loading and read-only inventory verification
+  'test/universe-delivery-git-write.test.ts', // verified real Git blob reuse and bounded writes with unchanged refs/index
   'test/universe-delivery-git-precommit.test.ts', // prepared real Git transaction guards and create-only ref outcomes
   'test/universe-delivery-kill.test.ts', // global stop under real prepared Git ref locks
   'test/universe-integration-delivery.test.ts', // private delivery evidence and fault-injected local Git publication
@@ -454,6 +455,7 @@ export const REAL_IO_TEST_FILES = [
   // false positive; it moved to scripts/realio-lane-known-fast-spawns.mjs, its
   // better home — the `spawn(` it matches is inside a source-text scan.)
   // Track B — autonomy core.
+  'test/maintainer-pr-runner.test.ts', // real Git linked worktrees, Node verification and macOS kernel confinement/cancellation
   'test/host-merge-310b.test.ts', // real git through FakeGithub (test/helpers/fleet-github-310b.ts) — guard cannot see it
   'test/standing-merge-pass-310b.test.ts', // real git rebase/squash through FakeGithub — guard cannot see it
   'test/verse-sources-api.test.ts', // 3.15: real loopback http server bind for POST /api/verse/sources/open

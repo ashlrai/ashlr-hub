@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 import type { PathLike } from 'node:fs';
 
 const faults = vi.hoisted(() => ({
+  rejectNativeProbe: false,
+  nativeProbeCalls: 0,
   assuranceCalls: [] as Array<{
     path: string;
     kind: string;
@@ -34,6 +36,27 @@ const faults = vi.hoisted(() => ({
   bigintCanonicalReplacement: false,
 }));
 
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawnSync: (...args: Parameters<typeof actual.spawnSync>) => {
+      const argv = args[1];
+      const processProbe = Array.isArray(argv) && (
+        (args[0] === '/bin/ps' && argv[0] === '-o' && argv[1] === 'lstart=') ||
+        (args[0] === 'powershell.exe' && argv.includes('-Command') &&
+          argv.some(argument => argument.includes('Get-Process -Id $TargetPid')))
+      );
+      // Do not intercept native ACL assurance or ordinary child processes.
+      if (processProbe) {
+        faults.nativeProbeCalls += 1;
+        if (faults.rejectNativeProbe) throw new Error('native process probe unavailable');
+      }
+      return actual.spawnSync(...args);
+    },
+  };
+});
+
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   const collidingA = 2n ** 54n;
@@ -51,6 +74,10 @@ vi.mock('node:fs', async (importOriginal) => {
   };
   return {
     ...actual,
+    chmodSync(target: PathLike, mode: number): void {
+      faults.events.push(`chmod:${mode.toString(8)}:${String(target)}`);
+      actual.chmodSync(target, mode);
+    },
     closeSync(fd: number): void {
       actual.closeSync(fd);
       faults.fdPaths.delete(fd);
@@ -186,6 +213,7 @@ import * as path from 'node:path';
 
 import {
   acquireLocalStoreLock,
+  acquireLocalStoreLockWithOutcome,
   ownsLocalStoreLock,
   releaseLocalStoreLock,
   verifiedProcessStartIdentity,
@@ -243,6 +271,8 @@ function exitedChildPid(): number {
 }
 
 beforeEach(() => {
+  faults.rejectNativeProbe = false;
+  faults.nativeProbeCalls = 0;
   faults.assuranceCalls.length = 0;
   faults.assuranceSideEffect = undefined;
   faults.candidateUnlinkPath = undefined;
@@ -274,6 +304,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  faults.rejectNativeProbe = false;
+  faults.nativeProbeCalls = 0;
   faults.assuranceCalls.length = 0;
   faults.assuranceSideEffect = undefined;
   faults.candidateUnlinkPath = undefined;
@@ -366,6 +398,26 @@ describe('local store lock installation handoff', () => {
     expect(fs.existsSync(lockPath)).toBe(false);
   });
 
+  it('classifies its own held lock without native probes across wall-clock jumps', () => {
+    const lockPath = path.join(tmpDir, 'self-contention.lock');
+    const holder = acquireLocalStoreLock(lockPath, 0);
+    expect(holder).not.toBeNull();
+    faults.rejectNativeProbe = true;
+    faults.nativeProbeCalls = 0;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
+    try {
+      expect(acquireLocalStoreLockWithOutcome(lockPath, 0)).toEqual({
+        state: 'contended', lock: null,
+      });
+      expect(ownsLocalStoreLock(holder)).toBe(true);
+      expect(faults.nativeProbeCalls).toBe(0);
+    } finally {
+      clock.mockRestore();
+      faults.rejectNativeProbe = false;
+      releaseLocalStoreLock(holder);
+    }
+  });
+
   it('secures a fresh directory and candidate before writing lock payload bytes', () => {
     const lockDir = path.join(tmpDir, 'fresh-locks');
     const lockPath = path.join(lockDir, 'ordered.lock');
@@ -382,7 +434,11 @@ describe('local store lock installation handoff', () => {
     expect(candidateCall).toMatchObject({ anchorPath: tmpDir });
     const candidateAssurance = `assure:secure-created:file:${candidateCall?.path}`;
     const candidateWrite = `write:${candidateCall?.path}`;
-    expect(faults.events.indexOf(directoryAssurance)).toBeGreaterThanOrEqual(0);
+    const directoryChmod = `chmod:700:${lockDir}`;
+    expect(faults.events.indexOf(directoryChmod)).toBeGreaterThanOrEqual(0);
+    expect(faults.events.indexOf(directoryAssurance)).toBeGreaterThan(
+      faults.events.indexOf(directoryChmod),
+    );
     expect(faults.events.indexOf(candidateAssurance)).toBeGreaterThan(
       faults.events.indexOf(directoryAssurance),
     );
@@ -396,6 +452,78 @@ describe('local store lock installation handoff', () => {
       anchorPath: tmpDir,
     });
     releaseLocalStoreLock(lock);
+  });
+
+  it('inspects live contention without rewriting an already-private directory', () => {
+    const lockPath = path.join(tmpDir, 'read-only-contention.lock');
+    const options = { anchorPath: tmpDir, exactPrivateStorage: true };
+    const holder = acquireLocalStoreLock(lockPath, 0, options);
+    expect(holder).not.toBeNull();
+    const directoryBefore = fs.lstatSync(tmpDir, { bigint: true });
+    const ownerBefore = fs.lstatSync(lockPath, { bigint: true });
+    const bytesBefore = fs.readFileSync(lockPath);
+    faults.events.length = 0;
+    faults.assuranceCalls.length = 0;
+    try {
+      expect(acquireLocalStoreLockWithOutcome(lockPath, 0, options)).toEqual({
+        state: 'contended', lock: null,
+      });
+      expect(acquireLocalStoreLockWithOutcome(lockPath, 0, options)).toEqual({
+        state: 'contended', lock: null,
+      });
+      expect(faults.events).not.toContain(`chmod:700:${tmpDir}`);
+      expect(faults.assuranceCalls).toContainEqual({
+        path: tmpDir, kind: 'directory', mode: 'inspect-existing', anchorPath: tmpDir,
+      });
+      expect(faults.assuranceCalls).toContainEqual({
+        path: lockPath, kind: 'file', mode: 'inspect-existing', anchorPath: tmpDir,
+      });
+      const directoryAfter = fs.lstatSync(tmpDir, { bigint: true });
+      expect({ dev: directoryAfter.dev, ino: directoryAfter.ino, mode: directoryAfter.mode })
+        .toEqual({ dev: directoryBefore.dev, ino: directoryBefore.ino, mode: directoryBefore.mode });
+      if (process.platform !== 'win32') expect(directoryAfter.ctimeNs).toBe(directoryBefore.ctimeNs);
+      const ownerAfter = fs.lstatSync(lockPath, { bigint: true });
+      expect({ dev: ownerAfter.dev, ino: ownerAfter.ino, nlink: ownerAfter.nlink })
+        .toEqual({ dev: ownerBefore.dev, ino: ownerBefore.ino, nlink: ownerBefore.nlink });
+      expect(fs.readFileSync(lockPath)).toEqual(bytesBefore);
+
+      faults.rejectAssurance = (target, kind, mode) =>
+        target === tmpDir && kind === 'directory' && mode === 'inspect-existing';
+      expect(acquireLocalStoreLockWithOutcome(lockPath, 0, options)).toEqual({
+        state: 'unavailable', lock: null,
+      });
+      expect(fs.readFileSync(lockPath)).toEqual(bytesBefore);
+      expect(faults.events).not.toContain(`chmod:700:${tmpDir}`);
+    } finally {
+      faults.rejectAssurance = undefined;
+      expect(releaseLocalStoreLock(holder)).toBe(true);
+    }
+  });
+
+  it.runIf(process.platform !== 'win32').each([
+    { label: 'ordinary 0755', mode: 0o755 },
+    { label: 'sticky 01700', mode: 0o1700 },
+  ])('repairs an existing $label directory before granting lock ownership', ({ mode }) => {
+    const lockDir = path.join(tmpDir, 'repair-locks');
+    const lockPath = path.join(lockDir, 'repair.lock');
+    fs.mkdirSync(lockDir, { mode: 0o700 });
+    fs.chmodSync(lockDir, mode);
+    expect(fs.lstatSync(lockDir, { bigint: true }).mode & 0o7777n).toBe(BigInt(mode));
+    faults.events.length = 0;
+
+    const holder = acquireLocalStoreLock(lockPath, 0, {
+      anchorPath: tmpDir, exactPrivateStorage: true,
+    });
+    try {
+      expect(holder).not.toBeNull();
+      expect(fs.lstatSync(lockDir, { bigint: true }).mode & 0o7777n).toBe(0o700n);
+      expect(faults.events.filter((event) => event === `chmod:700:${lockDir}`)).toHaveLength(1);
+      expect(faults.assuranceCalls).toContainEqual({
+        path: lockDir, kind: 'directory', mode: 'inspect-existing', anchorPath: tmpDir,
+      });
+    } finally {
+      if (holder) expect(releaseLocalStoreLock(holder)).toBe(true);
+    }
   });
 
   it('leaves no payload or authority when fresh candidate assurance fails', () => {
@@ -638,6 +766,9 @@ describe('local store lock installation handoff', () => {
     })}\n`, { encoding: 'utf8', mode: 0o600 });
 
     expect(acquireLocalStoreLock(lockPath, 0)).toBeNull();
+    expect(acquireLocalStoreLockWithOutcome(lockPath, 0)).toEqual({
+      state: 'unavailable', lock: null,
+    });
     expect(JSON.parse(fs.readFileSync(lockPath, 'utf8'))).toMatchObject({
       pid: process.pid,
       token: 'live-owner',

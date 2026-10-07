@@ -33,6 +33,8 @@
  */
 import { memo, useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type SyntheticEvent } from 'react';
 import type { VerseThinkingKind } from '../../../../core/verse/types.js';
+import { formatElapsed } from '../verse-model.js';
+import { formatTokens } from '../verse-readouts.js';
 import styles from './ThinkingBlock.module.css';
 
 export interface ThinkingBlockProps {
@@ -53,24 +55,16 @@ export interface ThinkingBlockProps {
   stateKey?: string;
 }
 
-/** "~1.8k tok" — one decimal under 10k, so the figure moves visibly while it streams. */
+/** "~1.8k tok" — the shared two-significant-figure token display. */
 export function formatThinkingTokens(n: number): string {
-  const rounded = Math.max(0, Math.round(n));
-  if (rounded < 1000) return `~${rounded} tok`;
-  if (rounded < 10_000) return `~${(rounded / 1000).toFixed(1).replace(/\.0$/, '')}k tok`;
-  if (rounded < 1_000_000) return `~${Math.round(rounded / 1000)}k tok`;
-  return `~${(rounded / 1_000_000).toFixed(1).replace(/\.0$/, '')}M tok`;
+  return `~${formatTokens(Math.max(0, n))} tok`;
 }
 
 /** "12s" / "1m 5s" / "<1s". */
 export function formatThinkingDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return '';
   if (ms < 1000) return '<1s';
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
+  return formatElapsed(ms);
 }
 
 /** Characters per token for the fallback estimate (the common English ratio). */

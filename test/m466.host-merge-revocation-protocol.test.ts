@@ -445,9 +445,7 @@ describe('M466 durable host merge cancellation and revocation protocol foundatio
   });
 
   it('revalidates expiry after waiting for the authority lock', async () => {
-    const exactIdentity = identity({
-      expiresAt: new Date(NOW.getTime() + 500).toISOString(),
-    });
+    const exactIdentity = identity();
     const prepared = prepare(exactIdentity);
     const authorityId = hostMergeRevocationAuthorityId(exactIdentity)!;
     const statePath = hostMergeRevocationStatePath(exactIdentity)!;
@@ -464,7 +462,8 @@ describe('M466 durable host merge cancellation and revocation protocol foundatio
       operationId: 'delayed-expiry-arm-466',
       expectedSequence: prepared.record.sequence,
       expectedReceiptDigest: prepared.receipt.receiptDigest,
-      now: new Date(NOW.getTime() + 100),
+      // Put the short expiry window in the lock wait, not private-state preparation.
+      now: new Date(Date.parse(exactIdentity.expiresAt) - 400),
     });
     await child.ready;
     child.child.send({ go: true });

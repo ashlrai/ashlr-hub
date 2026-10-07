@@ -7,30 +7,35 @@
  * functions only produce the string.
  */
 
-/** Auto-compact a count: 1,284 / 12.9K / 4.2M. */
+import { formatMetric, formatMetricUsd } from './format-metric.js';
+
+/** Auto-compact with two significant figures. */
 export function formatCompact(n: number): string {
   if (!Number.isFinite(n)) return '—';
   const abs = Math.abs(n);
-  if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(abs >= 10_000_000 ? 0 : 1)}M`;
-  if (abs >= 10_000) return `${Math.round(n / 1000)}K`;
-  if (abs >= 1_000) return n.toLocaleString('en-US');
-  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+  if (abs >= 1_000_000) return `${formatMetric(n / 1_000_000)}M`;
+  if (abs >= 1_000) return `${formatMetric(n / 1_000)}K`;
+  return formatMetric(n);
 }
 
-/** Auto-compact USD: $4.20 / $1.2K / $4.2M. */
+/** Auto-compact USD with two significant figures: $4.2 / $1.2K / $4.2M. */
 export function formatUsd(n: number): string {
   if (!Number.isFinite(n)) return '—';
   const abs = Math.abs(n);
   const sign = n < 0 ? '-' : '';
-  if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(1)}M`;
-  if (abs >= 1_000) return `${sign}$${(abs / 1_000).toFixed(1)}K`;
-  return `${sign}$${abs.toFixed(2)}`;
+  if (abs >= 1_000_000) return `${sign}$${formatMetric(abs / 1_000_000)}M`;
+  if (abs >= 1_000) return `${sign}$${formatMetric(abs / 1_000)}K`;
+  return formatMetricUsd(n);
 }
 
-/** Fraction (0..1) as a percentage. */
-export function formatPercent(fraction: number, digits = 0): string {
-  if (!Number.isFinite(fraction)) return '—';
-  return `${(fraction * 100).toFixed(digits)}%`;
+/**
+ * Fraction as a percentage with two significant figures, including tiny values.
+ * `_digits` remains accepted for legacy callers; display precision is shared.
+ */
+export function formatPercent(fraction: number, _digits = 0): string {
+  const percentage = fraction * 100;
+  if (!Number.isFinite(percentage)) return '—';
+  return `${formatMetric(percentage)}%`;
 }
 
 /** Signed delta for a stat tile: "+12" / "-3" / "0". */
