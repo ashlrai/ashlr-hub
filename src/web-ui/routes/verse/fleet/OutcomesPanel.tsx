@@ -5,6 +5,7 @@ import type { SurfaceActions } from '../command/actions.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { outcomesQuery, writeOutcome } from './outcomes-queries.js';
 import type { OutcomeScope, OutcomeStatus, OutcomeView } from './outcomes-types.js';
+import { ENGINE_LABEL, isVerseEngine } from '../verse-model.js';
 import styles from './outcomes.module.css';
 
 const LABEL: Record<OutcomeStatus, string> = {
@@ -13,6 +14,23 @@ const LABEL: Record<OutcomeStatus, string> = {
 };
 type Editor = { id: string; revision: number; existing: boolean; desiredOutcome: string; targetRepos: string[]; acceptance: string };
 const fresh = (): Editor => ({ id: `outcome-${crypto.randomUUID()}`, revision: 0, existing: false, desiredOutcome: '', targetRepos: [], acceptance: '' });
+
+function managerEngine(engine: string): string {
+  return engine === 'grok-cli' ? 'Grok' : isVerseEngine(engine) ? ENGINE_LABEL[engine] : 'Native';
+}
+
+function managerStatus(outcome: OutcomeView): string {
+  const manager = outcome.manager;
+  if (!manager || manager.sourceState !== 'healthy') return 'Manager state is unavailable. Refresh to reconnect.';
+  const mode = manager.mode === 'interactive' ? 'Chat manager' : 'Manager';
+  if (outcome.status === 'paused') return `${mode} paused`;
+  if (manager.running) return `${mode} ${manager.running.intent === 'review' ? 'reviewing' : manager.running.intent === 'replan' ? 'replanning' : 'planning'}`;
+  if (manager.next) return `${mode} waiting for the fleet`;
+  if (manager.latest?.state === 'failed') return `${mode} stage failed`;
+  if (manager.latest?.state === 'aborted') return `${mode} stage stopped`;
+  if (manager.latest?.state === 'stale') return `${mode} result no longer current`;
+  return `${mode} idle`;
+}
 
 export function OutcomesPanel({ actions }: { actions: SurfaceActions }) {
   const read = useQuery(outcomesQuery, { freshMs: 4_000 });
@@ -23,25 +41,35 @@ export function OutcomesPanel({ actions }: { actions: SurfaceActions }) {
   // second outcome or turn an old edit into a new current-revision mutation.
   const pendingCommand = useRef<{ key: string; id: string } | null>(null);
   const inFlight = useRef(false);
+  // Keep the exact configure body until confirmed or explicitly replace its revision.
+  const [managerCommands, setManagerCommands] = useState<Record<string, { id: string; revision: number }>>({});
   const value = read.data;
   const available = read.status !== 'error' && value?.sourceState !== 'degraded' && value?.outcomes !== null && value?.enrollment.sourceState === 'healthy';
   const disabled = !available || actions.busy || actions.readOnly;
   const repos = value?.enrollment.repos ?? [];
 
-  function mutate(action: 'start' | 'edit' | 'pause' | 'resume', id: string, revision: number, scope?: OutcomeScope) {
+  function mutate(action: 'start' | 'edit' | 'pause' | 'resume' | 'manager-configure', id: string, revision: number, scope?: OutcomeScope) {
     const key = JSON.stringify([action, id, revision, scope]);
     if (pendingCommand.current?.key !== key) pendingCommand.current = { key, id: crypto.randomUUID() };
-    const commandId = pendingCommand.current.id;
+    const savedManagerCommand = Object.hasOwn(managerCommands, id) ? managerCommands[id] : undefined;
+    const managerCommand = action === 'manager-configure' ? savedManagerCommand ?? { id: crypto.randomUUID(), revision } : undefined;
+    if (managerCommand && !savedManagerCommand) setManagerCommands(current => ({ ...current, [id]: managerCommand }));
+    const commandId = managerCommand?.id ?? pendingCommand.current.id;
+    const expectedRevision = managerCommand?.revision ?? revision;
     actions.act(async () => {
       if (inFlight.current) return;
       inFlight.current = true;
       try {
-        await writeOutcome(action, id, commandId, revision, scope);
+        await writeOutcome(action, id, commandId, expectedRevision, scope);
+        if (action === 'manager-configure') {
+          setManagerCommands(current => { const next = { ...current }; delete next[id]; return next; });
+        }
         pendingCommand.current = null;
         if (action === 'start' || action === 'edit') setEditor(null);
         refetch();
       } finally { inFlight.current = false; }
-    }, 'Save the desired outcome for the fleet to plan within its existing authority.');
+    }, action === 'manager-configure' ? 'Enable the manager to plan, delegate and review this outcome within the fleet’s existing authority.'
+      : 'Save the desired outcome for the fleet to plan within its existing authority.');
   }
 
   function edit(outcome: OutcomeView) {
@@ -91,8 +119,12 @@ export function OutcomesPanel({ actions }: { actions: SurfaceActions }) {
     {read.status !== 'error' && value?.outcomes ? <div className={styles.list}>{value.outcomes.map(outcome => <details key={outcome.id} className={styles.row}>
       <summary><strong>{outcome.scope.desiredOutcome}</strong><span data-status={outcome.status}>{LABEL[outcome.status]}</span></summary>
       <div className={styles.detail}>
-        {outcome.status === 'waiting-plan' ? <p className={styles.note}>The desired result is saved. Waiting for the Leader to refine a plan.</p> : null}
+        {outcome.status === 'waiting-plan' && !outcome.manager ? <p className={styles.note}>The desired result is saved. Waiting for the Leader to refine a plan.</p> : null}
         {outcome.status === 'plan-verified' ? <p className={styles.note}>All active plan tasks have verification or explicit gate evidence. Check the desired result against your acceptance criteria.</p> : null}
+        {outcome.manager ? <p className={styles.note} role="status">{managerStatus(outcome)}</p> : null}
+        {outcome.manager?.sourceState === 'healthy' && (outcome.manager.running ?? outcome.manager.latest) ? <p className={styles.note}>
+          Recorded route: {managerEngine((outcome.manager.running ?? outcome.manager.latest)!.route.engine)} · {(outcome.manager.running ?? outcome.manager.latest)!.route.model}
+        </p> : null}
         <p className={styles.note}>Revision {outcome.revision} · {outcome.scope.targetRepos.length} repositories</p>
         <ul>{outcome.scope.acceptance.map(item => <li key={item}>{item}</li>)}</ul>
         {outcome.tasks.length ? <ul aria-label="Outcome tasks">{outcome.tasks.map(task => <li key={task.key}>
@@ -104,11 +136,19 @@ export function OutcomesPanel({ actions }: { actions: SurfaceActions }) {
           {task.mergeIdentity ? <small>Verified merge {task.mergeIdentity}</small> : null}
         </li>)}</ul> : null}
         <div className={styles.actions}>
+          {!outcome.manager ? <Button size="sm" variant="primary" disabled={disabled || outcome.status === 'paused'}
+            onClick={() => mutate('manager-configure', outcome.id, outcome.revision)}
+            title="Enable frontier planning and review; workers use the fleet’s current resources and authority">Enable manager</Button> : null}
+          {!outcome.manager && Object.hasOwn(managerCommands, outcome.id) && managerCommands[outcome.id] && managerCommands[outcome.id]!.revision !== outcome.revision ?
+            <Button size="sm" variant="ghost" disabled={disabled} onClick={() => {
+              setManagerCommands(current => { const next = { ...current }; delete next[outcome.id]; return next; });
+            }}>Use current manager revision</Button> : null}
           <Button size="sm" variant="ghost" disabled={disabled} onClick={() => edit(outcome)}>Edit outcome</Button>
           <Button size="sm" variant="ghost" disabled={disabled} onClick={() => mutate(outcome.status === 'paused' ? 'resume' : 'pause', outcome.id, outcome.revision)}>
             {outcome.status === 'paused' ? 'Resume outcome' : 'Pause outcome'}
           </Button>
         </div>
+        {!outcome.manager && outcome.status === 'paused' ? <p className={styles.note}>Resume this outcome before enabling its manager.</p> : null}
         <p className={styles.note}>Pause stops new requests and asks running work to stop. External provider jobs may continue until cancellation is confirmed.</p>
       </div>
     </details>)}</div> : null}

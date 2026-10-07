@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
-import { pendingManagerMessage, submitManagerMessage, validManagerRead } from './manager-queries.js';
+import { pendingManagerMessage, submitManagerMessage, validManagerRead, validManagerProjection } from './manager-queries.js';
 
 const healthy = (sessionId: string, outcomeId: string) => ({ sourceState: 'healthy', association: {
   outcomeId, revision: 3, scopeRevision: 1, paused: false, terminalStageIds: [],
@@ -81,5 +81,30 @@ describe('manager request identities', () => {
     expect(validManagerRead(healthy('chat', 'outcome'))).toBe(true);
     expect(validManagerRead({ ...healthy('chat', 'outcome'), association: { ...healthy('chat', 'outcome').association, paused: undefined } })).toBe(false);
     expect(validManagerRead({ sourceState: 'degraded', association: null })).toBe(true);
+  });
+});
+
+
+describe('shared browser manager projection', () => {
+  it('admits actual resident metadata while keeping the interactive session wrapper strict', () => {
+    const resident = { ...healthy('chat-1', 'work').association.manager, mode: 'resident', sessionId: null, conversationRevision: 0 };
+    expect(validManagerProjection(resident)).toBe(true);
+    // The core permits resident mode to retain an existing conversation association.
+    expect(validManagerProjection({ ...resident, sessionId: 'chat-1' })).toBe(true);
+    expect(validManagerRead({ ...healthy('chat-1', 'work'), association: { ...healthy('chat-1', 'work').association, manager: resident } })).toBe(false);
+    expect(validManagerRead(healthy('chat-1', 'work'))).toBe(true);
+  });
+  it.each([
+    { mode: 'interactive', sessionId: null }, { mode: 'unknown' }, { conversationRevision: -1 },
+    { running: { intent: 'plan', state: 'succeeded', route: { engine: 'codex', tier: 'frontier', seatId: 'personal', model: 'gpt-6.1-sol' } } },
+    { latest: { intent: 'review', state: 'succeeded', route: { engine: 'codex', tier: 'local', seatId: 'personal', model: 'gpt-6.1-sol' } } },
+    { next: { intent: 'publish' } },
+  ])('refuses a malformed consumed projection %j', changed => {
+    expect(validManagerProjection({ ...healthy('chat-1', 'work').association.manager, ...changed })).toBe(false);
+  });
+  it('preserves unknown source state without treating it as enabled', () => {
+    const degraded = { sourceState: 'degraded', enabled: false, mode: null, sessionId: null, conversationRevision: null, running: null, next: null, latest: null };
+    expect(validManagerProjection(degraded)).toBe(true);
+    expect(validManagerProjection({ ...degraded, enabled: true })).toBe(false);
   });
 });

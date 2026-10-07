@@ -17,6 +17,17 @@ function stage(value: unknown, running: boolean): boolean {
       running && value.state !== 'running') return false;
   return object(value.route) && value.route.tier === 'frontier' && label(value.route.engine) && label(value.route.seatId) && label(value.route.model);
 }
+/** Shared browser-only validation for actual resident and interactive projections. */
+export function validManagerProjection(value: unknown): value is Extract<OutcomeManagerSessionRead, { sourceState: 'healthy' }>['association']['manager'] {
+  if (!object(value)) return false;
+  if (value.sourceState !== 'healthy') return ['missing', 'degraded'].includes(String(value.sourceState)) && value.enabled === false &&
+    value.mode === null && value.sessionId === null && value.conversationRevision === null && value.running === null && value.next === null && value.latest === null;
+  return value.enabled === true && ['interactive', 'resident'].includes(String(value.mode)) &&
+    (value.sessionId === null ? value.mode === 'resident' : typeof value.sessionId === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value.sessionId)) &&
+    Number.isSafeInteger(value.conversationRevision) && Number(value.conversationRevision) >= 0 &&
+    stage(value.running, true) && stage(value.latest, false) &&
+    (value.next === null || object(value.next) && intent(value.next.intent));
+}
 /** Validate the browser-consumed projection, without importing private ledger or crypto code. */
 export function validManagerRead(value: unknown): value is OutcomeManagerSessionRead {
   if (!object(value)) return false;
@@ -25,12 +36,7 @@ export function validManagerRead(value: unknown): value is OutcomeManagerSession
   if (!object(row) || typeof row.outcomeId !== 'string' || !/^[a-z0-9](?:[a-z0-9._-]{0,78}[a-z0-9])?$/.test(row.outcomeId) ||
       !Number.isSafeInteger(row.revision) || Number(row.revision) < 1 || !Number.isSafeInteger(row.scopeRevision) || Number(row.scopeRevision) < 1 ||
       typeof row.paused !== 'boolean' || !Array.isArray(row.terminalStageIds) || !row.terminalStageIds.every(id => typeof id === 'string' && /^[a-f0-9]{64}$/.test(id))) return false;
-  const manager = row.manager;
-  return object(manager) && manager.sourceState === 'healthy' && manager.enabled === true && manager.mode === 'interactive' &&
-    typeof manager.sessionId === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(manager.sessionId) &&
-    Number.isSafeInteger(manager.conversationRevision) && Number(manager.conversationRevision) >= 0 &&
-    stage(manager.running, true) && stage(manager.latest, false) &&
-    (manager.next === null || object(manager.next) && intent(manager.next.intent));
+  return validManagerProjection(row.manager) && row.manager.sourceState === 'healthy' && row.manager.mode === 'interactive';
 }
 export function managerSessionQuery(sessionId: string): QueryDef<OutcomeManagerSessionRead> {
   return { key: key(sessionId), async fetch(signal) {
