@@ -6,9 +6,11 @@ import {dirname, join} from 'node:path';
 import {tmpdir, userInfo} from 'node:os';
 import {pathToFileURL, URL} from 'node:url';
 import {createHash, generateKeyPairSync, sign} from 'node:crypto';
+import {execFileSync} from 'node:child_process';
+import process from 'node:process';
 import ts from 'typescript';
 import {gunzipSync} from 'node:zlib';
-import {desktopPublisherGithub, finalizeDesktopUpdate, packDesktopAppArchive, parseFinalizeArguments, prepareDesktopAppIdentity, verifyUpdateAudit} from '../../scripts/finalize-desktop-update.mjs';
+import {desktopNativeBundleConfiguration, desktopPublisherGithub, finalizeDesktopUpdate, packDesktopAppArchive, parseFinalizeArguments, prepareDesktopAppIdentity, restoreFreshDesktopSidecar, signAndAcceptDesktopSea, verifyUpdateAudit} from '../../scripts/finalize-desktop-update.mjs';
 import {inspectTar} from '../../scripts/hosted-build-artifact.mjs';
 
 const hash = data => createHash('sha256').update(data).digest('hex');
@@ -140,6 +142,100 @@ test('publisher prepares both signed display keys and refuses either mismatched 
   for (const key of ['CFBundleShortVersionString', 'CFBundleVersion']) {
     values[key] = '3.25.1'; assert.throws(() => prepareDesktopAppIdentity(app, '3.25.2', root, env, execute)); values[key] = '3.25.2';
   }
+});
+function seaAcceptanceFixture(t, fault) {
+  const root = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'phantom-sterile-sea-test-')));
+  t.after(() => fs.rmSync(root, {recursive: true, force: true}));
+  const app = join(root, 'Phantom.app'), output = join(root, 'output'), sidecar = join(app, 'Contents/MacOS/ashlr');
+  const entitlements = join(root, 'desktop/src-tauri/Entitlements.plist');
+  fs.mkdirSync(dirname(sidecar), {recursive: true}); fs.mkdirSync(dirname(entitlements), {recursive: true}); fs.mkdirSync(output);
+  fs.writeFileSync(entitlements, 'unchanged audio-only test entitlements');
+  // A real disposable subprocess exercises lifetime/environment/output checks;
+  // codesign is intercepted. This fixture is not a signed native release.
+  fs.writeFileSync(sidecar, `#!/bin/sh\n[ -z "$GH_TOKEN$TAURI_SIGNING_PRIVATE_KEY$TAURI_SIGNING_PRIVATE_KEY_PATH" ] || exit 90\n[ "$PWD" = "$HOME" ] && [ -d "$TMPDIR" ] || exit 91\ncase "$1" in\n --help) printf '${fault === 'help' ? 'unavailable' : 'Phantom phm'}\\n';;\n --version) printf '${fault === 'version' ? '0.0.0' : '3.25.2'}\\n';;\n *) exit 92;;\nesac\n`, {mode: 0o700});
+  const env = {PATH: '/private/compiler-tools:/usr/bin:/bin', HOME: '/private/operator-home'};
+  const signer = 'A'.repeat(40), calls = [];
+  const execute = (bin, args, cwd, childEnv, timeout) => {
+    calls.push({bin, args, cwd, env: childEnv, timeout});
+    if (bin === '/usr/bin/codesign') return '';
+    assert.equal(bin, sidecar); assert.equal(timeout, 10_000);
+    assert.deepEqual(Object.keys(childEnv).sort(), ['HOME', 'LANG', 'LC_ALL', 'NO_COLOR', 'PATH', 'TMPDIR']);
+    assert.equal(childEnv.PATH, '/usr/bin:/bin'); assert.notEqual(childEnv.HOME, env.HOME);
+    assert.equal(fs.statSync(childEnv.HOME).mode & 0o777, 0o700);
+    const result = execFileSync(bin, args, {cwd, env: childEnv, timeout, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']});
+    if (args[0] === '--help' && fault === 'bytes') fs.appendFileSync(sidecar, '# substituted bytes\n');
+    if (args[0] === '--help' && fault === 'entitlements') fs.appendFileSync(entitlements, 'replacement');
+    return result;
+  };
+  return {root, app, output, signer, env, calls, execute, entitlements};
+}
+test('native publisher preserves the qualified local signer/runtime recipe and accepts real sterile child output', t => {
+  const f = seaAcceptanceFixture(t);
+  assert.deepEqual(desktopNativeBundleConfiguration(f.signer), {bundle: {createUpdaterArtifacts: false, macOS: {signingIdentity: f.signer, hardenedRuntime: false}}});
+  assert.throws(() => desktopNativeBundleConfiguration('-'));
+  signAndAcceptDesktopSea({...f, version: '3.25.2'}, f.execute);
+  assert.deepEqual(f.calls[0], {bin: '/usr/bin/codesign', args: ['--force', '--deep', '--sign', f.signer, '--entitlements', f.entitlements, f.app], cwd: f.root, env: f.env, timeout: undefined});
+  assert.deepEqual(f.calls[1].args, ['--verify', '--deep', '--strict', f.app]);
+  assert.deepEqual(f.calls.slice(2).map(c => c.args), [['--help'], ['--version']]);
+  assert.deepEqual(fs.readdirSync(f.output), []);
+});
+for (const fault of ['help', 'version', 'bytes', 'entitlements']) test(`signed SEA ${fault} refusal prevents acceptance and cleans sterile state`, t => {
+  const f = seaAcceptanceFixture(t, fault);
+  assert.throws(() => signAndAcceptDesktopSea({...f, version: '3.25.2'}, f.execute));
+  assert.deepEqual(fs.readdirSync(f.output), []);
+});
+function fixedSidecarFixture(t) {
+  const root = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'phantom-fixed-sidecar-test-')));
+  t.after(() => fs.rmSync(root, {recursive: true, force: true}));
+  const source = join(root, 'dist-bin/ashlr');
+  const app = join(root, 'desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Phantom.app');
+  const destination = join(app, 'Contents/MacOS/ashlr');
+  fs.mkdirSync(dirname(source), {recursive: true}); fs.mkdirSync(dirname(destination), {recursive: true});
+  const fresh = Buffer.from('fresh exact test-only SEA\0bytes'), signed = Buffer.from('previous Tauri signed bytes plus obsolete signature allocation');
+  fs.writeFileSync(source, fresh, {mode: 0o755}); fs.writeFileSync(destination, signed, {mode: 0o700});
+  const native = join(dirname(destination), 'ashlr-desktop'); fs.writeFileSync(native, 'native unchanged');
+  return {root, source, app, destination, native, fresh, signed};
+}
+test('restores stale signed private sidecar to exact fresh SEA bytes/mode without changing native or other files', t => {
+  const f = fixedSidecarFixture(t), original = fs.lstatSync(f.destination);
+  restoreFreshDesktopSidecar(f.root);
+  assert.deepEqual(fs.readFileSync(f.destination), f.fresh);
+  assert.equal(fs.lstatSync(f.destination).mode & 0o777, 0o755);
+  assert.equal(fs.lstatSync(f.destination).ino, original.ino);
+  assert.equal(fs.readFileSync(f.native, 'utf8'), 'native unchanged');
+  assert.deepEqual(fs.readFileSync(f.source), f.fresh);
+});
+for (const target of ['source', 'destination']) for (const fault of ['symlink', 'hardlink', 'writable']) test(`refuses ${target} ${fault} before sidecar replacement`, t => {
+  const f = fixedSidecarFixture(t), path = f[target], backup = `${path}-original`;
+  if (fault === 'symlink') {fs.renameSync(path, backup); fs.symlinkSync(backup, path);}
+  if (fault === 'hardlink') fs.linkSync(path, backup);
+  if (fault === 'writable') fs.chmodSync(path, 0o777);
+  assert.throws(() => restoreFreshDesktopSidecar(f.root));
+  assert.deepEqual(fs.readFileSync(f.destination), f.signed);
+  assert.deepEqual(fs.readFileSync(f.source), f.fresh);
+});
+test('refuses a file owned by a different caller identity without changing ownership or bytes', t => {
+  const f = fixedSidecarFixture(t), getuid = process.getuid;
+  // Real files retain their kernel owner; model only the different trusted caller.
+  try {process.getuid = () => getuid() + 1; assert.throws(() => restoreFreshDesktopSidecar(f.root), /owned executable/);}
+  finally {process.getuid = getuid;}
+  assert.deepEqual(fs.readFileSync(f.destination), f.signed);
+});
+for (const fault of ['replacement', 'symlink', 'parent', 'source']) test(`refuses actual ${fault} race before any private sidecar write`, t => {
+  const f = fixedSidecarFixture(t);
+  assert.throws(() => restoreFreshDesktopSidecar(f.root, () => {
+    if (fault === 'source') {fs.appendFileSync(f.source, 'changed'); return;}
+    if (fault === 'parent') {
+      const parent = dirname(f.destination), retired = `${parent}-retired`;
+      fs.renameSync(parent, retired); fs.mkdirSync(parent); fs.renameSync(join(retired, 'ashlr'), f.destination); return;
+    }
+    fs.renameSync(f.destination, `${f.destination}-retired`);
+    if (fault === 'symlink') fs.symlinkSync(f.source, f.destination);
+    else fs.writeFileSync(f.destination, 'unrelated replacement', {mode: 0o755});
+  }), /changed/);
+  if (fault === 'replacement') assert.equal(fs.readFileSync(f.destination, 'utf8'), 'unrelated replacement');
+  if (fault === 'parent' || fault === 'source') assert.deepEqual(fs.readFileSync(f.destination), f.signed);
+  if (fault === 'symlink') assert.deepEqual(fs.readFileSync(f.source), f.fresh);
 });
 test('real private app archive uses exact canonical paths, bytes and modes including long USTAR prefix', t => {
   const root = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'phantom-app-pack-test-'))); t.after(() => fs.rmSync(root, {recursive: true, force: true}));

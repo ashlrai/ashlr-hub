@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { verifyArtifact, adoptArtifact, validateAdoptedArtifact, sourceBinding, inspectTar } from './hosted-build-artifact.mjs';
 import { inspectLocalApp } from './local-app-transaction.mjs';
+import { codesignArgv } from './ship-local.mjs';
 import { requireRepositoryMetadata, requireRepositoryReference } from '../.github/scripts/github-repository-binding.mjs';
 import { getDesktopReleaseToolchain, DESKTOP_RELEASE_TOOL_PINS } from './desktop-release-policy.mjs';
 
@@ -134,6 +135,61 @@ export function prepareDesktopAppIdentity(app, version, root, env, execute = run
   }
   for (const key of ['CFBundleShortVersionString', 'CFBundleVersion']) assert.equal(execute('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', plist], root, env).trim(), version);
 }
+/** Preserve the qualified local signer and Bun JIT policy, including the existing entitlements. */
+export function desktopNativeBundleConfiguration(signer) {
+  assert.match(signer, /^[A-F0-9]{40}$/);
+  return {bundle: {createUpdaterArtifacts: false, macOS: {signingIdentity: signer, hardenedRuntime: false}}};
+}
+/** Restore only the fixed freshly built SEA before re-signing the private bundle. */
+export function restoreFreshDesktopSidecar(root, afterOpen = () => {}) {
+  const source = join(root, 'dist-bin/ashlr');
+  const destination = join(root, 'desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Phantom.app/Contents/MacOS/ashlr');
+  const ownedExecutable = stat => stat.isFile() && !stat.isSymbolicLink() && stat.uid === process.getuid() && stat.nlink === 1 && (stat.mode & 0o022) === 0 && (stat.mode & 0o111) !== 0;
+  const original = fs.lstatSync(source); assert.ok(ownedExecutable(original), 'fresh SEA is not an owned executable');
+  const fresh = bytes(source); assert.ok(fresh.length > 0 && same(original, fs.lstatSync(source)), 'fresh SEA changed');
+  const parentPath = dirname(destination);
+  assert.equal(fs.realpathSync(parentPath), parentPath, 'private sidecar parent is not canonical');
+  const parent = fs.lstatSync(parentPath); assert.ok(parent.isDirectory() && parent.uid === process.getuid() && (parent.mode & 0o022) === 0, 'private sidecar parent is unsafe');
+  const named = fs.lstatSync(destination); assert.ok(ownedExecutable(named), 'private sidecar is not an owned executable');
+  const fd = fs.openSync(destination, fs.constants.O_RDWR | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    assert.ok(same(named, fs.fstatSync(fd)), 'private sidecar changed');
+    // Hermetic race hook only; the fixed producer call never supplies one.
+    afterOpen();
+    assert.ok(same(named, fs.fstatSync(fd)) && same(named, fs.lstatSync(destination)) && same(parent, fs.lstatSync(parentPath)), 'private sidecar changed before copy');
+    assert.ok(same(original, fs.lstatSync(source)), 'fresh SEA changed before copy');
+    fs.ftruncateSync(fd, 0);
+    let at = 0;
+    while (at < fresh.length) { const written = fs.writeSync(fd, fresh, at, fresh.length - at, at); assert.ok(written > 0); at += written; }
+    fs.fchmodSync(fd, original.mode & 0o777); fs.fsyncSync(fd);
+    const copied = fs.fstatSync(fd);
+    assert.ok(ownedExecutable(copied) && copied.dev === named.dev && copied.ino === named.ino && same(copied, fs.lstatSync(destination)), 'private sidecar changed during copy');
+    assert.equal(copied.mode & 0o777, original.mode & 0o777);
+    assert.ok(fs.readFileSync(fd).equals(fresh) && bytes(source).equals(fresh) && same(original, fs.lstatSync(source)), 'fresh SEA copy differs');
+    assert.ok(same(copied, fs.fstatSync(fd)) && same(copied, fs.lstatSync(destination)) && same(parent, fs.lstatSync(parentPath)), 'private sidecar changed after copy');
+  } finally { fs.closeSync(fd); }
+}
+export function signAndAcceptDesktopSea({app, version, root, output, signer, env}, execute = run) {
+  const entitlements = join(root, 'desktop/src-tauri/Entitlements.plist');
+  const entitlementDigest = digest(bytes(entitlements));
+  // The supported local transaction signs without hardened runtime; adding it
+  // here would break the bundled Bun SEA despite otherwise valid signatures.
+  execute('/usr/bin/codesign', codesignArgv(signer, entitlements, app).slice(1), root, env);
+  execute('/usr/bin/codesign', ['--verify', '--deep', '--strict', app], root, env);
+  const sidecar = join(app, 'Contents/MacOS/ashlr');
+  const signedDigest = digest(bytes(sidecar));
+  const sterile = fs.mkdtempSync(join(output, 'sea-acceptance-'));
+  const temp = join(sterile, 'tmp');
+  const closed = {HOME: sterile, TMPDIR: temp, PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', NO_COLOR: '1'};
+  try {
+    fs.chmodSync(sterile, 0o700); fs.mkdirSync(temp, {mode: 0o700});
+    const help = execute(sidecar, ['--help'], sterile, closed, 10_000);
+    assert.ok(help.includes('Phantom') && /\bphm\b/u.test(help), 'signed SEA help is unavailable');
+    assert.equal(execute(sidecar, ['--version'], sterile, closed, 10_000).trim(), version, 'signed SEA version differs');
+    assert.equal(digest(bytes(sidecar)), signedDigest, 'signed SEA changed during acceptance');
+    assert.equal(digest(bytes(entitlements)), entitlementDigest, 'app entitlements changed');
+  } finally { fs.rmSync(sterile, {recursive: true, force: true}); }
+}
 async function buildNative({root, bundle, policy, source, version, surfaceDigest, packageSha256, output, tools}) {
   const bin = join(output, 'tools'); fs.mkdirSync(bin, {mode: 0o700});
   for (const name of ['node', 'bun', 'cargo', 'rustc', 'gh']) fs.symlinkSync(tools[name].path, join(bin, name));
@@ -146,16 +202,18 @@ async function buildNative({root, bundle, policy, source, version, surfaceDigest
   run(tools.node.path, ['desktop/scripts/prepare-sidecar.mjs'], root, env);
   run(tools.tauri.path, ['icon', 'src-tauri/icons/icon.svg'], join(root, 'desktop'), env);
   // The private publishing key is absent from every compiler/build-script environment.
-  run(tools.tauri.path, ['build', '--bundles', 'app', '--ci', '--target', 'aarch64-apple-darwin', '--config', JSON.stringify({bundle: {createUpdaterArtifacts: false}})], join(root, 'desktop'), env, 30 * 60_000);
+  run(tools.tauri.path, ['build', '--bundles', 'app', '--ci', '--target', 'aarch64-apple-darwin', '--config', JSON.stringify(desktopNativeBundleConfiguration(tools.appleSigner))], join(root, 'desktop'), env, 30 * 60_000);
   const app = join(root, 'desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Phantom.app');
-  assert.equal(digest(bytes(join(app, 'Contents/MacOS/ashlr'))), digest(bytes(join(root, 'dist-bin/ashlr'))), 'app sidecar differs from fresh SEA');
+  // Tauri's legitimate signature changes Mach-O bytes. Replace only this fixed
+  // private sidecar with the fresh SEA, then sign and smoke-test the whole app.
+  restoreFreshDesktopSidecar(root);
   const publicApp = inventory(join(app, 'Contents/Resources/public')), publicBuild = inventory(join(root, 'dist-bin/public'));
   assert.equal(publicApp.sha256, publicBuild.sha256, 'app public assets differ from fresh source');
   prepareDesktopAppIdentity(app, version, root, env);
   const marker = {schemaVersion: 1, version, source: {revision: source.revision, tree: source.tree}, authoritySurfaceDigest: surfaceDigest, packageSha256};
   const {canonicalJson} = await import(pathToFileURL(join(root, 'dist/core/authority/canonical-json.js')).href);
   fs.writeFileSync(join(app, 'Contents/Resources/phantom-release.json'), canonicalJson(marker), {flag: 'wx', mode: 0o644});
-  run('/usr/bin/codesign', ['--force', '--deep', '--sign', tools.appleSigner, '--options', 'runtime', '--entitlements', join(root, 'desktop/src-tauri/Entitlements.plist'), app], root, env);
+  signAndAcceptDesktopSea({app, version, root, output, signer: tools.appleSigner, env});
   const io = {lstat: path => {const st = fs.lstatSync(path); return {isDirectory: st.isDirectory(), isSymbolicLink: st.isSymbolicLink(), dev: st.dev, ino: st.ino};}, appInventory: path => inventory(path).sha256, exec: (bin, argv) => {try {return {status: 0, stdout: run(bin, argv, root, env)};} catch {return {status: 1, stdout: ''};}}};
   inspectLocalApp(app, tools.appleSigner, io);
   for (const [key, expected] of [['CFBundleName', 'Phantom'], ['CFBundleDisplayName', 'Phantom'], ['CFBundleShortVersionString', version], ['CFBundleVersion', version]]) assert.equal(run('/usr/bin/plutil', ['-extract', key, 'raw', '-o', '-', join(app, 'Contents/Info.plist')], root, env).trim(), expected);
