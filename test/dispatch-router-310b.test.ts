@@ -37,6 +37,7 @@ import {
 import { resolveLeaderPreferences, unavailableLeaderPreferences } from '../src/core/vision/leader-preferences.js';
 import { defaultBudgetPolicy } from '../src/core/routing/policy.js';
 import { standingSeatFor } from '../src/core/authority/effective-config.js';
+import { resolveEngineSpec } from '../src/core/run/engine-registry.js';
 import type { SeatCapacity } from '../src/core/routing/headroom.js';
 import type { BudgetPolicy } from '../src/core/routing/types.js';
 import type { EffectivePolicy, EffectiveSeatPolicy } from '../src/core/authority/types.js';
@@ -612,5 +613,39 @@ describe('operator Grok preference and finite dispatch capacity', () => {
     expect(grokDispatchBatchCapacity({ daemon: { perTickItems: Number.MAX_SAFE_INTEGER, parallel: Number.MAX_SAFE_INTEGER } } as AshlrConfig)).toBe(64);
     expect(grokDispatchBatchCapacity({ daemon: { mode: 'continuous', perTickItems: 20, concurrency: { cloud: 17, total: 18 } } } as AshlrConfig)).toBe(17);
     expect(grokDispatchBatchCapacity({ daemon: { perTickItems: 20, parallel: 0 } } as AshlrConfig)).toBe(0);
+  });
+});
+
+
+describe('shared outcome manager routing', () => {
+  const manager = () => item({ id: 'outcome-manager:outcome:basis', source: 'goal',
+    effort: 5, score: 25, tags: ['outcome-manager', 'difficulty:high'] });
+  it('resolves the concrete manager model when no model override is configured', () => {
+    const route = routeWorkItem(manager(), LEGACY_LOCAL, ctx([grok()]));
+    expect(route.hold).toBeNull();
+    expect(route.model).toBe(resolveEngineSpec(route.backend)?.defaultModel);
+    expect(route.model).toEqual(expect.any(String));
+  });
+  it('uses an eligible frontier account instead of a non-frontier first candidate', () => {
+    const route = routeWorkItem(manager(), LEGACY_LOCAL, ctx([grok(), claude(10, 10), local()], {
+      tierOf: engine => String(engine) === 'grok-cli' ? 'frontier' : 'mid',
+    }));
+    expect(route.hold).toBeNull();
+    expect(route.backend).toBe('grok-cli');
+    expect(route.tier).toBe('frontier');
+    expect(route.seatDecision?.seatId).toBe('grok');
+    expect(route.seatDecision?.exclusions.find(row => row.seatId === 'claude')?.reasons.join(' ')).toContain('frontier manager');
+  });
+  it('holds manager planning when only non-frontier execution is available', () => {
+    const route = routeWorkItem(manager(), LEGACY_LOCAL, ctx([grok(), local()], { tierOf: () => 'mid' }));
+    expect(route.hold?.kind).toBe('park');
+    expect(route.seatDecision?.seatId).toBeNull();
+    expect(route.seatDecision?.exclusions.some(row => row.reasons.some(reason => reason.includes('frontier manager')))).toBe(true);
+  });
+  it('preserves normal worker routing to cheaper models', () => {
+    const route = routeWorkItem(item({ tags: ['difficulty:high'] }), LEGACY_LOCAL, ctx([grok(), local()], { tierOf: () => 'mid' }));
+    expect(route.hold).toBeNull();
+    expect(route.backend).toBe('grok-cli');
+    expect(route.tier).toBe('mid');
   });
 });

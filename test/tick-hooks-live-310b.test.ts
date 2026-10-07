@@ -23,6 +23,7 @@ import {
 } from '../src/core/fleet/tick-hooks-live.js';
 import { EXPERIMENT_SLOTS } from '../src/core/learn/experiments.js';
 import { fleetLaneOf } from '../src/core/fleet/dispatch-router.js';
+import { resolveEngineSpec } from '../src/core/run/engine-registry.js';
 import { fleetPrKey, type ObservedPrState, type OpenFleetPrRef } from '../src/core/fleet/backpressure.js';
 import { emptyBackpressureState } from '../src/core/fleet/backpressure.js';
 import { defaultBudgetPolicy } from '../src/core/routing/policy.js';
@@ -524,6 +525,20 @@ describe('seatAllows', () => {
     expect(['claude', 'claude-b']).toContain(selected);
     const other = selected === 'claude' ? 'claude-b' : 'claude';
     expect(r.hooks.seatAllows('claude', { maxPercent: 90, seatId: other, itemId: 'item-1', model: route.model }).allowed).toBe(false);
+  });
+
+  it('admits the cached concrete default model for a manager without a model override', async () => {
+    const hooks = createLiveTickHooks({ deps: { ...h.deps,
+      legacyRoute: () => ({ backend: 'claude', tier: 'frontier', reason: 'native default' }),
+    } });
+    hooks.effectiveConfig(CFG);
+    await hooks.beforeTick(hookCtx);
+    const task = item({ source: 'goal', tags: ['outcome-manager', 'difficulty:high'], effort: 5 });
+    const route = hooks.route(task, CFG);
+    expect(route).toMatchObject({ backend: 'claude', hold: null, model: resolveEngineSpec('claude', CFG)?.defaultModel });
+    const selected = route.seatDecision!.seatId!;
+    expect(hooks.seatAllows('claude', { maxPercent: 90, itemId: task.id, seatId: selected, model: route.model }).allowed).toBe(true);
+    expect(hooks.seatAllows('claude', { maxPercent: 90, itemId: task.id, seatId: selected, model: 'different-model' }).allowed).toBe(false);
   });
 
   it.each(['grant', 'producer-role', 'capacity', 'unknown-usage', 'missing-capacity', 'duplicate-capacity', 'stale', 'budget', 'session-ceiling', 'weekly-ceiling', 'stop'] as const)(

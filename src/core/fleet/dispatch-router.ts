@@ -35,6 +35,7 @@
  * Honesty: `null` = unknown. Every exclusion carries a specific sentence, and
  * a hold always says why and (when a date is known) until when.
  */
+import { isOutcomeManagerWorkItem } from '../goals/outcome-manager-types.js';
 import { resolveDaemonCountPreferences, countForInventory } from '../daemon/count-preferences.js';
 import { leaderPreferencesReady, resolveLeaderPreferences, type ResolvedLeaderPreferences } from '../vision/leader-preferences.js';
 import { DAEMON_SPEND_GUARD_ITEM_CAPACITY } from '../daemon/state.js';
@@ -600,8 +601,13 @@ export function executionForSeat(item: WorkItem, legacy: LegacyRoute, seat: Seat
   const installed = ctx.laneEngines[lane];
   if (installed === null) return null;
   const backend = fleetLaneOf(legacy.backend, ctx.cfg) === lane ? legacy.backend : installed;
-  const model = (backend === legacy.backend ? legacy.model ?? undefined : configuredModel(ctx.cfg, backend))
+  const candidateModel = (backend === legacy.backend ? legacy.model ?? undefined : configuredModel(ctx.cfg, backend))
     ?? (lane === 'grok-cli' && routingRequestFor(item).difficulty === 'low' ? grokFastModel() : undefined);
+  // Cache the manager's concrete model before exact-route admission. Filling
+  // a default later in the daemon would change the route it was admitted for.
+  const model = isOutcomeManagerWorkItem(item)
+    ? candidateModel?.trim() || configuredModel(ctx.cfg, backend)?.trim() || resolveEngineSpec(backend, ctx.cfg)?.defaultModel
+    : candidateModel;
   return { backend, reason: 'Exact candidate execution for observed task fit.', tier: backend === legacy.backend ? legacyTier(legacy, ctx) : ctx.tierOf(backend) ?? 'local',
     ...(model ? { model } : {}) };
 }
@@ -680,6 +686,11 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
       const execution = executionForSeat(item, legacy, seat, ctx);
       if (!execution) continue;
       const candidateEngine = execution.backend;
+      if (isOutcomeManagerWorkItem(item) && execution.tier !== 'frontier') {
+        add({ kind: 'lane', text: 'Planning and reviewing an outcome needs a frontier manager; this execution is not frontier.' });
+        extra.push({ seatId, reasons, nextEligibleAt: null, details });
+        continue;
+      }
       const demoted = activeDemotion(ctx.demotions, candidateEngine, repo, kind, ctx.nowMs);
       if (demoted) {
         // The string form keeps "demoted until <ISO>: <why>" (logs, CLI); the
@@ -701,7 +712,7 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
 
   // 3.15: the Devin CLI lane takes what no seat-router seat could — see
   // devinCliOverflow. It never displaces a seat the router chose.
-  if (chosenSeat === null) {
+  if (chosenSeat === null && !isOutcomeManagerWorkItem(item)) {
     const devin = devinCliOverflow(request, repo, kind, ctx);
     if ('engine' in devin) {
       const exclusionsSoFar = [...decision.exclusions, ...extra].sort((a, b) => (a.seatId < b.seatId ? -1 : a.seatId > b.seatId ? 1 : 0));

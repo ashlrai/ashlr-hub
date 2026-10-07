@@ -83,7 +83,7 @@ import {
 } from '../sandbox/mutation-fence.js';
 import { audit as persistAudit } from '../sandbox/audit.js';
 import { readEnrollmentRegistry } from '../sandbox/policy.js';
-import { currentStandingPolicy } from '../authority/effective-config.js';
+import { currentStandingPolicy, standingSeatFor } from '../authority/effective-config.js';
 import { repoIdentityOfPath } from '../fleet/repo-identity.js';
 import { outcomeDigest } from '../goals/outcome-types.js';
 import { goalProjectMatchesRepo } from '../goals/project-match.js';
@@ -91,6 +91,9 @@ import { readOutcomeWorkItemContext, materializeOutcomeIntents, outcomeDirectory
 import { OutcomeStore } from '../goals/outcome-store.js';
 import { readOutcomeInventory } from '../vision/leader-outcomes.js';
 import { OutcomeDispatch, isOutcomeWorkItem, reconcileOutcomeCompletions } from './outcome-dispatch.js';
+import { OutcomeManagerDispatch, isOutcomeManagerWorkItem, outcomeManagerWorkItems, readOutcomeManagerWorkItemContext, reconcileOutcomeManagerTerminals } from './outcome-manager.js';
+import { managerConversation, managerHostAdmission } from './outcome-manager-host.js';
+import type { OutcomeManagerRoute } from '../goals/outcome-manager-types.js';
 import { buildBacklog, loadBacklog } from '../portfolio/backlog.js';
 import { loadQueuedAutonomyItems } from '../portfolio/queued-autonomy.js';
 import {
@@ -218,6 +221,8 @@ import {
 } from '../fleet/quota.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import { resolveEngineSpec } from '../run/engine-registry.js';
+import { resolveNativeSeatLaunch } from '../resources/native-profile.js';
+import { resolveAccountsRoot } from '../verse/seats.js';
 // The one authority for "does this engine run on this machine" (pool tiering).
 import { engineLocality, engineMeteredness } from '../policy/local-only.js';
 import { resolveDevinCliFleetModel } from '../devin/cli-engine.js';
@@ -4791,9 +4796,34 @@ export async function tick(
     const paused = new Set(tickConstraints.pausedRepos.map((path) => resolve(path)));
     return out.filter((item) => !paused.has(resolve(item.repo)));
   };
+  /** Saved launch provenance can be current even after its allowance window is exhausted.
+   * This check authorizes terminal metadata only; every new contact still asks seatAllows. */
+  const managerRouteCurrent = (route: OutcomeManagerRoute, executionRepo: string): boolean => {
+    const policy = standingTick ? currentStandingPolicy() : null;
+    const registry = readEnrollmentRegistry();
+    const spec = resolveEngineSpec(route.engine, routingCfg);
+    if (!policy || stopRequested() || !stillOwnsTick() || registry.state !== 'ready' || !registry.repos.includes(executionRepo) ||
+        spec?.kind !== 'cli-agent' || engineTierOf(route.engine as EngineId, routingCfg) !== 'frontier' ||
+        !routingCfg.foundry?.allowedBackends?.includes(route.engine as EngineId)) return false;
+    const lane = fleetLaneOf(route.engine as EngineId, routingCfg);
+    const seat = standingSeatFor(policy.spend, route.seatId);
+    const seatEngine = engineOfSeatId(route.seatId);
+    const matches = lane === 'codex' && seatEngine === 'codex' || lane === 'claude-cli' && seatEngine === 'claude' ||
+      lane === 'grok-cli' && seatEngine === 'grok';
+    const identity = repoIdentityOfPath(executionRepo);
+    if (!matches || !seat?.enabled || !seat.roles.includes('producer') ||
+        !policy.engines.includes(lane === 'claude-cli' ? 'claude-cli' : lane === 'grok-cli' ? 'grok-cli' : 'codex') ||
+        identity === null || !policy.repos.some(repo => repo.nameWithOwner.toLowerCase() === identity.toLowerCase())) return false;
+    // Current prepared roster/profile metadata only. This neither spends a fresh
+    // allowance ticket nor proves the historical provider billing principal.
+    const provider = lane === 'claude-cli' ? 'claude' : lane === 'grok-cli' ? 'grok' : 'codex';
+    return resolveNativeSeatLaunch({ accountsRoot: resolveAccountsRoot(routingCfg), provider, seatId: route.seatId,
+      ...(provider === 'claude' ? { requireClaudeBrokerSafety: true } : {}) }).ok;
+  };
   const refreshBacklogForTick = async (): Promise<WorkItem[]> => {
     if (stopRequested()) return [];
     try {
+      const managerItems: WorkItem[] = [];
       if (!opts.dryRun) {
         const inventory = readOutcomeInventory();
         // Unknown/partial discovery cannot authorize creation or completion.
@@ -4809,15 +4839,32 @@ export async function tick(
                       granted.nameWithOwner.toLowerCase() === repoIdentityOfPath(repo)?.toLowerCase()))));
             };
             if (!authorized()) continue;
+            const outcomeStore = new OutcomeStore(outcomeDirectory(outcome.id));
+            reconcileOutcomeManagerTerminals(outcomeStore, managerHostAdmission({
+              stillAuthorized: () => authorized() && stillOwnsTick(),
+              executionRepoAllowed: (target, executionRepo) => {
+                const registry = readEnrollmentRegistry();
+                return registry.state === 'ready' && registry.repos.includes(executionRepo) &&
+                  goalProjectMatchesRepo(target, executionRepo) && authorized();
+              },
+            }, { policy: () => standingTick ? currentStandingPolicy() : null, repoIdentity: repoIdentityOfPath,
+              routeCurrent: managerRouteCurrent,
+              // Recovery cannot admit another provider contact or start a new stage.
+              routeAllowed: () => false,
+            }));
             reconcileOutcomeCompletions({ store: new OutcomeStore(outcomeDirectory(outcome.id)) });
             materializeOutcomeIntents(outcome.id, { stillAuthorized: authorized, cfg: routingCfg });
+            const fresh = new OutcomeStore(outcomeDirectory(outcome.id)).read();
+            if (fresh.sourceState === 'healthy' && authorized()) {
+              managerItems.push(...outcomeManagerWorkItems([fresh.state], new Date().toISOString()));
+            }
           }
         }
       }
       const backlog = await buildBacklog({ repos: enrolled });
       backlogSnapshotAt = backlog.generatedAt;
       backlogSnapshotId = backlog.snapshotId;
-      const resolution = resolveDiagnosticResliceParents(backlog.items);
+      const resolution = resolveDiagnosticResliceParents([...backlog.items, ...managerItems]);
       diagnosticResliceParentsResolved = resolution.resolved;
       diagnosticResliceParentsMissing = resolution.missing;
       return applyTickConstraints(filterGeneratedRepairDispatch(resolution.dispatchable));
@@ -6554,11 +6601,14 @@ export async function tick(
         ? [opts.signal, leaseController.signal, fleetWatchdogController.signal, outcomeAbortController.signal]
         : [leaseController.signal, fleetWatchdogController.signal, outcomeAbortController.signal],
     );
-    const outcomeCandidate = isOutcomeWorkItem(item);
-    const outcomeContext = outcomeCandidate ? readOutcomeWorkItemContext(item) : null;
+    const managerCandidate = isOutcomeManagerWorkItem(item);
+    const outcomeCandidate = isOutcomeWorkItem(item) || managerCandidate;
+    const outcomeContext = !managerCandidate && outcomeCandidate ? readOutcomeWorkItemContext(item) : null;
+    const managerContext = managerCandidate ? readOutcomeManagerWorkItemContext(item) : null;
+    let managerSelectedRoute: OutcomeManagerRoute | null = null;
     const outcomePolicy = outcomeCandidate && standingTick ? currentStandingPolicy() : null;
     const outcomePolicyDigest = outcomePolicy ? outcomeDigest({ ...outcomePolicy, computedAt: null }) : null;
-    const outcomeDispatch = outcomeContext ? new OutcomeDispatch(outcomeContext, item, attemptId, {
+    const outcomeAdmission = {
       stillAuthorized: () => {
         const policy = standingTick ? currentStandingPolicy() : null;
         return stillOwnsTick() && !stopRequested() && !dispatchSignal.aborted &&
@@ -6566,14 +6616,30 @@ export async function tick(
           isRejectedCaptureRecoveryAuthorized(item) && (!standingTick || policy !== null &&
             outcomePolicyDigest === outcomeDigest({ ...policy, computedAt: null }));
       },
-      executionRepoAllowed: (target, executionRepo) => {
+      executionRepoAllowed: (target: string, executionRepo: string) => {
         const registry = readEnrollmentRegistry();
         return registry.state === 'ready' && registry.repos.includes(executionRepo) &&
           goalProjectMatchesRepo(target, executionRepo) && (!standingTick ||
             outcomePolicy?.repos.some(granted => granted.nameWithOwner.toLowerCase() ===
               repoIdentityOfPath(executionRepo)?.toLowerCase()) === true);
       },
-    }) : null;
+    };
+    const workerOutcomeDispatch = outcomeContext ? new OutcomeDispatch(outcomeContext, item, attemptId, outcomeAdmission) : null;
+    const managerOutcomeDispatch = managerContext ? new OutcomeManagerDispatch(managerContext, item, attemptId,
+      managerHostAdmission(outcomeAdmission, {
+        policy: () => standingTick ? currentStandingPolicy() : null,
+        repoIdentity: repoIdentityOfPath,
+        routeCurrent: managerRouteCurrent,
+        routeAllowed: (route, executionRepo) => {
+          if (!standingTick || !managerSelectedRoute || outcomeDigest(route) !== outcomeDigest(managerSelectedRoute) ||
+              !outcomeAdmission.stillAuthorized() || !outcomeAdmission.executionRepoAllowed(item.repo, executionRepo) ||
+              engineTierOf(route.engine as EngineId, routingCfg) !== 'frontier' ||
+              resolveEngineSpec(route.engine, routingCfg)?.kind !== 'cli-agent' || !withinLimit(route.engine as EngineId, routingCfg)) return false;
+          try { return hooks.seatAllows(route.engine as EngineId, { maxPercent: resolveSubscriptionMaxPercent(routingCfg),
+            itemId: item.id, model: route.model, seatId: route.seatId }).allowed === true; } catch { return false; }
+        },
+      }), { conversation: managerConversation }) : null;
+    const outcomeDispatch = workerOutcomeDispatch ?? managerOutcomeDispatch;
     let outcomeWatch: ReturnType<typeof setInterval> | undefined;
     const beginQueueExecution = (): void => {
       if (dispatchSignal.aborted || !coordinator.beginExecution(item.id, machineId)) {
@@ -6605,7 +6671,7 @@ export async function tick(
         return fleetWatchdogOutcome(item, attemptId, localFleet.taskTimeoutMs);
       }
       if (leaseController.signal.aborted) return queueLeaseLostOutcome(item, attemptId);
-      if (outcomeCandidate && !readOutcomeWorkItemContext(item)) {
+      if (outcomeCandidate && !(managerCandidate ? readOutcomeManagerWorkItemContext(item) : readOutcomeWorkItemContext(item))) {
         return { item, spentUsd: 0, dispatched: false, dispatch: dispatchTrace(item, {
           assignedBy: 'preflight', reason: 'outcome unavailable, paused or retired', dispatched: false,
           runId: attemptId, trajectoryId: `run:${attemptId}`, skipReason: 'outcome-unavailable',
@@ -7108,6 +7174,21 @@ export async function tick(
         if (lane === 'claude-cli' && engineOfSeatId(seatId) === 'claude') return seatId;
         return lane === 'codex' && engineOfSeatId(seatId) === 'codex' ? seatId : undefined;
       })();
+      if (managerCandidate) {
+        const spec = resolveEngineSpec(backend!, routingCfg);
+        selectedModel = selectedModel?.trim() || configuredModelForBackend(backend!, routingCfg) || spec?.defaultModel || null;
+        // A manager has one exact native frontier producer, never a mixed-route BON/swarm fallback.
+        if (!managerOutcomeDispatch || !standingTick || backendTier !== 'frontier' || spec?.kind !== 'cli-agent' ||
+            !standingSeatId || !selectedModel) {
+          return { item, spentUsd: 0, dispatched: false, dispatch: dispatchTrace(item, {
+            backend, tier: backendTier, model: selectedModel, assignedBy: 'manager-route',
+            reason: 'No grant-authorized native frontier account/model is available for this manager stage.',
+            dispatched: false, runId: attemptId, trajectoryId: `run:${attemptId}`, skipReason: 'manager-route-unavailable',
+          }) };
+        }
+        managerSelectedRoute = { engine: backend!, seatId: standingSeatId, model: selectedModel, tier: 'frontier' };
+        managerOutcomeDispatch.bindRoute(managerSelectedRoute);
+      }
       // Every new provider contact keeps the same task scope and rechecks current allowance policy.
       const selectedTaskAdmission = standingTick ? () => {
         if (!stillOwnsTick() || stopRequested() || dispatchSignal.aborted) return false;
@@ -7443,12 +7524,12 @@ export async function tick(
         // threshold from the harness / Leader routing weights). The config's
         // own bestOfN / bestOfNCandidates never apply there: they were not
         // written against the grant's lanes and reserves. No plan ⇒ one attempt.
-        const standingBonPlan = standingTick && !isTrustedGeneratedRepairItem(item)
+        const standingBonPlan = standingTick && !managerCandidate && !isTrustedGeneratedRepairItem(item)
           ? standingBestOfNPlan(hooks, item, resolveSubscriptionMaxPercent(routingCfg))
           : null;
         // Critic/candidate paths are not uniformly provable zero-dollar here.
         // Retain the admitted single producer when USD headroom is exhausted.
-        const bestOfN = tickSpent >= remainingBudget || proposalOnlyActivation
+        const bestOfN = managerCandidate || tickSpent >= remainingBudget || proposalOnlyActivation
           ? 1
           : standingTick
             ? (standingBonPlan?.run ? resolveBestOfNCount(standingBonPlan.candidates.length) : 1)

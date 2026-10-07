@@ -709,6 +709,7 @@
 /test/outcome-daemon-loop.test.ts @masonwyatt23
 /test/outcome-dispatch.test.ts @masonwyatt23
 /test/outcome-manager-dispatch.test.ts @masonwyatt23
+/test/outcome-manager-host.test.ts @masonwyatt23
 /test/outcome-manager.test.ts @masonwyatt23
 /test/outcome-proposal-admission.test.ts @masonwyatt23
 /test/outcome-runtime.test.ts @masonwyatt23
