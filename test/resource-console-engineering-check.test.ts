@@ -1,7 +1,7 @@
 /** Pure orchestration tests: all filesystem/evidence projections are inert, explicit fixtures. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const seams = vi.hoisted(() => ({ read: vi.fn(), stat: vi.fn(), poolStatus: vi.fn(), preview: vi.fn(), decode: vi.fn(),
-  prepare: vi.fn(), catalog: vi.fn(), runtime: vi.fn(), graph: vi.fn(), campaign: vi.fn(), universe: vi.fn(), readiness: vi.fn(),
+  prepare: vi.fn(), catalog: vi.fn(), runtime: vi.fn(), graph: vi.fn(), projection: vi.fn(), readiness: vi.fn(),
   key: vi.fn(), kill: vi.fn(), matches: vi.fn(), forbidden: vi.fn(() => { throw new Error('Execution is forbidden'); }) }));
 vi.mock('node:fs', async original => ({ ...await original<typeof import('node:fs')>(), lstatSync: seams.stat }));
 vi.mock('../src/core/resources/pool-runtime.js', () => ({ readResourceJson: seams.read, resourcePoolStatus: seams.poolStatus,
@@ -14,7 +14,7 @@ vi.mock('../src/core/resources/console-projects.js', async original => ({ ...awa
   matchesResourceConsoleProject: seams.matches }));
 vi.mock('../src/core/universe/resource-runtime-check.js', () => ({ checkResourceGenerationRuntime: seams.runtime }));
 vi.mock('../src/core/universe/control-graph.js', () => ({ readControlGraph: seams.graph, runControlGraph: seams.forbidden }));
-vi.mock('../src/core/universe/campaign-store.js', () => ({ readUniverseCampaign: seams.campaign, campaignUniverse: seams.universe }));
+vi.mock('../src/core/universe/campaign-store.js', () => ({ readUniverseCampaignProjection: seams.projection }));
 vi.mock('../src/core/universe/campaign-readiness.js', () => ({ readUniverseCampaignReadiness: seams.readiness }));
 vi.mock('../src/core/universe/portfolio-controller-store.js', () => ({ portfolioControllerDirectory: () => '/fixture/universe/controller' }));
 vi.mock('../src/core/foundry/provenance.js', async original => ({ ...await original<typeof import('../src/core/foundry/provenance.js')>(),
@@ -34,6 +34,8 @@ const enrollment = (id = 'first', expectedRuntimeDigest = 'a'.repeat(64)) => ({ 
   graphRoot: `/fixture/graphs/${id}`, host: { resourceRuntime: runtimeFile, expectedRuntimeDigest, root: '/fixture/universe',
     definition: { id: `${id}-controller`, tasks: [{ campaignId: 'campaign', dependsOn: [] }] } } },
   definitionDigest: 'b'.repeat(64), summary: { enrollmentDigest: 'c'.repeat(64) } });
+const validProjection = () => ({ campaign: { sourceState: 'healthy' }, universe: { sourceState: 'healthy',
+  manifest: { variants: [{ generation: { kind: 'resource-pool', allowedWorkerIds: ['local'] } }] } } });
 const validRuntime = () => ({ schemaVersion: 1, status: 'valid', evidenceScope: 'local-configuration-only', providerContacted: false,
   checks: [{ code: 'runtime', status: 'passed' }], workers: [{ workerId: 'local', policyHolds: [], eligibility: 'excluded',
     exclusionReasons: ['concurrency-exhausted'] }], warnings: ['execution-and-account-identity-unverified'] });
@@ -55,7 +57,7 @@ beforeEach(() => {
   seams.matches.mockReturnValue(true); seams.key.mockReturnValue(Buffer.alloc(32));
   seams.kill.mockReturnValue({ state: 'inactive', sourceState: 'healthy' });
   seams.readiness.mockReturnValue({ sourceState: 'healthy', automaticAction: 'run', observedState: 'ready', disposition: 'startable' });
-  seams.universe.mockReturnValue({ manifest: { variants: [{ generation: { kind: 'resource-pool', allowedWorkerIds: ['local'] } }] } });
+  seams.projection.mockImplementation(validProjection);
   vi.spyOn(globalThis, 'fetch').mockImplementation(() => { throw new Error('No network permitted'); });
 });
 afterEach(() => { expect(seams.forbidden).not.toHaveBeenCalled(); expect(globalThis.fetch).not.toHaveBeenCalled(); vi.restoreAllMocks(); });
@@ -81,6 +83,37 @@ describe('standalone commissioning check orchestration', () => {
     expect(report.enrollments[0]).toMatchObject({ projectRegistration: 'would-register', status: 'configured',
       runtime: { workers: [{ eligibility: 'excluded', exclusionReasons: ['concurrency-exhausted'] }] } });
     expect(report.checks.every(check => check.status === 'passed')).toBe(true);
+  });
+  it('observes every task independently after readiness without repeating its Universe projection', () => {
+    const first = enrollment(); first.row.host.definition.tasks.push({ campaignId: 'other-campaign', dependsOn: [] });
+    const second = enrollment('second'); second.row.host.root = '/fixture/other-universe';
+    seams.prepare.mockReturnValue([first, second]);
+    const report = checkResourceConsoleEngineering(options);
+    expect(report.status).toBe('configured'); expect(report.enrollments.map(row => row.id)).toEqual(['first', 'second']);
+    expect(seams.projection.mock.calls).toEqual([
+      ['campaign', { root: '/fixture/universe' }], ['other-campaign', { root: '/fixture/universe' }],
+      ['campaign', { root: '/fixture/other-universe' }],
+    ]);
+    expect(seams.readiness.mock.calls).toEqual(seams.projection.mock.calls);
+    for (let i = 0; i < 3; i++) expect(seams.readiness.mock.invocationCallOrder[i]).toBeLessThan(seams.projection.mock.invocationCallOrder[i]!);
+  });
+  it('refreshes each observation and sees changed worker evidence on a later call', () => {
+    expect(checkResourceConsoleEngineering(options).status).toBe('configured');
+    const changed = validProjection(); changed.universe.manifest.variants[0]!.generation.allowedWorkerIds = ['foreign'];
+    seams.projection.mockReturnValue(changed);
+    const report = checkResourceConsoleEngineering(options);
+    expect(report).toMatchObject({ status: 'held', enrollments: [{ reasons: ['campaign-workers-unavailable'] }] });
+    expect(seams.projection).toHaveBeenCalledTimes(2); expect(seams.readiness).toHaveBeenCalledTimes(2);
+  });
+  it.each(['missing-universe', 'campaign', 'universe'] as const)('refuses %s damage after an independent healthy readiness sample', kind => {
+    expect(checkResourceConsoleEngineering(options).status).toBe('configured');
+    const changed = validProjection();
+    if (kind === 'missing-universe') seams.projection.mockReturnValue({ campaign: { sourceState: 'degraded' }, universe: null });
+    else { changed[kind].sourceState = 'degraded'; seams.projection.mockReturnValue(changed); }
+    const report = checkResourceConsoleEngineering(options);
+    expect(report).toMatchObject({ status: 'unavailable', reasons: ['commissioning-enrollment-unavailable'], enrollments: [] });
+    expect(seams.readiness).toHaveBeenCalledTimes(2); expect(seams.projection).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(report)).not.toContain('/fixture');
   });
   it('rejects captured configuration drift at the final snapshot stage without partial rows', () => {
     let reads = 0;

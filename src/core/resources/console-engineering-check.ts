@@ -5,7 +5,7 @@ import { canonicalEvidencePackJsonV3, loadExistingProvenanceKeyReadOnly } from '
 import { readKillSwitch } from '../sandbox/policy.js';
 import { canonical, digest } from '../universe/artifacts.js';
 import { readControlGraph, type ControlGraphReport } from '../universe/control-graph.js';
-import { campaignUniverse, readUniverseCampaign } from '../universe/campaign-store.js';
+import { readUniverseCampaignProjection } from '../universe/campaign-store.js';
 import { readUniverseCampaignReadiness } from '../universe/campaign-readiness.js';
 import { portfolioControllerDirectory } from '../universe/portfolio-controller-store.js';
 import { checkResourceGenerationRuntime, type ResourceGenerationRuntimeCheck } from '../universe/resource-runtime-check.js';
@@ -133,7 +133,12 @@ export function checkResourceConsoleEngineering(input: ResourceConsoleEngineerin
           const campaign = readUniverseCampaignReadiness(task.campaignId, { root: entry.row.host.root });
           if (campaign.sourceState !== 'healthy' || !(campaign.automaticAction === 'run' || campaign.observedState === 'completed' ||
             campaign.observedState === 'ready' && campaign.disposition === 'owned')) reasons.push('campaign-not-startable');
-          const universe = campaignUniverse(readUniverseCampaign(task.campaignId, { root: entry.row.host.root }), { root: entry.row.host.root });
+          // Reuse only this task's coherent observation; readiness and the final
+          // configuration sample remain independent. Degraded history is not a
+          // reason to reproject a Universe by definition and ignore its failure.
+          const observed = readUniverseCampaignProjection(task.campaignId, { root: entry.row.host.root });
+          const universe = observed.universe;
+          if (observed.campaign.sourceState !== 'healthy' || universe?.sourceState !== 'healthy') throw new Error();
           for (const variant of universe.manifest.variants) {
             const generation = variant.generation;
             if (generation?.kind !== 'resource-pool') continue;
