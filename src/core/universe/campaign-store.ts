@@ -150,13 +150,16 @@ export function campaignOwnerAlive(owner: CampaignOwner): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
 }
 
-export function readCampaignEvents(directory: string): CampaignEvent[] {
+function readCampaignObservation(directory: string): { records: CampaignEvent[]; folded: ReturnType<typeof foldCampaignEvents> } {
   inspectPrivateDirectory(directory);
   const result = readImmutablePrivateRecords(config(directory), { requireComplete: true });
   if (!result.complete || result.sourceState !== 'healthy') throw new Error(`Campaign evidence unavailable: ${result.stopReasons.join(', ') || result.sourceState}`);
   const records = result.records.sort((a, b) => a.sequence - b.sequence);
-  foldCampaignEvents(records);
-  return records;
+  return { records, folded: foldCampaignEvents(records) };
+}
+
+export function readCampaignEvents(directory: string): CampaignEvent[] {
+  return readCampaignObservation(directory).records;
 }
 
 export function foldCampaignEvents(records: CampaignEvent[]): {
@@ -295,7 +298,13 @@ export function assertCampaignSeedEvaluatorsSettled(universeId: string, options:
 }
 
 export function projectCampaign(records: CampaignEvent[], universe: UniverseSummary): UniverseCampaignSummary {
-  const folded = foldCampaignEvents(records);
+  return projectCampaignObservation(records, foldCampaignEvents(records), universe);
+}
+
+// Only this invocation's privately validated history is reused. Public callers
+// still pass through the strict fold; later observations reread their own ledger.
+function projectCampaignObservation(records: CampaignEvent[], folded: ReturnType<typeof foldCampaignEvents>,
+  universe: UniverseSummary): UniverseCampaignSummary {
   const { created } = folded;
   const reasons: string[] = [];
   if (universe.sourceState !== 'healthy') reasons.push(...universe.reasons);
@@ -371,11 +380,11 @@ export function readUniverseCampaignProjection(id: string, options: UniverseStor
   const directory = campaignDirectory(id, options);
   inspectPrivateDirectory(directory);
   try {
-    const records = readCampaignEvents(directory);
-    const created = foldCampaignEvents(records).created;
+    const { records, folded } = readCampaignObservation(directory);
+    const { created } = folded;
     if (created.definition.id !== id) throw new Error('Campaign definition id does not match its storage slot');
     const universe = campaignUniverse(created, options);
-    return { campaign: projectCampaign(records, universe), universe };
+    return { campaign: projectCampaignObservation(records, folded, universe), universe };
   } catch (error) {
     // A damaged history is never a fresh campaign with a fresh resource budget.
     const first = readImmutablePrivateRecordPoint(config(directory), '00000000', '00000000.json').record;

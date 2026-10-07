@@ -24,6 +24,17 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Patch the example site's Sharp override and shadcn-scoped MCP SDK dependency,
   preserving optional platform packages. The separate braces advisory remains
   unresolved.
+- Add an explicit upgrade command for recognized older Claude profile launchers,
+  preserving the native sign-in, account identity and existing profile contents.
+  The upgrade supports a dry run and does not automatically change live profiles.
+- Retain bounded Grok run diagnostics and classify a final failed local
+  verification without a saved proposal as a verification failure.
+- Reuse the validated campaign event fold within one observation while retaining
+  fresh ledger reads, owner checks and independent accounting samples.
+- Cache native broker compilation with pinned restore/save actions and keys
+  bound to compiler, SDK and source inputs. Only successful master pushes save
+  entries; every original Cargo check and test still runs. Hosted cold/warm
+  timing remains to be measured.
 
 ## [3.25.0] — 2026-10-07
 

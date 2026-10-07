@@ -455,6 +455,96 @@ jobs:
           toolchain: "1.97.1"
           components: rustfmt, clippy
 
+      # Compiled cache contents are executable. Only successful protected-master
+      # pushes populate this private CI namespace; PRs restore but never save.
+      - name: Fingerprint native compile inputs
+        id: cargo-inputs
+        shell: bash
+        run: |
+          node <<'NODE'
+          const { execFileSync } = require('node:child_process');
+          const { createHash } = require('node:crypto');
+          const { appendFileSync, lstatSync, readFileSync } = require('node:fs');
+          const digest = (value) => createHash('sha256').update(value).digest('hex');
+          const command = (file, args) => {
+            const value = execFileSync(file, args, { encoding: 'utf8', maxBuffer: 1024 * 1024 }).trim();
+            if (!value) throw new Error('missing native compiler probe');
+            return value;
+          };
+          const nativeInput = (file) => [
+            '.github/workflows/ci.yml', 'Cargo.toml', 'Cargo.lock',
+            '.cargo/config', '.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml',
+            'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/Cargo.lock',
+            'desktop/src-tauri/build.rs', 'desktop/src-tauri/tauri.conf.json',
+            'desktop/src-tauri/Info.plist', 'desktop/src-tauri/Entitlements.plist',
+            'desktop/src-tauri/.cargo/config', 'desktop/src-tauri/.cargo/config.toml',
+            'desktop/src-tauri/rust-toolchain', 'desktop/src-tauri/rust-toolchain.toml',
+          ].includes(file) ||
+            file.startsWith('desktop/src-tauri/src/') ||
+            file.startsWith('desktop/src-tauri/capabilities/') ||
+            file.startsWith('desktop/src-tauri/icons/');
+          // git's index supplies membership: outputs and untracked private files
+          // cannot enter the fingerprint or be read by this step.
+          const files = command('git', ['ls-files', '-z']).split('\0').filter(nativeInput).sort();
+          for (const required of ['.github/workflows/ci.yml', 'desktop/src-tauri/Cargo.toml',
+            'desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/build.rs', 'desktop/src-tauri/tauri.conf.json']) {
+            if (!files.includes(required)) throw new Error('missing tracked native input');
+          }
+          const source = createHash('sha256');
+          for (const file of files) {
+            if (!lstatSync(file).isFile()) throw new Error('nonregular native input');
+            source.update(JSON.stringify([file, digest(readFileSync(file))]));
+          }
+          // Output-directory/wrapper overrides would change the cached artifact
+          // domain. They are not used by this gate and must not share its key.
+          for (const field of ['CARGO_TARGET_DIR', 'CARGO_BUILD_BUILD_DIR', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER']) {
+            if (process.env[field]) throw new Error('unsupported native cache output or wrapper');
+          }
+          const rust = command('rustc', ['-vV']);
+          const host = rust.match(/^host: (.+)$/m)?.[1];
+          if (!host || !process.env.ImageOS || !process.env.ImageVersion) throw new Error('missing native compiler/image identity');
+          const flags = ['RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CARGO_BUILD_RUSTFLAGS',
+            'CARGO_BUILD_TARGET', 'CC', 'CFLAGS', 'CXX', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS',
+            'SDKROOT', 'MACOSX_DEPLOYMENT_TARGET'].map((field) => [field, process.env[field] ?? '']);
+          flags.push(...Object.entries(process.env).filter(([field]) =>
+            /^CARGO_PROFILE_(DEV|TEST)_/.test(field) || /^CARGO_TARGET_[A-Z0-9_]+_(LINKER|RUSTFLAGS)$/.test(field)).sort());
+          const environment = digest(JSON.stringify({
+            rust, cargo: command('cargo', ['-V']), host,
+            os: command('sw_vers', ['-productVersion']), arch: command('uname', ['-m']),
+            image: [process.env.ImageOS, process.env.ImageVersion],
+            xcode: command('xcodebuild', ['-version']),
+            developer: command('xcode-select', ['-p']),
+            sdk: [command('xcrun', ['--show-sdk-version']), command('xcrun', ['--show-sdk-path'])],
+            flags, invocation: 'host-lib-locked-default-features-dev-test',
+          }));
+          const key = `phantom-ci-broker-cargo-v1-${environment}-${source.digest('hex')}`;
+          appendFileSync(process.env.GITHUB_OUTPUT, `key=${key}\n`);
+          NODE
+
+      - name: Restore native compilation cache
+        id: cargo-cache
+        uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: desktop/src-tauri/target/debug/
+          key: ${{ steps.cargo-inputs.outputs.key }}
+
+      # GitHub may return a primary-key prefix match. It is not this exact
+      # compilation domain; refuse before invoking any cached executable.
+      - name: Validate native cache identity
+        env:
+          EXPECTED_CARGO_CACHE_KEY: ${{ steps.cargo-inputs.outputs.key }}
+          PRIMARY_CARGO_CACHE_KEY: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+          RESTORED_CARGO_CACHE_KEY: ${{ steps.cargo-cache.outputs.cache-matched-key }}
+        run: |
+          node <<'NODE'
+          const { EXPECTED_CARGO_CACHE_KEY: expected, PRIMARY_CARGO_CACHE_KEY: primary,
+            RESTORED_CARGO_CACHE_KEY: restored } = process.env;
+          if (!/^phantom-ci-broker-cargo-v1-[a-f0-9]{64}-[a-f0-9]{64}$/.test(expected ?? '') ||
+              primary !== expected || (restored && restored !== expected)) {
+            throw new Error('native compilation cache identity differs');
+          }
+          NODE
+
       - name: Create disposable Tauri sidecar fixture
         shell: bash
         run: |
@@ -515,6 +605,13 @@ jobs:
             rmdir -- desktop/src-tauri/resources/public desktop/src-tauri/resources
             test ! -e desktop/src-tauri/resources
           fi
+
+      - name: Save native compilation cache
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: desktop/src-tauri/target/debug/
+          key: ${{ steps.cargo-inputs.outputs.key }}
 
   windows-service-authority:
     name: Windows service authority (Server 2022)
