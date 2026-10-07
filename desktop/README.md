@@ -13,6 +13,10 @@ macOS release. The Linux CLI and web dashboard remain supported.
 Installed size: ~141 MiB, including the bundled Bun `ashlr`
 sidecar (~100 MiB), Rust executable and web assets.
 
+The 3.24.4 release candidate targets this [macOS arm64 installer](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.4/Ashlr_3.24.4_aarch64_locally-signed.dmg).
+That candidate link is available only after its release artifacts are published;
+use the published 3.24.3 installer above until then.
+
 ---
 
 ## Install
