@@ -22,7 +22,7 @@ import { useMemo, useState, type CSSProperties, type ReactNode } from 'react';
 import { formatMetric } from '../../../components/charts/format-metric.js';
 import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
 import { Tooltip } from '../../../components/primitives/Tooltip.js';
-import { useQuery } from '../../../data/hooks.js';
+import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { usedPercentText } from '../percent-text.js';
 import { historicalLeftPercent } from './resource-usage-history.js';
 import { ACCOUNT_CLOCK_MS, useCapacityData } from '../usage/CapacityStrip.js';
@@ -32,8 +32,8 @@ import { accountStatus, buildCapacityRows, type AccountStatus, type CapacityRow 
 import { formatUsd } from './resources-model.js';
 import { cloudCreditsQuery } from './resources-queries.js';
 import { devinConsumptionEvidence, devinUsageEvidence, formatAcu } from '../devin/devin-model.js';
-import { devinQuery } from '../devin/devin-queries.js';
-import { openResources } from './resources-store.js';
+import { DEVIN_POLL_MS, devinQuery } from '../devin/devin-queries.js';
+import { openResources, useResourcesUi } from './resources-store.js';
 import { moveResource, orderedResources, useResourceOrder } from './resource-order.js';
 import styles from './ResourcesBar.module.css';
 
@@ -219,7 +219,19 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   const data = useCapacityData();
   const cloudRead = useQuery(cloudCreditsQuery);
   const devinRead = useQuery(devinQuery);
+  const refreshDevin = useRefetch(devinQuery);
+  const resources = useResourcesUi();
   const devin = devinRead.data?.value ?? null;
+  const [coldStartedAt] = useState(() => Date.now());
+  const consumption = devin?.consumption;
+  // Catch the server's startup collection promptly, but only for real pending
+  // metadata and for the first minute. GET never starts a provider request.
+  const coldPending = devin?.status.connected && devin.status.enabled && devinRead.error === undefined
+    && consumption?.source === 'devin-v3-organization-daily' && consumption.scope === 'organization'
+    && consumption.report === null && (consumption.state === 'not-checked' || consumption.state === 'reading')
+    && Date.now() - coldStartedAt < DEVIN_POLL_MS;
+  // The drawer owns this cadence while open; hidden bars/windows do not poll.
+  usePollWhileVisible(refreshDevin, coldPending ? 5_000 : DEVIN_POLL_MS, { enabled: resources.bar && !resources.open });
   const [, setClock] = useState(() => Date.now());
   const savedOrder = useResourceOrder();
   const [dragged, setDragged] = useState<string | null>(null);
