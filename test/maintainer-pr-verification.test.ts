@@ -24,6 +24,17 @@ function evidence(): MaintainerRunEvidence {
     confinement: 'required', sourceUnchanged: true, worktreeRemoved: true,
   };
 }
+function cargoEvidence(): MaintainerRunEvidence {
+  const run = evidence();
+  const command = { id: 'cargo-check', kind: 'test' as const, cmd: ['cargo', 'test', '--locked'], required: true };
+  run.expectedCommands = [command]; run.commands[0]!.command = command;
+  const payload = { v: 1 as const, recipe: 'cargo-vendor-locked-v1' as const, sourceTree: treeSha,
+    inputsSha256: '1'.repeat(64), lockSha256: '2'.repeat(64), toolchainSha256: '3'.repeat(64),
+    vendorSha256: '4'.repeat(64), configSha256: '5'.repeat(64), packageCount: 1 };
+  run.cargoDependencies = { ...payload, receiptSha256: createHash('sha256').update(JSON.stringify(payload)).digest('hex') };
+  run.dependenciesRemoved = true;
+  return run;
+}
 
 function fixture() {
   const state = {
@@ -75,6 +86,38 @@ function fixture() {
 const input = { repo, pr: 12, confirmHead: headSha };
 
 describe('host-owned maintainer PR verification', () => {
+  it('publishes a version-two Cargo receipt only after exact dependency evidence and cleanup', async () => {
+    const f = fixture(); f.run.mockResolvedValueOnce(cargoEvidence());
+    const result = await verifyMaintainerPr(input, f.deps);
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.receipt.v).toBe(2);
+    expect(f.writes()[0]!.body).toMatchObject({ external_id: expect.stringMatching(/^maintainer-v2:/) });
+  });
+  it.each([
+    ['missing attachment', (run: MaintainerRunEvidence) => { delete run.cargoDependencies; }],
+    ['unfinished cleanup', (run: MaintainerRunEvidence) => { run.dependenciesRemoved = false; }],
+    ['wrong source', (run: MaintainerRunEvidence) => { run.cargoDependencies!.sourceTree = 'f'.repeat(40); }],
+    ['wrong digest', (run: MaintainerRunEvidence) => { run.cargoDependencies!.receiptSha256 = '0'.repeat(64); }],
+    ['empty inventory', (run: MaintainerRunEvidence) => { run.cargoDependencies!.packageCount = 0; }],
+    ['unsupported recipe', (run: MaintainerRunEvidence) => { run.cargoDependencies!.recipe = 'untrusted' as never; }],
+  ])('does not post Cargo success with %s', async (_label, change) => {
+    const run = cargoEvidence(); change(run);
+    const f = fixture(); f.run.mockResolvedValueOnce(run);
+    expect((await verifyMaintainerPr(input, f.deps)).ok).toBe(false);
+    expect(f.writes()).toEqual([]);
+  });
+  it('keeps the Cargo duplicate key stable across fresh immutable configuration directories', async () => {
+    const f = fixture(); f.run.mockImplementation(async () => {
+      const run = cargoEvidence();
+      run.cargoDependencies!.configSha256 = createHash('sha256').update(String(f.run.mock.calls.length)).digest('hex');
+      const { receiptSha256: _digest, ...payload } = run.cargoDependencies!;
+      run.cargoDependencies!.receiptSha256 = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+      return run;
+    });
+    expect((await verifyMaintainerPr(input, f.deps)).ok).toBe(true);
+    expect((await verifyMaintainerPr(input, f.deps)).ok).toBe(true);
+    expect(f.writes()).toHaveLength(1);
+  });
   it('posts the real confined multi-commit head without manufacturing fleet provenance', async () => {
     const f = fixture();
     const result = await verifyMaintainerPr(input, f.deps);

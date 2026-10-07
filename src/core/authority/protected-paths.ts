@@ -111,6 +111,7 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   // Maintainer intake and exact-tree verification decide App acceptance too.
   'src/core/fleet/maintainer-pr-verification.ts',
   'src/core/fleet/maintainer-pr-runner.ts',
+  'src/core/fleet/maintainer-cargo-dependencies.ts',
   'src/cli/maintainer-verify.ts',
   // 3.13: signs provenance for cloud PRs it ingests into the standing pass
   'src/core/fleet/cloud-intake.ts',

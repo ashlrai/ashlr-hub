@@ -86,6 +86,7 @@ export const AUTHORITY_SURFACE_ROOTS = Object.freeze([
   'dist/cli/maintainer-verify.js',
   'dist/core/fleet/maintainer-pr-verification.js',
   'dist/core/fleet/maintainer-pr-runner.js',
+  'dist/core/fleet/maintainer-cargo-dependencies.js',
   'dist/core/fleet/host-merge.js',
   'dist/core/fleet/post-merge-watch.js',
   'dist/core/fleet/quarantine.js',

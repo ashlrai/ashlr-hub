@@ -14,6 +14,7 @@ import { withRepoLease, withVerificationSlot } from '../sandbox/execution-leases
 import { mirrorLeaseKey } from './mirrors.js';
 import type { MaintainerPrPins, MaintainerRunEvidence } from './maintainer-pr-verification.js';
 import { runSafeGitSync, verifyGitTarget, type SafeGitTarget } from '../sandbox/safe-git.js';
+import { needsMaintainerCargo, prepareMaintainerCargoDependencies, type MaintainerCargoAttachment } from './maintainer-cargo-dependencies.js';
 
 const OID = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -38,10 +39,12 @@ interface RunnerDependencies {
   runCommand: typeof runVerifyCommandAsync;
   lease: <T>(repo: string, fn: () => Promise<T>, signal?: AbortSignal) => Promise<T>;
   slot: <T>(repo: string, fn: () => Promise<T>, signal?: AbortSignal) => Promise<T>;
+  prepareCargo: typeof prepareMaintainerCargoDependencies;
 }
 const defaults: RunnerDependencies = {
   openConfinement: openStandingVerificationConfinement,
   runCommand: runVerifyCommandAsync,
+  prepareCargo: prepareMaintainerCargoDependencies,
   lease: async (repo, fn, signal) => {
     const result = await withRepoLease(mirrorLeaseKey(repo), fn, { signal });
     if (!result.ok) throw new Error(`repository lease unavailable: ${result.reason}`);
@@ -172,6 +175,7 @@ export async function runMaintainerPr(input: MaintainerRunInput, _deps: Partial<
   let scratch: string | null = null;
   let worktree: string | null = null;
   let confined: Awaited<ReturnType<typeof openStandingVerificationConfinement>> = null;
+  let cargo: MaintainerCargoAttachment | null = null;
   try {
     if (![input.diffSha256, input.contractSha256].every((digest) => DIGEST.test(digest)) || !OID.test(input.mergeBaseSha)) throw new Error('invalid verification binding');
     await deps.slot(input.mirrorPath, async () => {
@@ -189,14 +193,23 @@ export async function runMaintainerPr(input: MaintainerRunInput, _deps: Partial<
         git(input.mirrorPath, ['worktree', 'add', '--detach', worktree!, input.headSha]);
         recordScratchTarget(input.mirrorPath, worktree!);
       }, input.signal);
-      confined = await deps.openConfinement(worktree!);
+      if (needsMaintainerCargo(prepared.expectedCommands)) {
+        cargo = await deps.prepareCargo({ worktree: worktree!, sourceTree: input.treeSha, signal: input.signal, assertAuthorized: input.assertAuthorized });
+        result.cargoDependencies = cargo.receipt;
+        result.dependenciesRemoved = false;
+        await input.assertAuthorized();
+        if (input.signal?.aborted) throw new Error('verification cancelled');
+      }
+      confined = await deps.openConfinement(worktree!, cargo ? { cargoAttachment: cargo } : {});
       if (!confined) throw new Error('required verification confinement is unavailable');
       for (const command of prepared.expectedCommands) {
         if (input.signal?.aborted) throw new Error('verification cancelled');
         await input.assertAuthorized();
+        cargo?.assertCurrent(worktree!);
         const startedAt = new Date().toISOString(); const started = performance.now();
         const commandResult = await deps.runCommand(command, worktree!, input.cfg, { signal: input.signal, _runSubprocess: confined.runSubprocess });
         executed.push({ command, result: commandResult, startedAt, durationMs: performance.now() - started, outputSha256: hash(commandResult.output) });
+        cargo?.assertCurrent(worktree!);
         if (!commandResult.ok) throw new Error(`required command failed: ${command.id ?? command.kind}`);
       }
       await input.assertAuthorized();
@@ -213,6 +226,9 @@ export async function runMaintainerPr(input: MaintainerRunInput, _deps: Partial<
   } finally {
     try { (confined as Awaited<ReturnType<typeof openStandingVerificationConfinement>>)?.close(); }
     catch (error) { result.ok = false; result.reason = `confinement cleanup failed: ${scrubSecrets(error instanceof Error ? error.message : String(error))}`; }
+    try {
+      if (cargo) { (cargo as MaintainerCargoAttachment).close(); result.dependenciesRemoved = true; }
+    } catch (error) { result.ok = false; result.reason = `dependency cleanup failed: ${scrubSecrets(error instanceof Error ? error.message : String(error))}`; }
     try {
       if (worktree && !result.worktreeRemoved) await deps.lease(input.mirrorPath, async () => {
         removeScratchWorktree(input.mirrorPath, worktree!); result.worktreeRemoved = true;

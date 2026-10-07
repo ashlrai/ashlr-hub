@@ -147,6 +147,7 @@
 /src/core/fleet/verify-check-run.ts @masonwyatt23
 /src/core/fleet/maintainer-pr-verification.ts @masonwyatt23
 /src/core/fleet/maintainer-pr-runner.ts @masonwyatt23
+/src/core/fleet/maintainer-cargo-dependencies.ts @masonwyatt23
 /src/cli/maintainer-verify.ts @masonwyatt23
 /src/core/fleet/cloud-intake.ts @masonwyatt23
 /src/core/fleet/post-merge-watch.ts @masonwyatt23
@@ -688,6 +689,7 @@
 /test/m97.setup-wizard-authority-isolation.test.ts @masonwyatt23
 /test/m97.setup-wizard.test.ts @masonwyatt23
 /test/m98.cross-platform-confine.test.ts @masonwyatt23
+/test/maintainer-cargo-dependencies.test.ts @masonwyatt23
 /test/maintainer-pr-runner.test.ts @masonwyatt23
 /test/maintainer-pr-verification.test.ts @masonwyatt23
 /test/maintainer-verify-cli.test.ts @masonwyatt23

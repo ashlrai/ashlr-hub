@@ -881,9 +881,26 @@ record base/head/tree/merge-base/diff/contract/policy bindings and real command
 timings. They are local evidence, not signed producer provenance or an importable
 authorization. Saved JSON cannot create a green check. Duplicate checks are
 recognized only after a fresh successful verification and current pin checks.
+New maintainer receipts use version 2; older version-1 files remain historical
+evidence and do not authorize dependency attachment or check publication.
+
+For base-derived Cargo commands on supported macOS/Linux hosts, the runner
+requires a locally installed exact `rust-toolchain.toml` version and a Cargo
+lockfile containing only workspace packages and checksum-bound crates.io
+packages. It parses manifests and rejects escaping paths, symlinks, Git/custom
+sources and repository/ancestor Cargo configuration before preparation. The
+host runs official `cargo vendor --locked` with an isolated credential-free
+Cargo home; only source materialization can contact the public registry.
+Candidate build scripts never execute during that host preparation.
+The actual candidate commands retain kernel network denial and use private,
+read-only vendored sources and source-replacement configuration outside every
+writable directory. The receipt binds exact input, lock, tool executable,
+vendor and configuration digests; source/dependency drift and failed cleanup
+withhold the App check. The full host Cargo cache is never granted to candidates.
+Windows Cargo preparation and unsupported source recipes fail closed.
 
 Exit 0 confirms the exact App check; exit 1 withholds verification; exit 2 means
-invalid arguments. Missing dependencies or tool caches under confinement remain
+invalid arguments. Unsupported dependencies or unavailable pinned toolchains remain
 infrastructure failures. Do not retry with weaker confinement or convert local
 builds into a successful App check. After correcting a stale base, failed check
 or unavailable toolchain, review the new exact head and invoke the command

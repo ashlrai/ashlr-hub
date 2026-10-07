@@ -2417,7 +2417,7 @@ export function confinedWorkspaceBins(
  */
 export async function openStandingVerificationConfinement(
   worktree: string,
-  opts: { readOnlyPaths?: readonly string[] } = {},
+  opts: { readOnlyPaths?: readonly string[]; cargoAttachment?: import('../fleet/maintainer-cargo-dependencies.js').MaintainerCargoAttachment } = {},
 ): Promise<StandingVerificationConfinement | null> {
   let live: boolean;
   try {
@@ -2452,13 +2452,24 @@ export async function openStandingVerificationConfinement(
     runTmpDir = realpathSync(mkdtempSync(join(parent, 'verify-confine-')));
     chmodSync(runTmpDir, 0o700);
     const base = overlayMod.buildAutonomousEnvOverlay({ engine: 'local', runTmpDir, home, seatId: null });
+    const cargo = opts.cargoAttachment;
+    if (cargo) {
+      const { requireMaintainerCargoAttachment } = await import('../fleet/maintainer-cargo-dependencies.js');
+      requireMaintainerCargoAttachment(cargo);
+      cargo.assertCurrent(worktree);
+      // Configuration is OUTSIDE every writable directory. A read grant alone
+      // does not protect a file underneath a writable ancestor.
+      if (base.writablePaths.some((path) => isInsideDir(cargo.cargoHome, path) || isInsideDir(cargo.vendor, path)) ||
+          isInsideDir(cargo.cargoHome, worktree) || isInsideDir(cargo.vendor, worktree)) throw new VerificationConfinementError('Cargo attachment overlaps writable source/cache');
+    }
     const toolchain = nodeToolchainPrefix(home, base.deniedReadPaths);
     const readOnly = [...base.readOnlyPaths];
     // The caller's grants that survived the checks below (real paths): the
     // only dirs outside the worktree a workspace bin entry may resolve into.
     const callerGrants: string[] = [];
-    const callerPaths = new Set(opts.readOnlyPaths ?? []);
-    for (const p of [...(toolchain ? [toolchain] : []), ...(opts.readOnlyPaths ?? [])]) {
+    const cargoPaths = cargo ? [cargo.cargoHome, cargo.vendor, cargo.toolchainBin] : [];
+    const callerPaths = new Set([...(opts.readOnlyPaths ?? []), ...cargoPaths]);
+    for (const p of [...(toolchain ? [toolchain] : []), ...(opts.readOnlyPaths ?? []), ...cargoPaths]) {
       const real = realpathOrNull(p);
       if (!real) continue;
       // A re-allowed read may never reach a protected directory (the profile's
@@ -2480,6 +2491,7 @@ export async function openStandingVerificationConfinement(
       set: Object.freeze({
         ...base.set,
         ...(toolchain ? { PATH: `${join(toolchain, 'bin')}${delimiter}${base.set['PATH'] ?? ''}` } : {}),
+        ...(cargo ? { CARGO_HOME: cargo.cargoHome, CARGO_NET_OFFLINE: 'true', RUSTC: join(cargo.toolchainBin, 'rustc'), RUSTDOC: join(cargo.toolchainBin, 'rustdoc') } : {}),
       }),
     };
     const launcher = confine.buildSandboxLauncher(confine.autonomousVerificationProfile(), {
@@ -2496,6 +2508,14 @@ export async function openStandingVerificationConfinement(
       const workspaceBins = confinedWorkspaceBins(subprocessOpts.env['PATH'] ?? '', worktree, worktreeReal, callerGrants);
       const env = overlayMod.applyAutonomousEnvOverlay(subprocessOpts.env, overlay);
       env['PATH'] = [...workspaceBins, overlay.set['PATH'] ?? ''].filter(Boolean).join(delimiter);
+      if (cargo) {
+        cargo.assertCurrent(worktree);
+        // Inherited source/config/wrapper variables cannot replace this pinned
+        // toolchain or immutable source config. Candidate PATH bins come last.
+        for (const key of Object.keys(env)) if (/^(?:CARGO_|RUST|CC$|CXX$|CFLAGS$|CXXFLAGS$|AR$)/i.test(key)) delete env[key];
+        Object.assign(env, { CARGO_HOME: cargo.cargoHome, CARGO_NET_OFFLINE: 'true', RUSTC: join(cargo.toolchainBin, 'rustc'), RUSTDOC: join(cargo.toolchainBin, 'rustdoc') });
+        env['PATH'] = [cargo.toolchainBin, env['PATH'] ?? ''].join(delimiter);
+      }
       return runVerifySubprocessAsync([launcher.bin, ...launcher.prefixArgs, ...argv], { ...subprocessOpts, env });
     };
     return { runSubprocess, close };
