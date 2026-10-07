@@ -145,6 +145,9 @@
 /src/core/fleet/standing-merge-pass.ts @masonwyatt23
 /src/core/fleet/fleet-merge-state.ts @masonwyatt23
 /src/core/fleet/verify-check-run.ts @masonwyatt23
+/src/core/fleet/maintainer-pr-verification.ts @masonwyatt23
+/src/core/fleet/maintainer-pr-runner.ts @masonwyatt23
+/src/cli/maintainer-verify.ts @masonwyatt23
 /src/core/fleet/cloud-intake.ts @masonwyatt23
 /src/core/fleet/post-merge-watch.ts @masonwyatt23
 /src/core/fleet/quarantine.ts @masonwyatt23
@@ -684,6 +687,9 @@
 /test/m97.setup-wizard-authority-isolation.test.ts @masonwyatt23
 /test/m97.setup-wizard.test.ts @masonwyatt23
 /test/m98.cross-platform-confine.test.ts @masonwyatt23
+/test/maintainer-pr-runner.test.ts @masonwyatt23
+/test/maintainer-pr-verification.test.ts @masonwyatt23
+/test/maintainer-verify-cli.test.ts @masonwyatt23
 /test/mcp-firm-resources.test.ts @masonwyatt23
 /test/merge-gates-310b.test.ts @masonwyatt23
 /test/mirror-sibling-deps-314.test.ts @masonwyatt23
