@@ -18,6 +18,11 @@
   "web": [
     { "file": "src/web-ui/routes/verse/sections/ChatSection.first-paint.test.tsx", "why": "the chat first-paint path stays statically lean (pairs with the first-paint budget step)" },
     { "file": "src/web-ui/routes/verse/VerseApp.first-paint.test.ts", "why": "VerseApp does not pull deferred modules onto first paint" },
-    { "file": "src/web-ui/routes/verse/VerseApp.test.tsx", "why": "the Verse app shell renders" }
+    { "file": "src/web-ui/routes/verse/VerseApp.test.tsx", "why": "the Verse app shell renders" },
+    { "file": "src/web-ui/design/control-density.test.ts", "why": "control heights follow density tokens; file-reading CSS assertions are invisible to import-based related selection" },
+    { "file": "src/web-ui/design/ui-scale.test.ts", "why": "display size composes with density and retains native titlebar clearance" },
+    { "file": "src/web-ui/design/style-scan-310.test.ts", "why": "listed modern UI styles use token colors and font sizes, including source files read as text" },
+    { "file": "src/web-ui/design/micro-label-font.test.ts", "why": "uppercase micro-labels follow the selected display font across stylesheets" },
+    { "file": "src/web-ui/design/tokens-contrast.test.ts", "why": "shared design tokens retain accessibility contrast in both themes" }
   ]
 }

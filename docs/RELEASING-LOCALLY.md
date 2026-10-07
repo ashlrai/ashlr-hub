@@ -82,6 +82,10 @@ file, runs that suite in full. Logs, the eslint cache and vitest JSON reports go
 `--json` prints a machine-readable result instead of the table.
 
 The import graph cannot see a test that reads a changed file as text instead of importing it.
+The web smoke set explicitly includes the existing density, UI-scale, style-token,
+micro-label-font and theme-contrast modules because they read stylesheet/token files.
+These fast design contracts run alongside the shell checks even when related selection
+cannot discover them. They do not cover every file-reading test.
 Use **`npm run gate:full`** to diagnose such changes when you are not running
 `prepublishOnly`; it runs the same static checks plus every backend and web test.
 The release `prepublishOnly` run already covers every test, so running both duplicates work.
