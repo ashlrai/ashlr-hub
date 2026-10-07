@@ -1573,7 +1573,7 @@ fn build_tab_window(
     let title_app = app.clone();
 
     let mut builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
-        .title("Ashlr browser")
+        .title("Phantom browser")
         .decorations(false)
         .resizable(false)
         .skip_taskbar(true)

@@ -348,7 +348,7 @@ fn register_hotkeys(app: &AppHandle) {
         inner.hotkey_registered = failures.is_empty();
         inner.hotkey_error = (!failures.is_empty()).then(|| {
             format!(
-                "Another app is already using {}. The mic button still works; quit that app or change its shortcut, then relaunch Ashlr.",
+                "Another app is already using {}. The mic button still works; quit that app or change its shortcut, then relaunch Phantom.",
                 failures.join(" and ")
             )
         });
@@ -549,7 +549,7 @@ fn start(
                         &asked,
                         None,
                         ErrorCode::MicDenied,
-                        "Microphone access was declined. Allow Ashlr in System Settings ▸ Privacy & Security ▸ Microphone.",
+                        "Microphone access was declined. Allow Phantom in System Settings ▸ Privacy & Security ▸ Microphone.",
                     );
                 }
                 emit_state(&asked);
@@ -572,7 +572,7 @@ fn start(
                 app,
                 Some(&id),
                 ErrorCode::MicDenied,
-                "Ashlr is not allowed to use the microphone. Turn it on in System Settings ▸ Privacy & Security ▸ Microphone.",
+                "Phantom is not allowed to use the microphone. Turn it on in System Settings ▸ Privacy & Security ▸ Microphone.",
             );
             return abandon(app, hub);
         }
@@ -590,7 +590,7 @@ fn start(
                 app,
                 Some(&id),
                 ErrorCode::NoUsageDescription,
-                "This Ashlr build cannot ask for the microphone yet. Reinstall it with `npm run ship:local -- --native`.",
+                "This Phantom build cannot ask for the microphone yet. Reinstall it with `npm run ship:local -- --native`.",
             );
             return abandon(app, hub);
         }

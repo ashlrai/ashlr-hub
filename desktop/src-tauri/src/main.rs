@@ -945,7 +945,7 @@ fn start_sequence(handle: AppHandle) {
             thread::sleep(Duration::from_millis(PORT_PROBE_MS));
         }
         sidecar_guard::Reclaim::OwnedByLiveApp => eprintln!(
-            "[ashlr-desktop] another Ashlr window already owns the sidecar on {SERVE_PORT}"
+            "[ashlr-desktop] another Phantom window already owns the sidecar on {SERVE_PORT}"
         ),
         sidecar_guard::Reclaim::StaleRecordCleared | sidecar_guard::Reclaim::NothingRecorded => {}
     }
@@ -994,9 +994,9 @@ fn sweep_orphans() {
     for (pid, port) in &report.foreign {
         match port {
             Some(port) => eprintln!(
-                "[ashlr-desktop] note: another Ashlr server is running (pid {pid}, port {port}) — not ours, left running"
+                "[ashlr-desktop] note: another Phantom server is running (pid {pid}, port {port}) — not ours, left running"
             ),
-            None => eprintln!("[ashlr-desktop] note: another Ashlr server is running (pid {pid}) — not ours, left running"),
+            None => eprintln!("[ashlr-desktop] note: another Phantom server is running (pid {pid}) — not ours, left running"),
         }
     }
     if !report.reaped.is_empty() {
@@ -2400,7 +2400,7 @@ fn main() {
         .setup(setup)
         .on_window_event(on_window_event)
         .build(tauri::generate_context!())
-        .expect("error building Ashlr desktop app");
+        .expect("error building Phantom desktop app");
 
     app.run(|handle, event| match event {
         // Every quit path lands here: ⌘Q, the app menu, the tray, or a signal.
