@@ -3,9 +3,10 @@
  * Usage (3.15): nothing on a server without the route; "Not set up" when
  * unkeyed; today's decisions, confidence and the estimate when on.
  */
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { evictAll } from '../../../data/cache.js';
+import { evictAll, refetchQuery } from '../../../data/cache.js';
+import { jevQuery } from '../jev/jev-queries.js';
 import { JevResource } from './JevResource.js';
 import { JevPanel } from '../jev/JevPanel.js';
 import { narrowJevResponse, jevEvidenceLines, jevHeadline, formatUsd } from '../jev/jev-model.js';
@@ -88,7 +89,32 @@ describe('JevPanel', () => {
     const row = container.querySelector('[data-jev-kind="operator-intent"]');
     expect(row?.textContent).toContain('33%');
     expect(row?.textContent).toContain('0.86');
+    expect(screen.getByRole('figure', { name: 'Jev response time today' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'operator-intent · 2 calls: 350 ms' })).toBeInTheDocument();
   });
+
+  it('retains measured history when a refresh fails rather than drawing a zero', async () => {
+    render(<JevPanel />);
+    await screen.findByRole('figure', { name: 'Jev response time today' });
+    vi.mocked(fetch).mockResolvedValueOnce(json({ error: 'read session expired' }, 401));
+    await act(async () => { await refetchQuery(jevQuery.key, () => jevQuery.fetch(), true); });
+    expect(screen.getByText('Refresh unavailable · showing the last snapshot.')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'engine-error · 3 calls: 400 ms' })).toBeInTheDocument();
+  });
+
+  it('keeps an unavailable server route absent and an unrecognized response explicit', async () => {
+    body = 404;
+    const first = render(<JevPanel />);
+    await act(async () => { await refetchQuery(jevQuery.key, () => jevQuery.fetch(), true); });
+    expect(screen.queryByRole('figure')).toBeNull();
+    first.unmount();
+    evictAll();
+    body = { generatedAt: 'x', status: status({ callsToday: 'many' }), kinds: [] };
+    render(<JevPanel />);
+    expect(await screen.findByText(/Unrecognized response — update Phantom/)).toBeInTheDocument();
+    expect(screen.queryByRole('figure')).toBeNull();
+  });
+
 });
 
 describe('jev-model', () => {
