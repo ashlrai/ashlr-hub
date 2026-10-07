@@ -225,7 +225,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node --test .github/tests/desktop-update-finalizer.test.mjs .github/tests/ci-pack-smoke.test.mjs .github/tests/first-paint-built.test.mjs .github/tests/ci-qualification-lane.test.mjs .github/tests/ci-attestation-inputs.test.mjs .github/tests/hosted-build-artifact.test.mjs .github/tests/hosted-native-build.test.mjs
+          node --test .github/tests/ci-pack-smoke.test.mjs .github/tests/desktop-update-finalizer.test.mjs .github/tests/first-paint-built.test.mjs .github/tests/ci-qualification-lane.test.mjs .github/tests/ci-attestation-inputs.test.mjs .github/tests/hosted-build-artifact.test.mjs .github/tests/hosted-native-build.test.mjs
           snapshot="$(node .github/scripts/ci-pack-smoke.mjs capture "$RUNNER_TEMP")"
           printf 'ASHLR_PACK_SMOKE_SNAPSHOT=%s\n' "$snapshot" >> "$GITHUB_ENV"
           npm run check:first-paint:built
