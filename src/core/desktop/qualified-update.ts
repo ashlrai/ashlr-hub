@@ -249,6 +249,11 @@ interface TransactionModule {
   removeCreatedAliases(aliases: unknown[], io: TransactionIo): void;
   launchedAppIsOwned(io: TransactionIo): boolean;
 }
+/** Load only this installed Node package's disk helper; a SEA has no package root. */
+export async function loadInstalledDesktopTransaction(root: string): Promise<TransactionModule> {
+  if (!root || root !== runningPackageRoot()) hold('unsupported-installed-runtime');
+  return await import(pathToFileURL(join(root, 'scripts', 'local-app-transaction.mjs')).href) as TransactionModule;
+}
 function privateParents(home: string, path: string): void {
   if (!path.startsWith(home + '/')) hold('unsafe-installation-path');
   directory(home, false); let at = home;
@@ -275,7 +280,7 @@ function verifyAppReleaseRecord(appRoot: string, manifest: UpdateManifest, read?
 async function installPairedUpdate(stageId: string, staged: ReturnType<typeof readStage>, deps: DesktopUpdateDependencies, expected: UpdateAdmission): Promise<DesktopUpdateState> {
   const root = deps.packageRoot!;
   // Only the already-running compiled package supplies the transaction implementation.
-  const helper = deps.transaction ? await deps.transaction() : await import(pathToFileURL(join(root, 'scripts', 'local-app-transaction.mjs')).href) as TransactionModule;
+  const helper = deps.transaction ? await deps.transaction() : await loadInstalledDesktopTransaction(root);
   const io = helper.createLocalAppTransactionIo({packageRoot: root, home: deps.home});
   io.log = () => {}; // native receives only bounded typed progress/results, never private paths
   const current = join(deps.home, '.local', 'share', 'ashlr', 'current');
@@ -392,7 +397,7 @@ export async function readQualifiedDesktopUpdateResult(stageId: string, deps: De
     const identity = parseBuildIdentity(installedBytes(join(root, 'dist', 'build-identity.json'), 64 * 1024).toString('utf8'));
     const surface = verifyAuthoritySurfaceAt(root, 'installed', {fresh: true});
     if (!identity || identity.dirty || identity.provenance !== 'git' || identity.revision !== manifest.source.revision || identity.packageVersion !== version || !surface.ok || surface.digest !== manifest.authoritySurfaceDigest) hold('installed-current-unverified');
-    const helper = deps.transaction ? await deps.transaction() : await import(pathToFileURL(join(root, 'scripts', 'local-app-transaction.mjs')).href) as TransactionModule;
+    const helper = deps.transaction ? await deps.transaction() : await loadInstalledDesktopTransaction(root);
     const io = helper.createLocalAppTransactionIo({packageRoot: root, home: deps.home});
     const app = helper.selectLocalApp(manifest.app.signer, io);
     if (!app || app.path !== '/Applications/Phantom.app' || app.inventory !== manifest.app.inventorySha256) hold('installed-app-unverified');
@@ -467,7 +472,7 @@ export function createDesktopUpdateDependencies(trust: UpdateTrust | null): Desk
       const executable = spawnSync('/bin/ps', ['-p', String(parent.pid), '-o', 'comm='],
         {encoding: 'utf8', timeout: 2000, maxBuffer: 16 * 1024, env: {PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C'}});
       if (executable.error || executable.status !== 0 || executable.stdout.trim() !== parent.executable) return false;
-      const helper = await import(pathToFileURL(join(root, 'scripts', 'local-app-transaction.mjs')).href) as TransactionModule;
+      const helper = await loadInstalledDesktopTransaction(root);
       const io = helper.createLocalAppTransactionIo({packageRoot: root, home: userInfo().homedir});
       const deadline = Date.now() + 6500;
       io.exec = (command: string, argv: string[]) => {

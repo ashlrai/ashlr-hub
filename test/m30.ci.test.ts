@@ -146,7 +146,7 @@ describe('M30 CI workflow', () => {
     expect(qualificationLane).toContain('length: 14');
   });
 
-  it('runs the same five whole release preflight modules before the existing Mac builds', () => {
+  it('runs whole release and source contracts before the existing Mac builds', () => {
     expect(pkg.scripts?.['check:release']).toBe([
       'npm run test:ci -- --maxWorkers=1 --fileParallelism=false',
       'test/m515.release-publish-authority-split.test.ts',
@@ -154,6 +154,8 @@ describe('M30 CI workflow', () => {
       'test/authority-release-truth.test.ts',
       'test/m33.release-meta.test.ts',
       'test/cli-registry-drift.test.ts',
+      'test/authority-tier1-closure-310b.test.ts',
+      'test/sidecar-literal-imports-315.test.ts',
     ].join(' '));
     expect(ciYml.match(/run: npm run check:release/g)).toHaveLength(2);
     for (const [id, condition] of [
@@ -677,6 +679,8 @@ describe('M30 CI workflow', () => {
       ...Array<string>(2).fill('test/authority-release-truth.test.ts'),
       ...Array<string>(2).fill('test/m33.release-meta.test.ts'),
       ...Array<string>(2).fill('test/cli-registry-drift.test.ts'),
+      ...Array<string>(2).fill('test/authority-tier1-closure-310b.test.ts'),
+      ...Array<string>(2).fill('test/sidecar-literal-imports-315.test.ts'),
       ...Array<string>(4).fill('test/m342.dispatch-production-ledger.test.ts'),
     ].sort());
     expect(windowsPortabilityThree).toContain('--reporter=dot');
@@ -709,6 +713,8 @@ describe('M30 CI workflow', () => {
       'test/authority-release-truth.test.ts',
       'test/m33.release-meta.test.ts',
       'test/cli-registry-drift.test.ts',
+      'test/authority-tier1-closure-310b.test.ts',
+      'test/sidecar-literal-imports-315.test.ts',
     ].sort());
     expect(windowsEntries.match(/test\/m395\.effect-terminal-retention\.test\.ts/g)).toHaveLength(
       1,

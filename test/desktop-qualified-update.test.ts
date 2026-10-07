@@ -9,8 +9,10 @@ import { Header, type HeaderData } from 'tar';
 import { canonicalJson } from '../src/core/authority/canonical-json.js';
 import { applyQualifiedDesktopUpdate, desktopUpdateStagePath, downloadQualifiedUpdateArtifact,
   inspectQualifiedDesktopUpdate, inspectSignedAppArchive, readQualifiedDesktopUpdateResult,
+  loadInstalledDesktopTransaction,
   type DesktopUpdateDependencies, type UpdateAdmission } from '../src/core/desktop/qualified-update.js';
 import { authoritySurfaceDigest } from '../src/core/authority/surface.js';
+import * as authoritySurface from '../src/core/authority/surface.js';
 import type { UpdateManifest, UpdateTrust } from '../src/core/desktop/update-manifest.js';
 
 const roots: string[] = [];
@@ -261,6 +263,31 @@ describe('unsupported installed host refusal',()=>{
       now:noRead,sleep:async()=>noRead(),download:async()=>noRead()};
     expect(inspectQualifiedDesktopUpdate('a'.repeat(32),deps)).toMatchObject({state:'blocked',reason:'unsupported-installed-runtime'});
     expect(await applyQualifiedDesktopUpdate('a'.repeat(32),deps)).toMatchObject({state:'blocked',reason:'unsupported-installed-runtime'});
+  });
+});
+describe('fixed installed Node transaction helper',()=>{
+  function diskHelper() {
+    const root=fs.realpathSync(fs.mkdtempSync(join(tmpdir(),'update-disk-helper-')));roots.push(root);
+    fs.mkdirSync(join(root,'scripts'));
+    const marker=`fixed-helper-${root}`;
+    fs.writeFileSync(join(root,'scripts/local-app-transaction.mjs'),
+      `globalThis[${JSON.stringify(marker)}] = true; export function createLocalAppTransactionIo(options) { return options; }`);
+    return {root,marker};
+  }
+  it('loads the fixed helper from the actual running disk package',async()=>{
+    const f=diskHelper();const running=vi.spyOn(authoritySurface,'runningPackageRoot').mockReturnValue(f.root);
+    try {
+      const helper=await loadInstalledDesktopTransaction(f.root);
+      expect(helper.createLocalAppTransactionIo({packageRoot:f.root,home:f.root})).toEqual({packageRoot:f.root,home:f.root});
+      expect(Reflect.get(globalThis,f.marker)).toBe(true);
+    } finally {running.mockRestore();Reflect.deleteProperty(globalThis,f.marker);}
+  });
+  it.each(['no-disk-package','different-running-package'])('refuses %s before executing helper code',async shape=>{
+    const f=diskHelper();const running=vi.spyOn(authoritySurface,'runningPackageRoot').mockReturnValue(shape==='no-disk-package'?null:join(f.root,'other'));
+    try {
+      await expect(loadInstalledDesktopTransaction(f.root)).rejects.toThrow('unsupported-installed-runtime');
+      expect(Reflect.get(globalThis,f.marker)).toBeUndefined();
+    } finally {running.mockRestore();Reflect.deleteProperty(globalThis,f.marker);}
   });
 });
 describe('strict signed app archive interpretation',()=>{
