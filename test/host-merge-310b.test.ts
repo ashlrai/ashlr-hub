@@ -10,7 +10,8 @@
  * REAL-IO (spawns git through the fake): belongs in the real-io lane —
  * requested in the U3 report (test/config/realio-lane-membership.mjs).
  */
-import { unlinkSync } from 'node:fs';
+import { HUB_REPOSITORY_IDENTITY as hub, isHubRepositoryLabel } from '../src/core/authority/repository-binding.js';
+import { rmSync, unlinkSync } from 'node:fs';
 import { outwardMutationFencePath } from '../src/core/sandbox/mutation-fence.js';
 import { createHash } from 'node:crypto';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -63,7 +64,12 @@ beforeAll(() => {
 
 afterEach(() => {
   for (const scratch of scratches) closeGitScratch(scratch);
-  for (const fake of fakes) fake.dispose();
+  for (const fake of fakes) {
+    fake.dispose();
+    // The current-identity cases reuse the SAME reviewed repo name. The fake
+    // disposes its origin but leaves its HOME-isolated canonical mirror.
+    rmSync(fake.mirror, { recursive: true, force: true });
+  }
   fakes = [];
   scratches = [];
 });
@@ -78,14 +84,24 @@ interface Harness {
 
 function harness(opts: ConstructorParameters<typeof FakeGithub>[0] = {}): Harness {
   counter++;
-  const repo = `ashlrai/canary-hm${counter}`;
+  const repo = opts.repo ?? `ashlrai/canary-hm${counter}`;
   const fake = new FakeGithub({ repo, ...opts });
   fakes.push(fake);
   const ledger = new MemoryLedger();
   const kill = { on: false };
   const policy = standingPolicy([repoPolicy(repo)]);
   const deps: HostMergeDeps = {
-    transport: fake.transport,
+    transport: async (call) => {
+      const reply = await fake.transport(call);
+      if (!isHubRepositoryLabel(repo) || reply.status !== 200 && reply.status !== 201) return reply;
+      const metadata = { full_name: repo, id: hub.repositoryId, node_id: hub.repositoryNodeId, owner: { id: hub.ownerId, login: hub.ownerLogin }, default_branch: hub.defaultBranch, private: false, visibility: 'public' };
+      if (call.method === 'GET' && call.path === `/repos/${repo}`) return { ...reply, body: metadata };
+      const withBase = (body: unknown) => {
+        if (!body || typeof body !== 'object' || !('base' in body)) return body;
+        return { ...body, base: { ...(body.base as object), repo: metadata } };
+      };
+      return { ...reply, body: Array.isArray(reply.body) ? reply.body.map(withBase) : withBase(reply.body) };
+    },
     token: async () => ({ token: 'ghs_test_installation_token', expiresAt: null }),
     nowMs: () => Date.now(),
     sleep: async () => undefined,
@@ -124,7 +140,7 @@ async function openChange(h: Harness, key = `p-${counter}`, ownerLane = false) {
   const opened = await openFleetPr({
     repo: h.repo,
     branch,
-    baseBranch: 'main',
+    baseBranch: h.fake.defaultBranch,
     headSha: published.headSha,
     baseSha: base,
     treeSha: tree,
@@ -444,6 +460,71 @@ describe('the SHA-pinned merge through the revocation protocol', () => {
       expect(state.merge).toMatchObject({ phase: 'failed', error: 'merge request not sent' });
     },
   );
+
+  it.each(['blob', 'ref', 'PR', 'close', 'reopen'] as const)('refuses Stop and policy changes during deferred metadata before %s contact', async (effect) => {
+    for (const revoke of ['Stop', 'policy'] as const) {
+      const h = harness({ repo: hub.legacyName, defaultBranch: hub.defaultBranch });
+      const { state, base, tree, head, diff } = await openChange(h);
+      if (effect === 'reopen') expect((await closeFleetPr({ repo: h.repo, number: state.pr!.number, reason: 'fixture preparation', actor: 'leader' }, h.deps)).ok).toBe(true);
+      const branch = `ashlr/fleet/metadata-${effect}-${counter}`;
+      if (effect === 'PR') h.fake.git(['update-ref', `refs/heads/${branch}`, head]);
+      const scratch = effect === 'blob' || effect === 'ref' ? scratchFor(h.fake) : null;
+      if (scratch) expect(treeForDiff(scratch, base, diff)).toMatchObject({ ok: true, treeSha: tree });
+      const start = h.fake.calls.length;
+      let metadataReads = 0;
+      let writesAtPause = -1;
+      let entered!: () => void;
+      let release!: () => void;
+      const waiting = new Promise<void>((resolve) => { entered = resolve; });
+      const deferred = new Promise<void>((resolve) => { release = resolve; });
+      const transport = h.deps.transport;
+      h.deps.transport = async (call) => {
+        const reply = await transport(call);
+        if (call.method === 'GET' && call.path === `/repos/${h.repo}`) {
+          metadataReads++;
+          const reached = effect === 'PR' ? metadataReads === 2 : effect === 'ref'
+            ? h.fake.calls.slice(start).some((row) => row.method === 'POST' && row.path.endsWith('/git/commits')) : metadataReads === 1;
+          if (reached && writesAtPause < 0) {
+            writesAtPause = h.fake.calls.filter((row) => row.method !== 'GET').length;
+            entered(); await deferred;
+          }
+        }
+        return reply;
+      };
+      const operation = effect === 'blob' || effect === 'ref'
+        ? publishVerifiedTree({ repo: h.repo, branch, baseSha: base, treeSha: tree, scratch: scratch!, commitMessage: 'fixture metadata race' }, h.deps)
+        : effect === 'PR' ? openFleetPr({ repo: h.repo, branch, baseBranch: hub.defaultBranch, headSha: head, baseSha: base, treeSha: tree, title: 'fixture metadata race', body: 'fixture', ownerLane: false, ownerLaneReason: null }, h.deps)
+        : (effect === 'close' ? closeFleetPr : reopenFleetPr)({ repo: h.repo, number: state.pr!.number, reason: 'fixture metadata race', actor: 'leader' }, h.deps);
+      await Promise.race([waiting, operation.then(() => { throw new Error('Operation settled before reaching the deferred metadata boundary.'); })]);
+      if (revoke === 'Stop') h.kill.on = true;
+      else h.deps.policy = () => null;
+      release();
+      expect(await operation).toMatchObject({ ok: false });
+      expect(h.fake.calls.filter((row) => row.method !== 'GET')).toHaveLength(writesAtPause);
+      // Reuse the exact requested identity without leaving its fixture mirror.
+      h.fake.dispose(); rmSync(h.fake.mirror, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['identity', 'Stop', 'unanswered PUT'] as const)('distinguishes fresh metadata from the actual merge contact: %s', async (change) => {
+    const h = harness({ repo: hub.legacyName, defaultBranch: hub.defaultBranch });
+    const { state, head } = await openChange(h);
+    h.fake.greenRequired(head);
+    const transport = h.deps.transport;
+    h.deps.transport = async (call) => {
+      const reply = await transport(call);
+      if (call.method === 'GET' && call.path === `/repos/${h.repo}`) {
+        if (change === 'identity') return { ...reply, body: { ...(reply.body as object), full_name: hub.renamedName } };
+        if (change === 'Stop') h.kill.on = true;
+      }
+      if (change === 'unanswered PUT' && call.method === 'PUT' && call.path.endsWith('/merge')) return { status: 0, body: null };
+      return reply;
+    };
+    const result = await mergeFleetPrPinned(pinnedInput(h, state), h.deps);
+    expect(result).toMatchObject({ ok: false, mergeCalled: change === 'unanswered PUT' });
+    expect(h.fake.mergeCalls()).toHaveLength(change === 'unanswered PUT' ? 1 : 0);
+    expect(state.merge?.phase).toBe(change === 'unanswered PUT' ? 'consumed' : 'failed');
+  });
 
   it('keeps a contacted but unanswered merge consumed and a failed token mint definitely unsent', async () => {
     const h = harness();

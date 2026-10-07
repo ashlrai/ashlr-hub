@@ -5,6 +5,8 @@
  * are evidence, never an input that can authorize a green check.
  */
 import { createHash } from 'node:crypto';
+import { hubRepositoryEffectRefusal } from '../authority/github-repository-admission.js';
+import { isHubRepositoryLabel, requireHubRepositoryMetadata, requireHubRepositoryReference } from '../authority/repository-binding.js';
 import { canonicalizeDaemonActivationValue } from '../daemon/activation-permit.js';
 import type { EffectivePolicy } from '../authority/types.js';
 import type { VerifyCommand, VerifyCommandResult } from '../run/verify-commands.js';
@@ -106,6 +108,10 @@ function requirePolicy(repo: string, deps: MaintainerVerificationDeps): Effectiv
 
 async function request(deps: MaintainerVerificationDeps, repo: string, suffix: string, body?: unknown, beforeDispatch?: () => void): Promise<GithubReply> {
   const token = (await deps.token(repo)).token;
+  if (body !== undefined) {
+    const refusal = await hubRepositoryEffectRefusal(repo, deps.transport, token);
+    if (refusal) return refusal;
+  }
   beforeDispatch?.();
   return deps.transport({ method: body === undefined ? 'GET' : 'POST', path: `/repos/${repo}${suffix}`, token, ...(body === undefined ? {} : { body }) });
 }
@@ -120,6 +126,7 @@ interface Observation { source: MaintainerPrPins; rulesSha256: string; appId: nu
 
 async function observe(repo: string, pr: number, actor: string, deps: MaintainerVerificationDeps): Promise<Observation> {
   const repoBody = object(await read(deps, repo, ''));
+  if (isHubRepositoryLabel(repo)) requireHubRepositoryMetadata(repo, repoBody);
   const defaultBranch = repoBody?.['default_branch'];
   if (repoBody?.['full_name'] !== repo || typeof defaultBranch !== 'string' || !defaultBranch || defaultBranch.length > 200) {
     throw new Error('repository identity or protected base is unavailable');
@@ -131,6 +138,7 @@ async function observe(repo: string, pr: number, actor: string, deps: Maintainer
   const pull = object(await read(deps, repo, `/pulls/${pr}`));
   const base = object(pull?.['base']);
   const head = object(pull?.['head']);
+  if (isHubRepositoryLabel(repo)) requireHubRepositoryReference(repo, base?.['repo']);
   if (pull?.['number'] !== pr || pull?.['state'] !== 'open' || base?.['ref'] !== defaultBranch ||
       object(base?.['repo'])?.['full_name'] !== repo || typeof head?.['sha'] !== 'string' || !SHA.test(head['sha'])) {
     throw new Error('PR is not open against this repository default branch');

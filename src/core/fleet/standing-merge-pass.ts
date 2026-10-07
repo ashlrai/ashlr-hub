@@ -87,6 +87,7 @@ import {
   openGitScratch,
   OWNER_LANE_LABEL,
   policyEpochDigest,
+  githubEffectDispatchGuard,
   publishVerifiedTree,
   readBranchHead,
   readHeadChecks,
@@ -1438,7 +1439,7 @@ async function runG3(
  * (verify-check-run.ts). A failure is noted, never fatal here: G7 decides.
  */
 async function postVerifyCheck(ctx: PassContext, state: FleetMergeStateV1): Promise<VerifyCheckResult> {
-  const result = await ensureFleetVerifyCheck(state, ctx.deps.host);
+  const result = await ensureFleetVerifyCheck(state, { ...ctx.deps.host, beforeDispatch: githubEffectDispatchGuard(state.repo, ctx.deps.host, ctx.policy) });
   if (!result.ok) note(ctx, `${state.repo}#${state.pr?.number ?? '?'}: ashlr/verify not posted (${result.code}): ${result.reason}`);
   return result;
 }

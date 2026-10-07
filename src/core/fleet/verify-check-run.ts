@@ -32,6 +32,7 @@
  * (not retryable); `ashlr authority setup` detects the missing permission and
  * prints where to grant it.
  */
+import { hubRepositoryEffectRefusal } from '../authority/github-repository-admission.js';
 import { createHash } from 'node:crypto';
 
 import { scrubSecrets } from '../util/scrub.js';
@@ -91,7 +92,7 @@ export type VerifyCheckResult =
   | { ok: true; memo: VerifyCheckMemo; action: 'created' | 'updated' | 'unchanged' }
   | { ok: false; code: 'permission' | 'github' | 'invalid'; reason: string; retryable: boolean };
 
-type Deps = Pick<HostMergeDeps, 'transport' | 'token' | 'nowMs'>;
+type Deps = Pick<HostMergeDeps, 'transport' | 'token' | 'nowMs'> & { beforeDispatch?: () => void };
 
 function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
@@ -199,6 +200,11 @@ async function call(deps: Deps, repo: string, method: GithubCall['method'], suff
     return { status: 0, body: { message: `no installation token for ${repo}: ${scrubSecrets(error instanceof Error ? error.message : String(error)).slice(0, 200)}` } };
   }
   try {
+    if (method !== 'GET') {
+      const refusal = await hubRepositoryEffectRefusal(repo, deps.transport, token);
+      if (refusal) return refusal;
+      deps.beforeDispatch?.();
+    }
     return await deps.transport({ method, path: `/repos/${repo}${suffix}`, token, ...(body !== undefined ? { body } : {}) });
   } catch {
     return { status: 0, body: null };

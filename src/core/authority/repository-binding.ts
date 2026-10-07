@@ -24,38 +24,44 @@ export function isHubRepositoryLabel(name: string): boolean {
   return normalized === HUB_REPOSITORY_IDENTITY.legacyName || normalized === HUB_REPOSITORY_IDENTITY.renamedName;
 }
 
-export interface HubRepositoryBinding {
+export interface HubRepositoryReference {
   readonly nameWithOwner: HubRepositoryLabel;
   readonly repositoryId: number;
   readonly repositoryNodeId: string;
   readonly ownerId: number;
   readonly ownerLogin: string;
+}
+
+export interface HubRepositoryBinding extends HubRepositoryReference {
   readonly defaultBranch: string;
 }
 
 const record = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 
-/** Validate a freshly fetched GitHub /repos response; no redirect/alias fallback. */
-export function requireHubRepositoryMetadata(requestedName: string, raw: unknown): Readonly<HubRepositoryBinding> {
+/** Validate the minimal repository identity returned in a PR base reference. */
+export function requireHubRepositoryReference(requestedName: string, raw: unknown): Readonly<HubRepositoryReference> {
   const identity = HUB_REPOSITORY_IDENTITY;
   const repo = record(raw);
   const owner = record(repo?.['owner']);
   if ((requestedName !== identity.legacyName && requestedName !== identity.renamedName)
     || repo?.['full_name'] !== requestedName
     || repo['id'] !== identity.repositoryId || repo['node_id'] !== identity.repositoryNodeId
-    || owner?.['id'] !== identity.ownerId || owner['login'] !== identity.ownerLogin
-    || repo['default_branch'] !== identity.defaultBranch || repo['private'] !== false || repo['visibility'] !== 'public') {
+    || owner?.['id'] !== identity.ownerId || owner['login'] !== identity.ownerLogin) {
     throw new TypeError('Repository metadata does not match the reviewed exact Hub identity.');
   }
-  return Object.freeze({
-    nameWithOwner: requestedName,
-    repositoryId: identity.repositoryId,
-    repositoryNodeId: identity.repositoryNodeId,
-    ownerId: identity.ownerId,
-    ownerLogin: identity.ownerLogin,
-    defaultBranch: identity.defaultBranch,
-  });
+  return Object.freeze({ nameWithOwner: requestedName, repositoryId: identity.repositoryId,
+    repositoryNodeId: identity.repositoryNodeId, ownerId: identity.ownerId, ownerLogin: identity.ownerLogin });
+}
+
+/** Validate a freshly fetched GitHub /repos response; no redirect/alias fallback. */
+export function requireHubRepositoryMetadata(requestedName: string, raw: unknown): Readonly<HubRepositoryBinding> {
+  const reference = requireHubRepositoryReference(requestedName, raw);
+  const repo = record(raw)!;
+  if (repo['default_branch'] !== HUB_REPOSITORY_IDENTITY.defaultBranch || repo['private'] !== false || repo['visibility'] !== 'public') {
+    throw new TypeError('Repository metadata does not match the reviewed exact Hub identity.');
+  }
+  return Object.freeze({ ...reference, defaultBranch: HUB_REPOSITORY_IDENTITY.defaultBranch });
 }
 
 /**

@@ -5,8 +5,12 @@ import {
   githubRepositoryFromRemote,
   isHubRepositoryLabel,
   requireHubRepositoryMetadata,
+  requireHubRepositoryReference,
 } from '../src/core/authority/repository-binding.js';
 import { nameWithOwnerFromRemote, originUrlFromConfig } from '../src/core/fleet/repo-identity.js';
+import { hubRepositoryEffectRefusal, isHubRepositoryApiPath } from '../src/core/authority/github-repository-admission.js';
+import { fetchGithubTransport, readRepoInfo, readPr } from '../src/core/fleet/host-merge.js';
+import type { HostMergeDeps, GithubCall } from '../src/core/fleet/host-merge.js';
 import { isCloudSelfRepo } from '../src/core/cloud/pr-actions.js';
 
 const identity = HUB_REPOSITORY_IDENTITY;
@@ -96,5 +100,52 @@ describe('strict GitHub remote hints', () => {
   ])('refuses deceptive or decorated origin %s', (remote) => {
     expect(githubRepositoryFromRemote(remote)).toBeNull();
     expect(nameWithOwnerFromRemote(remote)).toBeNull();
+  });
+});
+
+
+describe('fresh current-name effect admission', () => {
+  it('accepts a minimal PR base reference without inventing branch/visibility metadata', () => {
+    const { default_branch: _branch, private: _private, visibility: _visibility, ...ref } = metadata();
+    expect(requireHubRepositoryReference(identity.legacyName, ref).repositoryId).toBe(identity.repositoryId);
+    expect(() => requireHubRepositoryMetadata(identity.legacyName, ref)).toThrow(TypeError);
+    expect(() => requireHubRepositoryReference(identity.legacyName, { ...ref, id: identity.repositoryId + 1 })).toThrow(TypeError);
+  });
+
+  it.each([identity.legacyName, identity.renamedName])('freshly observes every effect on %s without a reusable pass', async (repo) => {
+    const calls: GithubCall[] = [];
+    let replacement = false;
+    const transport = async (call: GithubCall) => { calls.push(call); return { status: 200, body: { ...metadata(repo), id: replacement ? 1 : identity.repositoryId } }; };
+    expect(await hubRepositoryEffectRefusal(repo, transport, 'memory-only')).toBeNull();
+    replacement = true;
+    expect(await hubRepositoryEffectRefusal(repo, transport, 'memory-only')).toMatchObject({ status: 409 });
+    expect(calls).toEqual(Array.from({ length: 2 }, () => ({ method: 'GET', path: `/repos/${repo}`, token: 'memory-only' })));
+  });
+
+  it('does not probe unrelated repositories or mistake a component namespace for the workbench', async () => {
+    const transport = async () => { throw new Error('unexpected contact'); };
+    expect(await hubRepositoryEffectRefusal('ashlrai/phantom-secrets', transport, 'memory-only')).toBeNull();
+    expect(isHubRepositoryApiPath('/repos/ashlrai/phantom-secrets/check-runs')).toBe(false);
+    expect(isHubRepositoryApiPath('/repos/ashlrai/phantom/check-runs')).toBe(true);
+  });
+
+  it.each([301, 302, 307, 308])('refuses HTTP %i without following the old-name redirect', async (status) => {
+    let options: RequestInit | undefined;
+    const fetchImpl = (async (_url: unknown, init?: RequestInit) => { options = init; return new Response(null, { status, headers: { location: 'https://api.github.com/repos/ashlrai/phantom' } }); }) as typeof fetch;
+    expect(await fetchGithubTransport(fetchImpl)({ method: 'POST', path: `/repos/${identity.legacyName}/check-runs`, token: 'memory-only', body: {} })).toMatchObject({ status: 409 });
+    expect(options?.redirect).toBe('manual');
+  });
+
+  it('rejects an already redirected response even when it reports success', async () => {
+    const response = new Response('{}', { status: 200 });
+    Object.defineProperty(response, 'redirected', { value: true });
+    expect(await fetchGithubTransport((async () => response) as typeof fetch)({ method: 'GET', path: `/repos/${identity.legacyName}`, token: 'memory-only' })).toMatchObject({ status: 409 });
+  });
+
+  it('refuses replaced repository metadata and mismatched PR base identity at read admission', async () => {
+    const deps = { token: async () => ({ token: 'memory-only', expiresAt: null }), transport: async () => ({ status: 200, body: { ...metadata(), id: 1 } }) } as unknown as HostMergeDeps;
+    expect(await readRepoInfo(identity.legacyName, deps)).toBe('Repository metadata does not match the reviewed exact Hub identity.');
+    deps.transport = async () => ({ status: 200, body: { number: 1, node_id: 'PR_1', state: 'open', head: { sha: 'a'.repeat(40), ref: 'work' }, base: { ref: 'master', repo: metadata(identity.renamedName) } } });
+    expect(await readPr(identity.legacyName, 1, deps)).toBe('GitHub returned a malformed pull request');
   });
 });
