@@ -25,6 +25,7 @@
  * owner lane, head-SHA races and judge-family refusals are tested without
  * GitHub, models or a real ledger.
  */
+import { isHubRepositoryLabel } from '../authority/repository-binding.js';
 import { readHostMergeRevocationState } from '../autonomy/host-merge-revocation-protocol.js';
 import { outcomeProposalStillCurrent } from '../daemon/outcome-proposal-admission.js';
 import { assertSelectedOutcomeAdmission } from '../run/outcome-admission.js';
@@ -550,7 +551,7 @@ export function defaultStandingPassDeps(): StandingPassDeps {
     hasCurrentVerificationBinding: (proposal) => hasCurrentVerificationBinding(proposal),
     selfEvalParity: (repoPath, cfg) => selfEvalParityForRepo(repoPath, cfg),
     isSelfRepo: (proposal, repo, repoPolicy) =>
-      (repoPolicy?.selfRepo ?? null) !== null || repo.toLowerCase() === 'ashlrai/ashlr-hub' || isSelfTargetProposal(proposal),
+      (repoPolicy?.selfRepo ?? null) !== null || isHubRepositoryLabel(repo) || isSelfTargetProposal(proposal),
     // U4's store; a throw is "unreadable" and G0 treats the repo as held.
     listHolds: () => listRepoHolds(),
     mergeTimes24h: async (repo, nowMs) => {
