@@ -598,10 +598,25 @@ describe('self-improvement drive — highest leverage, cheapest lane, bounded by
   });
   const budget = (over: Partial<DriveBudget> = {}): DriveBudget => ({ mode: 'balanced', cloud: { ok: true, reason: null }, devin: { ok: true, reason: null }, fleet: true, ...over });
 
-  it('picks the cheapest capable lane and at most one paid launch a day', () => {
+  it('selects every independent admitted improvement without arbitrary daily ceilings', () => {
     const picks = selectImprovements([cand('a', 9), cand('b', 8), cand('c', 7, 'small'), cand('d', 6)], budget(), [], NOW);
+    expect(picks.map((p) => [p.candidate.id, p.lane])).toEqual([['a', 'cloud'], ['b', 'cloud'], ['c', 'fleet'], ['d', 'cloud']]);
+    expect(DRIVE_LIMITS.maxPerDay).toBeNull();
+    expect(DRIVE_LIMITS.maxPaidPerDay).toBeNull();
+  });
+
+  it('retains explicitly supplied daily and paid limits, including zero', () => {
+    const candidates = [cand('a', 9), cand('b', 8), cand('c', 7, 'small'), cand('d', 6)];
+    const picks = selectImprovements(candidates, budget(), [], NOW, { maxPerDay: 3, maxPaidPerDay: 1 });
     expect(picks.map((p) => [p.candidate.id, p.lane])).toEqual([['a', 'cloud'], ['b', 'backlog'], ['c', 'fleet']]);
-    expect(picks).toHaveLength(DRIVE_LIMITS.maxPerDay);
+    expect(selectImprovements(candidates, budget(), [], NOW, { maxPerDay: 0 })).toEqual([]);
+    expect(selectImprovements(candidates, budget(), [], NOW, { maxPaidPerDay: 0 }).map(p => p.lane)).toEqual(['backlog', 'backlog', 'fleet', 'backlog']);
+    expect(selectImprovements(candidates, budget(), [], NOW, {}).map(p => p.lane)).toEqual(['cloud', 'cloud', 'fleet', 'cloud']);
+  });
+
+  it.each([Infinity, NaN, -1, 1.5])('refuses invalid explicit daily drive limit %s', limit => {
+    expect(() => selectImprovements([cand('a', 1)], budget(), [], NOW, { maxPerDay: limit })).toThrow(RangeError);
+    expect(() => selectImprovements([cand('a', 1)], budget(), [], NOW, { maxPaidPerDay: limit })).toThrow(RangeError);
   });
 
   it('never spends in reserve mode or past a lane gate', () => {
@@ -634,14 +649,14 @@ describe('self-improvement drive — highest leverage, cheapest lane, bounded by
     };
     const first = await runLeaderDrive(runDeps, { sources });
     expect(first.ran).toBe(true);
-    expect(first.selections.map((s) => s.lane)).toEqual(['cloud', 'backlog', 'backlog']);
+    expect(first.selections.map((s) => s.lane)).toEqual(['cloud', 'cloud', 'cloud']);
     // The cloud pick is class B: scheduled behind its veto window, not launched yet.
     expect(first.actions[0]).toMatchObject({ kind: 'cloud.launch', status: 'scheduled' });
     expect(powers.launched).toEqual([]);
-    expect(first.actions.slice(1).every((a) => a.kind === 'backlog.add' && a.status === 'applied')).toBe(true);
+    expect(first.actions.every((a) => a.kind === 'cloud.launch' && a.status === 'scheduled')).toBe(true);
     const report = readDriveState().lastReport!;
     expect(report.text).toMatch(/Self-improvement — 3 moves/);
-    expect(report.actionIds).toEqual([first.actions[0]!.id]);
+    expect(report.actionIds).toEqual(first.actions.map(action => action.id));
     expect(report.postedAt).toBeNull();
 
     const again = await runLeaderDrive(runDeps, { sources });

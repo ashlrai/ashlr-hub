@@ -885,8 +885,9 @@ launch a cloud or Devin task, add backlog work, keep its own notes, and save a
 new playbook or automation version, each with its class and veto window. On
 Telegram it sends a morning brief and an evening recap, answers "status" at
 once from recorded state, turns "go build X" into work, and asks one question
-at a time. Once a day it may pick up to three Phantom improvements of its
-own (at most one paid). Jev may add an advisory note to a memo when it thinks
+at a time. Its daily self-improvement pass may select every independent
+improvement admitted by the live resource, reserve and signed-authority gates.
+Explicit caller-supplied launch limits still apply. Jev may add an advisory note to a memo when it thinks
 an action deserves a stricter class; the class the policy set always stands.
 Details: [LEADER.md](LEADER.md#founder-mode-315).
 

@@ -258,7 +258,7 @@ Every paid lane still applies its own budget gate at launch.
 Ashlr Verse improvements from recurring retro causes, its own failures,
 Needs-you friction, usage and the open gates in
 `docs/VERSE-COMPETITIVE-ACCEPTANCE.md`, and routes each pick to the cheapest
-capable lane: at most 3 a day, at most 1 paid, a 7-day cooldown per idea, no
+capable lane: no fixed daily launch ceiling, a 7-day cooldown per idea, no
 paid lanes in reserve, nothing enacted in a dry run. The line posts the report
 with Approve and Veto. `foundry.leader.selfImprove: false` turns it off.
 

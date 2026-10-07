@@ -11,9 +11,8 @@
  *   competitive  the open gates in docs/VERSE-COMPETITIVE-ACCEPTANCE.md
  *
  * HOW IT PICKS (`selectImprovements`, pure): highest leverage first, one per
- * idea per cooldown, at most DRIVE_LIMITS.maxPerDay, at most maxPaidPerDay
- * paid launches, and never a paid lane in reserve mode or when that lane's
- * own budget gate says no. Lanes, cheapest capable first:
+ * idea per cooldown, optional explicit daily limits, and never a paid lane
+ * in reserve mode or when that lane's own budget gate says no. Lanes, cheapest capable first:
  *   small → fleet   (work.dispatch — local / grok, free)
  *   PR    → cloud   (cloud.launch purpose self-improve — the cloud budget's
  *                    stricter self-improvement gate), else
@@ -47,10 +46,10 @@ import type { LeaderRunDeps } from './leader.js';
 // ---------------------------------------------------------------------------
 
 export const DRIVE_LIMITS = Object.freeze({
-  /** Improvements launched per local day, all lanes. */
-  maxPerDay: 3,
-  /** Of those, paid launches (cloud / Devin). */
-  maxPaidPerDay: 1,
+  /** No arbitrary daily work ceiling; resource admission remains authoritative. */
+  maxPerDay: null,
+  /** Paid launches still pass each lane's live budget and reserve gates. */
+  maxPaidPerDay: null,
   /** An idea is not picked again within this many days. */
   cooldownDays: 7,
   /** Local hour (America/New_York by default) the drive may run from — after the morning brief. */
@@ -211,39 +210,50 @@ export interface DriveSelection {
   why: string;
 }
 
-/** Pick today's improvements. Pure: same inputs, same picks. */
+export interface DriveSelectionLimits {
+  maxPerDay?: number | null;
+  maxPaidPerDay?: number | null;
+  cooldownDays?: number;
+}
+
+/** Pick today's improvements. Null/omitted limits add no ceiling to admitted work. */
 export function selectImprovements(
   candidates: readonly ImprovementCandidate[],
   budget: DriveBudget,
   history: readonly DriveHistoryEntry[],
   nowMs: number,
-  limits: { maxPerDay: number; maxPaidPerDay: number; cooldownDays: number } = DRIVE_LIMITS,
+  limits: DriveSelectionLimits = DRIVE_LIMITS,
 ): DriveSelection[] {
-  const cooldownFrom = nowMs - limits.cooldownDays * 86_400_000;
+  const maxPerDay = limits.maxPerDay ?? null;
+  const maxPaidPerDay = limits.maxPaidPerDay ?? null;
+  for (const limit of [maxPerDay, maxPaidPerDay]) {
+    if (limit !== null && (!Number.isSafeInteger(limit) || limit < 0)) throw new RangeError('Daily drive limits must be nonnegative safe integers or null.');
+  }
+  const cooldownFrom = nowMs - (limits.cooldownDays ?? DRIVE_LIMITS.cooldownDays) * 86_400_000;
   const recent = new Set(history.filter((h) => Date.parse(h.at) >= cooldownFrom).map((h) => h.candidateId));
   const out: DriveSelection[] = [];
   let paid = 0;
   const paidAllowed = budget.mode !== 'reserve';
   for (const c of candidates) {
-    if (out.length >= limits.maxPerDay) break;
+    if (maxPerDay !== null && out.length >= maxPerDay) break;
     if (recent.has(c.id)) continue;
     let lane: DriveLane;
     let why: string;
     if (c.size === 'small' && budget.fleet) {
       lane = 'fleet';
       why = 'small change: the free local / grok fleet';
-    } else if (paidAllowed && paid < limits.maxPaidPerDay && budget.cloud?.ok) {
+    } else if (paidAllowed && (maxPaidPerDay === null || paid < maxPaidPerDay) && budget.cloud?.ok) {
       lane = 'cloud';
       why = 'PR-sized: a cloud session inside the self-improvement budget';
-    } else if (paidAllowed && paid < limits.maxPaidPerDay && budget.devin?.ok) {
+    } else if (paidAllowed && (maxPaidPerDay === null || paid < maxPaidPerDay) && budget.devin?.ok) {
       lane = 'devin';
       why = `PR-sized: Devin (cloud ${budget.cloud ? `unavailable: ${budget.cloud.reason ?? 'refused'}` : 'lane absent'})`;
     } else {
       lane = 'backlog';
       why = !paidAllowed
         ? 'budget is in reserve: queued, nothing spent'
-        : paid >= limits.maxPaidPerDay
-          ? `today's paid launch is used: queued`
+        : maxPaidPerDay !== null && paid >= maxPaidPerDay
+          ? `today's explicit paid launch limit is reached: queued`
           : 'no paid lane has budget: queued';
     }
     if (lane === 'cloud' || lane === 'devin') paid += 1;
