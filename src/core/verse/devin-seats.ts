@@ -51,7 +51,7 @@ import {
   type DevinModelFamily,
 } from '../devin/models.js';
 import { devinStatus } from '../devin/service.js';
-import { listDevinTasks, readDevinBudget } from '../devin/store.js';
+import { readDevinTaskInventory, readDevinBudget } from '../devin/store.js';
 import type { DevinStatus } from '../devin/types.js';
 import { DEVIN_DEFAULT_MODEL_ID } from './adapters/devin.js';
 import type { SeatReadiness } from './health-types.js';
@@ -184,16 +184,19 @@ export async function discoverDevinSeats(opts: DevinSeatDiscoveryOptions = {}): 
     health = { state: 'unavailable', summary: hint, windows: unknownWindows, observedAt: now.toISOString() };
   } else {
     let summary: string | null = null;
+    let accountingKnown = false;
     try {
-      const view = devinBudgetView(listDevinTasks(Number.MAX_SAFE_INTEGER), readDevinBudget(), now);
-      summary = `${acu(view.acuToday)} of ${acu(view.budget.maxAcuPerDay)} today · up to ${acu(view.budget.maxAcuPerSession)} per chat`;
+      const inventory = readDevinTaskInventory();
+      const view = devinBudgetView(inventory.tasks, readDevinBudget(), now, inventory.sourceState);
+      accountingKnown = inventory.sourceState === 'ready';
+      summary = inventory.sourceState === 'ready' ? `${acu(view.acuToday)} of ${acu(view.budget.maxAcuPerDay)} today · up to ${acu(view.budget.maxAcuPerSession)} per chat` : 'Local budget capacity is unknown.';
       if (!view.canLaunch.ok && view.canLaunch.reason) summary = `${summary} · new chats paused: ${view.canLaunch.reason}`;
     } catch {
-      summary = null;
+      summary = 'Local budget capacity is unknown.';
     }
     health = status.state === 'unreachable'
       ? { state: 'degraded', summary: status.reason, windows: unknownWindows, observedAt: now.toISOString() }
-      : { state: 'ready', summary, windows: unknownWindows, observedAt: now.toISOString() };
+      : { state: accountingKnown ? 'ready' : 'degraded', summary, windows: unknownWindows, observedAt: now.toISOString() };
   }
   const cloud: VerseSeat = {
     id: DEVIN_CLOUD_SEAT_ID,

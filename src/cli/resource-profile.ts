@@ -4,6 +4,8 @@ const USAGE = `usage: ashlr resources profile prepare --provider codex|claude|gr
   --directory NEW_ABS --executable ABS [--json]
        ashlr resources profile repin --directory EXISTING_ABS --executable ABS
   [--dry-run] [--json]
+       ashlr resources profile upgrade-template --directory EXISTING_ABS
+  [--dry-run] [--json]
 
 prepare creates one new private profile under an existing owned mode-0700 parent.
 Writes a standalone launcher, command.json, preparation manifest and empty native
@@ -23,6 +25,16 @@ current executable writes nothing. Sessions already running keep the binary
 they started with; the next launch through the profile uses the new one.
 --dry-run validates everything and reports the change without writing.
 
+upgrade-template installs the current fixed Claude safety environment into an
+exact recognized previous launcher. It keeps the pinned binary, command/manifest,
+native state and sign-in storage unchanged; it does not verify authentication.
+It saves only launcher.mjs.template-prev, separate from repin's .prev copies.
+--dry-run validates without writing. An explicit retry validates a recognized
+backup and confirms publication durability; conflicting backups are refused.
+Use while the selected seat has no running native turn: old launch observations
+are invalidated, never carried forward. A publication failure may already have
+changed the launcher; inspect and retry rather than re-create or sign in again.
+
 No executable is launched, credentials read/copied, account signed in, provider
 contacted, pool enrolled or resident service installed. The returned login argv
 is a separate interactive native action, not something this command executes.
@@ -32,19 +44,22 @@ Node with process.execve support and a supported POSIX platform are required.
 --executable must name a canonical regular executable file, not an install symlink.
 Output includes private local paths, never authentication material.
 Exit codes: 0 prepared, repinned or already pinned (authentication not checked),
-1 preparation or repin unavailable, 2 invalid arguments. Grok preparation
+1 preparation, repin or template upgrade unavailable, 2 invalid arguments. Grok preparation
 supports separate native login/metadata; it does not enable a Grok
 task-generation adapter.
 `;
 class UsageError extends Error {}
 /** A repin failure whose message is fixed, path-free text saying whether the profile changed. */
 class RepinFailure extends Error {}
+class TemplateUpgradeFailure extends Error {}
 const REPIN_UNAVAILABLE = 'Native profile repin unavailable; inspect the profile before retrying';
+const TEMPLATE_UPGRADE_UNAVAILABLE = 'Claude native template upgrade unavailable; inspect the profile before retrying';
 
 type ProfileCommand =
   | { help: true }
   | { help: false; subcommand: 'prepare'; json: boolean; provider: 'codex' | 'claude' | 'grok'; directory: string; executable: string }
-  | { help: false; subcommand: 'repin'; json: boolean; dryRun: boolean; directory: string; executable: string };
+  | { help: false; subcommand: 'repin'; json: boolean; dryRun: boolean; directory: string; executable: string }
+  | { help: false; subcommand: 'upgrade-template'; json: boolean; dryRun: boolean; directory: string };
 
 function parse(args: string[]): ProfileCommand {
   if (args.length > 12 || args.some((arg) => typeof arg !== 'string' || Buffer.byteLength(arg) > 4096 ||
@@ -52,14 +67,15 @@ function parse(args: string[]): ProfileCommand {
     Buffer.byteLength(args.join('\0')) > 16 * 1024) throw new UsageError('Invalid profile arguments');
   if (args.length === 1 && ['--help', '-h'].includes(args[0]!)) return { help: true };
   const subcommand = args[0];
-  if (subcommand !== 'prepare' && subcommand !== 'repin') throw new UsageError('Expected prepare or repin subcommand');
+  if (subcommand !== 'prepare' && subcommand !== 'repin' && subcommand !== 'upgrade-template') throw new UsageError('Expected prepare, repin or upgrade-template subcommand');
   // repin reads the provider from the existing profile and never changes it.
-  const valued = subcommand === 'prepare' ? ['--provider', '--directory', '--executable'] : ['--directory', '--executable'];
+  const valued = subcommand === 'prepare' ? ['--provider', '--directory', '--executable']
+    : subcommand === 'repin' ? ['--directory', '--executable'] : ['--directory'];
   const values = new Map<string, string>(); let json = false; let dryRun = false;
   for (let i = 1; i < args.length; i++) {
     const flag = args[i]!;
     if (flag === '--json') { if (json) throw new UsageError('Duplicate profile option'); json = true; continue; }
-    if (flag === '--dry-run' && subcommand === 'repin') { if (dryRun) throw new UsageError('Duplicate profile option'); dryRun = true; continue; }
+    if (flag === '--dry-run' && subcommand !== 'prepare') { if (dryRun) throw new UsageError('Duplicate profile option'); dryRun = true; continue; }
     if (flag === '--provider' && subcommand === 'repin') throw new UsageError('repin keeps the profile provider; --provider is not accepted');
     if (!valued.includes(flag) || values.has(flag)) throw new UsageError('Unknown or duplicate profile option');
     const value = args[++i]; if (!value || value.startsWith('-')) throw new UsageError('Profile option requires a value');
@@ -72,6 +88,7 @@ function parse(args: string[]): ProfileCommand {
     }
     return value;
   };
+  if (subcommand === 'upgrade-template') return { help: false, subcommand, json, dryRun, directory: path('--directory') };
   if (subcommand === 'repin') return { help: false, subcommand, json, dryRun, directory: path('--directory'), executable: path('--executable') };
   const provider = values.get('--provider');
   if (provider !== 'codex' && provider !== 'claude' && provider !== 'grok') throw new UsageError('Expected codex, claude or grok provider');
@@ -115,18 +132,37 @@ async function repin(options: Extract<ProfileCommand, { subcommand: 'repin' }>):
   console.log(lines.join('\n'));
 }
 
+async function upgradeTemplate(options: Extract<ProfileCommand, { subcommand: 'upgrade-template' }>): Promise<void> {
+  const { upgradeResourceNativeProfileTemplate, ResourceNativeProfileTemplateUpgradeError } = await import('../core/resources/native-profile.js');
+  let report: ReturnType<typeof upgradeResourceNativeProfileTemplate>;
+  try { report = upgradeResourceNativeProfileTemplate({ directory: options.directory, dryRun: options.dryRun }); }
+  catch (error) { throw new TemplateUpgradeFailure(error instanceof ResourceNativeProfileTemplateUpgradeError ? error.message : TEMPLATE_UPGRADE_UNAVAILABLE); }
+  if (options.json) { console.log(JSON.stringify(report, null, 2)); return; }
+  const heading = report.status === 'would-upgrade' ? 'dry run · would upgrade template'
+    : report.status === 'upgraded' ? 'template upgraded' : 'current template · unchanged';
+  const lines = [`Native profile · claude · ${heading} · authentication not checked`, `Directory: ${report.directory}`];
+  if (report.backupPath) lines.push(`Previous launcher kept: ${quote(report.backupPath)}`);
+  if (options.dryRun) lines.push('Nothing was written.');
+  lines.push('Pinned binary, command, manifest and native sign-in storage retained. Nothing was executed.',
+    'Existing launch observations are not reused. Check identity, allowance and credit protection through the normal native observation before autonomous work.');
+  console.log(lines.join('\n'));
+}
+
 export async function cmdResourceProfile(args: string[]): Promise<number> {
-  let subcommand: 'prepare' | 'repin' | null = null;
+  let subcommand: 'prepare' | 'repin' | 'upgrade-template' | null = null;
   try {
     const options = parse(args); if (options.help) { console.log(USAGE); return 0; }
     subcommand = options.subcommand;
-    if (options.subcommand === 'repin') await repin(options); else await prepare(options);
+    if (options.subcommand === 'repin') await repin(options);
+    else if (options.subcommand === 'upgrade-template') await upgradeTemplate(options);
+    else await prepare(options);
     return 0;
   } catch (error) {
     // Repin failures carry fixed, path-free text that says whether the profile
     // changed; anything else (and every prepare failure) stays generic.
-    const message = error instanceof UsageError || error instanceof RepinFailure ? error.message
-      : subcommand === 'repin' ? REPIN_UNAVAILABLE : 'Native profile preparation unavailable; inspect the selected target for partial files';
+    const message = error instanceof UsageError || error instanceof RepinFailure || error instanceof TemplateUpgradeFailure ? error.message
+      : subcommand === 'repin' ? REPIN_UNAVAILABLE : subcommand === 'upgrade-template' ? TEMPLATE_UPGRADE_UNAVAILABLE
+        : 'Native profile preparation unavailable; inspect the selected target for partial files';
     if (args.includes('--json')) console.log(JSON.stringify({ error: message })); else console.error(message);
     return error instanceof UsageError ? 2 : 1;
   }

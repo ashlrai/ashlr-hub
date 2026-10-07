@@ -698,7 +698,7 @@ function parseExtraction(raw: string): { kind: OperatorDirectiveKind; text: stri
  * about what it can do from here (nothing — it acts only through memo
  * actions under the grant) and never claims to be a real person.
  */
-export const LEADER_CONVERSATION_SYSTEM = `You are the Leader of an autonomous AI software company — the Visionary — in a direct conversation with Mason, the owner. A fleet of coding agents works for you across a portfolio of repositories; the product that matters most is Ashlr Verse.
+export const LEADER_CONVERSATION_SYSTEM = `You are the Leader of an autonomous AI software company — the Visionary — in a direct conversation with Mason, the owner. A fleet of coding agents works for you across a portfolio of repositories; the product that matters most is Phantom.
 
 ${LEADER_FOUNDER_VOICE}
 

@@ -3,10 +3,11 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  appendCampaignEvent, campaignDirectory, foldCampaignEvents, initUniverseCampaign, readCampaignEvents,
+  appendCampaignEvent, campaignDirectory, foldCampaignEvents, initUniverseCampaign, projectCampaign, readCampaignEvents,
   readUniverseCampaign, readUniverseCampaignProjection, readUniverseCampaigns, requestUniverseCampaignControl, validateUniverseCampaignDefinition,
 } from '../src/core/universe/campaign-store.js';
 import type { UniverseCampaignDefinition, UniverseSummary } from '../src/core/universe/types.js';
+import { projectUniverse } from '../src/core/universe/store.js';
 
 const state = vi.hoisted(() => ({ universe: null as UniverseSummary | null }));
 vi.mock('../src/core/universe/store.js', () => ({
@@ -89,6 +90,49 @@ describe('strict Universe campaign definition and private store', () => {
     expect(changed.universe!.comparatorDigest).toBe('d'.repeat(64));
     expect(observed.universe!.comparatorDigest).toBe('c'.repeat(64));
     expect(readCampaignEvents(directory)).toEqual(before);
+  });
+
+  it('preserves projection and live ownership while rereading durable controls', () => {
+    const { root, definition } = fixture();
+    initUniverseCampaign(definition, { root });
+    const directory = campaignDirectory(definition.id, { root });
+    const at = new Date().toISOString();
+    appendCampaignEvent(directory, { kind: 'started', at,
+      deadlineAt: new Date(Date.parse(at) + definition.budget.maxDurationMs).toISOString(),
+      owner: { pid: process.pid, startRef: 'fixture-owner' } });
+    appendCampaignEvent(directory, { kind: 'step', at, ordinal: 1,
+      runId: '00000000-0000-4000-8000-000000000001', generation: 1,
+      variantIds: ['change'], reservedModelRequests: 0 });
+    const records = readCampaignEvents(directory);
+    const expected = projectCampaign(records, state.universe!);
+    vi.mocked(projectUniverse).mockClear();
+    const alive = vi.spyOn(process, 'kill');
+    try {
+      const first = readUniverseCampaignProjection(definition.id, { root });
+      expect(JSON.stringify(first.campaign)).toBe(JSON.stringify(expected));
+      expect(first.universe).toEqual(state.universe);
+      expect(projectUniverse).toHaveBeenCalledTimes(1);
+      expect(alive.mock.calls).toEqual([[process.pid, 0]]);
+      appendCampaignEvent(directory, { kind: 'control', at, action: 'pause' });
+      alive.mockClear();
+      const second = readUniverseCampaignProjection(definition.id, { root });
+      expect(second.campaign).toMatchObject({ state: 'pause-requested', owner: { pid: process.pid } });
+      expect(second.campaign.progress.attempts).toBe(first.campaign.progress.attempts);
+      expect(second.campaign.steps[0]!.state).toBe('interrupted');
+      expect(first.campaign.state).toBe('running');
+      expect(projectUniverse).toHaveBeenCalledTimes(2);
+      expect(alive.mock.calls).toEqual([[process.pid, 0]]);
+      expect(JSON.stringify(second.campaign)).toBe(JSON.stringify(projectCampaign(readCampaignEvents(directory), state.universe!)));
+      expect(readCampaignEvents(directory)).toHaveLength(records.length + 1);
+    } finally { alive.mockRestore(); }
+  });
+
+  it('keeps public projection validation strict for caller-owned event arrays', () => {
+    const { root, definition } = fixture();
+    initUniverseCampaign(definition, { root });
+    const records = readCampaignEvents(campaignDirectory(definition.id, { root }));
+    expect(() => projectCampaign([{ ...records[0]!, sequence: 1 }], state.universe!)).toThrow(/duplicates, or gaps/);
+    expect(readUniverseCampaignProjection(definition.id, { root }).campaign.sourceState).toBe('healthy');
   });
 
   it('never initializes missing state from observation or controls', () => {

@@ -398,6 +398,42 @@ function inspectRepinTarget(directory: string): RepinInspection {
   } catch { throw new ResourceNativeProfileRepinError('inconsistent'); }
 }
 
+/** Same-directory checked publication; callers own the final target and binding fence. */
+function publishProfileFile(directory: string, assertOwned: () => void, file: string, text: string,
+  precondition: () => void, onInstalled?: () => void): void {
+    assertOwned();
+    const temp = join(directory, `.${basename(file)}.${randomBytes(8).toString('hex')}.repin-tmp`);
+    let fd: number | undefined; let identity: BigIntStats | undefined; let installed = false;
+    try {
+      fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      const before = fstatSync(fd, { bigint: true }); identity = before; const named = lstatSync(temp, { bigint: true });
+      if (!before.isFile() || before.nlink !== 1n || before.size !== 0n || !same(before, named) || named.isSymbolicLink() ||
+        (before.mode & 0o777n) !== 0o600n || typeof process.getuid === 'function' && before.uid !== BigInt(process.getuid())) throw new Error();
+      const bytes = Buffer.from(text); let offset = 0;
+      while (offset < bytes.length) { const written = writeSync(fd, bytes, offset, bytes.length - offset); if (written < 1) throw new Error(); offset += written; }
+      fsyncSync(fd); const after = fstatSync(fd, { bigint: true });
+      if (!same(before, after) || after.nlink !== 1n || after.size !== BigInt(bytes.length) || (after.mode & 0o777n) !== 0o600n) throw new Error();
+      closeSync(fd); fd = undefined;
+      assertOwned(); precondition();
+      const pending = lstatSync(temp, { bigint: true });
+      if (!same(before, pending) || !pending.isFile() || pending.isSymbolicLink() || pending.nlink !== 1n ||
+        (pending.mode & 0o777n) !== 0o600n) throw new Error();
+      renameSync(temp, file); installed = true; onInstalled?.();
+      const placed = lstatSync(file, { bigint: true });
+      if (!same(before, placed) || !placed.isFile() || placed.isSymbolicLink() || placed.nlink !== 1n || (placed.mode & 0o777n) !== 0o600n) throw new Error();
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+      // Our own O_EXCL temp file only; best effort, and it never names a live file.
+      if (identity && !installed) {
+        try {
+          const named = lstatSync(temp, { bigint: true });
+          if (same(identity, named) && named.isFile() && !named.isSymbolicLink() && named.nlink === 1n &&
+            (named.mode & 0o777n) === 0o600n && (typeof process.getuid !== 'function' || named.uid === BigInt(process.getuid()))) unlinkSync(temp);
+        } catch { /* Missing, changed or unsafe temporary remains for owner inspection. */ }
+      }
+    }
+}
+
 /**
  * Re-pin one existing prepared profile to a different native executable.
  * Rewrites only the executable locator (see the section comment above);
@@ -458,33 +494,8 @@ export function repinResourceNativeProfile(options: ResourceNativeProfileRepinOp
   const unchangedSinceInspection = (file: string, read: OwnedFile): void => {
     const now = readOwnedFile(file); if (!same(now.stat, read.stat) || now.text !== read.text) throw new Error();
   };
-  // Write a fresh exclusive temp file beside `file`, then rename it into place.
-  // The precondition runs immediately before the rename; the remaining window
-  // is a same-owner race inside a directory only this uid can write.
-  const publish = (file: string, text: string, precondition: () => void, onInstalled?: () => void): void => {
-    assertOwned();
-    const temp = join(directory, `.${basename(file)}.${randomBytes(8).toString('hex')}.repin-tmp`);
-    let fd: number | undefined; let created = false; let installed = false;
-    try {
-      fd = openSync(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600); created = true;
-      const before = fstatSync(fd, { bigint: true }); const named = lstatSync(temp, { bigint: true });
-      if (!before.isFile() || before.nlink !== 1n || before.size !== 0n || !same(before, named) || named.isSymbolicLink() ||
-        (before.mode & 0o777n) !== 0o600n || typeof process.getuid === 'function' && before.uid !== BigInt(process.getuid())) throw new Error();
-      const bytes = Buffer.from(text); let offset = 0;
-      while (offset < bytes.length) { const written = writeSync(fd, bytes, offset, bytes.length - offset); if (written < 1) throw new Error(); offset += written; }
-      fsyncSync(fd); const after = fstatSync(fd, { bigint: true });
-      if (!same(before, after) || after.nlink !== 1n || after.size !== BigInt(bytes.length) || (after.mode & 0o777n) !== 0o600n) throw new Error();
-      closeSync(fd); fd = undefined;
-      assertOwned(); precondition();
-      renameSync(temp, file); installed = true; onInstalled?.();
-      const placed = lstatSync(file, { bigint: true });
-      if (!same(before, placed) || !placed.isFile() || placed.isSymbolicLink() || placed.nlink !== 1n || (placed.mode & 0o777n) !== 0o600n) throw new Error();
-    } finally {
-      if (fd !== undefined) closeSync(fd);
-      // Our own O_EXCL temp file only; best effort, and it never names a live file.
-      if (created && !installed) { try { unlinkSync(temp); } catch { /* left beside the profile for inspection */ } }
-    }
-  };
+  const publish = (file: string, text: string, precondition: () => void, onInstalled?: () => void): void =>
+    publishProfileFile(directory, assertOwned, file, text, precondition, onInstalled);
   const syncDirectory = (): void => fsyncDirectory(directory, { expectedIdentity: state.directoryStat });
 
   let launcherChanged = mode === 'resume';
@@ -512,6 +523,128 @@ export function repinResourceNativeProfile(options: ResourceNativeProfileRepinOp
     assertOwned();
   } catch { throw new ResourceNativeProfileRepinError(launcherChanged ? 'failed-partial' : 'failed-unchanged'); }
   return report('repinned', backups);
+}
+
+// ---------------------------------------------------------------------------
+// Explicit Claude safety-template upgrade; state and binary pins never migrate.
+// ---------------------------------------------------------------------------
+export interface ResourceNativeProfileTemplateUpgradeOptions { directory: string; dryRun?: boolean }
+export interface ResourceNativeProfileTemplateUpgrade {
+  schemaVersion: 1;
+  scope: 'native-profile-template-upgrade';
+  status: 'upgraded' | 'unchanged' | 'would-upgrade';
+  authentication: 'not-checked';
+  provider: 'claude';
+  directory: string;
+  launcherPath: string;
+  backupPath: string | null;
+  previousTemplate: 'previous' | 'current';
+  template: 'current';
+}
+export type ResourceNativeProfileTemplateUpgradeFailure = 'invalid' | 'inconsistent' | 'failed-unchanged' | 'failed-after-publish';
+const TEMPLATE_UPGRADE_MESSAGES: Record<ResourceNativeProfileTemplateUpgradeFailure, string> = {
+  invalid: 'Invalid Claude native template upgrade: options, runtime, profile or pinned executable unavailable; nothing was written',
+  inconsistent: 'Claude native profile or template backup is not an unchanged recognized profile; nothing was written',
+  'failed-unchanged': 'Claude native template upgrade failed before the launcher changed; its previous template remains',
+  'failed-after-publish': 'Claude native template publication or durability is unconfirmed; inspect the profile and retry the explicit upgrade',
+};
+export class ResourceNativeProfileTemplateUpgradeError extends Error {
+  constructor(readonly failure: ResourceNativeProfileTemplateUpgradeFailure) {
+    super(TEMPLATE_UPGRADE_MESSAGES[failure]); this.name = 'ResourceNativeProfileTemplateUpgradeError';
+  }
+}
+
+function profileTemplates(state: RepinInspection): { current: string; previous: string } {
+  const line = state.launcherLines.find(line => line.startsWith(LAUNCHER_DIRECTORIES_PREFIX))!;
+  const directories = exactJson(line.slice(LAUNCHER_DIRECTORIES_PREFIX.length, -1), 0) as Array<{ path: string; dev: string; ino: string }>;
+  const profile = state.manifest as unknown as ResourceNativeProfile;
+  return { current: launcherSource(profile, directories), previous: launcherSource(profile, directories, false) };
+}
+function sameExecutableStamp(a: BigIntStats, b: BigIntStats): boolean {
+  return same(a, b) && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
+}
+
+/** Only generated launcher metadata is read/written. Native state and credentials are never opened. */
+export function upgradeResourceNativeProfileTemplate(options: ResourceNativeProfileTemplateUpgradeOptions): ResourceNativeProfileTemplateUpgrade {
+  let directory: string; let dryRun: boolean; let state: RepinInspection;
+  let binaryStamp: BigIntStats; let nodeStamp: BigIntStats;
+  try {
+    if (!isRecord(options) || ![Object.prototype, null].includes(Object.getPrototypeOf(options)) ||
+      !Object.hasOwn(options, 'directory') || Reflect.ownKeys(options).some(key =>
+        (key !== 'directory' && key !== 'dryRun') || !('value' in Object.getOwnPropertyDescriptor(options, key)!))) throw new Error();
+    directory = options.directory; dryRun = options.dryRun ?? false;
+    if (!path(directory) || typeof dryRun !== 'boolean' || typeof process.execve !== 'function' ||
+      process.platform === 'win32' || process.platform === 'aix') throw new Error();
+    state = inspectRepinTarget(directory);
+    executable(state.manifestExecutable); executable(state.manifest['nodeExecutable'] as string);
+    binaryStamp = lstatSync(state.manifestExecutable, { bigint: true });
+    nodeStamp = lstatSync(state.manifest['nodeExecutable'] as string, { bigint: true });
+  } catch (error) {
+    throw new ResourceNativeProfileTemplateUpgradeError(error instanceof ResourceNativeProfileRepinError && error.failure === 'inconsistent'
+      ? 'inconsistent' : 'invalid');
+  }
+  let templates: ReturnType<typeof profileTemplates>; let backup: OwnedFile | null;
+  const backupPath = `${state.paths.launcher}.template-prev`;
+  try {
+    if (state.provider !== 'claude' || state.launcherExecutable !== state.manifestExecutable) throw new Error();
+    templates = profileTemplates(state);
+    if (state.files.launcher.text !== templates.current && state.files.launcher.text !== templates.previous) throw new Error();
+    try { backup = readOwnedFile(backupPath); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; backup = null; }
+    if (backup && backup.text !== templates.previous) throw new Error();
+  } catch { throw new ResourceNativeProfileTemplateUpgradeError('inconsistent'); }
+  const current = state.files.launcher.text === templates.current;
+  const report = (status: ResourceNativeProfileTemplateUpgrade['status'], saved: boolean): ResourceNativeProfileTemplateUpgrade => ({
+    schemaVersion: 1, scope: 'native-profile-template-upgrade', status, authentication: 'not-checked', provider: 'claude', directory,
+    launcherPath: state.paths.launcher, backupPath: saved ? backupPath : null, previousTemplate: current ? 'current' : 'previous', template: 'current',
+  });
+  if (dryRun) return report(current ? 'unchanged' : 'would-upgrade', backup !== null);
+  if (current && !backup) return report('unchanged', false);
+
+  const assertOwned = (): void => {
+    inspectPrivateDirectory(state.parent); if (!same(state.parentStat, lstatSync(state.parent, { bigint: true }))) throw new Error();
+    inspectPrivateDirectory(directory); if (!same(state.directoryStat, lstatSync(directory, { bigint: true }))) throw new Error();
+  };
+  const assertBindings = (launcher: OwnedFile): void => {
+    assertOwned();
+    const fresh = inspectRepinTarget(directory);
+    for (const key of ['launcher', 'manifest', 'command'] as const) {
+      const original = key === 'launcher' ? launcher : state.files[key];
+      if (!same(fresh.files[key].stat, original.stat) || fresh.files[key].text !== original.text) throw new Error();
+    }
+    executable(state.manifestExecutable); executable(state.manifest['nodeExecutable'] as string);
+    if (!sameExecutableStamp(binaryStamp, lstatSync(state.manifestExecutable, { bigint: true })) ||
+      !sameExecutableStamp(nodeStamp, lstatSync(state.manifest['nodeExecutable'] as string, { bigint: true }))) throw new Error();
+  };
+  const assertBackup = (): void => {
+    const saved = readOwnedFile(backupPath);
+    if (!backup || !same(saved.stat, backup.stat) || saved.text !== templates.previous) throw new Error();
+  };
+  let published = current;
+  try {
+    assertBindings(state.files.launcher);
+    if (!backup) {
+      publishProfileFile(directory, assertOwned, backupPath, templates.previous, () => {
+        assertBindings(state.files.launcher);
+        // A backup created by another owner operation is never overwritten, even if its bytes match.
+        try { lstatSync(backupPath); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+        throw new Error();
+      });
+      backup = readOwnedFile(backupPath);
+    }
+    assertBackup(); fsyncDirectory(directory, { expectedIdentity: state.directoryStat });
+    if (!current) {
+      publishProfileFile(directory, assertOwned, state.paths.launcher, templates.current, () => {
+        assertBindings(state.files.launcher); assertBackup();
+      }, () => { published = true; });
+    }
+    // An explicit retry with a recognized backup also confirms a prior publication's durability.
+    fsyncDirectory(directory, { expectedIdentity: state.directoryStat });
+    const settled = inspectRepinTarget(directory);
+    if (settled.files.launcher.text !== templates.current) throw new Error();
+    assertBindings(settled.files.launcher); assertBackup();
+    return report(current ? 'unchanged' : 'upgraded', true);
+  } catch { throw new ResourceNativeProfileTemplateUpgradeError(published ? 'failed-after-publish' : 'failed-unchanged'); }
 }
 
 // ---------------------------------------------------------------------------
@@ -620,12 +753,9 @@ export function resolveNativeSeatLaunch(options: {
   // Execute only a whole pristine recognized template. Ordinary routes retain
   // the exact previous template; the new broker requires current safety bytes.
   try {
-    const directoriesLine = state.launcherLines.find((line) => line.startsWith(LAUNCHER_DIRECTORIES_PREFIX))!;
-    const directories = exactJson(directoriesLine.slice(LAUNCHER_DIRECTORIES_PREFIX.length, -1), 0) as Array<{ path: string; dev: string; ino: string }>;
-    const profile = state.manifest as unknown as ResourceNativeProfile;
-    const current = launcherSource(profile, directories);
-    if (current !== state.files.launcher.text && (options.requireClaudeBrokerSafety === true ||
-      launcherSource(profile, directories, false) !== state.files.launcher.text)) throw new Error();
+    const templates = profileTemplates(state);
+    if (templates.current !== state.files.launcher.text && (options.requireClaudeBrokerSafety === true ||
+      templates.previous !== state.files.launcher.text)) throw new Error();
   } catch { return seatFailure('profile-invalid'); }
   return {
     ok: true,

@@ -219,7 +219,7 @@ describe('the access sheet', () => {
     const dialog = await screen.findByRole('dialog');
     await user.click(within(dialog).getByRole('checkbox', { name: /Xcode/ }));
     await user.click(within(dialog).getByRole('button', { name: 'Allow selected' }));
-    const sheet = await screen.findByRole('dialog', { name: 'Let Ashlr see and use this Mac' });
+    const sheet = await screen.findByRole('dialog', { name: 'Let Phantom see and use this Mac' });
     expect(within(sheet).getByText('Not allowed')).toBeInTheDocument();
     expect(within(sheet).getByText(/quit and relaunch/)).toBeInTheDocument();
     expect(within(sheet).getByText(/roughly once a month/)).toBeInTheDocument();
@@ -282,7 +282,7 @@ describe('native permission errors', () => {
     });
     mount(h);
     h.push({ id: ID1, sessionId: 's-1', kind: 'native', op: { op: 'screenshot', req: ID1, grants: [] }, createdAt: AT });
-    const sheet = await screen.findByRole('dialog', { name: 'Let Ashlr see and use this Mac' });
+    const sheet = await screen.findByRole('dialog', { name: 'Let Phantom see and use this Mac' });
     await waitFor(() => expect(within(sheet).getAllByText('Not allowed')).toHaveLength(2));
     expect(h.results).toEqual([{ id: ID1, ok: false, code: 'no-permission', error: 'Screen Recording is off.' }]);
   });

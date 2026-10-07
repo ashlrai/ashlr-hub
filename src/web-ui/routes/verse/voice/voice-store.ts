@@ -1,3 +1,4 @@
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 /**
  * routes/verse/voice/voice-store.ts — the one dictation state machine behind
  * every mic button, the ⌃⌥V hotkey and the floating pill (VoiceHud).
@@ -274,7 +275,7 @@ export function startVoice(targetId: string): void {
     const sent = nativeVoice()?.send({ op: 'start', session: id, mode, ...(cwd ? { cwd } : {}) }) ?? false;
     if (!sent) {
       endSession();
-      setError('unsupported', 'The desktop app did not accept the request — restart Ashlr.', targetId);
+      setError('unsupported', `The desktop app did not accept the request — restart ${PRODUCT_NAME}.`, targetId);
       return;
     }
     startTimer = setTimeout(() => {

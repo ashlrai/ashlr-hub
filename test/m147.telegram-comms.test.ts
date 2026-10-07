@@ -28,6 +28,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
+import { syncBuiltinESMExports } from 'node:module';
 
 // ---------------------------------------------------------------------------
 // Mock node:https — intercept all outbound HTTPS calls
@@ -38,15 +39,19 @@ let _mockHttpResponse: unknown = { ok: true, result: [] };
 let _mockHttpError: Error | null = null;
 let _mockHttpStatus = 200;
 const _httpCalls: { path: string; body: unknown }[] = [];
+let _strictHttpPaths: Set<string> | null = null;
 
-vi.mock('node:https', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:https')>();
+// This transport contract must never retain a real HTTPS fallback, including
+// concurrent dynamic imports used by the profile's independent getters.
+vi.mock('node:https', () => {
   return {
-    ...actual,
-    request: (
+    request: vi.fn((
       opts: { path: string; [k: string]: unknown },
       callback: (res: EventEmitter & { statusCode?: number; resume: () => void }) => void,
     ) => {
+      if (_strictHttpPaths && (opts.hostname !== 'api.telegram.org' || opts.method !== 'POST' || !_strictHttpPaths.has(opts.path))) {
+        throw new Error('Unexpected HTTPS fixture request');
+      }
       const chunks: Buffer[] = [];
       let body = '';
 
@@ -86,7 +91,7 @@ vi.mock('node:https', async (importOriginal) => {
       fakeReq.destroy = () => {};
 
       return fakeReq;
-    },
+    }),
   };
 });
 
@@ -109,6 +114,8 @@ import {
   telegramQuestionNamespace,
   setTelegramTransportForTests,
   setTelegramSendClockForTests,
+  syncTelegramDisplayBrand,
+  TELEGRAM_PHANTOM_BRAND,
 } from '../src/core/integrations/telegram.js';
 import {
   postRequest,
@@ -234,6 +241,7 @@ const _sendSleeps: number[] = [];
 beforeEach(() => {
   expect.hasAssertions();
   _httpCalls.length = 0;
+  _strictHttpPaths = null;
   _mockHttpResponse = { ok: true, result: [] };
   _mockHttpError = null;
   _mockHttpStatus = 200;
@@ -252,6 +260,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  _strictHttpPaths = null;
   setTelegramTransportForTests(null);
   setTelegramSendClockForTests(null);
   vi.clearAllMocks();
@@ -1024,5 +1033,177 @@ describe('typed question transport binding and markup edits', () => {
     expect(await editTelegramQuestionKeyboard(123, [[{ text: 'bad', data: '🚀'.repeat(17) }]], cfgTelegram())).toBe(false);
     expect(await editTelegramQuestionKeyboard(123, [[{ text: 'bad', url: 'https://example.com' }]], cfgTelegram())).toBe(false);
     expect(transport).not.toHaveBeenCalled();
+  });
+});
+
+// The hosted bot profile is an explicit operator action, separate from messages.
+describe('Telegram display-brand preview and apply', () => {
+  const botId = 123456789;
+  function profile(target = false) {
+    const values = { name: target ? TELEGRAM_PHANTOM_BRAND.name : 'Ashlr',
+      description: target ? TELEGRAM_PHANTOM_BRAND.description : 'Old description',
+      short_description: target ? TELEGRAM_PHANTOM_BRAND.shortDescription : 'Old short description' };
+    const calls: { method: string; body: Record<string, unknown> }[] = [];
+    const transport = async (method: string, body: Record<string, unknown>): Promise<unknown> => {
+      calls.push({ method, body });
+      if (method === 'getMe') return { ok: true, result: { id: botId, is_bot: true, username: 'ashlr_test_bot' } };
+      if (method.startsWith('getMy')) return { ok: true, result: { ...values } };
+      const parameter = method === 'setMyName' ? 'name' : method === 'setMyDescription' ? 'description' : 'short_description';
+      values[parameter] = String(body[parameter]);
+      return { ok: true, result: true };
+    };
+    return { values, calls, transport };
+  }
+  it('previews with only identity/default-locale getters and never echoes arbitrary profile text', async () => {
+    const fixture = profile(); fixture.values.description = BOT_TOKEN;
+    setTelegramTransportForTests(fixture.transport);
+    const result = await syncTelegramDisplayBrand(cfgTelegram());
+    expect(result.status).toBe('preview'); expect(result.botId).toBe(botId);
+    expect(result.fields.name.state).toBe('different');
+    expect(JSON.stringify(result)).not.toContain(BOT_TOKEN);
+    expect(fixture.calls).toEqual([{ method: 'getMe', body: {} },
+      { method: 'getMyName', body: { language_code: '' } },
+      { method: 'getMyDescription', body: { language_code: '' } },
+      { method: 'getMyShortDescription', body: { language_code: '' } }]);
+  });
+  it('writes differing fields only, then validates all fresh readback on the same bot', async () => {
+    const fixture = profile(); fixture.values.name = TELEGRAM_PHANTOM_BRAND.name;
+    setTelegramTransportForTests(fixture.transport);
+    const result = await syncTelegramDisplayBrand(cfgTelegram(), { apply: true, expectedBotId: botId });
+    expect(result.status).toBe('verified'); expect(Object.values(result.fields).every((f) => f.state === 'verified')).toBe(true);
+    expect(fixture.calls.filter((c) => c.method.startsWith('set'))).toEqual([
+      { method: 'setMyDescription', body: { description: TELEGRAM_PHANTOM_BRAND.description, language_code: '' } },
+      { method: 'setMyShortDescription', body: { short_description: TELEGRAM_PHANTOM_BRAND.shortDescription, language_code: '' } }]);
+    expect(fixture.calls.map((c) => c.method)).toEqual(['getMe', 'getMyName', 'getMyDescription', 'getMyShortDescription',
+      'setMyDescription', 'setMyShortDescription', 'getMe', 'getMyName', 'getMyDescription', 'getMyShortDescription']);
+  });
+  it('is an apply no-op when current values match, with a fresh final observation', async () => {
+    const fixture = profile(true); setTelegramTransportForTests(fixture.transport);
+    expect((await syncTelegramDisplayBrand(cfgTelegram(), { apply: true, expectedBotId: botId })).status).toBe('verified');
+    expect(fixture.calls).toHaveLength(8); expect(fixture.calls.some((c) => c.method.startsWith('set'))).toBe(false);
+  });
+  it.each([undefined, 0, -1, Number.MAX_SAFE_INTEGER + 1, NaN])('refuses unsafe/missing apply bot ID %s before contact', async (expectedBotId) => {
+    const fixture = profile(); setTelegramTransportForTests(fixture.transport);
+    expect((await syncTelegramDisplayBrand(cfgTelegram(), { apply: true, expectedBotId })).status).toBe('blocked');
+    expect(fixture.calls).toEqual([]);
+  });
+  it.each([cfgDisabled, cfgTelegramMissingToken, cfgTelegramMissingChatId, cfgIMessage])('never contacts a disabled/incomplete Telegram configuration', async (makeConfig) => {
+    const previous = process.env.TELEGRAM_BOT_TOKEN; delete process.env.TELEGRAM_BOT_TOKEN;
+    try {
+      const fixture = profile(); setTelegramTransportForTests(fixture.transport);
+      expect((await syncTelegramDisplayBrand(makeConfig())).status).toBe('blocked'); expect(fixture.calls).toEqual([]);
+    } finally { if (previous === undefined) delete process.env.TELEGRAM_BOT_TOKEN; else process.env.TELEGRAM_BOT_TOKEN = previous; }
+  });
+  it('refuses a different configured bot after getMe without setters', async () => {
+    const fixture = profile(); setTelegramTransportForTests(fixture.transport);
+    const result = await syncTelegramDisplayBrand(cfgTelegram(), { apply: true, expectedBotId: botId + 1 });
+    expect(result.status).toBe('blocked'); expect(result.errors[0]?.reason).toBe('bot-mismatch');
+    expect(fixture.calls.map((c) => c.method)).toEqual(['getMe']);
+  });
+  it.each([{ id: botId, is_bot: false }, { id: '123', is_bot: true }, { id: Number.MAX_SAFE_INTEGER + 1, is_bot: true }])('refuses malformed/non-bot identity', async (result) => {
+    const transport = vi.fn(async () => ({ ok: true, result })); setTelegramTransportForTests(transport);
+    expect((await syncTelegramDisplayBrand(cfgTelegram())).status).toBe('unknown'); expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it.each([{}, { name: 1 }, { name: 'x'.repeat(65) }])('treats malformed getter values as unknown and never writes', async (badValue) => {
+    const fixture = profile(); setTelegramTransportForTests(async (method, body) => method === 'getMyName'
+      ? { ok: true, result: badValue } : fixture.transport(method, body));
+    const result = await syncTelegramDisplayBrand(cfgTelegram(), { apply: true, expectedBotId: botId });
+    expect(result.status).toBe('unknown'); expect(result.errors).toContainEqual({ stage: 'name', reason: 'malformed-response' });
+    expect(fixture.calls.some((c) => c.method.startsWith('set'))).toBe(false);
+  });
+  it('preserves partial success, stops after rejection, and performs readback without retrying', async () => {
+    const fixture = profile(); let writes = 0;
+    setTelegramTransportForTests(async (method, body) => {
+      if (method === 'setMyDescription') { writes++; fixture.calls.push({ method, body }); return { ok: false, error_code: 429,
+        parameters: { retry_after: 12 }, description: `private ${BOT_TOKEN}` }; }
+      if (method.startsWith('set')) writes++;
+      return fixture.transport(method, body);
+    });
+    const result = await syncTelegramDisplayBrand(cfgTelegram(), { apply: true, expectedBotId: botId });
+    expect(result.status).toBe('partial'); expect(writes).toBe(2);
+    expect(result.fields.name.state).toBe('verified'); expect(result.fields.description.state).toBe('failed');
+    expect(result.fields.shortDescription.state).toBe('not-attempted');
+    expect(result.errors).toContainEqual({ stage: 'description', reason: 'rejected', errorCode: 429, retryAfterSeconds: 12 });
+    expect(JSON.stringify(result)).not.toContain(BOT_TOKEN); expect(_sendSleeps).toEqual([]);
+    expect(fixture.calls.filter((c) => c.method === 'getMe')).toHaveLength(2);
+  });
+  it('does not call an acknowledgment success verified when final getter is unavailable', async () => {
+    const fixture = profile(); let reads = 0;
+    setTelegramTransportForTests(async (method, body) => {
+      if (method === 'getMe') reads++;
+      if (reads === 2 && method === 'getMyDescription') return null;
+      return fixture.transport(method, body);
+    });
+    const result = await syncTelegramDisplayBrand(cfgTelegram(), { apply: true, expectedBotId: botId });
+    expect(result.status).toBe('partial'); expect(result.fields.description.state).toBe('unconfirmed');
+    expect(result.fields.name.state).toBe('verified');
+  });
+  it('uses readback to confirm an ambiguous final setter that actually applied, without replay', async () => {
+    const fixture = profile();
+    setTelegramTransportForTests(async (method, body) => {
+      const response = await fixture.transport(method, body);
+      return method === 'setMyShortDescription' ? null : response;
+    });
+    const result = await syncTelegramDisplayBrand(cfgTelegram(), { apply: true, expectedBotId: botId });
+    expect(result.status).toBe('verified'); expect(result.errors).toContainEqual({ stage: 'shortDescription', reason: 'unavailable' });
+    expect(fixture.calls.filter((c) => c.method === 'setMyShortDescription')).toHaveLength(1);
+  });
+  it('refuses final identity drift rather than presenting other-bot values as verified', async () => {
+    const fixture = profile(); let reads = 0;
+    setTelegramTransportForTests(async (method, body) => {
+      if (method === 'getMe' && ++reads === 2) return { ok: true, result: { id: botId + 1, is_bot: true } };
+      return fixture.transport(method, body);
+    });
+    const result = await syncTelegramDisplayBrand(cfgTelegram(), { apply: true, expectedBotId: botId });
+    expect(result.status).toBe('partial'); expect(Object.values(result.fields).every((f) => f.state === 'unconfirmed')).toBe(true);
+    expect(result.errors).toContainEqual({ stage: 'identity', reason: 'bot-mismatch' });
+  });
+  it('an explicit retry re-observes and writes only remaining differing fields', async () => {
+    const fixture = profile(); let fail = true;
+    setTelegramTransportForTests(async (method, body) => method === 'setMyDescription' && fail ? null : fixture.transport(method, body));
+    expect((await syncTelegramDisplayBrand(cfgTelegram(), { apply: true, expectedBotId: botId })).status).toBe('partial');
+    fixture.calls.length = 0; fail = false;
+    expect((await syncTelegramDisplayBrand(cfgTelegram(), { apply: true, expectedBotId: botId })).status).toBe('verified');
+    expect(fixture.calls.filter((c) => c.method.startsWith('set')).map((c) => c.method)).toEqual(['setMyDescription', 'setMyShortDescription']);
+  });
+  it('pins cfg and environment token before asynchronous contacts', async () => {
+    const cfg = cfgTelegramMissingToken(); const previous = process.env.TELEGRAM_BOT_TOKEN;
+    process.env.TELEGRAM_BOT_TOKEN = BOT_TOKEN;
+    // Guard the actual builtin as well: concurrent dynamic-import mock mistakes
+    // must fail this contract rather than fall through to a live HTTPS request.
+    const actual = await vi.importActual<typeof import('node:https')>('node:https');
+    const builtinIntercept = vi.spyOn(actual.default, 'request').mockImplementation(() => { throw new Error('Unexpected non-stubbed HTTPS request'); });
+    syncBuiltinESMExports();
+    try {
+      // Resolve Vitest's lazy builtin mock before concurrent dynamic imports.
+      const mocked = await import('node:https');
+      expect(vi.isMockFunction(mocked.request)).toBe(true);
+      expect(mocked.request).not.toBe(actual.default.request);
+      _strictHttpPaths = new Set([`/bot${BOT_TOKEN}/getMyName`, `/bot${BOT_TOKEN}/getMyDescription`, `/bot${BOT_TOKEN}/getMyShortDescription`]);
+      // Vitest can return the builtin namespace during concurrent lazy imports.
+      // Its request function also delegates ONLY to the strict local fixture.
+      builtinIntercept.mockImplementation(mocked.request); syncBuiltinESMExports();
+      _mockHttpResponse = { ok: true, result: { name: 'Old', description: 'Old', short_description: 'Old' } };
+      setTelegramTransportForTests(async () => {
+        cfg.comms!.telegram!.botToken = 'replacement'; process.env.TELEGRAM_BOT_TOKEN = 'replacement-env';
+        setTelegramTransportForTests(null);
+        return { ok: true, result: { id: botId, is_bot: true } };
+      });
+      const result = await syncTelegramDisplayBrand(cfg);
+      expect({ status: result.status, errors: result.errors, calls: _httpCalls }).toMatchObject({ status: 'preview', errors: [] });
+      expect(_httpCalls.map((c) => c.path)).toEqual([`/bot${BOT_TOKEN}/getMyName`, `/bot${BOT_TOKEN}/getMyDescription`, `/bot${BOT_TOKEN}/getMyShortDescription`]);
+      expect(_httpCalls.map((c) => c.body)).toEqual([{ language_code: '' }, { language_code: '' }, { language_code: '' }]);
+    } finally {
+      _strictHttpPaths = null; builtinIntercept.mockRestore(); syncBuiltinESMExports();
+      if (previous === undefined) delete process.env.TELEGRAM_BOT_TOKEN; else process.env.TELEGRAM_BOT_TOKEN = previous;
+    }
+  });
+  it('drops thrown credential-bearing diagnostics and restricts the complete operation inventory', async () => {
+    setTelegramTransportForTests(async () => { throw new Error(`https://api.telegram.org/bot${BOT_TOKEN}/getMe`); });
+    const failed = await syncTelegramDisplayBrand(cfgTelegram());
+    expect(failed.status).toBe('unknown'); expect(JSON.stringify(failed)).not.toContain(BOT_TOKEN);
+    const fixture = profile(); setTelegramTransportForTests(fixture.transport);
+    expect((await syncTelegramDisplayBrand(cfgTelegram(), { apply: true, expectedBotId: botId })).status).toBe('verified');
+    expect(new Set(fixture.calls.map((c) => c.method))).toEqual(new Set(['getMe', 'getMyName', 'getMyDescription', 'getMyShortDescription', 'setMyName', 'setMyDescription', 'setMyShortDescription']));
   });
 });

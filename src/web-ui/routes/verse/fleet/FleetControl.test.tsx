@@ -6,10 +6,11 @@
  * `__ASHLR_DESKTOP__.fleet`, run steering and the grant editor's diff.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { apiGet, METADATA_JSON_READ_TIMEOUT_MS } from '../../../data/client.js';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { FleetSection } from '../sections/FleetSection.js';
-import { evictAll, getQuerySnapshot, runQuery } from '../../../data/cache.js';
+import { evictAll, getQuerySnapshot, runQuery, queryGateStats } from '../../../data/cache.js';
 import { refreshFleetControlReads } from './fleet-control-queries.js';
 import { FleetControl, FLEET_CONTROL_POLL_MS } from './FleetControl.js';
 import { SectionVisibilityProvider } from '../shell/section-visibility.js';
@@ -161,6 +162,46 @@ describe('automatic control polling', () => {
     await act(async () => { releases.forEach(release => release()); await Promise.all(blockers); });
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('region', { name: 'Fleet control' })).toHaveTextContent('Running · pid 4242');
+    unmount();
+  });
+
+  it('reads the actual new PID after native completion once four stalled HTTP reads abort', async () => {
+    let request: { id: string; op: string } | null = null;
+    (window as unknown as Record<string, unknown>).__ASHLR_DESKTOP__ = {
+      fleet: { version: 1, ops: ['resident-restart'], send: (message: { id: string; op: string }) => { request = message; return true; } },
+    };
+    const old = fleetControl('live');
+    const fresh = fleetControl('live'); fresh.daemon.pid = 36373;
+    await runQuery('verse-fleet-control', async () => ({ value: old, available: true, reason: null }));
+    let live = 0; let peak = 0;
+    const paths: string[] = [];
+    vi.stubGlobal('fetch', vi.fn((path: string, init: RequestInit) => {
+      paths.push(path);
+      if (!path.startsWith('/stalled-')) return Promise.resolve(json(fresh));
+      live += 1; peak = Math.max(peak, live);
+      return new Promise<Response>((_resolve, reject) => init.signal!.addEventListener('abort', () => {
+        live -= 1; reject(init.signal!.reason);
+      }, { once: true }));
+    }));
+    const blockers = Array.from({ length: 4 }, (_, i) => runQuery(`stalled-${i}`, () => apiGet(`/stalled-${i}`)));
+    const { unmount } = render(panel());
+    const region = screen.getByRole('region', { name: 'Fleet control' });
+    fireEvent.click(within(region).getByRole('button', { name: 'Restart' }));
+    expect(request).toMatchObject({ op: 'resident-restart' });
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('ashlr:fleet', { detail: { ...request, phase: 'done', message: 'Native operation finished.' } }));
+    });
+    expect(region).toHaveTextContent('Running · pid 4242');
+    expect(paths).not.toContain('/api/verse/fleet/control');
+    expect(queryGateStats()).toMatchObject({ active: 4, peak: 4 });
+    expect(queryGateStats().queued).toBeGreaterThan(0);
+    await act(async () => { await vi.advanceTimersByTimeAsync(METADATA_JSON_READ_TIMEOUT_MS); await Promise.all(blockers); });
+    expect(region).toHaveTextContent('Running · pid 36373');
+    // Native completion forces a current read after the already queued mount read.
+    expect(paths.filter(path => path === '/api/verse/fleet/control')).toHaveLength(2);
+    expect(peak).toBe(4);
+    expect(queryGateStats().peak).toBe(4);
+    expect(live).toBe(0);
     unmount();
   });
 

@@ -688,6 +688,20 @@ pinned to 2.1.257. The seat shows its CLI version and a note with the fix:
 `ashlr resources profile repin --directory <dir> --executable <path>`. Add
 `--dry-run` to see the change without writing; a real repin first saves the
 profile's three files as `.prev` copies, which together restore the old pin.
+
+Binary re-pin preserves the original launcher template. For an existing Claude
+profile whose previous generated template lacks the host broker's fixed safety
+environment, use `ashlr resources profile upgrade-template --directory <dir>
+--dry-run`, then repeat without `--dry-run` when that seat has no active turn.
+This explicit operation replaces only a recognized launcher, retaining the
+binary pin, command/manifest and native sign-in storage. It keeps
+`launcher.mjs.template-prev` separately from the binary re-pin backups; changed,
+unsafe or conflicting profiles are refused. A failure after launcher publication
+may already have changed it: inspect and retry the same operation to validate
+its backup and durability. It never runs login, reads credentials or asserts
+that authentication is valid. Normal fresh identity, quota and credit-protection
+observations still determine whether autonomous Claude work can begin.
+
 (Verse 3.5–3.8 offered Opus 5.5 as `claude-opus-5.5`; the CLI resolved that id to
 Opus 5, so those sessions ran Opus 5. They keep their recorded id, but their next
 turns ask for the real Opus 5.5 — so on a seat still pinned below 2.1.280 Phantom
@@ -912,6 +926,18 @@ improvement admitted by the live resource, reserve and signed-authority gates.
 Explicit caller-supplied launch limits still apply. Jev may add an advisory note to a memo when it thinks
 an action deserves a stricter class; the class the policy set always stands.
 Details: [LEADER.md](LEADER.md#founder-mode-315).
+
+**Telegram bot display profile.** `ashlr comms telegram-brand --json` previews
+the configured bot's name and descriptions against Phantom's fixed display
+copy, without changing them. To apply it, use
+`ashlr comms telegram-brand --apply --expected-bot-id <id> --json` with the exact
+bot ID from that preview. The command changes only differing default-locale
+name/description fields and checks fresh readback. It never changes the token,
+username, commands, webhook or chat messages. Dedicated localized profiles may
+still show their own names. A partial or unconfirmed result is not success;
+an explicit rerun rechecks current facts and skips fields already matching.
+No profile updates run at startup. Telegram does not offer an atomic update
+across all three fields. See the [Telegram Bot API](https://core.telegram.org/bots/api#setmyname).
 
 ### Learning, reasoning data and experiments
 

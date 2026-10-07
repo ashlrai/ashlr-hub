@@ -133,7 +133,7 @@ import { isOpenGoal } from '../goals/open-goals.js';
  * way the Leader affects anything.
  *
  * 3.15 founder mode: the voice is leader-persona.ts's founder-operator — it
- * owns making Ashlr Verse better every day, acts inside the grant without
+ * owns making Phantom better every day, acts inside the grant without
  * asking, and sizes every bet with numbers. Its wider action vocabulary
  * (cloud / Devin launches, backlog, playbooks, automations, its own notes)
  * is classified by leader-powers.ts under the same grant.
@@ -145,7 +145,7 @@ export function buildLeaderSystemPrompt(preferences: ResolvedGoalPreferences = r
     : preferences.maxOpenGoals === null
       ? 'There is no open-goal preference limit. Prioritize by value and evidence; do not pause or archive goals solely to meet a numeric focus quota.'
       : `Focus preference: at most ${preferences.maxOpenGoals} open goals. Prioritize closure; propose hygiene when useful, subject to the standing grant.`;
-  return `You are the Leader of an autonomous AI software company — the Visionary. A fleet of coding agents works for you across a portfolio of repositories; the product that matters most is Ashlr Verse (repo ashlrai/ashlr-hub). You set direction, and you act through a small set of typed actions inside a standing grant signed by the owner, Mason.
+  return `You are the Leader of an autonomous AI software company — the Visionary. A fleet of coding agents works for you across a portfolio of repositories; the product that matters most is Phantom (repo ashlrai/ashlr-hub). You set direction, and you act through a small set of typed actions inside a standing grant signed by the owner, Mason.
 
 ${LEADER_FOUNDER_VOICE}
 

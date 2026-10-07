@@ -228,9 +228,9 @@ export async function sendReportViaTelegram(req: CommsRequest, cfg: AshlrConfig)
 export function formatThreadMessage(msg: LeaderThreadMessage): string {
   // 3.15: the Leader always speaks as itself (leader-persona.ts); Mason's own words are shown as written.
   const body = scrubSecrets(msg.from === 'mason' ? (msg.text ?? '') : leaderDisplayText(guardPersonaText(msg.text ?? ''))).trim();
-  // Mason's own words from another surface (e.g. Verse), mirrored so the
+  // Mason's own words from another surface (e.g. Phantom), mirrored so the
   // Leader's reply on Telegram has its context.
-  if (msg.from === 'mason') return `You (in ${msg.channel === 'verse' ? 'Verse' : String(msg.channel)}):\n${body}`;
+  if (msg.from === 'mason') return `You (in ${msg.channel === 'verse' ? 'Phantom' : String(msg.channel)}):\n${body}`;
   switch (msg.kind) {
     case 'question':
       return `Leader asks:\n${body}\n\n(Reply to this message to answer.)`;
@@ -752,7 +752,7 @@ export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig):
     }
     await replyTo(event, scrubSecrets(lines.join('\n') || 'Nothing to veto.'), cfg);
   } catch {
-    await replyTo(event, 'That did not go through — try again, or use Verse.', cfg);
+    await replyTo(event, 'That did not go through — try again, or use Phantom.', cfg);
   }
   return true;
 }
@@ -761,7 +761,7 @@ export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig):
 // Inbound: slash commands
 // ---------------------------------------------------------------------------
 
-const TELEGRAM_HELP_INTRO = 'Talk to the Leader: type a message, or reply to one to follow up.';
+const TELEGRAM_HELP_INTRO = 'Talk to Phantom’s Leader: type a message, or reply to one to follow up.';
 const TELEGRAM_HELP_SECTIONS = [
   ['Read', [
     ['/status or /brief', 'shipped, running, blockers and next'],
@@ -975,7 +975,7 @@ export async function handleSlashCommand(event: InboundEvent, text: string, cfg:
         const result = await receiveTelegramTask(task[1]!, task[2]!);
         await replyTo(event, scrubSecrets(result.message), cfg);
       } catch {
-        await replyTo(event, 'Could not hand that over — try again, or use Verse → Automations.', cfg);
+        await replyTo(event, 'Could not hand that over — try again, or use Phantom → Automations.', cfg);
       }
       return true;
     }

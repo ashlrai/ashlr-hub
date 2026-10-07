@@ -32,10 +32,10 @@ import {
 } from '../cloud/tracker.js';
 import type { CloudTaskReport } from '../cloud/types.js';
 import type { DevinClient, DevinSession } from './client.js';
-import { hasAmbiguousDevinCreate, previewDevinCreateRecovery } from './create-recovery.js';
+import { devinTaskDiagnostics, hasAmbiguousDevinCreate, previewDevinCreateRecovery } from './create-recovery.js';
 import { devinReportFromStructuredOutput, parseDevinReport } from './delivery-contract.js';
 import { connectedClient, recordDevinApiOutcome, snapshotOf, type DevinServiceDeps } from './service.js';
-import { listDevinTasks, readDevinTask, writeDevinTask } from './store.js';
+import { readDevinTaskInventory, readDevinTask, writeDevinTask } from './store.js';
 import { DEVIN_TASK_EXPIRY_MS, type DevinTaskV1 } from './types.js';
 import { stateFromSession } from './session-state.js';
 
@@ -110,18 +110,15 @@ export function resetDevinTrackerCursorForTest(): void {
   lastCheckedTaskId = null;
 }
 
-export async function refreshDevinTasks(deps: DevinTrackerDeps = {}): Promise<{ checked: number; updated: number }> {
+export async function refreshDevinTasks(deps: DevinTrackerDeps = {}): Promise<import('./types.js').DevinRefreshResult> {
   const gh = deps.gh ?? defaultCloudGh;
   const clock = deps.now ?? (() => new Date());
   const nowMs = clock().getTime();
   let checked = 0;
   let updated = 0;
-  let tasks: DevinTaskV1[];
-  try {
-    tasks = listDevinTasks(Number.MAX_SAFE_INTEGER);
-  } catch {
-    return { checked, updated };
-  }
+  const inventory = readDevinTaskInventory();
+  const tasks = inventory.tasks;
+  const diagnostics = devinTaskDiagnostics(inventory);
 
   for (const task of tasks) {
     if ((task.state === 'queued' || task.state === 'launching') && nowMs - Date.parse(task.createdAt) > DEVIN_STALE_LAUNCH_MS) {
@@ -133,7 +130,7 @@ export async function refreshDevinTasks(deps: DevinTrackerDeps = {}): Promise<{ 
   }
 
   const due = watchedForRefresh(tasks, nowMs);
-  if (due.length === 0) return { checked, updated };
+  if (due.length === 0) return { checked, updated, diagnostics };
 
   // One client for the sweep; without one the GitHub half still runs.
   let api: DevinTrackerDeps['client'] = null;
@@ -270,5 +267,5 @@ export async function refreshDevinTasks(deps: DevinTrackerDeps = {}): Promise<{ 
       if (commit(task, next)) updated += 1;
     } catch { /* a failed write leaves the task as it was */ }
   }
-  return { checked, updated };
+  return { checked, updated, diagnostics };
 }

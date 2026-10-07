@@ -17,14 +17,14 @@ that every integration, provider or autonomous effect is active.
 | Your task | Canonical guide |
 |-----------|-----------------|
 | See real candidates, rejection and parent-linked improvement without model credentials | [Executable demo](DEMO.md) |
-| Understand the objective and how progress is measured | [Ashlrverse North Star](NORTH-STAR.md) |
+| Understand the objective and how progress is measured | [Phantom North Star](NORTH-STAR.md) |
 | Separate tested firm machinery from remaining activation and integration work | [Autonomy gap map](AUTONOMY-GAP.md) |
 | Exercise signed graph execution and a deliberately lying candidate | [Firm graph fixture](FIRM-DEMO.md) |
 | Connect autonomy research to engineering acceptance | [Autonomy engineering brief](UNIVERSE-AUTONOMY-RESEARCH.md) |
-| Compare Ashlrverse with current agent platforms using measurable acceptance gates | [Competitive acceptance](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-COMPETITIVE-ACCEPTANCE.md) |
+| Compare Phantom with current agent platforms using measurable acceptance gates | [Competitive acceptance](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-COMPETITIVE-ACCEPTANCE.md) |
 | Run a first bounded experiment and inspect its results | [Quickstart](QUICKSTART.md) |
 | Understand the current components and their boundaries | [Architecture](ARCHITECTURE.md#current-runtime-map) |
-| Configure experiments, campaigns, portfolios and artifact delivery | [Ashlrverse operator guide](ASHLR-UNIVERSE.md) |
+| Configure experiments, campaigns, portfolios and artifact delivery | [Universe operator guide](ASHLR-UNIVERSE.md) |
 | Configure native/local workers, quotas, the foreground queue and fleet map | [Resource Pools](RESOURCE-POOLS.md) |
 | Install or roll back an exact trusted local package | [Pinned runtime](ASHLR-UNIVERSE.md#install-a-pinned-local-runtime) |
 | Change code and verify it locally | [Contributing — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/CONTRIBUTING.md) |
@@ -119,5 +119,5 @@ are source references, not setup instructions or current release receipts.
 Update the owning guide when behavior changes. Keep exact test counts, source
 hashes, artifact digests, provider observations and rollback identities in dated
 release or commissioning evidence instead of duplicating them throughout the
-documentation. Verification is local; do not enable GitHub Actions to follow
-these guides.
+documentation. Use focused local checks while iterating, then follow the
+canonical release guide for required hosted qualification and publication.

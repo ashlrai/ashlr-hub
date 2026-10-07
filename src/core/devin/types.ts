@@ -233,7 +233,23 @@ export interface DevinGate {
   reason: string | null;
 }
 
+export type DevinTaskSourceState = 'ready' | 'missing' | 'unavailable';
+/** Local task evidence only; never a provider quota or account balance. */
+export interface DevinTaskDiagnostics {
+  sourceState: DevinTaskSourceState;
+  legacyUnboundCount: number | null;
+  legacyUnboundAcu: number | null;
+}
+export interface DevinRefreshResult {
+  checked: number;
+  updated: number;
+  /** Optional for older servers and injected callers. Describes the input scan. */
+  diagnostics?: DevinTaskDiagnostics;
+}
+
 export interface DevinBudgetView {
+  /** Missing on older servers; partial numeric totals are not available capacity. */
+  accountingState?: DevinTaskSourceState;
   acuBudgetTotal: number;
   acuUsed: number;
   acuRemaining: number;
@@ -352,6 +368,7 @@ export const VERSE_DEVIN_TASKS_PATH = '/api/verse/devin/tasks' as const;
 
 /** GET /api/verse/devin */
 export interface DevinOverviewResponse {
+  taskDiagnostics?: DevinTaskDiagnostics;
   generatedAt: string;
   status: DevinStatus;
   budget: DevinBudgetView;

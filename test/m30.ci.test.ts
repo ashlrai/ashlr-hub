@@ -177,6 +177,25 @@ describe('M30 CI workflow', () => {
     expect(ciYml).not.toContain('pull_request_target');
   });
 
+  it('keeps native cache reuse independent from test and artifact admission', () => {
+    const native = workflowJob('native-macos-broker-foundation');
+    expect(native).not.toMatch(/restore-keys:|enableCrossOsArchive:|continue-on-error:|pull_request_target|cache-mode:/);
+    expect(native).toContain("if: success() && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo-cache.outputs.cache-hit != 'true'");
+    expect(native.match(/cache-hit/g)).toHaveLength(1);
+    expect(native.match(/path: desktop\/src-tauri\/target\/debug\//g)).toHaveLength(2);
+    expect(native.indexOf('- name: Bind candidate source')).toBeLessThan(native.indexOf('- name: Restore native compilation cache'));
+    expect(native.indexOf('- name: Remove disposable Tauri sidecar fixture')).toBeLessThan(native.indexOf('- name: Save native compilation cache'));
+    // Job/step identity remains the only hosted admission proof; no cache hit
+    // is allowed to skip or replace any required source-bound check.
+    const artifact = readFileSync(resolve(repoRoot, 'scripts/hosted-build-artifact.mjs'), 'utf8');
+    expect(artifact).toContain("name: 'Native macOS broker foundation (Rust 1.97.1)'");
+    for (const name of ['Bind candidate source', 'Check native broker formatting', 'Check native broker library', 'Lint native broker library', 'Test native broker library', 'Remove disposable Tauri sidecar fixture']) {
+      expect(artifact).toContain(`'${name}'`);
+    }
+    expect(artifact).not.toContain('cargo-cache');
+    expect(artifact).toContain("assert.equal(job.conclusion, 'success')");
+  });
+
   it('keeps artifact signing in a trusted default-branch workflow with verified data inputs', () => {
     const signing = readFileSync(resolve(repoRoot, '.github/workflows/attest-ci-build.yml'), 'utf8');
     const inputs = readFileSync(resolve(repoRoot, '.github/scripts/ci-attestation-inputs.mjs'), 'utf8');

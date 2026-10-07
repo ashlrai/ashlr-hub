@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to ashlr-hub are documented in this file.
+All notable changes to Phantom are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions map to milestone series: **2.1.0** = v2.1 "Harden & Prove" (H1–H8),
@@ -8,6 +8,45 @@ Versions map to milestone series: **2.1.0** = v2.1 "Harden & Prove" (H1–H8),
 hub (M1–M20). Entries below detail each milestone; dates are merge dates into `master`.
 
 ---
+
+## [3.25.1] — 2026-10-07
+
+### Fixed
+
+- Use Phantom in new Telegram messages, Leader prompts, desktop guidance and
+  phone passkey display names. Preserve saved conversations, provider names,
+  repository identifiers and compatible CLI, route and data identities.
+- Add an explicit Telegram profile preview and update command. Apply requires
+  the previewed bot ID, changes only differing default-locale display fields,
+  and verifies fresh readback without sending messages or changing credentials.
+- Give authenticated metadata reads a finite lifetime, including their JSON
+  response bodies. Preserve cached data, caller cancellation and mutation
+  behavior while reporting stalled reads as retryable failures.
+- Share the phone client import and local mutation refusal handling, preserving
+  method, body and response contracts. Desktop and phone startup bundles stay
+  within their existing size budgets.
+- Refuse new Devin session creation when local task accounting is incomplete.
+  Show unknown accounting and explain unconfirmed legacy exposure instead of
+  treating unreadable records as zero. Separate the local budget, reported use
+  and held exposure; these readings are not the provider's subscription balance.
+- Reuse one coherent campaign projection within commissioning and enrollment
+  checks, refusing missing or degraded evidence. Reuse the integration ledger
+  snapshot within each preflight. Fresh later checks still validate current
+  evidence; these changes do not claim a whole-workflow speed improvement.
+- Patch the example site's Sharp override and shadcn-scoped MCP SDK dependency,
+  preserving optional platform packages. The separate braces advisory remains
+  unresolved.
+- Add an explicit upgrade command for recognized older Claude profile launchers,
+  preserving the native sign-in, account identity and existing profile contents.
+  The upgrade supports a dry run and does not automatically change live profiles.
+- Retain bounded Grok run diagnostics and classify a final failed local
+  verification without a saved proposal as a verification failure.
+- Reuse the validated campaign event fold within one observation while retaining
+  fresh ledger reads, owner checks and independent accounting samples.
+- Cache native broker compilation with pinned restore/save actions and keys
+  bound to compiler, SDK and source inputs. Only successful master pushes save
+  entries; every original Cargo check and test still runs. Hosted cold/warm
+  timing remains to be measured.
 
 ## [3.25.0] — 2026-10-07
 

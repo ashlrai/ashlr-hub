@@ -11,7 +11,7 @@ import { runFixedUniverseEvaluator } from './fixed-evaluator.js';
 import { readUniverseIntegrationPlan, validateUniverseIntegrationDefinition } from './integration-plan.js';
 import type { UniverseIntegrationEvaluationEvidence, UniverseIntegrationEvaluationRequest,
   UniverseIntegrationEvaluationResult } from './integration-evaluation-types.js';
-import { assertComparatorUnchanged, manifestRecord, parseEvaluation, projectUniverse, universePath } from './store.js';
+import { assertComparatorUnchanged, manifestRecord, parseEvaluation, projectUniverse, readRecords, universePath } from './store.js';
 import type { UniverseStoreOptions } from './types.js';
 
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -276,8 +276,9 @@ export async function evaluateUniverseIntegration(input: unknown,
       }
       if (intents.length >= MAX_ATTEMPTS) throw new Error('Integration evaluation capacity exhausted');
       check();
-      const record = manifestRecord(directory);
-      const overview = projectUniverse(directory);
+      const records = readRecords(directory);
+      const record = manifestRecord(directory, records);
+      const overview = projectUniverse(directory, records);
       if (overview.sourceState !== 'healthy' || overview.activeRun || record.manifestDigest !== request.acceptance.manifestDigest ||
           record.comparatorDigest !== request.acceptance.comparatorDigest || record.manifest.seed.repo !== request.integration.target.repo ||
           record.manifest.seed.revision !== request.integration.target.baseCommit) throw new Error('Integration evaluation acceptance preflight failed');

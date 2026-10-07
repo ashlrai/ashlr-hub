@@ -10,7 +10,7 @@ import { DevinClient, type DevinSession, type DevinSessionPage } from '../src/co
 import { previewDevinCreateRecovery } from '../src/core/devin/create-recovery.js';
 import { storeDevinKey } from '../src/core/devin/secret.js';
 import { devinSessionTaskTag, messageDevinTask } from '../src/core/devin/service.js';
-import { readDevinTask, writeDevinConnection, writeDevinTask } from '../src/core/devin/store.js';
+import { readDevinTask, listDevinTasks, writeDevinConnection, writeDevinTask } from '../src/core/devin/store.js';
 import { devinTaskNeedsObservation, refreshDevinTasks, resetDevinTrackerCursorForTest } from '../src/core/devin/tracker.js';
 import type { DevinTaskV1 } from '../src/core/devin/types.js';
 import { fakeDevin } from './helpers/fake-devin.js';
@@ -58,7 +58,7 @@ describe('read-only ID-less create recovery preview', () => {
       ['GET',`/v3/organizations/${orgId}/sessions/${id}`],
     ]);
     expect(readDevinTask(row.id)).toEqual(before);
-    expect(await refreshDevinTasks({ client:{ client,orgId }, now:() => now })).toEqual({ checked:launchOrgId ? 1 : 0, updated:0 });
+    expect(await refreshDevinTasks({ client:{ client,orgId }, now:() => now })).toMatchObject({ checked:launchOrgId ? 1 : 0, updated:0 });
     expect(readDevinTask(row.id)).toEqual(before);
     expect(devinTaskAcuUsed(readDevinTask(row.id)!)).toBe(10);
   });
@@ -143,11 +143,23 @@ describe('supported refresh settles only org-pinned terminal observed usage', ()
     if (prior === undefined) delete process.env['ASHLR_HOME']; else process.env['ASHLR_HOME'] = prior;
     rmSync(root, { recursive: true, force: true });
   });
+  it('explains four legacy holds without scanning the provider or changing records', async () => {
+    const rows = Array.from({ length: 4 }, (_, i) => task({ id: `dv_20261002T0300_${String(i).padStart(6, '0')}`,
+      branch: `ashlr-devin/dv_20261002T0300_${String(i).padStart(6, '0')}`,
+      launchOrgId: undefined, state: i < 2 ? 'closed' : 'failed', failure: 'unparsed' }));
+    rows.forEach(writeDevinTask);
+    const before = listDevinTasks(); const a = api([page([session()])]);
+    expect(await refreshDevinTasks({ client: a, now: () => now })).toEqual({ checked: 0, updated: 0,
+      diagnostics: { sourceState: 'ready', legacyUnboundCount: 4, legacyUnboundAcu: 40 } });
+    expect(a.client.listSessions).not.toHaveBeenCalled(); expect(a.client.getSession).not.toHaveBeenCalled();
+    expect(listDevinTasks()).toEqual(before);
+  });
+
   it.each(['exit', 'error'] as const)('settles actual ACUs for literal %s with no POST/DELETE/GitHub calls', async (status) => {
     writeDevinTask(task());
     const a = api([page([session({ status })])], session({ status }));
     const gh = vi.fn();
-    expect(await refreshDevinTasks({ client: a, gh, now: () => now })).toEqual({ checked: 1, updated: 1 });
+    expect(await refreshDevinTasks({ client: a, gh, now: () => now })).toMatchObject({ checked: 1, updated: 1 });
     const after = readDevinTask(task().id)!;
     expect(after.sessionId).toBe('devin-found');
     expect(after.session?.readAt).toBe(now.toISOString());
@@ -168,14 +180,14 @@ describe('supported refresh settles only org-pinned terminal observed usage', ()
   ])('keeps the original full-cap hold for unverified termination/usage %#', async (exact) => {
     writeDevinTask(task());
     const before = readDevinTask(task().id)!;
-    expect(await refreshDevinTasks({ client: api([page([session()])], exact), now: () => now })).toEqual({ checked: 1, updated: 0 });
+    expect(await refreshDevinTasks({ client: api([page([session()])], exact), now: () => now })).toMatchObject({ checked: 1, updated: 0 });
     expect(readDevinTask(task().id)).toEqual(before);
     expect(devinTaskAcuUsed(before)).toBe(10);
   });
   it('does not automatically scan or bind legacy holds to a historical personal Max login', async () => {
     writeDevinTask(task({ launchOrgId: undefined }));
     const a = api([page([session()])]);
-    expect(await refreshDevinTasks({ client: a, now: () => now })).toEqual({ checked: 0, updated: 0 });
+    expect(await refreshDevinTasks({ client: a, now: () => now })).toMatchObject({ checked: 0, updated: 0 });
     expect(a.client.listSessions).not.toHaveBeenCalled();
     expect(devinTaskAcuUsed(readDevinTask(task().id)!)).toBe(10);
   });
@@ -185,7 +197,7 @@ describe('supported refresh settles only org-pinned terminal observed usage', ()
     const a = api([page([session()])], session({ status }));
     const gh = vi.fn(async () => { throw new Error('No delivery lookup for dismissed recovery'); });
     const clock = new Date(now.getTime() + 50 * 60 * 60 * 1000);
-    expect(await refreshDevinTasks({ client: a, now: () => clock, gh })).toEqual({ checked: 1, updated: 1 });
+    expect(await refreshDevinTasks({ client: a, now: () => clock, gh })).toMatchObject({ checked: 1, updated: 1 });
     const after = readDevinTask(dismissed.id)!;
     expect(after).toMatchObject({ state: 'closed', stateReason: 'Dismissed by you.', failure: 'unparsed', maxAcu: 10,
       launchOrgId: orgId, sessionId: 'devin-found', session: { status, acusConsumed: 3 } });
@@ -194,13 +206,13 @@ describe('supported refresh settles only org-pinned terminal observed usage', ()
     expect(a.client.listSessions).toHaveBeenCalledTimes(1);
     expect(a.client.getSession).toHaveBeenCalledWith(orgId, 'devin-found');
     expect(gh).not.toHaveBeenCalled();
-    expect(await refreshDevinTasks({ client: a, now: () => clock, gh })).toEqual({ checked: 0, updated: 0 });
+    expect(await refreshDevinTasks({ client: a, now: () => clock, gh })).toMatchObject({ checked: 0, updated: 0 });
   });
   it('keeps dismissed legacy ID-less records preview-only and never auto-binds the current account', async () => {
     writeDevinTask(task({ state: 'closed', launchOrgId: undefined, stateReason: 'Dismissed by you.' }));
     const before = readDevinTask(task().id)!;
     const a = api([page([session()])]);
-    expect(await refreshDevinTasks({ client: a, now: () => now })).toEqual({ checked: 0, updated: 0 });
+    expect(await refreshDevinTasks({ client: a, now: () => now })).toMatchObject({ checked: 0, updated: 0 });
     expect(a.client.listSessions).not.toHaveBeenCalled();
     expect(readDevinTask(before.id)).toEqual(before);
     expect(await previewDevinCreateRecovery(before, a)).toMatchObject({ kind: 'match', launchAccountBound: false });
@@ -213,7 +225,7 @@ describe('supported refresh settles only org-pinned terminal observed usage', ()
       writeDevinTask({ ...readDevinTask(task().id)!, state: 'closed' });
       return session();
     });
-    expect(await refreshDevinTasks({ client: a, now: () => now })).toEqual({ checked: 1, updated: 0 });
+    expect(await refreshDevinTasks({ client: a, now: () => now })).toMatchObject({ checked: 1, updated: 0 });
     expect(readDevinTask(task().id)?.state).toBe('closed');
   });
   it('does not read a known session through a different current organization', async () => {
@@ -268,7 +280,7 @@ describe('supported refresh settles only org-pinned terminal observed usage', ()
       createdAt: old, launchedAt: old, session: { status: 'running', statusDetail: 'working', acusConsumed: 2, prUrls: [], readAt: old } }));
     const a = api([], session());
     const gh = vi.fn(async () => ({ ok: true, stdout: '[]', stderr: '' }));
-    expect(await refreshDevinTasks({ client: a, gh, now: () => now })).toEqual({ checked: 1, updated: 1 });
+    expect(await refreshDevinTasks({ client: a, gh, now: () => now })).toMatchObject({ checked: 1, updated: 1 });
     expect(a.client.getSession).toHaveBeenCalledWith(orgId, 'devin-found');
     const after = readDevinTask(task().id)!;
     expect(after.state).toBe(state);
@@ -279,7 +291,7 @@ describe('supported refresh settles only org-pinned terminal observed usage', ()
   it.each([null, { status: 'exit' as const, statusDetail: null, acusConsumed: null, prUrls: [], readAt: now.toISOString() }])('keeps watching closed known sessions with incomplete terminal usage %#', async (observation) => {
     writeDevinTask(task({ state: 'closed', failure: null, sessionId: 'devin-found', sessionUrl: session().url, session: observation }));
     const a = api([], session());
-    expect(await refreshDevinTasks({ client: a, now: () => now })).toEqual({ checked: 1, updated: 1 });
+    expect(await refreshDevinTasks({ client: a, now: () => now })).toMatchObject({ checked: 1, updated: 1 });
     expect(readDevinTask(task().id)?.session).toMatchObject({ status: 'exit', acusConsumed: 3 });
     expect(readDevinTask(task().id)?.state).toBe('closed');
   });
@@ -287,7 +299,7 @@ describe('supported refresh settles only org-pinned terminal observed usage', ()
     writeDevinTask(task({ state: 'closed', failure: null, sessionId: 'devin-found', sessionUrl: session().url,
       session: { status: 'exit', statusDetail: null, acusConsumed: 3, prUrls: [], readAt: now.toISOString() } }));
     const a = api([]);
-    expect(await refreshDevinTasks({ client: a, now: () => now })).toEqual({ checked: 0, updated: 0 });
+    expect(await refreshDevinTasks({ client: a, now: () => now })).toMatchObject({ checked: 0, updated: 0 });
     expect(a.client.getSession).not.toHaveBeenCalled();
   });
 });

@@ -94,7 +94,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   vision: ['show', 'review', 'preview', 'shadow', 'approve', 'reconcile', 'set'],
   eval: ['attention', 'swe-bench'],
   genome: ['recall', 'learn', 'teach', 'consolidate', 'export', 'playbook'],
-  comms: ['status', 'send-test', 'cycle', 'ask', 'digest', 'ask-vision', 'ask-merges', 'setup-telegram'],
+  comms: ['status', 'send-test', 'cycle', 'ask', 'digest', 'ask-vision', 'ask-merges', 'setup-telegram', 'telegram-brand'],
   stack: ['status', 'list', 'providers', 'recommend', 'scan', 'doctor', 'add', 'apply'],
   ecosystem: ['doctor'],
   roadmap: ['run', 'resume', 'status'],

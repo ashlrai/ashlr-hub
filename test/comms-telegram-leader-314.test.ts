@@ -383,14 +383,14 @@ describe('Leader thread over Telegram', () => {
     expect(sends()).toHaveLength(0);
   });
 
-  it("mirrors Mason's Verse messages for context; never echoes his own Telegram messages", async () => {
+  it("mirrors Mason's Phantom messages for context; never echoes his own Telegram messages", async () => {
     const literal = `Memo ${MEMO_ID} at 2026-09-26T06:30:00.000Z; 2499.91 credits, 12345678901234567890`;
     thread.outbound = [
       { ...leaderMsg({ id: 'v-1', text: literal }), from: 'mason', channel: 'verse' },
       { ...leaderMsg({ id: 't-own', text: 'already on the phone' }), from: 'mason', channel: 'telegram' },
     ];
     await runCommsCycle(cfg(), fastCycle);
-    expect(texts()).toEqual([`You (in Verse):\n${literal}`]);
+    expect(texts()).toEqual([`You (in Phantom):\n${literal}`]);
     expect(thread.delivered).toEqual([
       { id: 'v-1', channel: 'telegram', ok: true },
       { id: 't-own', channel: 'telegram', ok: true },

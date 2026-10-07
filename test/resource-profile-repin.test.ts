@@ -15,7 +15,8 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { cmdResources } from '../src/cli/resources.js';
 import {
   prepareResourceNativeProfile, repinResourceNativeProfile, RESOURCE_NATIVE_PROFILE_MANIFEST_KEYS, ResourceNativeProfileRepinError,
-  type ResourceNativeProfile, type ResourceNativeProfileRepinOptions,
+  upgradeResourceNativeProfileTemplate, ResourceNativeProfileTemplateUpgradeError, resolveNativeSeatLaunch,
+  type ResourceNativeProfile, type ResourceNativeProfileRepinOptions, type ResourceNativeProfileTemplateUpgradeOptions,
 } from '../src/core/resources/native-profile.js';
 
 // Mockable fs primitives for fault injection. Faults are installed with
@@ -24,12 +25,15 @@ import {
 // real implementation after every test so no fault can leak into the next one.
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  return { ...actual, writeSync: vi.fn(actual.writeSync), renameSync: vi.fn(actual.renameSync) };
+  return { ...actual, writeSync: vi.fn(actual.writeSync), renameSync: vi.fn(actual.renameSync), fsyncSync: vi.fn(actual.fsyncSync), openSync: vi.fn(actual.openSync), unlinkSync: vi.fn(actual.unlinkSync) };
 });
 const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
 function stopFaults(): void {
   vi.mocked(fs.writeSync).mockImplementation(actualFs.writeSync);
   vi.mocked(fs.renameSync).mockImplementation(actualFs.renameSync);
+  vi.mocked(fs.fsyncSync).mockImplementation(actualFs.fsyncSync);
+  vi.mocked(fs.openSync).mockImplementation(actualFs.openSync);
+  vi.mocked(fs.unlinkSync).mockImplementation(actualFs.unlinkSync);
 }
 
 type Provider = 'codex' | 'claude' | 'grok';
@@ -446,5 +450,171 @@ describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'funct
       expect(help).toContain('--dry-run');
       expect(help).toMatch(/launcher\.mjs\.prev, profile\.json\.prev and command\.json\.prev/);
     });
+  });
+});
+
+function previousTemplate(profile: ResourceNativeProfile): string {
+  const previous = readFileSync(profile.launcherPath, 'utf8').split('\n').filter(line =>
+    !line.includes('Fixed nonsecret native safety flags.') && !line.includes("for(const key of ['CLAUDE_CODE_SUBPROCESS_ENV_SCRUB'")).join('\n');
+  writeFileSync(profile.launcherPath, previous); return previous;
+}
+function upgrade(profile: ResourceNativeProfile, extra: Partial<ResourceNativeProfileTemplateUpgradeOptions> = {}) {
+  return upgradeResourceNativeProfileTemplate({ directory: profile.directory, ...extra });
+}
+function expectUpgradeRefusal(action: () => unknown, failure: ResourceNativeProfileTemplateUpgradeError['failure']): void {
+  let caught: unknown; try { action(); } catch (error) { caught = error; }
+  expect(caught).toBeInstanceOf(ResourceNativeProfileTemplateUpgradeError);
+  expect((caught as ResourceNativeProfileTemplateUpgradeError).failure).toBe(failure);
+  expect((caught as Error).message).not.toContain(base);
+  expect((caught as Error).message).not.toMatch(/ENOENT|EACCES|EEXIST|private-error/);
+}
+
+describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'function')('explicit Claude native safety-template upgrade', () => {
+  it('upgrades only the launcher while preserving signed-in storage, binary and command bindings', () => {
+    const profile = prepared(); const previous = previousTemplate(profile);
+    writeFileSync(join(profile.nativeStatePath, 'account.fixture'), 'SYNTHETIC_NATIVE_SIGN_IN', { mode: 0o600 });
+    writeFileSync(join(profile.anthropicStatePath!, 'account.fixture'), 'SYNTHETIC_ANTHROPIC_STATE', { mode: 0o600 });
+    const saved = { native: tree(profile.nativeStatePath), anthropic: tree(profile.anthropicStatePath!), binary: readFileSync(oldBinary),
+      manifest: readFileSync(profile.manifestPath), command: readFileSync(profile.commandPath), directoryIno: lstatSync(profile.directory).ino };
+    const accountsRoot = join(base, 'accounts'); mkdirSync(accountsRoot, { mode: 0o700 });
+    writeFileSync(join(accountsRoot, 'connections.json'), JSON.stringify({schemaVersion:1,accounts:[{id:'claude-a',provider:'claude',command:profile.command}]}), {mode:0o600});
+    const resolve = (requireClaudeBrokerSafety = false) => resolveNativeSeatLaunch({accountsRoot,provider:'claude',seatId:'claude-a',requireClaudeBrokerSafety});
+    expect(resolve().ok).toBe(true); expect(resolve(true)).toMatchObject({ok:false,reason:'profile-invalid'});
+    const beforeDry = tree(profile.directory); expect(upgrade(profile,{dryRun:true})).toMatchObject({status:'would-upgrade',authentication:'not-checked',backupPath:null});
+    expect(tree(profile.directory)).toEqual(beforeDry);
+    // The operation must not open even synthetic native-state files or execute a native CLI.
+    vi.mocked(fs.openSync).mockImplementation(((file: fs.PathLike, ...args: unknown[]) => {
+      if ([profile.nativeStatePath,profile.anthropicStatePath!].some(path => String(file).startsWith(`${path}/`))) throw new Error('state read forbidden');
+      return Reflect.apply(actualFs.openSync,actualFs,[file,...args]);
+    }) as typeof fs.openSync);
+    const exec = vi.spyOn(process,'execve');
+    expect(upgrade(profile)).toMatchObject({status:'upgraded',authentication:'not-checked',provider:'claude',previousTemplate:'previous',template:'current',backupPath:`${profile.launcherPath}.template-prev`});
+    expect(exec).not.toHaveBeenCalled(); stopFaults(); exec.mockRestore();
+    expect(resolve(true).ok).toBe(true); expect(readFileSync(`${profile.launcherPath}.template-prev`,'utf8')).toBe(previous);
+    expect(lstatSync(`${profile.launcherPath}.template-prev`).mode & 0o777).toBe(0o600);
+    expect(lstatSync(`${profile.launcherPath}.template-prev`).nlink).toBe(1);
+    expect(tree(profile.nativeStatePath)).toEqual(saved.native); expect(tree(profile.anthropicStatePath!)).toEqual(saved.anthropic);
+    expect(readFileSync(oldBinary)).toEqual(saved.binary); expect(readFileSync(profile.manifestPath)).toEqual(saved.manifest);
+    expect(readFileSync(profile.commandPath)).toEqual(saved.command); expect(lstatSync(profile.directory).ino).toBe(saved.directoryIno);
+    const ran = launch(profile); expect(ran.binary).toBe('native-old');
+    for (const key of ['CLAUDE_CODE_SUBPROCESS_ENV_SCRUB','DISABLE_AUTOUPDATER','DISABLE_TELEMETRY','DISABLE_ERROR_REPORTING','CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC']) expect(ran.env[key]).toBe('1');
+  });
+
+  it('a current profile without an upgrade backup is a strict no-op; an upgraded profile retains its original backup', () => {
+    const current = prepared(); const before = tree(current.directory);
+    const fsync = vi.mocked(fs.fsyncSync); fsync.mockClear();
+    expect(upgrade(current)).toMatchObject({status:'unchanged',backupPath:null});
+    expect(fsync).not.toHaveBeenCalled(); expect(tree(current.directory)).toEqual(before);
+    previousTemplate(current); upgrade(current); const after = tree(current.directory);
+    fsync.mockClear(); expect(upgrade(current,{dryRun:true}).status).toBe('unchanged'); expect(fsync).not.toHaveBeenCalled();
+    expect(tree(current.directory)).toEqual(after);
+    expect(upgrade(current)).toMatchObject({status:'unchanged',previousTemplate:'current',backupPath:`${current.launcherPath}.template-prev`});
+    expect(fsync).toHaveBeenCalled(); expect(tree(current.directory)).toEqual(after);
+  });
+
+  it('preserves existing binary-repin backups and re-pin behavior, including the old template', () => {
+    const profile = prepared(); previousTemplate(profile); repin(profile,newBinary);
+    const backupBefore = [profile.launcherPath,profile.manifestPath,profile.commandPath].map(path => readFileSync(`${path}.prev`));
+    expect(readFileSync(profile.launcherPath,'utf8')).not.toContain('CLAUDE_CODE_SUBPROCESS_ENV_SCRUB');
+    expect(upgrade(profile).status).toBe('upgraded'); expect(launch(profile).binary).toBe('native-new');
+    expect([profile.launcherPath,profile.manifestPath,profile.commandPath].map(path => readFileSync(`${path}.prev`))).toEqual(backupBefore);
+  });
+
+  it.each(['codex','grok'] as const)('refuses a %s profile without any mutation', provider => {
+    const profile = prepared(provider); const before = tree(profile.directory);
+    expectUpgradeRefusal(()=>upgrade(profile),'inconsistent'); expect(tree(profile.directory)).toEqual(before);
+  });
+
+  it.each(['modified','torn-repin','state-replaced','linked-launcher','unsafe-backup','conflicting-backup','linked-backup'] as const)('refuses %s without repair', kind => {
+    const profile = prepared(); previousTemplate(profile);
+    const backup = `${profile.launcherPath}.template-prev`;
+    if (kind === 'modified') editInPlace(profile.launcherPath,text=>text+'// owner edit\n');
+    if (kind === 'torn-repin') editInPlace(profile.launcherPath,text=>text.replace(JSON.stringify(oldBinary),JSON.stringify(newBinary)));
+    if (kind === 'state-replaced') { renameSync(profile.nativeStatePath,join(base,'state-retained'));mkdirSync(profile.nativeStatePath,{mode:0o700}); }
+    if (kind === 'linked-launcher') linkSync(profile.launcherPath,join(base,'launcher-link'));
+    if (kind === 'unsafe-backup') symlinkSync(profile.launcherPath,backup);
+    if (kind === 'conflicting-backup') writeFileSync(backup,'unrecognized',{mode:0o600});
+    if (kind === 'linked-backup') { writeFileSync(backup,readFileSync(profile.launcherPath),{mode:0o600});linkSync(backup,join(base,'backup-link')); }
+    const before = tree(profile.directory);
+    expect(()=>upgrade(profile)).toThrow(ResourceNativeProfileTemplateUpgradeError); expect(tree(profile.directory)).toEqual(before);
+    expect(()=>upgrade(profile,{dryRun:true})).toThrow(ResourceNativeProfileTemplateUpgradeError); expect(tree(profile.directory)).toEqual(before);
+  });
+
+  it.each(['provider','executable','accessor','relative','dryRun','force'] as const)('refuses invalid %s options before mutation', kind => {
+    const profile = prepared(); previousTemplate(profile); const before = tree(profile.directory);
+    const options: unknown = kind === 'accessor' ? {get directory(){throw new Error('private-error');}}
+      : kind === 'relative' ? {directory:'relative'} : kind === 'dryRun' ? {directory:profile.directory,dryRun:'yes'}
+      : {directory:profile.directory,[kind]:kind === 'executable' ? newBinary : true};
+    expectUpgradeRefusal(()=>upgradeResourceNativeProfileTemplate(options as ResourceNativeProfileTemplateUpgradeOptions),'invalid');
+    expect(tree(profile.directory)).toEqual(before);
+  });
+
+  it('a failed backup or launcher write leaves the old template, and an exact leftover backup is safely reused', () => {
+    const profile = prepared(); const previous = previousTemplate(profile);
+    vi.mocked(fs.writeSync).mockImplementationOnce(()=>{throw new Error('private-error');});
+    expectUpgradeRefusal(()=>upgrade(profile),'failed-unchanged'); expect(readFileSync(profile.launcherPath,'utf8')).toBe(previous);
+    expect(leftoverTemps(profile)).toEqual([]); stopFaults();
+    vi.mocked(fs.renameSync).mockImplementation((from,to)=>{
+      if (String(to) === profile.launcherPath) throw new Error('private-error'); return actualFs.renameSync(from,to);
+    });
+    expectUpgradeRefusal(()=>upgrade(profile),'failed-unchanged'); stopFaults();
+    expect(readFileSync(profile.launcherPath,'utf8')).toBe(previous); expect(readFileSync(`${profile.launcherPath}.template-prev`,'utf8')).toBe(previous);
+    expect(leftoverTemps(profile)).toEqual([]); expect(upgrade(profile).status).toBe('upgraded');
+  });
+
+  it('reports a post-publication durability failure honestly and confirms it on an explicit retry', () => {
+    const profile = prepared(); const previous = previousTemplate(profile); let published = false;
+    vi.mocked(fs.renameSync).mockImplementation((from,to)=>{actualFs.renameSync(from,to); if(String(to)===profile.launcherPath)published=true;});
+    vi.mocked(fs.fsyncSync).mockImplementation(fd=>{if(published)throw new Error('private-error');actualFs.fsyncSync(fd);});
+    expectUpgradeRefusal(()=>upgrade(profile),'failed-after-publish'); stopFaults();
+    expect(readFileSync(profile.launcherPath,'utf8')).toContain('CLAUDE_CODE_SUBPROCESS_ENV_SCRUB');
+    expect(readFileSync(`${profile.launcherPath}.template-prev`,'utf8')).toBe(previous);
+    const before = tree(profile.directory); expect(upgrade(profile).status).toBe('unchanged'); expect(tree(profile.directory)).toEqual(before);
+  });
+
+  it.each(['manifest','command','binary','state'] as const)('refuses a concurrent %s change before launcher publication', kind => {
+    const profile = prepared(); const previous = previousTemplate(profile); let changed = false;
+    vi.mocked(fs.writeSync).mockImplementation(((...args: unknown[])=>{
+      const result = Reflect.apply(actualFs.writeSync,actualFs,args);
+      if (!changed) { changed=true;
+        if(kind==='manifest') actualFs.appendFileSync(profile.manifestPath,' ');
+        if(kind==='command') actualFs.appendFileSync(profile.commandPath,' ');
+        if(kind==='binary') actualFs.appendFileSync(oldBinary,'// edited\n');
+        if(kind==='state') {actualFs.renameSync(profile.nativeStatePath,join(base,'state-retained'));actualFs.mkdirSync(profile.nativeStatePath,{mode:0o700});}
+      } return result;
+    }) as typeof fs.writeSync);
+    expectUpgradeRefusal(()=>upgrade(profile),'failed-unchanged'); stopFaults();
+    expect(readFileSync(profile.launcherPath,'utf8')).toBe(previous); expect(leftoverTemps(profile)).toEqual([]);
+  });
+
+  it('never removes a replacement at a temporary path when publication fails', () => {
+    const profile = prepared(); previousTemplate(profile); let replacement: string | null = null;
+    vi.mocked(fs.writeSync).mockImplementation((()=>{
+      const temp = readdirSync(profile.directory).find(name=>name.endsWith('.repin-tmp'))!;
+      replacement = join(profile.directory,temp); actualFs.renameSync(replacement,join(base,'original-temp-retained'));
+      actualFs.writeFileSync(replacement,'KEEP_REPLACEMENT',{mode:0o600}); throw new Error('private-error');
+    }) as typeof fs.writeSync);
+    expectUpgradeRefusal(()=>upgrade(profile),'failed-unchanged'); stopFaults();
+    expect(replacement).not.toBeNull(); expect(readFileSync(replacement!,'utf8')).toBe('KEEP_REPLACEMENT');
+  });
+
+  it('supports real CLI dry-run, JSON, text and help with no executable/provider overrides', async () => {
+    const profile = prepared(); previousTemplate(profile); const before = tree(profile.directory);
+    const out = vi.spyOn(console,'log').mockImplementation(()=>{}); const err = vi.spyOn(console,'error').mockImplementation(()=>{});
+    expect(await cmdResources(['profile','upgrade-template','--directory',profile.directory,'--dry-run','--json'])).toBe(0);
+    expect(JSON.parse(String(out.mock.calls.at(-1)?.[0]))).toMatchObject({status:'would-upgrade',authentication:'not-checked'});
+    expect(tree(profile.directory)).toEqual(before);
+    for(const flag of ['--executable','--provider','--force']) {
+      expect(await cmdResources(['profile','upgrade-template','--directory',profile.directory,flag,'x','--json'])).toBe(2);
+      expect(tree(profile.directory)).toEqual(before);
+    }
+    expect(await cmdResources(['profile','upgrade-template','--directory',profile.directory,'--dry-run','--dry-run'])).toBe(2);
+    expect(await cmdResources(['profile','--help'])).toBe(0);expect(String(out.mock.calls.at(-1)?.[0])).toContain('profile upgrade-template --directory EXISTING_ABS');
+    expect(await cmdResources(['profile','upgrade-template','--directory',profile.directory])).toBe(0);
+    expect(String(out.mock.calls.at(-1)?.[0])).toContain('authentication not checked');expect(String(out.mock.calls.at(-1)?.[0])).toContain('sign-in storage retained');
+    editInPlace(profile.launcherPath,text=>text+'// edited\n');
+    expect(await cmdResources(['profile','upgrade-template','--directory',profile.directory,'--json'])).toBe(1);
+    expect(JSON.parse(String(out.mock.calls.at(-1)?.[0])).error).not.toContain(base);
+    expect(err.mock.calls.length).toBeGreaterThan(0);
   });
 });

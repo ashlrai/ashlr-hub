@@ -16,7 +16,7 @@
  * Devin store live in the worker's isolated ASHLR_HOME.
  */
 import { rmSync } from 'node:fs';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { EffectivePolicy, LedgerAppendInput } from '../src/core/authority/types.js';
 import { appendUserBacklogItems, cloudBacklogPath, nextBacklogItem, nextBacklogItemWhere, readCloudBacklog } from '../src/core/cloud/backlog.js';
@@ -364,6 +364,15 @@ describe('runDevinFleetTick', () => {
     writeDevinConnection({ orgId: FAKE_ORG, principal: 'service_user', principalName: 'Ashlr Verse', keyStore: 'keychain', connectedAt: new Date().toISOString() });
     updateDevinBudget({ acuBudgetTotal: 100, maxAcuPerDay: 60, reserveAcu: 10, maxAcuPerSession: 10 });
     expect(await runDevinFleetTick(deps({ laneAdvisor: () => ({ lane: 'cloud', confidence: 7 } as never) }))).toMatchObject({ outcome: 'launched' });
+  });
+
+  it('a recognized partial inventory holds before selecting or contacting work', async () => {
+    const nextItem = vi.fn();
+    expect(await runDevinFleetTick(deps({ taskInventory: () => ({ tasks: [], sourceState: 'unavailable' }),
+      budgetView: (tasks, budget, now, sourceState) => devinBudgetView(tasks, budget, now, sourceState), nextItem })))
+      .toMatchObject({ outcome: 'held', code: 'budget', reason: expect.stringContaining('unknown') });
+    expect(nextItem).not.toHaveBeenCalled();
+    expect(creates()).toEqual([]);
   });
 
   it('an unreadable task store holds (unknown spend is never zero)', async () => {

@@ -20,6 +20,8 @@
 import { localDayKey } from '../cloud/budget.js';
 import { DEVIN_USAGE_URL, type DevinBudgetV1, type DevinBudgetView, type DevinGate, type DevinTaskV1 } from './types.js';
 
+export const DEVIN_ACCOUNTING_UNAVAILABLE = 'The Devin task inventory is incomplete or unavailable; local spending capacity is unknown.';
+
 const OK: DevinGate = Object.freeze({ ok: true, reason: null });
 const refuse = (reason: string): DevinGate => ({ ok: false, reason });
 const round2 = (value: number): number => Math.round(value * 100) / 100;
@@ -69,7 +71,7 @@ export function devinTaskAcuHeadroom(task: DevinTaskV1): number {
   return Math.max(0, task.maxAcu - devinTaskAcuUsed(task));
 }
 
-export function devinBudgetView(tasks: readonly DevinTaskV1[], budget: DevinBudgetV1, now: Date): DevinBudgetView {
+export function devinBudgetView(tasks: readonly DevinTaskV1[], budget: DevinBudgetV1, now: Date, sourceState?: import('./types.js').DevinTaskSourceState): DevinBudgetView {
   const today = localDayKey(now);
   let used = budget.acuSpentAdjustment;
   let reported = budget.acuSpentAdjustment;
@@ -151,7 +153,13 @@ export function devinBudgetView(tasks: readonly DevinTaskV1[], budget: DevinBudg
       : `${fleetSessionsToday} of ${budget.fleetMaxSessionsPerDay} fleet Devin ${plural(budget.fleetMaxSessionsPerDay, 'session', 'sessions')} used today.`);
   }
 
+  if (sourceState !== undefined && sourceState !== 'ready') {
+    canLaunch = refuse(DEVIN_ACCOUNTING_UNAVAILABLE);
+    canFleetLaunch = refuse(DEVIN_ACCOUNTING_UNAVAILABLE);
+  }
+
   return {
+    ...(sourceState !== undefined ? { accountingState: sourceState } : {}),
     acuBudgetTotal: budget.acuBudgetTotal,
     acuUsed,
     acuRemaining,

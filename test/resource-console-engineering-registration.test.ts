@@ -4,12 +4,13 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rename
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const projections = vi.hoisted(() => ({ factory: vi.fn(), campaign: vi.fn(), universe: vi.fn(), readiness: vi.fn(), run: vi.fn() }));
+const projections = vi.hoisted(() => ({ factory: vi.fn(), campaign: vi.fn(), universe: vi.fn(), projection: vi.fn(), readiness: vi.fn(), run: vi.fn() }));
 vi.mock('../src/core/universe/firm-engineering-control-handler.js', async original => ({
   ...await original<typeof import('../src/core/universe/firm-engineering-control-handler.js')>(), createFirmEngineeringControlHandler: projections.factory,
 }));
 vi.mock('../src/core/universe/campaign-store.js', async original => ({
   ...await original<typeof import('../src/core/universe/campaign-store.js')>(), readUniverseCampaign: projections.campaign, campaignUniverse: projections.universe,
+  readUniverseCampaignProjection: projections.projection,
 }));
 vi.mock('../src/core/universe/campaign-readiness.js', async original => ({
   ...await original<typeof import('../src/core/universe/campaign-readiness.js')>(), readUniverseCampaignReadiness: projections.readiness,
@@ -54,10 +55,11 @@ async function fixture() {
   const runtimeFile = join(root, 'runtime.json'); save(runtimeFile, runtime);
   projections.factory.mockImplementation(host => ({ nodeInput: { bindingDigest: digest(canonical(host)), requestDigest: 'c'.repeat(64) },
     handler: { effectClass: 'resource-completion', constitutionVersion: 'fixture', policyEpoch: 0, bindingDigest: digest(canonical(host)), run: vi.fn() } }));
-  projections.campaign.mockReturnValue({ definition: { budget: { maxGenerations: 1, maxDurationMs: 30_000, maxModelRequests: 1,
+  projections.campaign.mockReturnValue({ sourceState: 'healthy', definition: { budget: { maxGenerations: 1, maxDurationMs: 30_000, maxModelRequests: 1,
     maxStagnantGenerations: 1, maxReportedTokens: null } } });
-  projections.universe.mockReturnValue({ manifest: { seed: { repo: project }, objective: 'Fixed objective',
+  projections.universe.mockReturnValue({ sourceState: 'healthy', manifest: { seed: { repo: project }, objective: 'Fixed objective',
     budget: { maxTrials: 1, maxDurationMs: 1000, trialTimeoutMs: 500, maxParallel: 1 } } });
+  projections.projection.mockImplementation(() => ({ campaign: projections.campaign(), universe: projections.universe() }));
   projections.readiness.mockReturnValue({ sourceState: 'healthy', automaticAction: 'run', observedState: 'ready', disposition: 'startable' });
   const supervisor = await createResourcePoolSupervisor({ ...control, pool, bindings, workspace: project, projects: [], readObservations: () => [], pollIntervalMs: 60_000 });
   supervisors.push(supervisor);

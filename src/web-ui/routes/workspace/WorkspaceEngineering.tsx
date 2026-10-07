@@ -1,3 +1,4 @@
+import { PRODUCT_NAME } from '../../app/product-brand.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { EngineeringSupervision } from './EngineeringSupervision.js';
 import { EngineeringSuccessors } from './EngineeringSuccessors.js';
@@ -152,7 +153,7 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
 
   function refresh() { setActionError(null); setNotice(null); setRevision((n) => n + 1); setCatalogRevision((n) => n + 1); }
   return <section className={styles.engineering} aria-label="Project engineering runs">
-    <header className={styles.header}><div><p className={styles.eyebrow}>ASHLRVERSE / ENGINEERING</p><h2>From objective to evidence.</h2>
+    <header className={styles.header}><div><p className={styles.eyebrow}>{PRODUCT_NAME.toUpperCase()} / ENGINEERING</p><h2>From objective to evidence.</h2>
       <p>{projectName} · Evaluated changes, explicit local delivery.</p></div>
       <button type="button" className={styles.button} disabled={!available || busy || loading} onClick={refresh}>Refresh evidence</button></header>
     {supervisionSupported ? <EngineeringSupervision available={available} unlocked={unlocked} selectedPlan={selected} onUnlock={onUnlock}

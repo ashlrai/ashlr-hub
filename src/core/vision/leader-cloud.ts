@@ -105,7 +105,7 @@ function buildPrompt(action: DispatchAction, context: readonly string[]): string
     // The brief is model-written: ask the session to check it against the
     // code rather than trust it, and to deliver a no-change report when the
     // premise is wrong instead of forcing a diff.
-    'This task was proposed by Ashlr Verse\'s Leader from its own digests. Verify each claim against the code before acting; '
+    'This task was proposed by Phantom\'s Leader from its own digests. Verify each claim against the code before acting; '
       + 'if the premise is wrong or the work is already done, report no-change instead of forcing a diff. '
       + 'Keep the change focused, add a regression test for every behaviour change, and keep tests HOME-isolated with no paid model calls.',
   ].filter((p): p is string => typeof p === 'string' && p.length > 0);

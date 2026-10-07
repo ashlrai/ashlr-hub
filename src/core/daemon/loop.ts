@@ -2497,6 +2497,23 @@ function productionOutcomeFromRunProposalOutcome(kind: RunProposalOutcome['kind'
   }
 }
 
+// Read the unsanitized capture count: missing/invalid values must not become
+// proof of zero captures. This recognizes only the host's final TITRR prefix;
+// it changes failure diagnostics, never proposal or completion authority.
+function directFinalVerificationFailed(run: Pick<Awaited<ReturnType<typeof runGoal>>,
+  'status' | 'proposalOutcome' | 'runEventSummary' | 'result'>): boolean {
+  const summary = run.runEventSummary;
+  const captures = summary?.actionCounts?.proposalCaptureAttempts;
+  if (run.status !== 'done' || summary?.status !== 'done' ||
+    run.proposalOutcome?.kind !== 'proposal-disabled' ||
+    run.proposalOutcome.proposalId !== undefined || summary.proposalId !== undefined ||
+    summary.proposalCreated !== false || typeof captures !== 'number' ||
+    !Number.isFinite(captures) || captures !== 0 ||
+    (summary.actionCounts?.proposalCreated !== undefined && summary.actionCounts.proposalCreated !== 0)) return false;
+  const match = /^\[TITRR: tests: still failing(?: after ([1-9]\d*) attempt\(s\)| - budget exceeded after attempt ([1-9]\d*)) - dropped, no proposal filed\](?:\n|$)/.exec(run.result ?? '');
+  return match !== null && Number.isSafeInteger(Number(match[1] ?? match[2]));
+}
+
 function dispatchProductionFromProposalOutcome(
   outcome: RunProposalOutcome | undefined,
   runId?: string,
@@ -7995,6 +8012,13 @@ export async function tick(
               proposalRequired: true,
               evidenceOutcome: runState.evidenceOutcome,
             });
+        if (!fanOut && dispatchProduction && directFinalVerificationFailed(runState)) {
+          dispatchProduction = {
+            ...dispatchProduction,
+            outcome: 'gate-blocked',
+            reason: 'verification-failed: TITRR final tests did not pass; no proposal filed',
+          };
+        }
         if (fanOut && dispatchProduction) {
           dispatchProduction = {
             ...dispatchProduction,

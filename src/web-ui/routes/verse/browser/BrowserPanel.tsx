@@ -1,3 +1,4 @@
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 /**
  * routes/verse/browser/BrowserPanel.tsx — the integrated Browser pane (3.15):
  * the browser Mason and a chat's agents share.
@@ -685,7 +686,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
           capture.notes!.push('the console could not be read');
         }
       } else if (mode === 'frame' && tab.url) {
-        capture.notes!.push('console, network errors and screenshots need the Ashlr desktop app');
+        capture.notes!.push(`console, network errors and screenshots need the ${PRODUCT_NAME} desktop app`);
       }
       const send = () => sendCaptureToChat(sessionId, capture, { attach: api.attach, insert: deps.insert, now: deps.now });
       const result = shot ? await gate.run('Attach the browser screenshot to this chat', send) : await send();

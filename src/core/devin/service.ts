@@ -31,7 +31,8 @@ import type { AshlrConfig } from '../types.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { join } from 'node:path';
 import { scrubSecrets } from '../util/scrub.js';
-import { devinBudgetView } from './budget.js';
+import { devinBudgetView, DEVIN_ACCOUNTING_UNAVAILABLE } from './budget.js';
+import { devinTaskDiagnostics } from './create-recovery.js';
 import { stateFromSession } from './session-state.js';
 import { DevinApiError, DevinClient, devinFailureSentence, type DevinFetch, type DevinSession } from './client.js';
 import { buildDevinPrompt, DEVIN_REPORT_SCHEMA } from './delivery-contract.js';
@@ -44,7 +45,7 @@ import { DevinConsumptionCache, type DevinConsumptionSnapshot } from './consumpt
 import {
   clearDevinConnection,
   devinHome, ensureDevinDirectory, devinConsumptionConnectionUnconfirmed, writeDevinConsumptionConnectionState,
-  listDevinTasks,
+  readDevinTaskInventory,
   newDevinTaskId,
   readDevinBudget,
   readDevinConnection,
@@ -255,13 +256,14 @@ function safePolicy(deps: DevinServiceDeps): EffectivePolicy | null {
   }
 }
 
-export async function devinStatus(deps: DevinServiceDeps = {}, tasks: readonly DevinTaskV1[] = listDevinTasks(Number.MAX_SAFE_INTEGER)): Promise<DevinStatus> {
+export async function devinStatus(deps: DevinServiceDeps = {}, tasks?: readonly DevinTaskV1[], sourceState?: import('./types.js').DevinTaskSourceState): Promise<DevinStatus> {
+  const inventory = tasks === undefined ? readDevinTaskInventory() : { tasks, sourceState: sourceState ?? 'ready' };
   const section = readConfig(deps);
   const enabled = devinEnabled(section);
   const connection = readDevinConnection();
   const present = connection ? await keyPresent(deps) : false;
   const connected = connection !== null && present;
-  const view = devinBudgetView(tasks, readDevinBudget(), (deps.now ?? (() => new Date()))());
+  const view = devinBudgetView(inventory.tasks, readDevinBudget(), (deps.now ?? (() => new Date()))(), inventory.sourceState);
   let readiness: StandingPolicyReadiness = { policy: null, grantState: null, reason: null };
   if (enabled && connected && devinFleetOptIn(section)) {
     if (deps.policy) {
@@ -533,7 +535,10 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
   // --- budget gate + persist queued (no await between them) ----------------
   const now = clock();
   const budget = readDevinBudget();
-  const view = devinBudgetView(listDevinTasks(Number.MAX_SAFE_INTEGER), budget, now);
+  const inventory = readDevinTaskInventory();
+  if (inventory.sourceState === 'unavailable') return refusal(DEVIN_ACCOUNTING_UNAVAILABLE, 'budget');
+  // Missing first-use storage can create a queued record, never contact Devin yet.
+  const view = devinBudgetView(inventory.tasks, budget, now);
   const verdict = origin === 'fleet' ? view.canFleetLaunch : view.canLaunch;
   if (!verdict.ok) return refusal(verdict.reason ?? 'The Devin budget refused this launch.', 'budget');
   const id = newDevinTaskId(now);
@@ -624,7 +629,11 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
     if (task.maxAcu > budgetNow.maxAcuPerSession) throw new DevinApiError('budget', 'The Devin session cap was lowered before launch.');
     // Check the actual outgoing cap against current limits, excluding exactly
     // this unchanged reservation. Every other task and unknown hold still counts.
-    const viewNow = devinBudgetView(listDevinTasks(Number.MAX_SAFE_INTEGER).filter(row => row.id !== id),
+    const inventoryNow = readDevinTaskInventory();
+    if (inventoryNow.sourceState !== 'ready' || !inventoryNow.tasks.some(row => row.id === id && JSON.stringify(row) === ownedTaskRecord)) {
+      throw new DevinApiError('budget', DEVIN_ACCOUNTING_UNAVAILABLE);
+    }
+    const viewNow = devinBudgetView(inventoryNow.tasks.filter(row => row.id !== id),
       { ...budgetNow, maxAcuPerSession: task.maxAcu }, clock());
     const verdictNow = origin === 'fleet' ? viewNow.canFleetLaunch : viewNow.canLaunch;
     if (!verdictNow.ok) throw new DevinApiError('budget', verdictNow.reason ?? 'The current Devin budget refused this launch.');
@@ -672,7 +681,8 @@ export async function launchDevinTask(req: DevinLaunchRequest | DevinInternalLau
 export async function devinOverview(deps: DevinServiceDeps = {}): Promise<DevinOverviewResponse> {
   const now = (deps.now ?? (() => new Date()))();
   // Admission uses every tracked session; only the response history is bounded.
-  const tasks = listDevinTasks(Number.MAX_SAFE_INTEGER);
+  const inventory = readDevinTaskInventory();
+  const tasks = inventory.tasks;
   const probe: Pick<DevinCliProbe, 'state'> & { cliPath?: string | null } = await (deps.cliProbe ?? (() => probeDevinCli()))();
   let models: DevinOverviewResponse['models'];
   if (probe.state !== 'missing') {
@@ -687,8 +697,9 @@ export async function devinOverview(deps: DevinServiceDeps = {}): Promise<DevinO
   return {
     generatedAt: now.toISOString(),
     consumption: peekDevinConsumption(now),
-    status: await devinStatus(deps, tasks),
-    budget: devinBudgetView(tasks, readDevinBudget(), now),
+    taskDiagnostics: devinTaskDiagnostics(inventory),
+    status: await devinStatus(deps, tasks, inventory.sourceState),
+    budget: devinBudgetView(tasks, readDevinBudget(), now, inventory.sourceState),
     tasks: tasks.slice(0, OVERVIEW_TASK_LIMIT),
     cli: { state: probe.state, usage: 'not-reported' },
     ...(models ? { models } : {}),

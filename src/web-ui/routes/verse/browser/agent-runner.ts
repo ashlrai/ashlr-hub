@@ -1,3 +1,4 @@
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 /**
  * routes/verse/browser/agent-runner.ts — how the Browser pane carries out
  * one agent command (core/verse/browser-mcp.ts + verse-mcp-browser-act.ts
@@ -80,9 +81,9 @@ export interface BrowserExecutor {
 }
 
 const FRAME_LIMIT =
-  'This Browser pane is running in the web UI (an embedded frame), which cannot see into or act in the page. Snapshots, screenshots, page text, console and clicking need the Ashlr desktop app. You can still open localhost pages with browser_navigate.';
+  `This Browser pane is running in the web UI (an embedded frame), which cannot see into or act in the page. Snapshots, screenshots, page text, console and clicking need the ${PRODUCT_NAME} desktop app. You can still open localhost pages with browser_navigate.`;
 const OLD_SHELL =
-  'This desktop app is too old to read the page structure or act in it. Ask the operator to update the Ashlr desktop app.';
+  `This desktop app is too old to read the page structure or act in it. Ask the operator to update the ${PRODUCT_NAME} desktop app.`;
 const PAUSED =
   'The operator took over the browser (they clicked or typed in it), so agent actions are paused. Wait until they press Resume in the Browser pane, then try again.';
 const NOT_OBSERVABLE =

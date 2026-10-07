@@ -7,7 +7,7 @@
  * the Keychain (test/helpers/fake-keychain.ts) and `gh`. Files live in the
  * worker's isolated ASHLR_HOME (test/setup/home.ts).
  */
-import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -26,7 +26,7 @@ import {
   type DevinServiceDeps,
 } from '../src/core/devin/service.js';
 import {
-  devinHome,
+  devinHome, devinTasksDir, readDevinTaskInventory,
   isDevinTask,
   isDevinConnection,
   listDevinTasks,
@@ -47,6 +47,15 @@ import { CloudInputError } from '../src/core/cloud/cloud-api.js';
 import { repoPolicy, standingPolicy } from './helpers/fleet-github-310b.js';
 import { FAKE_KEY, FAKE_ORG, fakeDevin, type FakeDevin } from './helpers/fake-devin.js';
 import { fakeKeychain, type FakeKeychain } from './helpers/fake-keychain.js';
+
+const inventoryProbe = vi.hoisted(() => ({ beforeRead: null as ((path: unknown) => void) | null }));
+vi.mock('node:fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return { ...actual, readdirSync: (...args: Parameters<typeof actual.readdirSync>) => {
+    inventoryProbe.beforeRead?.(args[0]);
+    return actual.readdirSync(...args);
+  } };
+});
 
 const REPO = 'ashlrai/devin-canary';
 const noSleep = async (): Promise<void> => undefined;
@@ -105,6 +114,7 @@ function everyFileText(): string {
 }
 
 beforeEach(() => {
+  inventoryProbe.beforeRead = null;
   rmSync(devinHome(), { recursive: true, force: true });
   api = fakeDevin({ self: { principal_type: 'service_user', service_user_id: 's', service_user_name: 'Ashlr Verse', org_id: null } });
   keychain = fakeKeychain();
@@ -134,6 +144,102 @@ function task(patch: Partial<DevinTaskV1> = {}): DevinTaskV1 {
 }
 
 // ---------------------------------------------------------------------------
+
+describe('complete local Devin accounting evidence', () => {
+  it('distinguishes missing, complete empty and corrupt partial inventories without repair', () => {
+    expect(readDevinTaskInventory()).toEqual({ tasks: [], sourceState: 'missing' });
+    mkdirSync(devinTasksDir(), { recursive: true });
+    expect(readDevinTaskInventory()).toEqual({ tasks: [], sourceState: 'ready' });
+    const good = task(); writeDevinTask(good);
+    const invalid = join(devinTasksDir(), 'dv_20260927T0400_zzzzzz.json');
+    writeFileSync(invalid, '{bad', { mode: 0o600 });
+    const original = readFileSync(invalid);
+    expect(readDevinTaskInventory()).toMatchObject({ sourceState: 'unavailable', tasks: [good] });
+    expect(listDevinTasks()).toEqual([good]);
+    expect(readFileSync(invalid)).toEqual(original);
+  });
+
+  it('never treats a capped record or a symlinked task directory as complete', () => {
+    const row = task(); writeDevinTask(row);
+    const path = join(devinTasksDir(), `${row.id}.json`);
+    writeFileSync(path, ' '.repeat(256 * 1024 + 1));
+    expect(readDevinTaskInventory().sourceState).toBe('unavailable');
+    rmSync(devinTasksDir(), { recursive: true });
+    const other = join(devinHome(), 'other'); mkdirSync(other);
+    symlinkSync(other, devinTasksDir(), process.platform === 'win32' ? 'junction' : 'dir');
+    expect(readDevinTaskInventory().sourceState).toBe('unavailable');
+  });
+
+  it.each(['ENOENT', 'EACCES'])('reports %s after observing the directory as unavailable, not first-use missing', code => {
+    mkdirSync(devinTasksDir(), { recursive: true });
+    inventoryProbe.beforeRead = path => {
+      if (path === devinTasksDir()) throw Object.assign(new Error('controlled enumeration failure'), { code });
+    };
+    expect(readDevinTaskInventory()).toEqual({ tasks: [], sourceState: 'unavailable' });
+    inventoryProbe.beforeRead = null;
+    expect(readDevinTaskInventory()).toEqual({ tasks: [], sourceState: 'ready' });
+  });
+
+  it('rejects record replacement during enumeration without changing surviving source records', () => {
+    const row = task(); writeDevinTask(row);
+    let reads = 0;
+    inventoryProbe.beforeRead = path => {
+      if (path === devinTasksDir() && ++reads === 2) {
+        writeDevinTask({ ...row, maxAcu: row.maxAcu + 1 });
+      }
+    };
+    expect(readDevinTaskInventory()).toMatchObject({ sourceState: 'unavailable' });
+    inventoryProbe.beforeRead = null;
+    expect(readDevinTask(row.id)).toMatchObject({ maxAcu: row.maxAcu + 1 });
+    expect(readDevinTaskInventory().sourceState).toBe('ready');
+  });
+
+  it('refuses an initial corrupted hold without recording or contacting a new launch', async () => {
+    await connect();
+    const row = task({ sessionId: null, sessionUrl: null, session: null, state: 'failed', failure: 'unparsed' });
+    writeDevinTask(row);
+    const path = join(devinTasksDir(), `${row.id}.json`); writeFileSync(path, '{bad');
+    const before = readFileSync(path); api.requests.length = 0;
+    expect(await launchDevinTask({ repo: REPO, prompt: 'x', origin: 'operator' }, deps())).toMatchObject({ ok: false, failure: 'budget' });
+    expect(api.requests.filter(request => request.method === 'POST')).toEqual([]);
+    expect(readFileSync(path)).toEqual(before);
+    expect(readdirSync(devinTasksDir())).toEqual([`${row.id}.json`]);
+  });
+
+  it.each(['corrupt', 'remove-directory'] as const)('refuses %s between queue admission and contact, including retries', async mutation => {
+    await connect();
+    const survivor = task({ state: 'closed', session: { status: 'exit', statusDetail: null, acusConsumed: 0, prUrls: [], readAt: new Date().toISOString() } });
+    writeDevinTask(survivor);
+    const path = join(devinTasksDir(), `${survivor.id}.json`);
+    const before = readFileSync(path); let changed = false;
+    const config = () => {
+      if (!changed && listDevinTasks().some(row => row.state === 'launching')) {
+        changed = true;
+        if (mutation === 'corrupt') writeFileSync(path, '{bad');
+        else rmSync(devinTasksDir(), { recursive: true });
+      }
+      return { enabled: true };
+    };
+    const result = await launchDevinTask({ repo: REPO, prompt: 'x', origin: 'operator' }, deps({ config }));
+    expect(changed).toBe(true);
+    expect(result).toMatchObject({ ok: false, failure: mutation === 'corrupt' ? 'budget' : 'not-enabled' });
+    expect(api.requests.filter(request => request.method === 'POST')).toEqual([]);
+    if (mutation === 'corrupt') {
+      expect(readFileSync(path, 'utf8')).toBe('{bad');
+      writeFileSync(path, before);
+      expect(readDevinTask(survivor.id)).toEqual(survivor);
+    }
+  });
+
+  it('permits an ordinary first launch only after its own complete queued record exists', async () => {
+    await connect();
+    expect(readDevinTaskInventory().sourceState).toBe('missing');
+    const result = await launchDevinTask({ repo: REPO, prompt: 'x', origin: 'operator' }, deps());
+    expect(result.ok).toBe(true);
+    expect(readDevinTaskInventory()).toMatchObject({ sourceState: 'ready', tasks: [result.task] });
+    expect(api.requests.filter(request => request.method === 'POST')).toHaveLength(1);
+  });
+});
 
 describe('persisted provider session identity', () => {
   it.each(['0123456789abcdef0123456789abcdef', 'devin-legacy_ABC-123', null])('roundtrips supported nullable identity %j', sessionId => {
@@ -253,6 +359,9 @@ describe('status and readiness lines', () => {
     expect(off.fleet).toMatchObject({ ready: false, fix: { kind: 'command', command: 'ashlr devin connect' } });
     await connect();
     resetDevinStatusCacheForTest();
+    const unknown = await devinStatus(deps());
+    expect(unknown.chat.ready).toBe(false);
+    mkdirSync(devinTasksDir(), { recursive: true });
     const ready = await devinStatus(deps());
     expect(ready).toMatchObject({ state: 'ready', connected: true, enabled: true, orgId: FAKE_ORG });
     // 3.15: Devin is a chat seat once ready.
@@ -304,7 +413,7 @@ describe('status and readiness lines', () => {
     expect(status).toMatchObject({ state: 'ready', connected: true,
       chat: { ready: false, word: 'New chats paused', detail: expected.canLaunch.reason } });
     expect(overview.status.chat).toEqual(status.chat);
-    expect(overview.budget).toEqual(expected);
+    expect(overview.budget).toEqual({ ...expected, accountingState: 'ready' });
     expect(overview.tasks).toEqual(all.slice(0, 100));
     expect(api.requests).toEqual([]);
     expect(readDevinTask(unknown.id)).toEqual(unknown);
@@ -597,6 +706,15 @@ describe('create admission after asynchronous preparation', () => {
     pending.release();
     expect(await pending.launch).toMatchObject({ ok:true, task:{ maxAcu:1 } });
     expect(api.requests.filter(r => r.method === 'POST')).toMatchObject([{ body:{ max_acu_limit:1 } }]);
+  });
+
+  it('refuses incomplete other-task evidence after an explicit 429 before a second provider POST', async () => {
+    const pending = await pendingLaunch('429');
+    writeFileSync(join(devinTasksDir(), 'dv_20260927T0400_zzzzzz.json'), '{bad');
+    pending.release();
+    const result = await pending.launch;
+    expect(result).toMatchObject({ ok: false, failure: 'budget' });
+    expect(api.requests.filter(request => request.method === 'POST')).toHaveLength(1);
   });
 
   it('preserves an independently closed own row when a stale retry is refused', async () => {

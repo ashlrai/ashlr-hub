@@ -4,6 +4,12 @@ Phantom is the engineering agent workbench, formerly Ashlr Verse. AshlrAI, Inc. 
 
 This presentation release preserves `@ashlr/hub`, the `ashlr` command, `ashlr verse`, the `ashlr-hub` repository, `/verse/` and `/verse/m/` routes, existing saved data and signed authority. The existing `phantom` command belongs to Phantom Secrets and is not replaced by the workbench.
 
+The planned GitHub destination is `ashlrai/phantom`, after release and authority,
+mirror and build-provenance bindings are qualified. A new npm identity,
+`@ashlr/phantom`, is under review; it is not an installation command yet.
+Existing package imports, CLI commands and saved data must remain compatible
+through either migration. Availability checks do not reserve either name.
+
 The native window, menus and About identify Phantom. The current compatible installation is still `Ashlr.app`; renaming it to `Phantom.app` requires the separately verified installer and updater migration. The bundle identifier, signing identity, custody keys and launch-agent names are retained.
 
 ## Mark provenance

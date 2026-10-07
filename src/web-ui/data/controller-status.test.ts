@@ -36,12 +36,40 @@ describe('named controller observation query', () => {
     expect(request).not.toHaveBeenCalled();
   });
   it('uses only the named GET route, with no root override, and strips nonpublic fields', async () => {
-    const request = vi.fn(async () => new Response(JSON.stringify({ ...report, definitionDigest: 'secret',
-      outcomes: [{ ...report.outcomes[0], campaignDigest: 'secret', deliveryDigest: 'secret' }] })));
+    let transportSignal!: AbortSignal;
+    const request = vi.fn(async (_path: string, init: RequestInit) => {
+      transportSignal = init.signal!;
+      return new Response(JSON.stringify({ ...report, definitionDigest: 'secret',
+        outcomes: [{ ...report.outcomes[0], campaignDigest: 'secret', deliveryDigest: 'secret' }] }));
+    });
     vi.stubGlobal('fetch', request);
     const signal = new AbortController().signal;
     expect(await readControllerStatus('fleet', signal)).toEqual(report);
-    expect(request).toHaveBeenCalledWith('/api/universe/controller-status?controllerId=fleet', expect.objectContaining({ method: 'GET', signal, credentials: 'same-origin' }));
+    // apiGet owns the transport lifetime, combining caller cancellation and its deadline.
+    expect(transportSignal).toBeInstanceOf(AbortSignal);
+    expect(transportSignal).not.toBe(signal);
+    expect(transportSignal.aborted).toBe(false);
+    expect(request).toHaveBeenCalledExactlyOnceWith('/api/universe/controller-status?controllerId=fleet', expect.objectContaining({ method: 'GET', signal: transportSignal, credentials: 'same-origin' }));
+  });
+  it('propagates caller cancellation to the pending named GET with the exact reason', async () => {
+    let transportSignal!: AbortSignal;
+    const request = vi.fn((_path: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      transportSignal = init.signal!;
+      transportSignal.addEventListener('abort', () => reject(transportSignal.reason), { once: true });
+    }));
+    vi.stubGlobal('fetch', request);
+    const caller = new AbortController();
+    const reason = new Error('controller read cancelled');
+    const reading = readControllerStatus('fleet', caller.signal);
+    expect(transportSignal).toBeInstanceOf(AbortSignal);
+    expect(transportSignal).not.toBe(caller.signal);
+    expect(transportSignal.aborted).toBe(false);
+    const rejected = expect(reading).rejects.toBe(reason);
+    caller.abort(reason);
+    await rejected;
+    expect(transportSignal.aborted).toBe(true);
+    expect(transportSignal.reason).toBe(reason);
+    expect(request).toHaveBeenCalledExactlyOnceWith('/api/universe/controller-status?controllerId=fleet', expect.objectContaining({ method: 'GET', signal: transportSignal, credentials: 'same-origin' }));
   });
   it.each([
     { controllerId: 'other' }, { schemaVersion: 2 }, { sourceState: ['healthy'] }, { status: ['completed'] },
