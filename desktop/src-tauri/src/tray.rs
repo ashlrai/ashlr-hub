@@ -363,7 +363,9 @@ mod tests {
         assert_eq!(stop_result_text(3, 0), None);
         assert_eq!(
             stop_result_text(2, 1).as_deref(),
-            Some("Stopped 2 of 3. 1 could not be stopped — open Phantom and stop it from the chat.")
+            Some(
+                "Stopped 2 of 3. 1 could not be stopped — open Phantom and stop it from the chat."
+            )
         );
         assert!(stop_result_text(0, 2).unwrap().contains("stop them"));
     }
