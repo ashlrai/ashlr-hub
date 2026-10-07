@@ -92,6 +92,7 @@ const ENGINE_IDS = new Set<EngineId>([
   'opencode',
   'meta-muse',
   'grok',
+  'grok-cli',
 ]);
 
 const TERMINATION_REASONS = new Set<TerminationReason>([

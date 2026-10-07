@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -54,7 +55,7 @@ describe('M361 metadata-only agent diagnostics', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  itWithProcessStart('persists only private fixed-schema metadata and leaves legacy contents untouched', () => {
+  itWithProcessStart.each(['codex', 'grok-cli'] as const)('persists only private fixed-schema %s metadata and leaves legacy contents untouched', (engine) => {
     const dir = agentDiagnosticsDir();
     mkdirSync(dir, { recursive: true, mode: 0o755 });
     const legacyPath = join(dir, 'attempt-legacy.log');
@@ -65,7 +66,7 @@ describe('M361 metadata-only agent diagnostics', () => {
     const rawError = 'Unauthorized token=sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
     const input = {
       runId: 'attempt-018f6d2e-7c50-4f15-8a2c-6efc97fb87a1',
-      engine: 'codex' as const,
+      engine,
       ok: false,
       terminationReason: 'backstop-timeout' as const,
       errorClass: classifyAgentDiagnosticError(rawError),
@@ -96,7 +97,7 @@ describe('M361 metadata-only agent diagnostics', () => {
       schemaVersion: 1,
       ts: expect.any(String),
       runRef,
-      engine: 'codex',
+      engine,
       ok: false,
       terminationReason: 'backstop-timeout',
       errorClass: 'authentication',
@@ -298,6 +299,9 @@ describe('M361 metadata-only agent diagnostics', () => {
     };
     expect(recordAgentDiagnostic({ ...base, runId: '../escape' })).toBe(false);
     expect(recordAgentDiagnostic({ ...base, attempt: 2 })).toBe(false);
+    // Exercise a malformed runtime caller rather than widening the supported EngineId type.
+    expect(recordAgentDiagnostic({ ...base, engine: 'unknown-engine' as typeof base.engine })).toBe(false);
+    expect(existsSync(agentDiagnosticsDir())).toBe(false);
 
     mkdirSync(agentDiagnosticsDir(), { recursive: true, mode: 0o700 });
     const path = join(agentDiagnosticsDir(), `${agentDiagnosticRunRef(base.runId)!}.jsonl`);
