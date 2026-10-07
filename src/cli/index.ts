@@ -590,6 +590,12 @@ const loadVerifySafetyCmd = lazyCmd(
   'verify-safety command requires src/cli/verify-safety.ts (H4 module not yet built).',
 );
 
+const loadMaintainerVerifyCmd = lazyCmd(
+  () => import('./maintainer-verify.js'),
+  (m) => m.cmdMaintainerVerify as Cmd,
+  'verify-pr requires the host-owned maintainer verifier.',
+);
+
 // ─── H7 command loaders ─────────────────────────────────────────────
 // preflight + onboard, matching the reflect/health/seams/verify-safety/audit
 // loaders — see docs/contracts/CONTRACT-H7.md.
@@ -2196,6 +2202,12 @@ async function main(): Promise<void> {
       case 'verify-safety': {
         const cmdVerifySafety = await loadVerifySafetyCmd();
         process.exitCode = await cmdVerifySafety(rest);
+        break;
+      }
+
+      case 'verify-pr': {
+        const cmdMaintainerVerify = await loadMaintainerVerifyCmd();
+        process.exitCode = await cmdMaintainerVerify(rest);
         break;
       }
 

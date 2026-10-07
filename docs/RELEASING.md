@@ -851,6 +851,44 @@ activate, or roll back. Even a verified candidate/rollback pair remains
 release tag, provenance, runtime installation, launch, and production
 acceptance gates remain separate and mandatory.
 
+## Verify an existing maintainer PR
+
+`ashlr verify-pr <owner/repo> <PR> --confirm-head <full-head-SHA> --json`
+is an explicit host-owned intake for an existing maintainer PR. It writes a
+private verification receipt and, after successful verification, publishes the
+required `ashlr/verify` check through the ruleset-bound GitHub App. It does not
+merge, publish an npm package, deploy a website or install a desktop release.
+The compatible `ashlr` CLI identity remains available under the Phantom brand.
+
+Run it from the compiled release after reviewing that exact head. Prerequisites
+are a current signed grant for the repository, an authenticated GitHub CLI
+account with repository write/maintain/admin permission, custody App access,
+and an active protected-branch rule requiring `ashlr/verify` from one specific
+App. The PR must contain the current default-branch base. A changed authority
+surface requires normal reapproval; this command cannot waive that requirement.
+
+The host acquires the exact base and PR head into its trusted mirror. It derives
+required merge commands from the immutable base, then runs them against the
+exact head tree in a private confined worktree. Required confinement, complete
+command exits and captured scrubbed-output digests, unchanged source, cleanup,
+current base/head/tree, maintainer account, signed policy, Stop epoch and active
+App rules are checked before publication. Stop tracks and aborts the execution
+lease, including queued mirror/fetch work. The final outbound call checks the
+exact fence and live authority after credential acquisition.
+
+Receipts are stored under `~/.ashlr/authority/maintainer-verification/`; they
+record base/head/tree/merge-base/diff/contract/policy bindings and real command
+timings. They are local evidence, not signed producer provenance or an importable
+authorization. Saved JSON cannot create a green check. Duplicate checks are
+recognized only after a fresh successful verification and current pin checks.
+
+Exit 0 confirms the exact App check; exit 1 withholds verification; exit 2 means
+invalid arguments. Missing dependencies or tool caches under confinement remain
+infrastructure failures. Do not retry with weaker confinement or convert local
+builds into a successful App check. After correcting a stale base, failed check
+or unavailable toolchain, review the new exact head and invoke the command
+again. Normal protected CI, merge and release acceptance remain separate.
+
 ## Install channels
 
 - **git checkout** (contributors): `ashlr update` = `git pull --ff-only` + rebuild.

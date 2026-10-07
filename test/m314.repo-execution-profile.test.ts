@@ -48,6 +48,13 @@ describe('repo execution profile', () => {
       execFileSync('git', ['-C', dir, 'add', 'ashlr.verify.json'], { stdio: 'pipe' });
       execFileSync('git', ['-C', dir, 'commit', '--quiet', '-m', 'add verifier'], { stdio: 'pipe' });
       expect(detectRepoExecutionProfile(dir).verifyContractSource).toBe('tracked-clean');
+      const trustedReads: readonly string[][] = [];
+      const trustedGitRead = (args: readonly string[]): string => {
+        (trustedReads as string[][]).push([...args]);
+        return execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      };
+      expect(detectRepoExecutionProfile(dir, { trustedGitRead }).verifyContractSource).toBe('tracked-clean');
+      expect(trustedReads.map((args) => args[0])).toEqual(['ls-files', 'status']);
 
       writeVerifyContract(dir, { ...mergeContract, commands: [...mergeContract.commands, {
         id: 'quick', kind: 'test', cmd: ['npm', 'run', 'quick'], required: true, profiles: ['quick'],

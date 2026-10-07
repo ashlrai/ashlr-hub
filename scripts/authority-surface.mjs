@@ -81,6 +81,11 @@ export const AUTHORITY_SURFACE_ROOTS = Object.freeze([
   'dist/core/fleet/standing-merge-pass.js',
   'dist/core/fleet/fleet-merge-state.js',
   'dist/core/fleet/verify-check-run.js',
+  // Existing maintainer PRs have their own host intake, not fleet provenance.
+  // Its caller, exact-tree runner and App-post decision are all grant-bound.
+  'dist/cli/maintainer-verify.js',
+  'dist/core/fleet/maintainer-pr-verification.js',
+  'dist/core/fleet/maintainer-pr-runner.js',
   'dist/core/fleet/host-merge.js',
   'dist/core/fleet/post-merge-watch.js',
   'dist/core/fleet/quarantine.js',

@@ -96,6 +96,20 @@ async function build(): Promise<AuthoritySurfaceManifestV1> {
 }
 
 describe('the build script', () => {
+  it('binds every maintainer intake/runner/check module to the signed surface', async () => {
+    const roots = ['dist/cli/maintainer-verify.js', 'dist/core/fleet/maintainer-pr-verification.js', 'dist/core/fleet/maintainer-pr-runner.js'];
+    for (const path of roots) {
+      expect(script.AUTHORITY_SURFACE_ROOTS).toContain(path);
+      put(path, 'export const binding = 1;\n');
+    }
+    const manifest = await script.computeAuthoritySurface({ packageRoot: root, roots, ts });
+    writeFileSync(join(root, 'dist/authority-surface.json'), JSON.stringify(manifest));
+    for (const path of roots) {
+      put(path, 'export const binding = 2;\n');
+      expect(verifyAuthoritySurfaceAt(root, 'running', { fresh: true })).toMatchObject({ ok: false, code: 'file-changed' });
+      put(path, 'export const binding = 1;\n');
+    }
+  });
   it('walks exactly the runtime closure', async () => {
     const manifest = await build();
     expect(manifest.files.map((f) => f.path)).toEqual([
