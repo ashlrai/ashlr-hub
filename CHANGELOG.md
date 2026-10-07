@@ -24,6 +24,9 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   repository observation before admitting a build.
 - Add a source-only release preflight so publication and documentation mismatches
   surface before expensive builds and hosted qualification.
+- Graph recorded Jev decision response time by kind, with call counts and an
+  accessible table. Keep unknown timing distinct from zero and exclude cached
+  decisions from call measurements.
 
 ### Fixed
 
@@ -35,6 +38,13 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Keep chat settings loading, failure and retry feedback visible without losing
   drafts or handoff notes. Preserve warm controls during refresh, ignore stale
   acknowledgements, and name deferred settings actions while they load.
+- Discover independent MCP tool lists concurrently while preserving configured
+  merge order, existing routes and per-server failure isolation.
+- Reuse a freshly verified campaign projection within a delivered-source read;
+  later requests still revalidate registration, recovery and artifact bytes.
+- Include existing stylesheet-reading design contracts in the fast development
+  smoke set, and wait for initial review selection before testing keyboard
+  navigation. Preserve navigation, caching and full release coverage.
 
 ## [3.24.3] — 2026-10-06
 
