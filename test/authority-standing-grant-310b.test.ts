@@ -268,6 +268,18 @@ describe('drafts', () => {
     expect(payload.merge.selfRepo).toBe('merge-non-authority');
   });
 
+  it('gives only the reviewed renamed self the existing Hub rollout and risk bounds', () => {
+    const old = draftInput.repos[0]!;
+    const payload = buildDefaultGrantPayload({ ...draftInput, repos: [old, { ...old, nameWithOwner: 'ashlrai/phantom' }, { ...old, nameWithOwner: 'someone/phantom' }] });
+    const legacy = payload.repos.find((r) => r.nameWithOwner === 'ashlrai/ashlr-hub')!;
+    expect(payload.repos.find((r) => r.nameWithOwner === 'ashlrai/phantom')).toEqual({ ...legacy, nameWithOwner: 'ashlrai/phantom' });
+    expect(payload.repos.find((r) => r.nameWithOwner === 'someone/phantom')).toMatchObject({ stage: 'propose', maxRisk: 'low', maxMergesPerDay: 4 });
+    for (const stage of payload.rollout.stages) {
+      expect(stage.repos.find((r) => r.nameWithOwner === 'ashlrai/phantom')).toEqual({ ...stage.repos.find((r) => r.nameWithOwner === 'ashlrai/ashlr-hub')!, nameWithOwner: 'ashlrai/phantom' });
+    }
+    expect(parseStandingGrantPayload(payload).ok).toBe(true);
+  });
+
   it('seats follow the budget decisions: Claude 40% reserve and 70% session ceiling, one local wildcard', () => {
     const { seats } = buildDefaultGrantPayload(draftInput).spend;
     expect(seats['claude']).toEqual({ enabled: true, reserveFloorPercent: 40, maxSessionWindowPercent: 70, roles: ['judge', 'leader'] });

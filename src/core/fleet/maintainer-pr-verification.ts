@@ -5,12 +5,15 @@
  * are evidence, never an input that can authorize a green check.
  */
 import { createHash } from 'node:crypto';
+import { hubRepositoryEffectRefusal } from '../authority/github-repository-admission.js';
+import { isHubRepositoryLabel, requireHubRepositoryMetadata, requireHubRepositoryReference } from '../authority/repository-binding.js';
 import { canonicalizeDaemonActivationValue } from '../daemon/activation-permit.js';
 import type { EffectivePolicy } from '../authority/types.js';
 import type { VerifyCommand, VerifyCommandResult } from '../run/verify-commands.js';
 import { scrubSecrets } from '../util/scrub.js';
 import type { HostMergeDeps, GithubReply } from './host-merge.js';
 import { ASHLR_VERIFY_CHECK_NAME } from './verify-check-run.js';
+import { needsMaintainerCargo, type MaintainerCargoReceipt } from './maintainer-cargo-dependencies.js';
 
 const SHA = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -50,10 +53,12 @@ export interface MaintainerRunEvidence {
   confinement: 'required';
   sourceUnchanged: boolean;
   worktreeRemoved: boolean;
+  cargoDependencies?: MaintainerCargoReceipt;
+  dependenciesRemoved?: boolean;
 }
 
 export interface MaintainerVerificationReceipt {
-  v: 1;
+  v: 2;
   kind: 'maintainer-pr-verification';
   actor: string;
   source: MaintainerPrPins;
@@ -103,6 +108,10 @@ function requirePolicy(repo: string, deps: MaintainerVerificationDeps): Effectiv
 
 async function request(deps: MaintainerVerificationDeps, repo: string, suffix: string, body?: unknown, beforeDispatch?: () => void): Promise<GithubReply> {
   const token = (await deps.token(repo)).token;
+  if (body !== undefined) {
+    const refusal = await hubRepositoryEffectRefusal(repo, deps.transport, token);
+    if (refusal) return refusal;
+  }
   beforeDispatch?.();
   return deps.transport({ method: body === undefined ? 'GET' : 'POST', path: `/repos/${repo}${suffix}`, token, ...(body === undefined ? {} : { body }) });
 }
@@ -117,6 +126,7 @@ interface Observation { source: MaintainerPrPins; rulesSha256: string; appId: nu
 
 async function observe(repo: string, pr: number, actor: string, deps: MaintainerVerificationDeps): Promise<Observation> {
   const repoBody = object(await read(deps, repo, ''));
+  if (isHubRepositoryLabel(repo)) requireHubRepositoryMetadata(repo, repoBody);
   const defaultBranch = repoBody?.['default_branch'];
   if (repoBody?.['full_name'] !== repo || typeof defaultBranch !== 'string' || !defaultBranch || defaultBranch.length > 200) {
     throw new Error('repository identity or protected base is unavailable');
@@ -128,6 +138,7 @@ async function observe(repo: string, pr: number, actor: string, deps: Maintainer
   const pull = object(await read(deps, repo, `/pulls/${pr}`));
   const base = object(pull?.['base']);
   const head = object(pull?.['head']);
+  if (isHubRepositoryLabel(repo)) requireHubRepositoryReference(repo, base?.['repo']);
   if (pull?.['number'] !== pr || pull?.['state'] !== 'open' || base?.['ref'] !== defaultBranch ||
       object(base?.['repo'])?.['full_name'] !== repo || typeof head?.['sha'] !== 'string' || !SHA.test(head['sha'])) {
     throw new Error('PR is not open against this repository default branch');
@@ -174,6 +185,14 @@ export function maintainerRunFailure(pins: MaintainerPrPins, run: MaintainerRunE
     if (run[key] !== pins[key] || !SHA.test(run[key])) return `verification ${key} does not match the PR`;
   }
   if (!DIGEST.test(run.diffSha256) || !DIGEST.test(run.contractSha256)) return 'diff/contract evidence is missing';
+  if (needsMaintainerCargo(run.expectedCommands)) {
+    const deps = run.cargoDependencies;
+    if (!deps || run.dependenciesRemoved !== true || deps.v !== 1 || deps.recipe !== 'cargo-vendor-locked-v1' || deps.sourceTree !== pins.treeSha ||
+        !Number.isSafeInteger(deps.packageCount) || deps.packageCount <= 0 ||
+        [deps.inputsSha256, deps.lockSha256, deps.toolchainSha256, deps.vendorSha256, deps.configSha256, deps.receiptSha256].some((value) => !DIGEST.test(value))) return 'Cargo dependency evidence or cleanup is missing';
+    const { receiptSha256, ...payload } = deps;
+    if (createHash('sha256').update(JSON.stringify(payload)).digest('hex') !== receiptSha256) return 'Cargo dependency receipt digest is invalid';
+  }
   if (run.expectedCommands.length === 0 || run.commands.length !== run.expectedCommands.length) return 'no complete base-derived command suite ran';
   for (let i = 0; i < run.expectedCommands.length; i++) {
     const expected = run.expectedCommands[i]!;
@@ -209,7 +228,7 @@ export async function verifyMaintainerPr(input: { repo: string; pr: number; conf
     };
     const startedAt = new Date(deps.nowMs()).toISOString();
     const run = await deps.run(initial.source);
-    const payload = { v: 1 as const, kind: 'maintainer-pr-verification' as const, actor, source: initial.source, authority, startedAt, finishedAt: new Date(deps.nowMs()).toISOString(), run };
+    const payload = { v: 2 as const, kind: 'maintainer-pr-verification' as const, actor, source: initial.source, authority, startedAt, finishedAt: new Date(deps.nowMs()).toISOString(), run };
     receipt = { ...payload, receiptSha256: maintainerEvidenceDigest(payload) };
     deps.record(receipt);
     const failure = maintainerRunFailure(initial.source, run);
@@ -236,9 +255,11 @@ export async function verifyMaintainerPr(input: { repo: string; pr: number; conf
       // A check's identity is stable across fresh successful executions of
       // the same source/contract/authority. Timing and output belong to each
       // unique receipt, not the idempotency key.
-      const externalId = `maintainer-v1:${maintainerEvidenceDigest({
+      const externalId = `maintainer-v2:${maintainerEvidenceDigest({
         source: initial.source, actor, authority, diffSha256: run.diffSha256,
         contractSha256: run.contractSha256, commands: run.expectedCommands,
+        ...(run.cargoDependencies ? { cargo: { recipe: run.cargoDependencies.recipe, inputsSha256: run.cargoDependencies.inputsSha256,
+          lockSha256: run.cargoDependencies.lockSha256, toolchainSha256: run.cargoDependencies.toolchainSha256, vendorSha256: run.cargoDependencies.vendorSha256 } } : {}),
       })}`;
       const prior = checks.find((item) => {
         const check = object(item);

@@ -22,6 +22,7 @@
  * Every failure is fail-closed: null policy, and the fleet behaves exactly
  * like master (dark).
  */
+import { isHubRepositoryLabel } from './repository-binding.js';
 import { loadConfigReadOnlyStrict } from '../config.js';
 import { killSwitchOn } from '../sandbox/policy.js';
 import { DEVIN_SEAT_ID, effectiveSeatPolicy, engineOfSeatId, type BudgetEngine } from '../routing/policy.js';
@@ -48,7 +49,6 @@ import {
 import { evaluateRollout, rolloutPositionFor, type RolloutEvaluation, type RolloutPositionInternal } from './rollout.js';
 import {
   LOCAL_SEAT_WILDCARD,
-  SELF_REPO_NAME_WITH_OWNER,
   readInstalledGrant,
   verifyStandingGrant,
   type GrantRejectCode,
@@ -213,7 +213,7 @@ export function computeEffectivePolicy(input: EffectivePolicyInput): EffectivePo
   const repos: EffectiveRepoPolicy[] = stage.repos.flatMap((stageRepo) => {
     const granted = grantRepos.get(stageRepo.nameWithOwner);
     if (!granted) return [];
-    const self = granted.nameWithOwner.toLowerCase() === SELF_REPO_NAME_WITH_OWNER;
+    const self = isHubRepositoryLabel(granted.nameWithOwner);
     const local = granted.enforcement === 'local';
     let repoStage = minStage(stageRepo.stage, granted.stage, switchStage, configStage);
     if (self && (grant.merge.selfRepo === 'propose-only' || cfg.selfMergeDisabled)) repoStage = 'propose';

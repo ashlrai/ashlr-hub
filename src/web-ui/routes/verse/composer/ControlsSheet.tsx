@@ -16,6 +16,7 @@
  */
 import { lazy, Suspense, useId, useRef, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import { SkeletonLine } from '../../../components/primitives/Skeleton.js';
 import { useFocusTrap } from '../../../components/primitives/focus-trap.js';
 import styles from './composer.module.css';
 
@@ -45,13 +46,13 @@ export function ControlsSheet({ open, onClose, children }: ControlsSheetProps) {
         <p className={styles.sheetNote}>Changes apply from the next turn.</p>
         <div className={styles.sheetBody}>
           {children}
-          <Suspense fallback={null}>
+          <Suspense fallback={<ActionLoading label="Loading playbooks…" />}>
             <UsePlaybookAction />
           </Suspense>
-          <Suspense fallback={null}>
+          <Suspense fallback={<ActionLoading label="Loading cloud action…" />}>
             <RunInCloudAction />
           </Suspense>
-          <Suspense fallback={null}>
+          <Suspense fallback={<ActionLoading label="Loading Devin action…" />}>
             <RunInDevinAction />
           </Suspense>
         </div>
@@ -59,4 +60,10 @@ export function ControlsSheet({ open, onClose, children }: ControlsSheetProps) {
     </div>,
     document.body,
   );
+}
+
+function ActionLoading({ label }: { label: string }) {
+  return <div className={styles.actionLoading} role="status" aria-label={label}>
+    <span>{label}</span><div aria-hidden="true"><SkeletonLine width="72%" /></div>
+  </div>;
 }

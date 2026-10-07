@@ -495,10 +495,16 @@ export async function startGateway(
     for (const t of listNativeTools()) {
       tools.push({ name: t.name, description: t.description, inputSchema: t.inputSchema });
     }
-    // Re-list live so the gateway reflects the current downstream tool set.
-    for (const d of downstreams) {
+    // Re-list live in parallel, then merge in registry order. A slow server
+    // must not delay starting another lookup or change route precedence.
+    const listedResults = await Promise.allSettled(
+      downstreams.map(async (d) => d.client.listTools({}, { timeout: timeoutMs })),
+    );
+    for (const [index, d] of downstreams.entries()) {
       try {
-        const listed = await d.client.listTools({}, { timeout: timeoutMs });
+        const result = listedResults[index]!;
+        if (result.status === 'rejected') throw result.reason;
+        const listed = result.value;
         for (const t of listed.tools ?? []) {
           const key = `${d.spec.name}${NS}${t.name}`;
           // M31 reserved-name guard: a downstream key can never shadow a native

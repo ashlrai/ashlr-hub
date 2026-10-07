@@ -72,6 +72,24 @@ describe('computeEffectivePolicy — min of everything', () => {
     expect(repo(policy(), 'ashlrai/ashlrcode').selfRepo).toBeNull();
   });
 
+  it('keeps renamed self protection, without joining an old grant to a new rollout label', () => {
+    const renamed = editGrant(grant, (g) => {
+      for (const r of g.repos) if (r.nameWithOwner === 'ashlrai/ashlr-hub') r.nameWithOwner = 'ashlrai/phantom';
+      for (const stage of g.rollout.stages) for (const r of stage.repos) {
+        if (r.nameWithOwner === 'ashlrai/ashlr-hub') r.nameWithOwner = 'ashlrai/phantom';
+      }
+    });
+    expect(repo(policy({ g: renamed }), 'ashlrai/phantom')).toMatchObject({ stage: 'merge', selfRepo: 'merge-non-authority', maxRisk: 'medium' });
+    expect(repo(policy({ g: editGrant(renamed, (g) => { g.merge.selfRepo = 'propose-only'; }) }), 'ashlrai/phantom').stage).toBe('propose');
+    expect(repo(policy({ g: renamed, config: { foundry: { autoMerge: { allowSelfMerge: false } } } }), 'ashlrai/phantom').stage).toBe('propose');
+    const oldGrantNewStage = editGrant(grant, (g) => {
+      for (const stage of g.rollout.stages) for (const r of stage.repos) {
+        if (r.nameWithOwner === 'ashlrai/ashlr-hub') r.nameWithOwner = 'ashlrai/phantom';
+      }
+    });
+    expect(policy({ g: oldGrantNewStage }).repos.some((r) => r.nameWithOwner === 'ashlrai/phantom')).toBe(false);
+  });
+
   it('config can only tighten', () => {
     const tight = policy({
       config: {

@@ -38,7 +38,10 @@ vi.mock('../src/core/run/verify-commands.js', async (importOriginal) => ({
 
 import { buildFleetRuleset, fleetAppPermissionUrls, readFleetApp, runAuthorityCli, type AuthorityCliDeps, type GhResult } from '../src/cli/authority.js';
 import { newFleetMergeState, type FleetMergeStateV1 } from '../src/core/fleet/fleet-merge-state.js';
-import type { GithubCall, GithubReply } from '../src/core/fleet/host-merge.js';
+import { HUB_REPOSITORY_IDENTITY as hub } from '../src/core/authority/repository-binding.js';
+import { githubEffectDispatchGuard } from '../src/core/fleet/host-merge.js';
+import { repoPolicy, standingPolicy } from './helpers/fleet-github-310b.js';
+import type { HostMergeDeps, GithubCall, GithubReply } from '../src/core/fleet/host-merge.js';
 import { evaluateG7Checks, type CheckRunObservation } from '../src/core/fleet/merge-gates.js';
 import { mirrorPathFor } from '../src/core/fleet/mirrors.js';
 import {
@@ -84,6 +87,7 @@ function fakeGithub(opts: { tree?: string; parents?: string[]; status?: number; 
   const transport = async (call: GithubCall): Promise<GithubReply> => {
     calls.push(call);
     const path = call.path.replace(`/repos/${REPO}`, '');
+    if (call.method === 'GET' && path === '') return { status: 200, body: { full_name: REPO, id: hub.repositoryId, node_id: hub.repositoryNodeId, owner: { id: hub.ownerId, login: hub.ownerLogin }, default_branch: 'master', private: false, visibility: 'public' } };
     if (call.method === 'GET' && path === `/git/commits/${HEAD}`) {
       return { status: 200, body: { sha: HEAD, tree: { sha: opts.tree ?? TREE }, parents: (opts.parents ?? [BASE]).map((p) => ({ sha: p })) } };
     }
@@ -138,6 +142,42 @@ describe('decideVerifyCheck — success only for G3 pass on the exact verified t
 });
 
 describe('postVerifyCheckRun — through the App transport', () => {
+  it('does not transfer an old-name grant to a new-name check publication', () => {
+    const gh = fakeGithub();
+    const host = { ...gh.deps, policy: () => standingPolicy([repoPolicy(REPO)]), killActive: () => false, killEpoch: () => 'off' } as HostMergeDeps;
+    expect(githubEffectDispatchGuard(hub.renamedName, host)).toThrow('GitHub effect authority changed before contact.');
+  });
+
+  it.each(['Stop', 'epoch', 'policy'] as const)('never writes when %s is revoked during fresh repository preflight', async (change) => {
+    const gh = fakeGithub();
+    let killed = false;
+    let stopEpoch = 'off';
+    let policy = standingPolicy([repoPolicy(REPO)]);
+    const host = { ...gh.deps, policy: () => policy, killActive: () => killed, killEpoch: () => stopEpoch } as HostMergeDeps;
+    const beforeDispatch = githubEffectDispatchGuard(REPO, host);
+    const transport = gh.deps.transport;
+    gh.deps.transport = async (call) => {
+      const reply = await transport(call);
+      if (call.method === 'GET' && call.path === `/repos/${REPO}`) {
+        if (change === 'Stop') killed = true;
+        if (change === 'epoch') stopEpoch = 'recreated-off';
+        if (change === 'policy') policy = { ...policy, grantId: 'replacement' };
+      }
+      return reply;
+    };
+    expect(await postVerifyCheckRun({ repo: REPO, headSha: HEAD, verified: verified(), prior: null }, { ...gh.deps, beforeDispatch })).toMatchObject({ ok: false });
+    expect(gh.writes()).toEqual([]);
+    expect(gh.calls.map((call) => call.path)).toEqual([`/repos/${REPO}/git/commits/${HEAD}`, `/repos/${REPO}`]);
+  });
+
+  it('refuses a valid-looking replacement repository before posting the App check', async () => {
+    const gh = fakeGithub();
+    const transport = gh.deps.transport;
+    gh.deps.transport = async (call) => call.path === `/repos/${REPO}` ? { status: 200, body: { full_name: REPO, id: 1 } } : transport(call);
+    expect(await postVerifyCheckRun({ repo: REPO, headSha: HEAD, verified: verified(), prior: null }, gh.deps)).toMatchObject({ ok: false, retryable: false });
+    expect(gh.writes()).toEqual([]);
+  });
+
   it('creates a completed ashlr/verify run on the head and remembers the App GitHub attributed it to', async () => {
     const gh = fakeGithub();
     const result = await postVerifyCheckRun({ repo: REPO, headSha: HEAD, verified: verified(), prior: null }, gh.deps);

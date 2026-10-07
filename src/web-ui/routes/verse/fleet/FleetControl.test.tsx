@@ -216,7 +216,8 @@ describe('the header', () => {
     stubSurfaceFetch({ kind: 'live', now, routes: { '/api/verse/fleet/control': preparing } });
     render(<FleetSection />);
     const region = await control();
-    expect(region).toHaveTextContent('preparing work: selection and dispatch');
+    expect(region).toHaveTextContent('Preparing work');
+    expect(region).toHaveTextContent('0 agents working · selection and dispatch');
     expect(region).toHaveTextContent('none working');
     expect(region).toHaveTextContent('tick in progress: selection and dispatch for 30s');
     expect(region).toHaveTextContent('last completed');
@@ -252,6 +253,104 @@ describe('the header', () => {
     expect(within(region).getByRole('button', { name: /^Start/ })).toBeDisabled();
     expect(within(region).getByRole('button', { name: /^Pause/ })).toBeEnabled();
     expect(within(region).getByRole('button', { name: /^Stop/ })).toBeEnabled();
+  });
+
+  it('keeps unknown daemon evidence explicit instead of claiming it is stopped', async () => {
+    const unknown = fleetControl('live');
+    unknown.daemon.service = 'unknown';
+    unknown.daemon.liveness = 'unknown';
+    unknown.daemon.pid = null;
+    stubSurfaceFetch({ routes: { '/api/verse/fleet/control': unknown } });
+    render(<FleetSection />);
+    const region = await control();
+    expect(region).toHaveTextContent('Status unavailable');
+    expect(region).not.toHaveTextContent('Not running');
+  });
+
+  it('marks a retained failed reading and lets a fresh check replace it', async () => {
+    const state = fleetControl('live');
+    stubSurfaceFetch({ routes: { '/api/verse/fleet/control': state } });
+    render(<FleetSection />);
+    const region = await control();
+    await act(async () => { await runQuery('verse-fleet-control', () => Promise.reject(new Error('read failed'))); });
+    expect(region).toHaveAttribute('data-state', 'unknown');
+    expect(region).toHaveTextContent('Last known: Running');
+    expect(region).toHaveTextContent('Showing the last reading');
+    let finish!: (value: { value: FleetControlStateV1; available: boolean; reason: null }) => void;
+    let pending!: Promise<void>;
+    await act(async () => { pending = runQuery('verse-fleet-control', () => new Promise(resolve => { finish = resolve; })); });
+    expect(region).toHaveAttribute('aria-busy', 'true');
+    expect(region).toHaveAttribute('data-state', 'unknown');
+    expect(region).toHaveTextContent('Last known: Running');
+    await act(async () => { finish({ value: state, available: true, reason: null }); await pending; });
+    expect(region).not.toHaveTextContent('Last known:');
+    await act(async () => { await runQuery('verse-fleet-control', () => Promise.reject(new Error('read failed again'))); });
+    state.daemon.pid = 36373;
+    await userEvent.setup().click(within(region).getByRole('button', { name: 'Check again' }));
+    await waitFor(() => expect(region).toHaveTextContent('Running · pid 36373'));
+    expect(region).not.toHaveTextContent('Last known:');
+    expect(region).toHaveAttribute('data-state', 'running');
+  });
+
+  it('announces a refresh while preserving the useful last reading', async () => {
+    const state = fleetControl('live');
+    stubSurfaceFetch({ routes: { '/api/verse/fleet/control': state } });
+    render(<FleetSection />);
+    const region = await control();
+    let finish!: (value: { value: FleetControlStateV1; available: boolean; reason: null }) => void;
+    let pending!: Promise<void>;
+    await act(async () => { pending = runQuery('verse-fleet-control', () => new Promise(resolve => { finish = resolve; })); });
+    expect(region).toHaveAttribute('aria-busy', 'true');
+    expect(region).toHaveTextContent('Updating fleet status…');
+    expect(region).toHaveTextContent('Running · pid 4242');
+    await act(async () => { finish({ value: state, available: true, reason: null }); await pending; });
+    expect(region).toHaveAttribute('aria-busy', 'false');
+    expect(region).not.toHaveTextContent('Updating fleet status…');
+  });
+
+  it.each([false, null])('opens helper maintenance automatically when installation is %s', async (installed) => {
+    const state = fleetControl('live');
+    state.custody.installed = installed;
+    stubSurfaceFetch({ routes: { '/api/verse/fleet/control': state } });
+    render(<FleetSection />);
+    const region = await control();
+    expect(within(region).getByText('Helper settings').closest('details')).toHaveAttribute('open');
+  });
+
+  it('collapses healthy maintenance without hiding its installed status', async () => {
+    stubSurfaceFetch({ kind: 'live' });
+    render(<FleetSection />);
+    const region = await control();
+    expect(region).toHaveTextContent('Installed · key ready');
+    const settings = within(region).getByText('Helper settings');
+    expect(settings.closest('details')).not.toHaveAttribute('open');
+    await userEvent.setup().click(settings);
+    expect(settings.closest('details')).toHaveAttribute('open');
+  });
+
+  it.each([false, null])('opens helper maintenance automatically when key readiness is %s', async (keyInitialized) => {
+    const state = fleetControl('live');
+    state.custody.keyInitialized = keyInitialized;
+    stubSurfaceFetch({ routes: { '/api/verse/fleet/control': state } });
+    render(<FleetSection />);
+    const region = await control();
+    expect(within(region).getByText('Helper settings').closest('details')).toHaveAttribute('open');
+  });
+
+  it('preserves a user-opened helper panel during healthy refreshes and opens it for a new blocker', async () => {
+    const state = fleetControl('live');
+    stubSurfaceFetch({ routes: { '/api/verse/fleet/control': state } });
+    render(<FleetSection />);
+    const region = await control();
+    const settings = within(region).getByText('Helper settings');
+    const user = userEvent.setup();
+    await user.click(settings);
+    await act(async () => { await runQuery('verse-fleet-control', async () => ({ value: { ...state }, available: true, reason: null })); });
+    expect(settings.closest('details')).toHaveAttribute('open');
+    await user.click(settings);
+    expect(settings.closest('details')).not.toHaveAttribute('open');
+    await act(async () => { await runQuery('verse-fleet-control', async () => ({ value: { ...state, custody: { ...state.custody, keyInitialized: false } }, available: true, reason: null })); });
+    expect(settings.closest('details')).toHaveAttribute('open');
   });
 
   it('names one blocker with one button — here the Touch ID sheet', async () => {
@@ -359,6 +458,13 @@ describe('the controls', () => {
 });
 
 describe('custody source checkout', () => {
+  async function custodyControl(): Promise<HTMLElement> {
+    const region = await control();
+    const settings = within(region).getByText('Helper settings');
+    if (!settings.closest('details')?.open) await userEvent.setup().click(settings);
+    return region;
+  }
+
   function nativeInstall(complete = true) {
     const sent: { id: string; op: string; checkout?: string }[] = [];
     (window as unknown as Record<string, unknown>).__ASHLR_DESKTOP__ = {
@@ -380,7 +486,7 @@ describe('custody source checkout', () => {
     const { sent } = nativeInstall();
     stubSurfaceFetch({ kind: 'live' });
     render(<FleetSection />);
-    const region = await control();
+    const region = await custodyControl();
     expect(within(region).getByRole('textbox', { name: 'Custody source checkout' })).toHaveValue('~/code/ashlr-hub');
     expect(region).toHaveTextContent('administrator approval is required');
     await userEvent.setup().click(within(region).getByRole('button', { name: 'Reinstall / upgrade' }));
@@ -393,7 +499,7 @@ describe('custody source checkout', () => {
     const { sent } = nativeInstall();
     stubSurfaceFetch({ kind: 'live' });
     render(<FleetSection />);
-    const region = await control();
+    const region = await custodyControl();
     const field = within(region).getByRole('textbox', { name: 'Custody source checkout' });
     fireEvent.change(field, { target: { value: '/demo/validated hub' } });
     await userEvent.setup().click(within(region).getByRole('button', { name: 'Reinstall / upgrade' }));
@@ -408,7 +514,7 @@ describe('custody source checkout', () => {
     const { sent } = nativeInstall();
     stubSurfaceFetch({ kind: 'live' });
     render(<FleetSection />);
-    const region = await control();
+    const region = await custodyControl();
     fireEvent.change(within(region).getByRole('textbox', { name: 'Custody source checkout' }), { target: { value } });
     expect(within(region).getByRole('button', { name: 'Reinstall / upgrade' })).toBeDisabled();
     expect(within(region).getByRole('textbox', { name: 'Custody source checkout' })).toHaveAttribute('aria-invalid', 'true');
@@ -422,7 +528,7 @@ describe('custody source checkout', () => {
     state.custody.hubCheckout = null;
     stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/fleet/control': state } });
     render(<FleetSection />);
-    const region = await control();
+    const region = await custodyControl();
     const button = within(region).getByRole('button', { name: 'Reinstall / upgrade' });
     expect(button).toBeDisabled();
     fireEvent.change(within(region).getByRole('textbox', { name: 'Custody source checkout' }), { target: { value: '~/reviewed-hub' } });
@@ -435,7 +541,7 @@ describe('custody source checkout', () => {
     const { sent, finish } = nativeInstall(false);
     stubSurfaceFetch({ kind: 'live' });
     render(<FleetSection />);
-    const region = await control();
+    const region = await custodyControl();
     act(() => {
       executeCatalogCommand('fleet.install-custody', { via: 'palette' });
       executeCatalogCommand('fleet.install-custody', { via: 'palette' });

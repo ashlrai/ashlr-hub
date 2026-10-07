@@ -47,6 +47,8 @@ import {
 import { appendLedger, currentLedgerHead } from '../authority/ledger.js';
 import { currentStandingPolicy } from '../authority/effective-config.js';
 import { githubToken } from '../authority/custody-client.js';
+import { hubRepositoryEffectRefusal, isHubRepositoryApiPath } from '../authority/github-repository-admission.js';
+import { isHubRepositoryLabel, requireHubRepositoryMetadata, requireHubRepositoryReference } from '../authority/repository-binding.js';
 import { isPlanUnavailable } from '../authority/server-enforcement.js';
 import type { EffectivePolicy, LedgerAppendInput, LedgerAppendResult, LedgerEventKind, LedgerHead } from '../authority/types.js';
 import { canonicalizeDaemonActivationValue } from '../daemon/activation-permit.js';
@@ -183,6 +185,7 @@ export function fetchGithubTransport(fetchImpl: typeof fetch = globalThis.fetch)
     try {
       const res = await fetchImpl(`${GITHUB_API}${call.path}`, {
         method: call.method,
+        ...(isHubRepositoryApiPath(call.path) ? { redirect: 'manual' as const } : {}),
         headers: {
           Accept: 'application/vnd.github+json',
           Authorization: `Bearer ${call.token}`,
@@ -193,6 +196,9 @@ export function fetchGithubTransport(fetchImpl: typeof fetch = globalThis.fetch)
         ...(call.body !== undefined ? { body: JSON.stringify(call.body) } : {}),
         signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
       });
+      if (isHubRepositoryApiPath(call.path) && (res.redirected || (res.status >= 300 && res.status < 400))) {
+        return { status: 409, body: { message: 'Exact repository requests cannot follow redirects.' } };
+      }
       const text = await res.text();
       if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) return { status: res.status, body: null };
       let body: unknown = null;
@@ -324,6 +330,15 @@ async function gh(
     return { status: 0, body: { message: `no installation token for ${repo}: ${errText(error)}` } };
   }
   try {
+    if (method !== 'GET') {
+      // Only reviewed Hub effects acquire the additional metadata await;
+      // preserve generic-repository behavior and recheck at actual contact.
+      const beforeDispatch = isHubRepositoryLabel(repo) ? githubEffectDispatchGuard(repo, deps) : null;
+      const refusal = await hubRepositoryEffectRefusal(repo, deps.transport, token);
+      if (refusal) return refusal;
+      try { beforeDispatch?.(); }
+      catch { return { status: 409, body: { message: 'GitHub effect authority changed before contact.' } }; }
+    }
     return await deps.transport({ method, path: repoPath(repo, suffix), token, ...(body !== undefined ? { body } : {}) });
   } catch {
     return { status: 0, body: null };
@@ -545,6 +560,10 @@ export interface RepoInfo {
 export async function readRepoInfo(repo: string, deps: HostMergeDeps): Promise<RepoInfo | string> {
   const reply = await gh(deps, repo, 'GET', '');
   if (reply.status !== 200) return githubMessage(reply);
+  if (isHubRepositoryLabel(repo)) {
+    try { requireHubRepositoryMetadata(repo, reply.body); }
+    catch { return 'Repository metadata does not match the reviewed exact Hub identity.'; }
+  }
   const body = obj(reply.body);
   const nodeId = str(body?.['node_id']);
   const defaultBranch = str(body?.['default_branch']);
@@ -610,13 +629,17 @@ export interface PrSnapshot {
   labels: string[];
 }
 
-function parsePr(body: unknown): PrSnapshot | null {
+function parsePr(body: unknown, repo: string): PrSnapshot | null {
   const b = obj(body);
   const number = b?.['number'];
   const nodeId = str(b?.['node_id']);
   const state = b?.['state'];
   const head = obj(b?.['head']);
   const base = obj(b?.['base']);
+  if (isHubRepositoryLabel(repo)) {
+    try { requireHubRepositoryReference(repo, base?.['repo']); }
+    catch { return null; }
+  }
   const headSha = sha(head?.['sha']);
   const headRef = str(head?.['ref']);
   const baseRef = str(base?.['ref']);
@@ -646,7 +669,7 @@ export async function readPr(repo: string, number: number, deps: HostMergeDeps):
   if (!Number.isSafeInteger(number) || number < 1) return 'invalid PR number';
   const reply = await gh(deps, repo, 'GET', `/pulls/${number}`);
   if (reply.status !== 200) return githubMessage(reply);
-  return parsePr(reply.body) ?? 'GitHub returned a malformed pull request';
+  return parsePr(reply.body, repo) ?? 'GitHub returned a malformed pull request';
 }
 
 /**
@@ -939,7 +962,11 @@ export async function openFleetPr(input: OpenFleetPrInput, deps: HostMergeDeps):
   const list = await gh(deps, input.repo, 'GET', `/pulls?state=open&head=${encodeURIComponent(`${owner}:${input.branch}`)}&per_page=10`);
   let pr: PrSnapshot | null = null;
   if (list.status === 200 && Array.isArray(list.body)) {
-    pr = (list.body as unknown[]).map(parsePr).find((p): p is PrSnapshot => p !== null && p.headRef === input.branch) ?? null;
+    const parsed = (list.body as unknown[]).map((body) => parsePr(body, input.repo));
+    if (isHubRepositoryLabel(input.repo) && parsed.some((pull) => pull === null)) {
+      return { ok: false, reason: 'GitHub returned a malformed pull request', retryable: false };
+    }
+    pr = parsed.find((p): p is PrSnapshot => p !== null && p.headRef === input.branch) ?? null;
   }
   if (!pr) {
     const created = await gh(deps, input.repo, 'POST', '/pulls', {
@@ -953,7 +980,7 @@ export async function openFleetPr(input: OpenFleetPrInput, deps: HostMergeDeps):
     if (created.status !== 201 && created.status !== 200) {
       return { ok: false, reason: `PR create: ${githubMessage(created)}`, retryable: created.status === 0 || created.status >= 500 };
     }
-    pr = parsePr(created.body);
+    pr = parsePr(created.body, input.repo);
     if (!pr) return { ok: false, reason: 'GitHub returned a malformed pull request', retryable: false };
   }
   let ownerLane = input.ownerLane;
@@ -1282,7 +1309,8 @@ export async function mergeFleetPrPinned(input: PinnedMergeInput, deps: HostMerg
         input.currentPolicyEpoch() !== identity.policyEpoch) contactRefusal = fail('recheck', 'standing policy changed before contact', true);
       else if (deps.nowMs() >= Date.parse(identity.expiresAt)) contactRefusal = fail('revoked', 'merge authority expired before contact', true);
       if (contactRefusal) throw new Error('merge contact refused');
-      contacted = true;
+      // Metadata reads are not a merge contact; only the exact write can be ambiguous.
+      if (call.method === 'PUT' && call.path === `/repos/${state.repo}/pulls/${pr.number}/merge`) contacted = true;
       return deps.transport(call);
     } };
     const reply = await gh(contactDeps, state.repo, 'PUT', `/pulls/${pr.number}/merge`, {
@@ -1412,7 +1440,7 @@ async function changeFleetPrState(
   }
   const reply = await gh(deps, req.repo, 'PATCH', `/pulls/${req.number}`, { state: to });
   if (reply.status !== 200) return result(false, `GitHub refused: ${githubMessage(reply)}`, current);
-  const after = parsePr(reply.body);
+  const after = parsePr(reply.body, req.repo);
   if (to === 'closed') {
     const row = deps.appendLedger({ kind: 'pr:closed', data: change, actor: req.actor, grantId: policy?.grantId ?? null, repo: req.repo });
     if (!row.ok) {
@@ -1937,12 +1965,26 @@ type WaitResult =
   | { kind: 'killed' }
   | { kind: 'error'; reason: string };
 
+/** Last-contact authority guard; callers retain their existing state/lease ownership. */
+export function githubEffectDispatchGuard(repo: string, deps: HostMergeDeps, expectedPolicy = deps.policy()): () => void {
+  const enrolled = (policy: EffectivePolicy | null) => policy?.repos.some((entry) => entry.nameWithOwner.toLowerCase() === repo.toLowerCase()) === true;
+  const epoch = enrolled(expectedPolicy) ? policyEpochDigest(expectedPolicy, repo) : null;
+  const stopEpoch = deps.killEpoch();
+  return () => {
+    const current = deps.policy();
+    if (!epoch || !enrolled(current) || deps.killActive() || deps.killEpoch() !== stopEpoch || policyEpochDigest(current, repo) !== epoch
+      || !current || !Number.isFinite(Date.parse(current.expiresAt)) || Date.parse(current.expiresAt) <= deps.nowMs()) {
+      throw new Error('GitHub effect authority changed before contact.');
+    }
+  };
+}
+
 async function waitForChecks(state: FleetMergeStateV1, deps: HostMergeDeps, deadlineMs: number): Promise<WaitResult> {
   const pr = state.pr!;
   // 3.13: the App's ashlr/verify on the revert head (idempotent per head). A
   // local-enforcement repo cannot pass G7 without it, so a transient failure
   // is retried later rather than sending the revert to the owner lane.
-  const posted = await ensureFleetVerifyCheck(state, deps);
+  const posted = await ensureFleetVerifyCheck(state, { ...deps, beforeDispatch: githubEffectDispatchGuard(state.repo, deps) });
   if (!posted.ok && posted.retryable && state.enforcement === 'local') {
     return { kind: 'error', reason: `${ASHLR_VERIFY_CHECK_NAME} could not be posted: ${posted.reason}` };
   }

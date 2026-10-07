@@ -9,6 +9,43 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.24.4] — 2026-10-07
+
+### Added
+
+- Prepare checksum-verified, locked Cargo dependencies for host-owned maintainer
+  verification. Candidate commands run offline with read-only dependencies and
+  configuration; receipts record provenance, unchanged inputs and cleanup.
+- Bind Phantom repository effects to fresh numeric repository identity and the
+  exact current namespace. Recheck Stop and authority after metadata reads;
+  redirects and replacement repositories cannot authorize writes.
+- Carry numeric repository identity in paired hosted artifact schemas, retain
+  historical signer namespaces, and recheck signed subject bytes after final
+  repository observation before admitting a build.
+- Add a source-only release preflight so publication and documentation mismatches
+  surface before expensive builds and hosted qualification.
+- Graph recorded Jev decision response time by kind, with call counts and an
+  accessible table. Keep unknown timing distinct from zero and exclude cached
+  decisions from call measurements.
+
+### Fixed
+
+- Distinguish preparing work from agents actually working, keep failed status
+  readings visibly uncertain until a successful refresh, and collapse healthy
+  helper settings while opening them when attention is needed.
+- Include every runtime dependency in both npm bundle aliases and verify
+  offline installation with an exclusive empty cache and empty npm configs.
+- Keep chat settings loading, failure and retry feedback visible without losing
+  drafts or handoff notes. Preserve warm controls during refresh, ignore stale
+  acknowledgements, and name deferred settings actions while they load.
+- Discover independent MCP tool lists concurrently while preserving configured
+  merge order, existing routes and per-server failure isolation.
+- Reuse a freshly verified campaign projection within a delivered-source read;
+  later requests still revalidate registration, recovery and artifact bytes.
+- Include existing stylesheet-reading design contracts in the fast development
+  smoke set, and wait for initial review selection before testing keyboard
+  navigation. Preserve navigation, caching and full release coverage.
+
 ## [3.24.3] — 2026-10-06
 
 ### Added

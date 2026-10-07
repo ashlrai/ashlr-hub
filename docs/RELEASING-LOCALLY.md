@@ -28,11 +28,19 @@ so run it explicitly before packaging.
 
 ```sh
 npm ci
+npm run check:release
 npm run prepublishOnly
 # If native desktop code changed: npm run build:binary; node desktop/scripts/prepare-sidecar.mjs; (cd desktop && cargo tauri build)
 npm run ship:local -- --native  # uses a PREBUILT native binary; verify it was copied
 npm publish <tarball> --access public   # the path ship:local printed; see Publishing
 ```
+
+Run `npm run check:release` before an expensive build or pushing release changes.
+It runs the three existing whole publication and documentation contract modules
+against source files, using the hermetic test runner; it does not require built
+`dist` output or provider credentials. Versioned installer links and release
+policy mismatches fail here early. This focused check does not replace the
+complete `prepublishOnly` suite, exact-source hosted checks or artifact acceptance.
 
 `ship:local --native` does not compile Rust. It skips the native replacement
 when `desktop/src-tauri/target/release/ashlr-desktop` is missing or older than
@@ -74,6 +82,10 @@ file, runs that suite in full. Logs, the eslint cache and vitest JSON reports go
 `--json` prints a machine-readable result instead of the table.
 
 The import graph cannot see a test that reads a changed file as text instead of importing it.
+The web smoke set explicitly includes the existing density, UI-scale, style-token,
+micro-label-font and theme-contrast modules because they read stylesheet/token files.
+These fast design contracts run alongside the shell checks even when related selection
+cannot discover them. They do not cover every file-reading test.
 Use **`npm run gate:full`** to diagnose such changes when you are not running
 `prepublishOnly`; it runs the same static checks plus every backend and web test.
 The release `prepublishOnly` run already covers every test, so running both duplicates work.

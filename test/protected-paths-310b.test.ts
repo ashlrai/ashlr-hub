@@ -55,6 +55,7 @@ describe('G1 — protected paths in every repo', () => {
     ['.vscode/tasks.json', 'build-and-hooks'],
     ['scripts/release.mjs', 'release-tooling'],
     ['scripts/build-identity.mjs', 'release-tooling'],
+    ['scripts/hosted-build-artifact.mjs', 'release-tooling'],
     ['scripts/authority-surface.mjs', 'release-tooling'],
     ['tools/custody/Sources/main.swift', 'release-tooling'],
     ['launchd/ai.ashlr.daemon.plist', 'release-tooling'],

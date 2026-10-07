@@ -25,6 +25,7 @@
  * owner lane, head-SHA races and judge-family refusals are tested without
  * GitHub, models or a real ledger.
  */
+import { isHubRepositoryLabel } from '../authority/repository-binding.js';
 import { readHostMergeRevocationState } from '../autonomy/host-merge-revocation-protocol.js';
 import { outcomeProposalStillCurrent } from '../daemon/outcome-proposal-admission.js';
 import { assertSelectedOutcomeAdmission } from '../run/outcome-admission.js';
@@ -86,6 +87,7 @@ import {
   openGitScratch,
   OWNER_LANE_LABEL,
   policyEpochDigest,
+  githubEffectDispatchGuard,
   publishVerifiedTree,
   readBranchHead,
   readHeadChecks,
@@ -550,7 +552,7 @@ export function defaultStandingPassDeps(): StandingPassDeps {
     hasCurrentVerificationBinding: (proposal) => hasCurrentVerificationBinding(proposal),
     selfEvalParity: (repoPath, cfg) => selfEvalParityForRepo(repoPath, cfg),
     isSelfRepo: (proposal, repo, repoPolicy) =>
-      (repoPolicy?.selfRepo ?? null) !== null || repo.toLowerCase() === 'ashlrai/ashlr-hub' || isSelfTargetProposal(proposal),
+      (repoPolicy?.selfRepo ?? null) !== null || isHubRepositoryLabel(repo) || isSelfTargetProposal(proposal),
     // U4's store; a throw is "unreadable" and G0 treats the repo as held.
     listHolds: () => listRepoHolds(),
     mergeTimes24h: async (repo, nowMs) => {
@@ -1437,7 +1439,7 @@ async function runG3(
  * (verify-check-run.ts). A failure is noted, never fatal here: G7 decides.
  */
 async function postVerifyCheck(ctx: PassContext, state: FleetMergeStateV1): Promise<VerifyCheckResult> {
-  const result = await ensureFleetVerifyCheck(state, ctx.deps.host);
+  const result = await ensureFleetVerifyCheck(state, { ...ctx.deps.host, beforeDispatch: githubEffectDispatchGuard(state.repo, ctx.deps.host, ctx.policy) });
   if (!result.ok) note(ctx, `${state.repo}#${state.pr?.number ?? '?'}: ashlr/verify not posted (${result.code}): ${result.reason}`);
   return result;
 }

@@ -1,4 +1,107 @@
-# Ashlr Platform Efficiency Roadmap
+# Phantom efficiency roadmap
+
+## Measured engineering efficiency: 2026-10-07
+
+Optimize time to verified working software, preserving supported-platform
+coverage and exact release evidence. This review separates elapsed critical-path
+time, aggregate runner consumption, fixture time and decision latency. They are
+different measurements; improving one does not prove a gain in the others.
+
+### Completed CI baseline
+
+[CI run 37570690824, attempt 1](https://github.com/ashlrai/ashlr-hub/actions/runs/37570690824)
+completed all 15 jobs successfully at source
+`e254d290787890165b2f31b9cf86e9ebdd1c638d`, tree
+`4ca687d0681418d34fc4851901c76148f23a5d49`, on 2026-10-07.
+The observation covers 04:16:39–04:55:43 UTC. It is a historical foundation
+baseline, not acceptance of the current candidate.
+
+| Measurement | Observed value | Scope and implication |
+|---|---:|---|
+| Full CI elapsed time | 39m04s | Includes queue offsets and the native job after Mac qualification. |
+| Longest general Mac job | 35m41s | General shard 3; its Vitest wall was 2,009.95s. |
+| General shard 3 fixture time | 1,817.60s / 90.4% | Reported tests dominate; transform was 34.46s, setup 45.89s and imports 105.76s. |
+| Isolated Mac qualification wall | 30m19s | The complete isolated job was 31m40s. |
+| Isolated fixture time | 1,765.10s / 97.7% | Fraction of 1,807.07s of Vitest invocations, not of the whole CI run. |
+| Native broker tail | 3m04s | Runs after all five Mac jobs; it limits gains from faster general shards. |
+| 14 normal builds | 1,047 runner-seconds | Aggregate resource use, not 17m27s of elapsed critical-path time; the longest critical Mac build was 88s. |
+
+Timing categories can overlap, and test hooks are not fully attributable to
+individual cases. The Mac and Linux reports covered the same 1,473 distinct
+backend module paths, but platform skips and actual native checks differ. Equal
+file membership does not make those executions interchangeable. Whole-project
+types, lint and docs already run once in the shared Ubuntu job; other platform
+builds provide their compiled CLI and runtime inventory. See the
+[CI workflow](../.github/workflows/ci.yml),
+[whole-module sharding harness](../scripts/test-ci-sharded.mjs) and
+[artifact qualification contract](../scripts/hosted-build-artifact.mjs).
+
+```mermaid
+flowchart LR
+  S["Source change"] --> P["Local release preflight<br/>about 0.8s test wall"]
+  P --> M["Platform matrix<br/>baseline longest Mac job: 35m41s"]
+  M --> N["Native broker<br/>baseline tail: 3m04s"]
+  N --> A["Qualified artifact and release acceptance<br/>measured separately"]
+  A --> O["Installed workflow observation<br/>task-specific latency"]
+  O --> S
+```
+
+The arrows show feedback order, not additive timing segments. The 0.8s local
+check is from a later source than the hosted baseline; it excludes dependency
+installation and does not replace the full matrix, Audit or release acceptance.
+
+### Narrow improvements in the 3.24.4 candidate
+
+As of this review, the installed and published release is **3.24.3**.
+The following work is source-qualified in the **3.24.4 candidate** at
+`022e024dbf9b6d25d27c56ac9d72ccddae9acfb5`; it has not yet established
+installed, published or production performance improvements.
+
+| Improvement | Verified behavior | Evidence boundary |
+|---|---|---|
+| Parallel MCP discovery | Independent downstream tool lists start together and merge in configured order; existing routing and error isolation remain. | Five whole modules passed, 121 cases, including a baseline-failing rendezvous regression. No universal discovery speedup or live-provider latency claim. [Gateway source](../src/core/mcp-gateway.ts), [regression coverage](../test/mcp-gateway-discovery.test.ts). |
+| Jev response-time chart | Shows per-kind daily mean decision wall time and recorded call counts; excludes cache hits and counts one call per batch. Zero, no calls and unknown remain distinct. | Four whole UI modules passed, 40 cases, with a synthetic 390px keyboard-table preview. It measures request and decision processing, not model decode speed, quality, percentiles or tokens per second. [Chart](../src/web-ui/routes/verse/jev/JevLatencyChart.tsx), [ledger](../src/core/decide/ledger.ts). |
+| Local release preflight | `npm run check:release` invokes the existing three whole publication and source-contract modules before an expensive build or push. | 64 passed, one intentional platform skip, about 0.8s test wall on the qualified local source. Dependency setup, build and hosted job startup are separate. [Local release guide](RELEASING-LOCALLY.md), [script](../package.json). |
+
+### Prioritized remaining work
+
+1. **Reject cheap release failures before expensive CI starts.** A shared
+   read-only hosted release preflight is proposed and awaits architectural
+   approval. Preserve all 15 platform jobs, exhaustive test membership, existing
+   deadlines, producer capture and protected-master attestation. Measure failed
+   iteration time saved and successful-run startup overhead separately.
+2. **Profile the real fixture hot spans.** The longest observed modules were
+   setup acceptance (540.40s), mission acceptance (410.64s) and universe delivery
+   (243.06s). Measure preparation, receipt validation, child startup and
+   filesystem waits before changing caching. Retain real restart, drift, Stop
+   and delivery behavior; do not replace integration coverage with mocks.
+3. **Balance whole modules using observed duration.** A historical simulation
+   of the four general Mac shards retained membership and modeled about 98s of
+   critical-path improvement with observed queue offsets. This is not an
+   achieved result; the isolated lane and native tail remain. Any new partition
+   contract needs separate review, deterministic fallback for new files, exact
+   union checks and unchanged isolation and platform requirements.
+4. **Join tool and model measurements to outcomes.** Use the
+   [agent efficiency guide](ELITE-AGENT-EFFICIENCY.md) and
+   [local report comparison](ELITE-AGENT-EFFICIENCY.md#compare-recorded-local-usage)
+   for controlled source, task, model, concurrency and cache provenance.
+   Browser/terminal/tool latency, cold startup, local-model decode speed and
+   routing cost need their own compatible before/after observations. Missing
+   counters stay unknown; a daily Jev mean cannot establish those measurements.
+
+For each optimization, pin baseline and head source/tree, OS and Node,
+whole-module and occurrence-aware case membership, pass/skip/todo counts,
+fixture/transform/setup/import counters, queue offsets, runner consumption and
+native tail. Compare natural runs at unchanged deadlines, retain actual failures
+and separately verify packaging, publication, installation and user acceptance.
+There is no measured 95–99% full-pipeline improvement. Faster framework startup
+alone would not remove the observed fixture work.
+
+## Historical ecosystem consolidation proposal: 2026-06-28
+
+The estimates below are the original proposal, not measured current costs,
+completed migrations or delivered savings. Revalidate account, dependency and
+product boundaries before selecting this work.
 
 > The ecosystem should be a **platform, not 13 silos.** Each repo separately
 > reinventing + paying for the same foundation (Supabase, auth, billing,

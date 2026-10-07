@@ -5,7 +5,7 @@ import { appendFileSync, chmodSync, copyFileSync, lstatSync, mkdirSync, mkdtempS
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const repository = 'ashlrai/ashlr-hub';
+import { requireProducerEnvironment, requireRepositoryMetadata, requireRepositoryReference } from './github-repository-binding.mjs';
 const roles = ['mac-general-1', 'mac-general-2', 'mac-general-3', 'mac-general-4', 'mac-isolated'];
 const hash = /^[a-f0-9]{40}$/;
 const integer = (value) => { assert.match(value ?? '', /^[1-9][0-9]*$/); const n = Number(value); assert.ok(Number.isSafeInteger(n)); return n; };
@@ -38,16 +38,19 @@ export function copyDataTree(source, destination, budget = { files: 0, bytes: 0,
 }
 
 export function prepare({ env = process.env, read = api } = {}) {
-  assert.equal(env.GITHUB_EVENT_NAME, 'workflow_dispatch'); assert.equal(env.GITHUB_REF, 'refs/heads/master'); assert.equal(env.GITHUB_REPOSITORY, repository);
+  const { repository } = requireProducerEnvironment(env);
+  assert.equal(env.GITHUB_EVENT_NAME, 'workflow_dispatch'); assert.equal(env.GITHUB_REF, 'refs/heads/master');
   assert.match(env.CANDIDATE_SHA ?? '', hash); assert.match(env.GITHUB_SHA ?? '', hash);
   const run = integer(env.CI_RUN_ID); const attempt = integer(env.CI_RUN_ATTEMPT); const artifactId = integer(env.BUILD_ARTIFACT_ID);
   assert.equal(git('rev-parse', 'HEAD'), env.GITHUB_SHA); assert.equal(git('status', '--porcelain', '--untracked-files=normal'), '');
   const base = `repos/${repository}`;
+  requireRepositoryMetadata(repository, read(base));
   const trusted = read(`${base}/git/commits/${env.GITHUB_SHA}`); const candidate = read(`${base}/git/commits/${env.CANDIDATE_SHA}`);
   assert.equal(trusted.sha, env.GITHUB_SHA); assert.equal(candidate.sha, env.CANDIDATE_SHA); assert.equal(trusted.tree.sha, candidate.tree.sha, 'trusted master tree differs from candidate');
   const ci = read(`${base}/actions/runs/${run}/attempts/${attempt}`);
   assert.equal(ci.id, run); assert.equal(ci.run_attempt, attempt); assert.equal(ci.head_sha, env.CANDIDATE_SHA);
-  assert.equal(ci.path, '.github/workflows/ci.yml'); assert.equal(ci.repository?.full_name, repository); assert.equal(ci.status, 'completed'); assert.equal(ci.conclusion, 'success');
+  requireRepositoryReference(repository, ci.repository);
+  assert.equal(ci.path, '.github/workflows/ci.yml'); assert.equal(ci.status, 'completed'); assert.equal(ci.conclusion, 'success');
   const names = artifactNames(run, attempt); const artifacts = []; let page = 1; let total = null;
   for (;;) {
     const result = read(`${base}/actions/runs/${run}/artifacts?per_page=100&page=${page++}`); assert.ok(Array.isArray(result.artifacts));

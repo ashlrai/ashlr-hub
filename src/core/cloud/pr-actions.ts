@@ -26,6 +26,7 @@
  * checks cached per head SHA so an unchanged branch is not re-downloaded):
  * cloud-api.ts refreshes it off the request path and Needs-you reads it.
  */
+import { isHubRepositoryLabel } from '../authority/repository-binding.js';
 import { currentStandingPolicy } from '../authority/effective-config.js';
 import type { EffectivePolicy } from '../authority/types.js';
 import { repoPolicyFor } from '../fleet/merge-gates.js';
@@ -139,7 +140,7 @@ export function normalizeCloseReason(raw: unknown): string | null {
 /** The one self repo rule the standing pass uses (defaultStandingPassDeps.isSelfRepo, minus proposal metadata a PR lacks). */
 export function isCloudSelfRepo(repo: string, policy: EffectivePolicy | null): boolean {
   const repoPolicy = policy ? repoPolicyFor(policy, repo) : null;
-  return (repoPolicy?.selfRepo ?? null) !== null || repo.toLowerCase() === 'ashlrai/ashlr-hub';
+  return (repoPolicy?.selfRepo ?? null) !== null || isHubRepositoryLabel(repo);
 }
 
 function policyFor(repo: string, policy: EffectivePolicy | null): CloudPrPolicy | null {

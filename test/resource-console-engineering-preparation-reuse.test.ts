@@ -100,15 +100,21 @@ describe('call-local console preparation validation reuse', () => {
       comparatorDigest: campaign.comparatorDigest, artifactDigest, repo: f.workspace, branch: 'codex/objective',
       baseCommit: f.recipe.seedRevision, commit: 'b'.repeat(40), tree: 'c'.repeat(40), changedFiles: ['value.json'],
       status: 'delivered', createdAt: '2026-01-01T00:00:00.000Z', completedAt: '2026-01-01T00:00:01.000Z' };
-    vi.spyOn(deliveryRecovery, 'readCompletedCampaignDelivery').mockReturnValue(receipt);
-    vi.spyOn(campaigns, 'campaignUniverse').mockReturnValue({ ...universe, runs: [{ id: 'run', universeId: universe.manifest.id,
+    const recoveredUniverse = { ...universe, runs: [{ id: 'run', universeId: universe.manifest.id,
       generation: 1, manifestDigest: campaign.manifestDigest, comparatorDigest: campaign.comparatorDigest,
       startedAt: receipt.createdAt, finishedAt: receipt.completedAt, status: 'completed', durationMs: 1000, tokensUsed: null, costUsd: null,
       trials: [{ id: 'trial', variantId: 'repair', niche: 'value', parentTrialId: null, status: 'passed', score: 2, metrics: {},
-        artifact: { path: artifactPath, digest: artifactDigest, revision: receipt.commit }, durationMs: 1000, delta: 1, selected: true }] }] });
+        artifact: { path: artifactPath, digest: artifactDigest, revision: receipt.commit }, durationMs: 1000, delta: 1, selected: true }] }] } as typeof universe;
+    // The real campaign read still reconstructs its own durable projection.
+    // Count only reads after recovery: registration's earlier reads are required.
+    const redundantProjection = vi.spyOn(campaigns, 'campaignUniverse');
+    const recovery = vi.spyOn(deliveryRecovery, 'readCompletedCampaignDeliveryProjection').mockImplementation(() => {
+      redundantProjection.mockClear(); return { receipt, universe: recoveredUniverse };
+    });
     let sourceBytes = Buffer.from([0x61, 0xe2, 0x82]);
+    let sourceDigest = artifactDigest;
     const originalArtifact = artifacts.readArtifactSnapshot;
-    vi.spyOn(artifacts, 'readArtifactSnapshot').mockImplementation(path => path === artifactPath ? { digest: artifactDigest,
+    vi.spyOn(artifacts, 'readArtifactSnapshot').mockImplementation(path => path === artifactPath ? { digest: sourceDigest,
       entries: [{ path: 'value.json', data: sourceBytes, executable: false },
         { path: 'evaluate.mjs', data: Buffer.from('\ufeffvalid\r\n'), executable: false }] } : originalArtifact(path));
     const before = tree(f.base);
@@ -123,11 +129,22 @@ describe('call-local console preparation validation reuse', () => {
       return JSON.parse(source!.context) as { files: Array<{ path: string; text: string; truncated: boolean }>; omittedFiles: number };
     };
     expect(context()).toMatchObject({ files: [{ path: 'evaluate.mjs', text: '\ufeffvalid\r\n', truncated: false }], omittedFiles: 1 });
+    expect(recovery).toHaveBeenCalledTimes(2); expect(redundantProjection).not.toHaveBeenCalled();
     sourceBytes = Buffer.from('a'.repeat(1599) + '💡tail');
     expect(context()).toMatchObject({ files: [{ path: 'value.json', text: 'a'.repeat(1599), truncated: true },
       { path: 'evaluate.mjs', text: '\ufeffvalid\r\n', truncated: false }], omittedFiles: 0 });
     sourceBytes = Buffer.from('binary\0source');
     expect(context()).toMatchObject({ files: [{ path: 'evaluate.mjs', text: '\ufeffvalid\r\n', truncated: false }], omittedFiles: 1 });
+    // Every call takes fresh recovery and rereads the artifact; a prior successful
+    // context cannot mask unavailable recovery, degraded evidence, or byte drift.
+    recovery.mockReturnValueOnce(null);
+    expect(readResourceEngineeringDeliveredSource(registry, request.id, prepared.enrollment.enrollmentDigest)).toBeNull();
+    recovery.mockReturnValueOnce({ receipt, universe: { ...recoveredUniverse, sourceState: 'degraded' } });
+    expect(readResourceEngineeringDeliveredSource(registry, request.id, prepared.enrollment.enrollmentDigest)).toBeNull();
+    sourceDigest = 'd'.repeat(64);
+    expect(readResourceEngineeringDeliveredSource(registry, request.id, prepared.enrollment.enrollmentDigest)).toBeNull();
+    sourceDigest = artifactDigest;
+    expect(readResourceEngineeringDeliveredSource(registry, request.id, prepared.enrollment.enrollmentDigest)).not.toBeNull();
     const metadata = vi.spyOn(preparation, 'readPreparedResourceEngineeringMetadata');
     expect(readResourceEngineeringDeliveredSource(registry, 'missing', prepared.enrollment.enrollmentDigest)).toBeNull();
     expect(readResourceEngineeringDeliveredSource(registry, request.id, '0'.repeat(64))).toBeNull();

@@ -189,6 +189,19 @@ describe('gate data files', () => {
     const raw = JSON.parse(readFileSync(join(repoRoot, 'scripts/gate-smoke.json'), 'utf8'));
     for (const entry of [...raw.backend, ...raw.web]) expect(entry.why, entry.file).toBeTruthy();
     const files = loadSmoke();
+    // Style readers do not import the CSS they validate, so related selection
+    // must retain these explicit smoke contracts alongside the existing shell checks.
+    expect([...files.web].sort()).toEqual([
+      'src/web-ui/design/control-density.test.ts',
+      'src/web-ui/design/micro-label-font.test.ts',
+      'src/web-ui/design/style-scan-310.test.ts',
+      'src/web-ui/design/tokens-contrast.test.ts',
+      'src/web-ui/design/ui-scale.test.ts',
+      'src/web-ui/routes/verse/VerseApp.first-paint.test.ts',
+      'src/web-ui/routes/verse/VerseApp.test.tsx',
+      'src/web-ui/routes/verse/sections/ChatSection.first-paint.test.tsx',
+    ]);
+    for (const suite of [files.backend, files.web]) expect(new Set(suite).size).toBe(suite.length);
     expect(files.backend.length).toBeGreaterThan(0);
     for (const file of [...files.backend, ...files.web]) expect(existsSync(join(repoRoot, file)), file).toBe(true);
     for (const file of files.backend) expect(file).toMatch(/^test\/.+\.test\.ts$/);

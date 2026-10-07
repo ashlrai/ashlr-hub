@@ -111,6 +111,7 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   // Maintainer intake and exact-tree verification decide App acceptance too.
   'src/core/fleet/maintainer-pr-verification.ts',
   'src/core/fleet/maintainer-pr-runner.ts',
+  'src/core/fleet/maintainer-cargo-dependencies.ts',
   'src/cli/maintainer-verify.ts',
   // 3.13: signs provenance for cloud PRs it ingests into the standing pass
   'src/core/fleet/cloud-intake.ts',
@@ -258,6 +259,8 @@ const ALL_REPO_RULES: readonly ProtectedPathRule[] = [
     scope: 'all-repos',
     patterns: [
       'scripts/release*', 'scripts/**/release*', 'scripts/build*', 'scripts/*authority*', 'scripts/install-custody*',
+      // This verifier mints the one-use capability that can replace local build bytes.
+      'scripts/hosted-build-artifact.mjs',
       'tools/custody/**', '**/*.plist', '**/*.entitlements', '**/src-tauri/capabilities/**',
       '**/src-tauri/tauri.conf.json', '**/src-tauri/tauri.*.conf.json',
     ],

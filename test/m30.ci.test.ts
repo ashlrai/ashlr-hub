@@ -195,7 +195,9 @@ describe('M30 CI workflow', () => {
     expect(signing).not.toMatch(/npm (?:ci|install|run build|publish)|node "?\$DIRECTORY\/(?:candidate|bundle)\//);
     expect(inputs).toContain("assert.equal(env.GITHUB_EVENT_NAME, 'workflow_dispatch')");
     expect(inputs).toContain("assert.equal(env.GITHUB_REF, 'refs/heads/master')");
-    expect(inputs).toContain("assert.equal(env.GITHUB_REPOSITORY, repository)");
+    expect(inputs).toContain('const { repository } = requireProducerEnvironment(env)');
+    expect(inputs).toContain('requireRepositoryMetadata(repository, read(base))');
+    expect(inputs).toContain('requireRepositoryReference(repository, ci.repository)');
     expect(inputs).toContain("assert.equal(trusted.tree.sha, candidate.tree.sha");
     expect(inputs).toContain("assert.equal(ci.path, '.github/workflows/ci.yml')");
   });

@@ -26,6 +26,7 @@ import {
 import { JEV_POLL_MS, jevQuery } from './jev-queries.js';
 import styles from './jev.module.css';
 import { JevCallPreference } from './JevCallPreference.js';
+import { JevLatencyChart } from './JevLatencyChart.js';
 
 export function JevPanel() {
   const read = useQuery(jevQuery);
@@ -51,6 +52,7 @@ export function JevPanel() {
           </p>
           {jevEvidenceLines(body.status).map((line) => <p key={line} className={styles.muted}>{line}</p>)}
           <p className={styles.muted}>{read.status === 'error' ? 'Refresh unavailable · showing the last snapshot.' : jevSnapshotLine(body.generatedAt)}</p>
+          <JevLatencyChart byKind={body.status.byKind} />
           {body.status.byKind.length > 0 ? (
             <div className={styles.scroll}>
               <table className={styles.kinds} aria-label="Jev decisions today by kind">

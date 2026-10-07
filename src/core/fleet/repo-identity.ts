@@ -23,6 +23,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { STANDING_GRANT_PATTERNS } from '../authority/types.js';
+import { githubRepositoryFromRemote } from '../authority/repository-binding.js';
 
 const MAX_CONFIG_BYTES = 256 * 1024;
 
@@ -32,10 +33,7 @@ export function fleetMirrorsDir(): string {
 
 /** `owner/name` from a GitHub remote URL (https, ssh, git@), or null. */
 export function nameWithOwnerFromRemote(url: string): string | null {
-  const match = /github\.com[:/]+([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/i.exec(url.trim());
-  if (!match) return null;
-  const nwo = `${match[1]}/${match[2]}`;
-  return STANDING_GRANT_PATTERNS.nameWithOwner.test(nwo) ? nwo : null;
+  return githubRepositoryFromRemote(url);
 }
 
 /** The `[remote "origin"] url` of a git config file's text, or null. */

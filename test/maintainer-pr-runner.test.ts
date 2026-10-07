@@ -176,6 +176,25 @@ describe('host exact-tree maintainer runner', () => {
     expect(result).toMatchObject({ ok: false, worktreeRemoved: true });
     expect(signals).toEqual([controller.signal, controller.signal, controller.signal, undefined]);
   });
+  it('rechecks Stop after Cargo preparation and removes the attachment before returning', async () => {
+    const controller = new AbortController(); const context = { ...fixture(), signal: controller.signal };
+    const cargoContract = JSON.parse(contract()); cargoContract.commands[0].cmd = ['cargo', 'test'];
+    writeFileSync(join(context.mirrorPath, 'ashlr.verify.json'), JSON.stringify(cargoContract));
+    git(context.mirrorPath, 'add', '.'); git(context.mirrorPath, 'commit', '-m', 'cargo base');
+    context.baseSha = git(context.mirrorPath, 'rev-parse', 'HEAD'); context.mergeBaseSha = context.baseSha;
+    writeFileSync(join(context.mirrorPath, 'code.txt'), 'cargo head');
+    git(context.mirrorPath, 'add', '.'); git(context.mirrorPath, 'commit', '-m', 'cargo head');
+    context.headSha = git(context.mirrorPath, 'rev-parse', 'HEAD'); context.treeSha = git(context.mirrorPath, 'rev-parse', 'HEAD^{tree}');
+    const prepared = await prepareMaintainerRun(context, deps); const close = vi.fn(); const runCommand = vi.fn(); const openConfinement = vi.fn();
+    const prepareCargo = vi.fn(async (input: { signal?: AbortSignal }) => {
+      expect(input.signal).toBe(controller.signal); controller.abort();
+      return { receipt: { sourceTree: context.treeSha }, close } as never;
+    });
+    const result = await runMaintainerPr(prepared, { ...deps, prepareCargo, openConfinement, runCommand });
+    expect(result).toMatchObject({ ok: false, commands: [], worktreeRemoved: true, dependenciesRemoved: true });
+    expect(result.reason).toContain('cancelled'); expect(close).toHaveBeenCalledOnce();
+    expect(openConfinement).not.toHaveBeenCalled(); expect(runCommand).not.toHaveBeenCalled();
+  });
   it('keeps cleanup running even if closing confinement fails', async () => {
     const prepared = await prepareMaintainerRun(fixture(), deps);
     const result = await runMaintainerPr(prepared, { ...deps, openConfinement: async () => ({ runSubprocess: runVerifySubprocessAsync, close: () => { throw new Error('cleanup failed'); } }) });
