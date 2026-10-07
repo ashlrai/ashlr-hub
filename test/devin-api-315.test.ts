@@ -14,7 +14,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { handleDevinApi, setDevinApiDepsForTest, startDevinScheduler, stopDevinScheduler } from '../src/core/devin/devin-api.js';
 import { storeDevinKey } from '../src/core/devin/secret.js';
 import { resetDevinStatusCacheForTest, refreshDevinConsumption, peekDevinConsumption, resetDevinConsumptionForTest, connectDevin, disconnectDevin, launchDevinTask, type DevinServiceDeps } from '../src/core/devin/service.js';
-import { devinHome, writeDevinConnection, devinConsumptionConnectionPath } from '../src/core/devin/store.js';
+import { devinHome, devinTasksDir, writeDevinConnection, devinConsumptionConnectionPath } from '../src/core/devin/store.js';
 import { findGithubPrUrls, readDismissedDevinCliPrs, recordDevinCliPrs } from '../src/core/devin/cli-prs.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import type { VerseApiContext } from '../src/core/verse/verse-api.js';
@@ -99,6 +99,7 @@ describe('/api/verse/devin', () => {
         devin: { seatId: 'devin', enabled: true, reserveFloorPercent: 0, maxSessionWindowPercent: null, roles: ['producer'] },
       } },
     });
+    mkdirSync(devinTasksDir(), { recursive: true });
     const display = vi.spyOn(displayPolicy, 'displayStandingPolicy').mockReturnValue(policy);
     const deps = serviceDeps();
     delete deps.policy;
@@ -138,6 +139,7 @@ describe('/api/verse/devin', () => {
   });
 
   it('GET answers the overview (status with Chat/Fleet verdicts, ACU budget) and never the key', async () => {
+    mkdirSync(devinTasksDir(), { recursive: true });
     const { status, text } = await get('/api/verse/devin');
     expect(status).toBe(200);
     const body = JSON.parse(text) as { status: Record<string, unknown>; budget: Record<string, unknown>; tasks: unknown[] };
@@ -145,6 +147,20 @@ describe('/api/verse/devin', () => {
     expect(body.budget).toMatchObject({ acuBudgetTotal: 50, canLaunch: { ok: true } });
     expect(body.status.selfIdentity).toBeUndefined();
     expect(text).not.toContain(FAKE_KEY);
+  });
+
+  it('a corrupt local inventory remains unknown across overview, refresh and budget update without provider contact', async () => {
+    mkdirSync(devinTasksDir(), { recursive: true });
+    writeFileSync(join(devinTasksDir(), 'dv_20260927T0400_aaaaaa.json'), '{bad');
+    const body = JSON.parse((await get('/api/verse/devin')).text);
+    expect(body.taskDiagnostics).toEqual({ sourceState: 'unavailable', legacyUnboundCount: null, legacyUnboundAcu: null });
+    expect(body.budget).toMatchObject({ accountingState: 'unavailable', canLaunch: { ok: false }, canFleetLaunch: { ok: false } });
+    expect(body.status).toMatchObject({ connected: true, chat: { ready: false }, fleet: { ready: false } });
+    const refresh = await post('/api/verse/devin/refresh', {});
+    expect(refresh).toMatchObject({ status: 200, body: { checked: 0, updated: 0, diagnostics: body.taskDiagnostics } });
+    const updated = await post('/api/verse/devin/budget', { acuBudgetTotal: 80 });
+    expect(updated).toMatchObject({ status: 200, body: { accountingState: 'unavailable', canLaunch: { ok: false } } });
+    expect(api.requests).toEqual([]);
   });
 
   it('malformed optional stored observation leaves legacy readiness unchanged and unknown', async () => {

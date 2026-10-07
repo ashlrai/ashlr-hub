@@ -190,10 +190,11 @@ export interface DevinFleetTickDeps {
   budgetPolicy(policy: EffectivePolicy): BudgetPolicy;
   seatEnabled(budget: BudgetPolicy): boolean;
   devinTasks(): DevinTaskV1[];
+  taskInventory?(): import('./store.js').DevinTaskInventory;
   /** Cloud-lane tasks, for backlog claims across both lanes. */
   cloudTasks(): BacklogClaimTask[];
   budget(): DevinBudgetV1;
-  budgetView(tasks: readonly DevinTaskV1[], budget: DevinBudgetV1, now: Date): DevinBudgetView;
+  budgetView(tasks: readonly DevinTaskV1[], budget: DevinBudgetV1, now: Date, sourceState?: import('./types.js').DevinTaskSourceState): DevinBudgetView;
   /** Repo an item without its own `repo` targets (the cloud lane's self-improvement repo); null = skip such items. */
   defaultRepo(): string | null;
   nextItem(
@@ -266,9 +267,10 @@ export async function runDevinFleetTick(depsIn?: Partial<DevinFleetTickDeps>): P
     const killActive = safeBool(() => deps.killActive(), true);
     policy = killActive ? null : safeValue(() => deps.policy(), null);
     const section = safeValue(() => deps.config(), undefined);
-    const tasks = safeValue(() => deps.devinTasks(), null);
+    const inventory = deps.taskInventory ? safeValue(() => deps.taskInventory!(), null) : null;
+    const tasks = deps.taskInventory ? inventory?.tasks ?? null : safeValue(() => deps.devinTasks(), null);
     if (tasks === null) return held(policy, 'budget', 'The Devin task store could not be read, so its spend is unknown.');
-    const view = deps.budgetView(tasks, deps.budget(), now);
+    const view = deps.budgetView(tasks, deps.budget(), now, inventory?.sourceState);
     pickCandidate = () => deps.nextItem(
       [...safeValue(() => deps.cloudTasks(), []), ...tasks],
       now,
@@ -389,9 +391,10 @@ export async function defaultDevinFleetTickDeps(): Promise<DevinFleetTickDeps> {
     budgetPolicy: (policy) => effective.clampBudgetPolicy(budgetStore.loadBudgetPolicy(), policy, [policyMod.DEVIN_SEAT_ID]),
     seatEnabled: (budget) => policyMod.effectiveSeatPolicy(budget, policyMod.DEVIN_SEAT_ID, 'devin').enabled,
     devinTasks: () => store.listDevinTasks(Number.MAX_SAFE_INTEGER),
+    taskInventory: () => store.readDevinTaskInventory(),
     cloudTasks: () => cloudStore.listCloudTasks(),
     budget: () => store.readDevinBudget(),
-    budgetView: (tasks, budget, now) => budgetMod.devinBudgetView(tasks, budget, now),
+    budgetView: (tasks, budget, now, sourceState) => budgetMod.devinBudgetView(tasks, budget, now, sourceState),
     defaultRepo: () => cloudStore.readCloudBudget().selfImprove.repo ?? null,
     nextItem: (tasks, now, defaultRepo, accept) => backlog.nextBacklogItemWhere(tasks, now, defaultRepo, accept),
     launch: (req) => service.launchDevinTask(req),

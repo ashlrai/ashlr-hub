@@ -12,6 +12,14 @@ export type DevinCreateRecoveryPreview =
   | { kind: 'match'; session: DevinSession; launchAccountBound: boolean; pages: number }
   | { kind: 'held'; reason: 'not-ambiguous' | 'account-context' | 'incomplete' | 'duplicate-session' | 'cursor-loop' | 'multiple-matches' | 'no-match' | 'read-failed' | 'changed-match'; pages: number };
 
+/** Pure local diagnostic; never previews or settles provider sessions. */
+export function devinTaskDiagnostics(inventory: import('./store.js').DevinTaskInventory): import('./types.js').DevinTaskDiagnostics {
+  if (inventory.sourceState !== 'ready') return { sourceState: inventory.sourceState, legacyUnboundCount: null, legacyUnboundAcu: null };
+  const legacy = inventory.tasks.filter(task => hasAmbiguousDevinCreate(task) && task.launchOrgId === undefined);
+  return { sourceState: 'ready', legacyUnboundCount: legacy.length,
+    legacyUnboundAcu: Math.round(legacy.reduce((sum, task) => sum + task.maxAcu, 0) * 100) / 100 };
+}
+
 /**
  * A finite GET request budget, not a fleet/session ceiling. Reaching it is
  * incomplete evidence: retain exposure. Legacy records can be previewed under

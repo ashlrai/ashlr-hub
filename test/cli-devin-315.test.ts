@@ -117,6 +117,27 @@ describe('ashlr devin', () => {
     expect(await runDevinCli(['budget', '--bogus', '1'], h.deps)).toBe(2);
   });
 
+  it('explains skipped legacy holds and keeps old refresh reply compatibility', async () => {
+    const h = harness({ refresh: async () => ({ checked: 0, updated: 0,
+      diagnostics: { sourceState: 'ready', legacyUnboundCount: 4, legacyUnboundAcu: 40 } }) });
+    expect(await runDevinCli(['refresh'], h.deps)).toBe(0);
+    expect(h.out.join('\n')).toContain('Skipped 4 legacy launches: 40 ACUs held; original account evidence is missing.');
+    const old = harness(); expect(await runDevinCli(['refresh'], old.deps)).toBe(0);
+    expect(old.out).toEqual(['Checked 2 Devin task(s); 1 changed.']);
+  });
+
+  it('reports unknown refresh/task-budget evidence without zero or available capacity', async () => {
+    const h = harness({ refresh: async () => ({ checked: 0, updated: 0,
+      diagnostics: { sourceState: 'unavailable', legacyUnboundCount: null, legacyUnboundAcu: null } }),
+      taskInventory: () => ({ tasks: [], sourceState: 'unavailable' }),
+      budgetView: (tasks, budget, now, sourceState) => devinBudgetView(tasks, budget, now, sourceState) });
+    expect(await runDevinCli(['refresh'], h.deps)).toBe(0);
+    expect(await runDevinCli(['budget'], h.deps)).toBe(0);
+    expect(h.out.join('\n')).toContain('Task evidence is unavailable');
+    expect(h.out.join('\n')).toContain('local budget capacity is unknown');
+    expect(h.out.join('\n')).not.toContain('ACUs left');
+  });
+
   it('unknown verbs are usage errors', async () => {
     const h = harness();
     expect(await runDevinCli(['merge'], h.deps)).toBe(2);

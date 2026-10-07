@@ -120,7 +120,7 @@ describe('DevinResource', () => {
 
   it('connected: ACUs left of the budget with an estimate note and the usage link', async () => {
     mount();
-    expect(await screen.findByText('34 ACUs of 50 ACUs left')).toBeTruthy();
+    expect(await screen.findByText('Local budget · 34 ACUs of 50 ACUs left')).toBeTruthy();
     expect(screen.getByRole('img', { name: /Devin ACUs: 12 ACUs accounted for of 50 ACUs, 34 ACUs left/ })).toBeTruthy();
     expect(screen.getByText(/Recorded cost coverage is unavailable/)).toBeTruthy();
     expect(screen.getByText(/1 running · 2 today/)).toBeTruthy();
@@ -289,11 +289,42 @@ describe('DevinResource', () => {
       unconfirmedAcuExposure: 18, estimatedUsdUsed: 4.5,
     }) };
     mount();
-    expect(await screen.findByText('30 ACUs of 50 ACUs available')).toBeTruthy();
+    expect(await screen.findByText('Local budget · 30 ACUs of 50 ACUs available')).toBeTruthy();
     expect(screen.getByRole('img', { name: /2 ACUs reported usage plus adjustment, 18 ACUs held exposure, 30 ACUs available/ })).toBeTruthy();
     expect(screen.getByText(/2 ACUs reported usage \+ adjustment · 18 ACUs held exposure · about \$4.5 for recorded usage/)).toBeTruthy();
     expect(screen.queryByText(/Recorded cost coverage is unavailable/)).toBeNull();
     expect(screen.queryByText(/about \$22.5/)).toBeNull();
+  });
+
+  it('refuses malformed diagnostic counts rather than claiming no legacy exposure', async () => {
+    overview = { generatedAt: 'x', status: status(), tasks: [], budget: budget(),
+      taskDiagnostics: { sourceState: 'ready', legacyUnboundCount: -1, legacyUnboundAcu: 0 } };
+    mount();
+    expect(await screen.findByText('Legacy launch exposure is unknown; task evidence is unavailable.')).toBeTruthy();
+    expect(screen.queryByText('No legacy launches need account evidence.')).toBeNull();
+    expect(posts).toEqual([]);
+  });
+
+  it('explains legacy held exposure without claiming provider quota or spending', async () => {
+    overview = { generatedAt: 'x', status: status(), tasks: [], budget: budget({ reportedAcuUsed: 0, unconfirmedAcuExposure: 40,
+      acuUsed: 40, acuRemaining: 10, estimatedUsdUsed: 0, accountingState: 'ready' }),
+      taskDiagnostics: { sourceState: 'ready', legacyUnboundCount: 4, legacyUnboundAcu: 40 } };
+    mount();
+    expect(await screen.findByText('4 old launches need account evidence · 40 ACUs held')).toBeTruthy();
+    expect(screen.getByText('Local budget · 10 ACUs of 50 ACUs available')).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Devin subscription and purchased credits' })).getAllByText('not reported')).toHaveLength(2);
+    expect(posts).toEqual([]);
+  });
+
+  it.each(['missing', 'unavailable'])('hides partial budget capacity on %s task evidence', async sourceState => {
+    overview = { generatedAt: 'x', status: status(), tasks: [], budget: budget({ accountingState: sourceState }),
+      taskDiagnostics: { sourceState, legacyUnboundCount: null, legacyUnboundAcu: null } };
+    mount();
+    expect(await screen.findByText('Local budget capacity is unknown; task evidence is unavailable.')).toBeTruthy();
+    expect(screen.getByText('Legacy launch exposure is unknown; task evidence is unavailable.')).toBeTruthy();
+    expect(screen.queryByRole('img', { name: /Devin (ACUs|tracked budget)/ })).toBeNull();
+    expect(screen.queryByText(/ACUs of 50 ACUs/)).toBeNull();
+    expect(posts).toEqual([]);
   });
 
   it('rejects malformed additive usage instead of rendering a false balance', async () => {
@@ -353,7 +384,7 @@ describe('DevinResource', () => {
   it('no Devin CLI installed (or an older server): no CLI line', async () => {
     overview = { generatedAt: 'x', status: status(), budget: budget(), tasks: [], cli: { state: 'missing', usage: 'not-reported' } };
     mount();
-    await screen.findByText('34 ACUs of 50 ACUs left');
+    await screen.findByText('Local budget · 34 ACUs of 50 ACUs left');
     expect(screen.queryByText(/Ashlr has not imported CLI session usage/)).toBeNull();
   });
 

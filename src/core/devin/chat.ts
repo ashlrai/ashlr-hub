@@ -19,10 +19,10 @@
 import { join } from 'node:path';
 
 import { scrubSecrets } from '../util/scrub.js';
-import { devinBudgetView } from './budget.js';
+import { devinBudgetView, DEVIN_ACCOUNTING_UNAVAILABLE } from './budget.js';
 import { DevinApiError, devinFailureSentence, type DevinSession } from './client.js';
 import { connectedClient, recordDevinApiOutcome, snapshotOf, type DevinServiceDeps } from './service.js';
-import { devinHome, ensureDevinDirectory, listDevinTasks, readDevinBudget, readDevinTask, writeDevinTask } from './store.js';
+import { devinHome, ensureDevinDirectory, readDevinTaskInventory, readDevinBudget, readDevinTask, writeDevinTask } from './store.js';
 import { stateFromSession } from './session-state.js';
 import { DEVIN_TASK_ID_PATTERN, type DevinFailureCode, type DevinGate, type DevinTaskV1 } from './types.js';
 import { readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
@@ -111,10 +111,11 @@ export function writeDevinChatState(state: DevinChatStateV1): void {
  */
 export function devinChatGate(now: Date = new Date()): DevinGate {
   try {
-    return devinBudgetView(listDevinTasks(Number.MAX_SAFE_INTEGER), readDevinBudget(), now).canLaunch;
+    const inventory = readDevinTaskInventory();
+    // First-use admission records the task before the authoritative complete scan.
+    return devinBudgetView(inventory.tasks, readDevinBudget(), now, inventory.sourceState === 'missing' ? 'ready' : inventory.sourceState).canLaunch;
   } catch {
-    // Unreadable budget state: the launch path re-checks and fails closed there.
-    return { ok: true, reason: null };
+    return { ok: false, reason: DEVIN_ACCOUNTING_UNAVAILABLE };
   }
 }
 

@@ -39,8 +39,20 @@ export function narrowDevinOverview(raw: unknown): DevinOverviewResponse | null 
   for (const key of ['reportedAcuUsed', 'unconfirmedAcuExposure']) {
     if (budget[key] !== undefined && (typeof budget[key] !== 'number' || !Number.isFinite(budget[key]) || budget[key] < 0)) return null;
   }
+  if (budget['accountingState'] !== undefined && !['ready', 'missing', 'unavailable'].includes(budget['accountingState'] as string)) return null;
   if (!Array.isArray(tasks) || !tasks.every((t) => isRecord(t) && typeof t['id'] === 'string' && typeof t['state'] === 'string')) return null;
   return raw as unknown as DevinOverviewResponse;
+}
+
+/** Optional diagnostic never derives legacy exposure from truncated public history. */
+export function devinTaskDiagnosticEvidence(raw: unknown): import('../../../../core/devin/types.js').DevinTaskDiagnostics | null {
+  if (!isRecord(raw) || Object.keys(raw).length !== 3) return null;
+  if (raw['sourceState'] === 'ready') {
+    if (!Number.isSafeInteger(raw['legacyUnboundCount']) || (raw['legacyUnboundCount'] as number) < 0
+      || typeof raw['legacyUnboundAcu'] !== 'number' || !Number.isFinite(raw['legacyUnboundAcu']) || raw['legacyUnboundAcu'] < 0) return null;
+  } else if (!['missing', 'unavailable'].includes(raw['sourceState'] as string)
+    || raw['legacyUnboundCount'] !== null || raw['legacyUnboundAcu'] !== null) return null;
+  return raw as unknown as import('../../../../core/devin/types.js').DevinTaskDiagnostics;
 }
 
 /** Captured /self metadata only: no current principal, permission or funding claim. */
@@ -62,6 +74,7 @@ export function devinSelfIdentityEvidence(raw: unknown, now = Date.now()): Devin
 
 /** Older servers combine unknown reservations with usage: never infer readings from that total. */
 export function devinUsageEvidence(budget: DevinBudgetView): { reported: number; held: number; free: number } | null {
+  if (budget.accountingState && budget.accountingState !== 'ready') return null;
   const reported = budget.reportedAcuUsed;
   const held = budget.unconfirmedAcuExposure;
   if (typeof reported !== 'number' || !Number.isFinite(reported) || reported < 0 ||

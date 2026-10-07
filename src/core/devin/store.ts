@@ -12,7 +12,7 @@
  * The API key is not stored here or anywhere on disk by Verse: see secret.ts.
  */
 import { randomInt } from 'node:crypto';
-import { lstatSync, readdirSync, rmSync } from 'node:fs';
+import { lstatSync, readdirSync, rmSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
 
 import { fsyncDirectory } from '../util/durability.js';
@@ -208,6 +208,56 @@ export function isDevinTask(value: unknown): value is DevinTaskV1 {
 
 function taskPath(id: string): string {
   return join(devinTasksDir(), `${id}.json`);
+}
+
+export interface DevinTaskInventory {
+  tasks: DevinTaskV1[];
+  sourceState: import('./types.js').DevinTaskSourceState;
+}
+
+/** Read-only accounting observation. Partial records never establish zero exposure. */
+export function readDevinTaskInventory(): DevinTaskInventory {
+  const tasks: DevinTaskV1[] = [];
+  const directory = devinTasksDir();
+  let complete = true;
+  let names: string[];
+  let observedDirectory = false;
+  let before: Stats;
+  try {
+    before = lstatSync(directory);
+    observedDirectory = true;
+    names = readdirSync(directory);
+    if (!before.isDirectory() || before.isSymbolicLink()) complete = false;
+  } catch (error) {
+    return { tasks, sourceState: !observedDirectory && (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'unavailable' };
+  }
+  const observed: Array<{ path: string; stat: Stats }> = [];
+  const sameFile = (a: Stats, b: Stats): boolean =>
+    a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    const id = name.slice(0, -'.json'.length);
+    if (!DEVIN_TASK_ID_PATTERN.test(id)) { complete = false; continue; }
+    const path = taskPath(id);
+    let stat: Stats | null = null;
+    try { stat = lstatSync(path); } catch { complete = false; }
+    const task = readDevinTask(id);
+    if (task) tasks.push(task);
+    else complete = false;
+    if (stat) {
+      if (!stat.isFile() || stat.isSymbolicLink()) complete = false;
+      observed.push({ path, stat });
+    }
+  }
+  try {
+    const after = lstatSync(directory);
+    if (before.dev !== after.dev || before.ino !== after.ino || before.mtimeMs !== after.mtimeMs
+      || after.isSymbolicLink() || !after.isDirectory()
+      || JSON.stringify([...names].sort()) !== JSON.stringify(readdirSync(directory).sort())) complete = false;
+    for (const row of observed) if (!sameFile(row.stat, lstatSync(row.path))) complete = false;
+  } catch { complete = false; }
+  tasks.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.id.localeCompare(a.id));
+  return { tasks, sourceState: complete ? 'ready' : 'unavailable' };
 }
 
 /** Newest first (by createdAt), corrupt files skipped, at most `limit`. */

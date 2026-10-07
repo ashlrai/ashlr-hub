@@ -250,10 +250,11 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   const cloudLevel: Level = !cloud ? 'unknown' : cloud.remainingUsd <= 0 ? 'out' : (cloudLeft ?? 0) < 20 ? 'low' : 'ok';
   // 3.15: Devin joins the bar only once it is connected and turned on.
   const devinShown = devin !== null && devin.status.enabled && devin.status.connected;
+  const devinAccountingKnown = devin !== null && (devin.budget.accountingState === undefined || devin.budget.accountingState === 'ready');
   const devinUsage = devin ? devinUsageEvidence(devin.budget) : null;
   const devinAvailable = devinUsage?.free ?? (devin ? Math.max(0, devin.budget.acuRemaining - Math.max(0, devin.budget.acuInFlight)) : 0);
-  const devinLeft = devin && devin.budget.acuBudgetTotal > 0 ? (devinAvailable / devin.budget.acuBudgetTotal) * 100 : null;
-  const devinLevel: Level = !devin ? 'unknown' : devin.budget.paused || devinAvailable <= 0 ? 'out' : (devinLeft ?? 0) < 20 ? 'low' : 'ok';
+  const devinLeft = devinAccountingKnown && devin && devin.budget.acuBudgetTotal > 0 ? (devinAvailable / devin.budget.acuBudgetTotal) * 100 : null;
+  const devinLevel: Level = !devinAccountingKnown ? 'unknown' : devin.budget.paused || devinAvailable <= 0 ? 'out' : (devinLeft ?? 0) < 20 ? 'low' : 'ok';
   // Admission is separate from tracked capacity and from provider quota readings.
   const devinNewChatPause = devin?.budget.canLaunch?.ok === false
     ? devin.budget.canLaunch.reason ?? 'The Devin budget refused another session.' : null;
@@ -339,9 +340,9 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
           content={
             <div className={styles.tip}>
               <div className={styles.tipHead}><ProviderLogo engine="devin" size={14} className={styles.logo} /><strong>Devin budget</strong></div>
-              <div className={styles.tipSummary}>{formatAcu(devinAvailable)} of {formatAcu(devin.budget.acuBudgetTotal)} {devinUsage ? 'available' : 'left'} · tracked budget{devin.budget.paused ? ' · paused' : ''}</div>
+              <div className={styles.tipSummary}>{devinAccountingKnown ? <>{formatAcu(devinAvailable)} of {formatAcu(devin.budget.acuBudgetTotal)} {devinUsage ? 'available' : 'left'} · tracked budget{devin.budget.paused ? ' · paused' : ''}</> : 'Local budget capacity unknown · task evidence unavailable'}</div>
               {devinUsage ? <div className={styles.tipLine}>{formatAcu(devinUsage.reported)} reported usage + adjustment · {formatAcu(devinUsage.held)} held exposure</div> : null}
-              <div className={styles.tipLine}>{formatMetric(devin.budget.running)} running · {formatMetric(devin.budget.sessionsToday)} today</div>
+              {devinAccountingKnown ? <div className={styles.tipLine}>{formatMetric(devin.budget.running)} running · {formatMetric(devin.budget.sessionsToday)} today</div> : null}
               {devinNewChatPause ? <div className={styles.tipLine}>New chats paused: {devinNewChatPause}</div> : null}
               <div className={styles.tipHint}>Click for Resources · ⌘.</div>
             </div>
@@ -353,7 +354,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
             className={styles.row}
             data-level={devinLevel}
             data-resource="devin"
-            aria-label={`Devin tracked budget: ${formatAcu(devinAvailable)} of ${formatAcu(devin.budget.acuBudgetTotal)} ${devinUsage ? 'available' : 'left'}${devinUsage ? `, ${formatAcu(devinUsage.held)} held exposure` : ''}${devinNewChatPause ? `. New chats paused: ${devinNewChatPause}` : ''}. Open Resources`}
+            aria-label={devinAccountingKnown ? `Devin tracked budget: ${formatAcu(devinAvailable)} of ${formatAcu(devin.budget.acuBudgetTotal)} ${devinUsage ? 'available' : 'left'}${devinUsage ? `, ${formatAcu(devinUsage.held)} held exposure` : ''}${devinNewChatPause ? `. New chats paused: ${devinNewChatPause}` : ''}. Open Resources` : 'Devin tracked budget capacity unknown: task evidence unavailable. Open Resources'}
             onClick={() => openResources()}
           >
             {expanded ? (
@@ -364,7 +365,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
                 </span>
                 <span className={styles.line}>
                   <Battery left={devinLeft} level={devinLevel} vertical={false} />
-                  <span className={styles.value}>{formatAcu(devinAvailable)} budget</span>
+                  <span className={styles.value}>{devinAccountingKnown ? `${formatAcu(devinAvailable)} budget` : 'Capacity unknown'}</span>
                 </span>
                 {devinNewChatPause ? <span className={styles.line}><span className={styles.value}>New chats paused</span></span> : null}
               </>

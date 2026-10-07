@@ -77,11 +77,12 @@ export interface DevinCliDeps {
   status: () => Promise<DevinStatus>;
   launch: (req: DevinLaunchRequest) => Promise<DevinLaunchResponse>;
   listTasks: (limit?: number) => DevinTaskV1[];
-  refresh: () => Promise<{ checked: number; updated: number }>;
+  refresh: () => Promise<import('../core/devin/types.js').DevinRefreshResult>;
+  taskInventory?: () => import('../core/devin/store.js').DevinTaskInventory;
   message: (taskId: string, text: string) => Promise<DevinMessageResult>;
   readBudget: () => DevinBudgetV1;
   updateBudget: (update: DevinBudgetUpdate) => DevinBudgetV1;
-  budgetView: (tasks: readonly DevinTaskV1[], budget: DevinBudgetV1, now: Date) => DevinBudgetView;
+  budgetView: (tasks: readonly DevinTaskV1[], budget: DevinBudgetV1, now: Date, sourceState?: import('../core/devin/types.js').DevinTaskSourceState) => DevinBudgetView;
   /** Hidden terminal input (raw mode, no echo). */
   readSecret: (prompt: string) => Promise<string>;
   originRepo: (cwd: string) => string | null;
@@ -106,10 +107,11 @@ async function defaultDeps(): Promise<DevinCliDeps> {
     launch: (req) => service.launchDevinTask(req),
     listTasks: (limit) => store.listDevinTasks(limit),
     refresh: () => tracker.refreshDevinTasks(),
+    taskInventory: () => store.readDevinTaskInventory(),
     message: (taskId, text) => service.messageDevinTask(taskId, text),
     readBudget: () => store.readDevinBudget(),
     updateBudget: (update) => store.updateDevinBudget(update),
-    budgetView: (tasks, b, now) => budget.devinBudgetView(tasks, b, now),
+    budgetView: (tasks, b, now, sourceState) => budget.devinBudgetView(tasks, b, now, sourceState),
     readSecret: readHiddenLine,
     originRepo: readOriginRepo,
     cwd: () => process.cwd(),
@@ -275,11 +277,16 @@ function cmdFleet(deps: DevinCliDeps, args: string[]): number {
   return 0;
 }
 
+function currentBudgetView(deps: DevinCliDeps, budget: DevinBudgetV1): DevinBudgetView {
+  const inventory = deps.taskInventory?.();
+  return deps.budgetView(inventory?.tasks ?? deps.listTasks(Number.MAX_SAFE_INTEGER), budget, deps.now(), inventory?.sourceState);
+}
+
 async function cmdStatus(deps: DevinCliDeps, args: string[]): Promise<number> {
   const asJson = takeFlag(args, '--json');
   rejectLeftovers(args);
   const status = await deps.status();
-  const view = deps.budgetView(deps.listTasks(Number.MAX_SAFE_INTEGER), deps.readBudget(), deps.now());
+  const view = currentBudgetView(deps, deps.readBudget());
   if (asJson) {
     json(deps, { status, budget: view });
     return 0;
@@ -288,6 +295,10 @@ async function cmdStatus(deps: DevinCliDeps, args: string[]): Promise<number> {
   if (status.orgId) deps.out(`  Organization: ${status.orgId}${status.principalName ? ` · ${status.principalName}` : ''} · key in the ${status.keyStore === 'keychain' ? 'macOS Keychain' : 'custody helper'}`);
   deps.out(`  ${status.chatLine}`);
   deps.out(`  ${status.fleetLine}`);
+  if (view.accountingState && view.accountingState !== 'ready') {
+    deps.out('  Local budget capacity is unknown: task evidence is unavailable.');
+    return 0;
+  }
   deps.out(`  ACUs: ${acu(view.acuUsed)} of ${acu(view.acuBudgetTotal)} accounted for · ${acu(view.acuToday)} today, used or held · ${view.running} running`);
   if (view.reportedAcuUsed !== undefined && view.unconfirmedAcuExposure !== undefined) {
     deps.out(`  ${acu(view.reportedAcuUsed)} reported usage + adjustment · ${acu(view.unconfirmedAcuExposure)} held exposure · ≈ $${view.estimatedUsdUsed} for recorded usage (estimate)`);
@@ -361,7 +372,14 @@ async function cmdRefresh(deps: DevinCliDeps, args: string[]): Promise<number> {
   rejectLeftovers(args);
   const result = await deps.refresh();
   if (asJson) json(deps, result);
-  else deps.out(`Checked ${result.checked} Devin task(s); ${result.updated} changed.`);
+  else {
+    deps.out(`Checked ${result.checked} Devin task(s); ${result.updated} changed.`);
+    const diagnostic = result.diagnostics;
+    if (diagnostic && diagnostic.sourceState !== 'ready') deps.out('Task evidence is unavailable; skipped legacy exposure is unknown.');
+    else if (diagnostic && typeof diagnostic.legacyUnboundCount === 'number' && diagnostic.legacyUnboundCount > 0 && typeof diagnostic.legacyUnboundAcu === 'number') {
+      deps.out(`Skipped ${diagnostic.legacyUnboundCount} legacy launches: ${acu(diagnostic.legacyUnboundAcu)} held; original account evidence is missing.`);
+    }
+  }
   return 0;
 }
 
@@ -398,9 +416,13 @@ function cmdBudget(deps: DevinCliDeps, args: string[]): number {
   set('fleetMaxSessionsPerDay', takeNumber(args, '--fleet-per-day', { whole: true, safe: true }));
   rejectLeftovers(args);
   const budget = Object.keys(update).length > 0 ? deps.updateBudget(update) : deps.readBudget();
-  const view = deps.budgetView(deps.listTasks(Number.MAX_SAFE_INTEGER), budget, deps.now());
+  const view = currentBudgetView(deps, budget);
   if (asJson) {
     json(deps, view);
+    return 0;
+  }
+  if (view.accountingState && view.accountingState !== 'ready') {
+    deps.out('Devin local budget capacity is unknown: task evidence is unavailable. Launches refused.');
     return 0;
   }
   deps.out(`Devin budget: ${acu(view.acuUsed)} of ${acu(view.acuBudgetTotal)} accounted for · ${acu(view.acuRemaining)} left before in-flight reservations${view.paused ? ' · PAUSED' : ''}`);

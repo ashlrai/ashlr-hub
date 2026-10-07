@@ -26,7 +26,7 @@ import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { MonogramTile } from '../apps/MonogramTile.js';
 import { describeContextError, useTokenGate } from '../context/use-token-gate.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
-import { acuLevel, devinConsumptionEvidence, devinHeadline, devinModelsLines, devinReadinessRow, devinSelfIdentityEvidence, devinUsageEvidence, DEVIN_USAGE_LINK, formatAcu, formatConsumptionAcu, safeDevinHref, waitingTasks } from '../devin/devin-model.js';
+import { acuLevel, devinConsumptionEvidence, devinHeadline, devinModelsLines, devinReadinessRow, devinSelfIdentityEvidence, devinTaskDiagnosticEvidence, devinUsageEvidence, DEVIN_USAGE_LINK, formatAcu, formatConsumptionAcu, safeDevinHref, waitingTasks } from '../devin/devin-model.js';
 import { DEVIN_POLL_MS, devinQuery, messageDevinTask, refreshDevinConsumption } from '../devin/devin-queries.js';
 import { requestGuarded } from '../shell/guarded-action.js';
 import { ReadinessLines } from './ReadinessLines.js';
@@ -154,6 +154,8 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
   const head = devinHeadline(status);
   const live = status.enabled && status.connected;
   const usage = devinUsageEvidence(budget);
+  const diagnostic = devinTaskDiagnosticEvidence(overview.taskDiagnostics);
+  const accountingKnown = budget.accountingState === undefined || budget.accountingState === 'ready';
   const available = usage?.free ?? Math.max(0, budget.acuRemaining - Math.max(0, budget.acuInFlight));
   const level = acuLevel({ ...budget, acuRemaining: available });
   const leftPercent = budget.acuBudgetTotal > 0 ? Math.max(0, Math.min(100, (available / budget.acuBudgetTotal) * 100)) : 0;
@@ -206,8 +208,9 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
       </section> : null}
       {live ? (
         <>
+          {accountingKnown ? <>
           <p className={styles.creditsHead}>
-            <span className={styles.creditsAmount}>{formatAcu(available)} of {formatAcu(budget.acuBudgetTotal)} {usage ? 'available' : 'left'}</span>
+            <span className={styles.creditsAmount}>Local budget · {formatAcu(available)} of {formatAcu(budget.acuBudgetTotal)} {usage ? 'available' : 'left'}</span>
             <span className={styles.pill} data-tone="neutral" title="Your configured allowance minus recorded usage and unresolved exposure; not a provider-reported credit balance or subscription quota.">tracked budget</span>
             {budget.paused ? <span className={styles.pill} data-tone="warning">paused</span> : null}
           </p>
@@ -228,6 +231,13 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
             {formatAcu(usage.reported)} reported usage + adjustment · {formatAcu(usage.held)} held exposure · about {formatMetricUsd(budget.estimatedUsdUsed)} for recorded usage
             <span className={styles.pill} data-tone="neutral" title={budget.estimateNote}>estimate</span>
           </p> : <p className={styles.fine}>This server combines reservations and usage. Recorded cost coverage is unavailable.</p>}
+          </> : <p className={styles.subtle}>Local budget capacity is unknown; task evidence is unavailable.</p>}
+          {overview.taskDiagnostics !== undefined ? <p className={styles.fine}>
+            {diagnostic?.sourceState === 'ready' ? (diagnostic.legacyUnboundCount ?? 0) > 0
+              ? `${formatMetric(diagnostic.legacyUnboundCount ?? 0)} old launches need account evidence · ${formatAcu(diagnostic.legacyUnboundAcu ?? 0)} held`
+              : 'No legacy launches need account evidence.'
+              : 'Legacy launch exposure is unknown; task evidence is unavailable.'}
+          </p> : null}
           {!budget.canLaunch.ok ? (
             <p className={styles.status} data-tone="warning"><span className={styles.statusDot} aria-hidden="true" /><span>{budget.canLaunch.reason}</span></p>
           ) : null}
@@ -236,7 +246,7 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
               {waiting.map((task) => <Reply key={task.id} task={task} />)}
             </ul>
           ) : null}
-          <p className={styles.fine}>{budget.estimateNote}</p>
+          {accountingKnown ? <p className={styles.fine}>{budget.estimateNote}</p> : null}
           <a className={styles.external} href={DEVIN_USAGE_LINK} target="_blank" rel="noopener noreferrer">
             Real usage on app.devin.ai
             <IconExternalLink />

@@ -67,7 +67,7 @@ import {
 import { devinBudgetView, devinTaskActive } from './budget.js';
 import { DEVIN_CLI_PR_WINDOW_MS, devinCliPrKey, dismissDevinCliPr, listDevinCliPrs, readDismissedDevinCliPrs, type DevinCliChatPrs } from './cli-prs.js';
 import { devinOverview, launchDevinTask, messageDevinTask, devinEnabled, refreshDevinConsumption, resetDevinConsumptionForTest, type DevinServiceDeps } from './service.js';
-import { listDevinTasks, readDevinTask, updateDevinBudget, writeDevinTask } from './store.js';
+import { listDevinTasks, readDevinTaskInventory, readDevinTask, updateDevinBudget, writeDevinTask } from './store.js';
 import { devinTaskNeedsObservation, refreshDevinTasks } from './tracker.js';
 import {
   DEVIN_TASK_ID_PATTERN,
@@ -397,7 +397,7 @@ function guarded<T>(name: JobName, run: () => Promise<T>): Promise<T> {
   return next;
 }
 
-export function refreshDevinTasksGuarded(): Promise<{ checked: number; updated: number }> {
+export function refreshDevinTasksGuarded(): Promise<import('./types.js').DevinRefreshResult> {
   return guarded('refresh', () => refreshDevinTasks({ ...serviceDeps, ...(prActionDeps.gh ? { gh: prActionDeps.gh } : {}) }));
 }
 
@@ -518,7 +518,8 @@ export const handleDevinApi: ApiModule = async (ctx, req: IncomingMessage, res: 
       const body = await readMutationBody(ctx, req, res, SMALL_BODY_MAX_BYTES);
       if (!body) return true;
       const budget = updateDevinBudget(parseDevinBudgetBody(body));
-      sendJson(res, 200, devinBudgetView(listDevinTasks(Number.MAX_SAFE_INTEGER), budget, new Date()));
+      const inventory = readDevinTaskInventory();
+      sendJson(res, 200, devinBudgetView(inventory.tasks, budget, new Date(), inventory.sourceState));
       return true;
     }
     if (path === VERSE_DEVIN_REFRESH_PATH) {

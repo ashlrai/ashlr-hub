@@ -141,7 +141,10 @@ and a separate session GET confirms that organization and tag. Only literal
 missing, conflicting or incomplete results retain it; refresh never creates,
 restarts or cancels a session to reconcile it.
 
-Older tasks have no recorded launch organization and remain held. The exported
+Older ambiguous launches without a recorded launch organization remain held.
+`ashlr devin refresh` now reports how many were skipped and the ACUs held;
+`--json` includes `diagnostics` with the task inventory state. A missing or
+unreadable inventory reports unknown exposure, never zero. The exported
 `previewDevinCreateRecovery` reader can inspect a match without binding those
 tasks to today's login. Its finite page budget limits GET work; reaching it
 means incomplete evidence, not proof of absence. Provider visibility can be
@@ -302,7 +305,13 @@ PRs, so there is no Land or Close; the item expires after 7 days.
 The Devin card shows the connection state (Connected, Key refused, Not
 connected, Turned off or Not set up) with its reason, the configured tracked
 budget with a meter, sessions running and today, the recorded-cost estimate,
-and two readiness lines:
+and two readiness lines. The meter is labeled **Local budget**, with reported
+usage and unresolved held exposure shown separately. Legacy launches needing
+original account evidence are identified without rebinding them to today’s
+connection. Incomplete task evidence hides capacity and refuses new launches;
+a normal first launch may create its initial record, but must establish a
+complete inventory immediately before contacting Devin:
+
 
 - **Chat:** "Pick “Devin (cloud)” in New chat. Each chat is one Devin
   session." when ready, or what to fix.

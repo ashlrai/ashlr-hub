@@ -59,14 +59,14 @@ describe('remote exposure is independent from local delivery visibility', () => 
     writeDevinTask(task({ createdAt, launchedAt: createdAt }));
     const getSession = vi.fn(async () => session());
     const gh = vi.fn(async () => ({ ok: true as const, stdout: '[]', stderr: '' }));
-    expect(await refreshDevinTasks({ client: { orgId: FAKE_ORG, client: { getSession } }, gh, now: () => now })).toEqual({ checked: 1, updated: 1 });
+    expect(await refreshDevinTasks({ client: { orgId: FAKE_ORG, client: { getSession } }, gh, now: () => now })).toMatchObject({ checked: 1, updated: 1 });
     expect(readDevinTask(id)).toMatchObject({ state: 'expired', session: { status: 'running', acusConsumed: 2 } });
     expect(devinBudgetView([readDevinTask(id)!], budget(), now)).toMatchObject({ acuUsed: 2, acuInFlight: 8 });
     expect(dismissDevinTask(id, now).ok).toBe(true);
     expect(devinBudgetView([readDevinTask(id)!], budget(), now)).toMatchObject({ acuUsed: 2, acuInFlight: 8 });
     const later = new Date(now.getTime() + 49 * 60 * 60 * 1000);
     getSession.mockRejectedValueOnce(new Error('provider unavailable'));
-    expect(await refreshDevinTasks({ client: { orgId: FAKE_ORG, client: { getSession } }, gh, now: () => later })).toEqual({ checked: 1, updated: 0 });
+    expect(await refreshDevinTasks({ client: { orgId: FAKE_ORG, client: { getSession } }, gh, now: () => later })).toMatchObject({ checked: 1, updated: 0 });
     expect(devinBudgetView([readDevinTask(id)!], budget(), later)).toMatchObject({ acuUsed: 2, acuInFlight: 8, acuToday: 8 });
     expect(getSession).toHaveBeenCalledTimes(2);
   });

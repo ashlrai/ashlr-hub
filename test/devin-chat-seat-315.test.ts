@@ -20,7 +20,7 @@ import { devinNeedsYouItems } from '../src/core/devin/devin-api.js';
 import { storeDevinKey } from '../src/core/devin/secret.js';
 import { resetDevinStatusCacheForTest } from '../src/core/devin/service.js';
 import { resetDevinCliProbeForTest } from '../src/core/devin/cli-probe.js';
-import { devinHome, listDevinTasks, readDevinBudget, readDevinTask, updateDevinBudget, writeDevinConnection, writeDevinTask } from '../src/core/devin/store.js';
+import { devinHome, devinTasksDir, listDevinTasks, readDevinBudget, readDevinTask, updateDevinBudget, writeDevinConnection, writeDevinTask } from '../src/core/devin/store.js';
 import { parseDevinTurnPayload, type DevinTurnLine, type DevinTurnPayload } from '../src/core/devin/turn-protocol.js';
 import { createDevinParser, devinAdapter, devinLineToEvent } from '../src/core/verse/adapters/devin.js';
 import { adapterFor } from '../src/core/verse/adapters/index.js';
@@ -427,10 +427,18 @@ describe('Devin seats', () => {
   });
 
   it('ready: runnable, with today’s ACUs and the per-chat cap as its summary', async () => {
+    mkdirSync(devinTasksDir(), { recursive: true });
     const { seats } = await discoverDevinSeats({ ...noCli, status: async () => ({ state: 'ready', reason: 'Connected.' }) });
     expect(seats[0]!.health.state).toBe('ready');
     expect(seats[0]!.health.summary).toMatch(/ACUs? of \d+ ACUs today · up to \d+ ACUs per chat/);
     expect(seats[0]!.models[0]!.unavailableReason).toBeUndefined();
+  });
+
+  it('incomplete accounting never presents a connected cloud seat as ready', async () => {
+    mkdirSync(devinTasksDir(), { recursive: true });
+    writeFileSync(join(devinTasksDir(), 'dv_20260927T0400_aaaaaa.json'), '{bad');
+    const { seats } = await discoverDevinSeats({ ...noCli, status: async () => ({ state: 'ready', reason: 'Connected.' }) });
+    expect(seats[0]!.health).toMatchObject({ state: 'degraded', summary: expect.stringContaining('Local budget capacity is unknown') });
   });
 
   it('the CLI seat appears only when the binary exists, and is disabled until logged in', async () => {

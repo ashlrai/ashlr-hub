@@ -296,6 +296,22 @@ describe('Devin tracked exposure in the bar', () => {
     expect(devin.querySelector('[aria-hidden="true"][data-level] > [style]')).toHaveStyle({ '--fill': '60%' });
   });
 
+  it.each(['missing', 'unavailable'])('keeps %s local Devin capacity unknown without changing provider quota', accountingState => {
+    vi.mocked(useCapacityData).mockReturnValue({ seats: [], health: null, budget: null, loading: false, refreshing: false, readFailed: false, rosterUnavailable: false, pendingSeatIds: [] });
+    vi.mocked(useQuery).mockImplementation(query => ({ data: query.key === 'verse-devin' ? { value: {
+      status: { enabled: true, connected: true },
+      budget: { acuBudgetTotal: 50, acuRemaining: 50, acuUsed: 0, acuInFlight: 0, accountingState,
+        reportedAcuUsed: 0, unconfirmedAcuExposure: 0, paused: false, running: 0, sessionsToday: 0 },
+    } } : undefined } as never));
+    render(<ResourcesBar expanded />);
+    const row = screen.getByRole('button', { name: 'Devin tracked budget capacity unknown: task evidence unavailable. Open Resources' });
+    expect(row).toHaveAttribute('data-level', 'unknown');
+    expect(screen.getByText('Capacity unknown')).toBeInTheDocument();
+    fireEvent.focus(row);
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Local budget capacity unknown');
+    expect(screen.getByRole('tooltip')).not.toHaveTextContent('ACUs of');
+  });
+
   it('shows a new-chat admission pause without turning held exposure into spent usage or a provider quota', () => {
     const reason = 'Another session could take today past the 30 ACUs daily cap (40 ACUs used or held).';
     vi.mocked(useCapacityData).mockReturnValue({ seats: [], health: null, budget: null, loading: false, refreshing: false, readFailed: false, rosterUnavailable: false, pendingSeatIds: [] });
