@@ -261,7 +261,7 @@ export function MultiModelBar({ sessionId, seats, text, running, registerInterce
   return (
     <div className={styles.bar} role="group" aria-label="Models">
       <select className={styles.select} aria-label="Auto seat" value={pref} onChange={(e) => changePref(e.target.value as AutoPref)}
-        title="Manager: One conversation; Phantom plans, delegates and reviews across your resources. Auto routes each message; Cheap-first drafts locally.">
+        title="Manager plans, delegates, reviews. Auto routes messages; Cheap-first drafts locally.">
         {AUTO_PREFS.map((p) => <option key={p} value={p}>{PREF_LABEL[p]}</option>)}
       </select>
 
@@ -382,4 +382,3 @@ export default MultiModelBar;
 export function resetPendingDraftsForTest(): void {
   pendingDrafts.clear();
 }
-
