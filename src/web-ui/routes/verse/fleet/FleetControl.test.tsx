@@ -60,6 +60,8 @@ describe('shared native readback', () => {
     ['verse-authority', '/api/verse/authority'],
     ['verse-control', '/api/verse/control'],
     ['verse-fleet', '/api/verse/fleet'],
+    ['fleet', '/api/fleet'],
+    ['fleet-activity', '/api/fleet-activity'],
   ] as const;
 
   it('refreshes all previously read metadata projections without starting unseen provider reads', async () => {
@@ -91,16 +93,16 @@ describe('shared native readback', () => {
     expect(paths).not.toContain('/api/verse/runtime');
   });
 
-  it('issues a post-operation read even while the old PID response is outstanding', async () => {
+  it.each(['verse-control', 'fleet'])('issues a post-operation %s read even while the old PID response is outstanding', async (key) => {
     let finishOld!: (value: { pid: number }) => void;
-    const old = runQuery('verse-control', () => new Promise<{ pid: number }>(resolve => { finishOld = resolve; }));
+    const old = runQuery(key, () => new Promise<{ pid: number }>(resolve => { finishOld = resolve; }));
     await Promise.resolve();
     vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(json({ pid: 35431 }))));
     refreshFleetControlReads();
-    await waitFor(() => expect(getQuerySnapshot<{ pid: number }>('verse-control').data?.pid).toBe(35431));
+    await waitFor(() => expect(getQuerySnapshot<{ pid: number }>(key).data?.pid).toBe(35431));
     finishOld({ pid: 56295 });
     await old;
-    expect(getQuerySnapshot<{ pid: number }>('verse-control').data?.pid).toBe(35431);
+    expect(getQuerySnapshot<{ pid: number }>(key).data?.pid).toBe(35431);
   });
 
   it.each(['done', 'failed', 'cancelled'] as const)('reads shared state after a native %s event without assuming success', async (phase) => {
@@ -456,12 +458,18 @@ describe('the controls', () => {
         },
       },
     };
+    await runQuery('fleet', async () => ({ daemon: { running: false, pid: null } }));
+    await runQuery('fleet-activity', async () => ({ marker: 'before-native-start' }));
     const stopped = fleetControl('live', now, { kill: true, working: 0 });
     const after = fleetControl('live', now, { service: 'absent', liveness: { state: 'stopped', pid: null, lastTickAt: null, reason: 'x' }, working: 0 });
     const { posted } = stubSurfaceFetch({
       kind: 'live',
       now,
-      routes: { '/api/verse/fleet/control': () => json(nativeFinished ? fleetControl('live', now) : stopped) },
+      routes: {
+        '/api/verse/fleet/control': () => json(nativeFinished ? fleetControl('live', now) : stopped),
+        '/api/fleet': { daemon: { running: true, pid: 4242 } },
+        '/api/fleet-activity': { marker: 'after-native-start' },
+      },
       post: (url) => (url === '/api/verse/fleet/control'
         ? answer('start', after, { did: ['Cleared Stop.'], needs: { kind: 'resident-start', label: 'Start the daemon', command: 'ashlr authority resident start', native: true } })
         : undefined),
@@ -480,6 +488,8 @@ describe('the controls', () => {
     await waitFor(() => expect(region).toHaveTextContent('Done — The fleet daemon is running under your grant.'));
     await waitFor(() => expect(region).toHaveTextContent('Running · pid 4242'));
     expect(within(region).getByText('/opt/homebrew/bin/ashlr authority resident start')).toBeInTheDocument();
+    await waitFor(() => expect(getQuerySnapshot('fleet').data).toEqual({ daemon: { running: true, pid: 4242 } }));
+    expect(getQuerySnapshot('fleet-activity').data).toEqual({ marker: 'after-native-start' });
   });
 
   it('Stop confirms with the catalog copy; ⌘⌥P and the palette run the same Pause', async () => {
