@@ -9,6 +9,22 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.25.1] — 2026-10-07
+
+### Fixed
+
+- Refuse new Devin session creation when local task accounting is incomplete.
+  Show unknown accounting and explain unconfirmed legacy exposure instead of
+  treating unreadable records as zero. Separate the local budget, reported use
+  and held exposure; these readings are not the provider's subscription balance.
+- Reuse one coherent campaign projection within commissioning and enrollment
+  checks, refusing missing or degraded evidence. Reuse the integration ledger
+  snapshot within each preflight. Fresh later checks still validate current
+  evidence; these changes do not claim a whole-workflow speed improvement.
+- Patch the example site's Sharp override and shadcn-scoped MCP SDK dependency,
+  preserving optional platform packages. The separate braces advisory remains
+  unresolved.
+
 ## [3.25.0] — 2026-10-07
 
 ### Added

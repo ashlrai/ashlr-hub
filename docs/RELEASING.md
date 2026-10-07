@@ -9,7 +9,7 @@
 > disabled during the Linux dependency quarantine. npm publication uses the
 > maintainer's interactive web 2FA and does not carry CI provenance.
 >
-> The source version is `@ashlr/hub@3.25.0` (release candidate). Verify its exact-source checks,
+> The source version is `@ashlr/hub@3.25.1` (release candidate). Verify its exact-source checks,
 > registry version and dist-tags, GitHub release assets and installed runtime
 > independently before reporting those delivery layers as complete. The
 > published 3.24.4 release remains the current distribution until the candidate
