@@ -688,6 +688,20 @@ pinned to 2.1.257. The seat shows its CLI version and a note with the fix:
 `ashlr resources profile repin --directory <dir> --executable <path>`. Add
 `--dry-run` to see the change without writing; a real repin first saves the
 profile's three files as `.prev` copies, which together restore the old pin.
+
+Binary re-pin preserves the original launcher template. For an existing Claude
+profile whose previous generated template lacks the host broker's fixed safety
+environment, use `ashlr resources profile upgrade-template --directory <dir>
+--dry-run`, then repeat without `--dry-run` when that seat has no active turn.
+This explicit operation replaces only a recognized launcher, retaining the
+binary pin, command/manifest and native sign-in storage. It keeps
+`launcher.mjs.template-prev` separately from the binary re-pin backups; changed,
+unsafe or conflicting profiles are refused. A failure after launcher publication
+may already have changed it: inspect and retry the same operation to validate
+its backup and durability. It never runs login, reads credentials or asserts
+that authentication is valid. Normal fresh identity, quota and credit-protection
+observations still determine whether autonomous Claude work can begin.
+
 (Verse 3.5–3.8 offered Opus 5.5 as `claude-opus-5.5`; the CLI resolved that id to
 Opus 5, so those sessions ran Opus 5. They keep their recorded id, but their next
 turns ask for the real Opus 5.5 — so on a seat still pinned below 2.1.280 Phantom
