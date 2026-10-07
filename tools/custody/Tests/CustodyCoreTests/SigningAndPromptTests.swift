@@ -70,7 +70,8 @@ final class SigningAndPromptTests: XCTestCase {
 
   func testPromptDescribesTheWholeScopeAndTheDigest() {
     let prompt = GrantPromptRenderer.render(grant)
-    XCTAssertTrue(prompt.reason.hasPrefix("approve Ashlr standing grant #1 for 30 days"))
+    XCTAssertTrue(prompt.reason.hasPrefix("approve Phantom standing grant #1 for 30 days"))
+    XCTAssertTrue(prompt.fullScope.hasPrefix("Phantom standing grant — review before Touch ID"))
     for repo in ["ashlrai/fleet-canary", "ashlrai/measurably", "ashlrai/ashlrcode"] {
       XCTAssertTrue(prompt.reason.contains(repo), repo)
       XCTAssertTrue(prompt.fullScope.contains(repo), repo)

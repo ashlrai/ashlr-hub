@@ -50,7 +50,7 @@ public enum GrantPromptRenderer {
         repos += "; +\(repoPhrases.count - repoLimit) more (see terminal)"
       }
       var parts: [String] = []
-      parts.append("approve Ashlr standing grant #\(g.grantSeq) for \(days) days, until \(until).")
+      parts.append("approve Phantom standing grant #\(g.grantSeq) for \(days) days, until \(until).")
       parts.append("\(g.repos.count) repos, \(merging) may merge: \(repos).")
       parts.append("Rollout: \(ladder).")
       parts.append("Caps: \(volume(g.maxFiles)) files / \(volume(g.maxLines)) lines; ashlr-hub \(g.selfRepo).")
@@ -73,7 +73,7 @@ public enum GrantPromptRenderer {
     }
 
     var lines: [String] = []
-    lines.append("Ashlr standing grant — review before Touch ID")
+    lines.append("Phantom standing grant — review before Touch ID")
     lines.append("  grant       \(g.grantId)  #\(g.grantSeq)  key \(g.keyId)")
     lines.append("  valid       \(g.issuedAt) → \(g.expiresAt)  (\(days) days)")
     lines.append("  digest      \(g.digestHex)")

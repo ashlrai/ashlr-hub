@@ -1,10 +1,17 @@
-# Ashlr Desktop
+# Phantom Desktop
 
-A Tauri v2 desktop app that wraps **Ashlr Verse** (the operator console at
+A Tauri v2 desktop app that wraps **Phantom** (the operator console at
 `/verse/`, see `../docs/VERSE.md`) in a native macOS window. Opening it starts
 the console; resident autonomy requires its separate local setup and grant.
 
-The versioned [v3.24.4 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.4/Ashlr_3.24.4_aarch64.dmg)
+The current compatible installation remains `/Applications/Ashlr.app`, with
+`Ashlr_<version>_aarch64.dmg` downloads and the stable `Ashlr Local` signing
+identity. Workbench windows and menus identify Phantom. Updated custody
+prompt wording requires the upcoming qualified helper release; it does not
+change the currently installed helper. The filesystem and updater migration
+to `Phantom.app` is a separate, qualified installer change.
+
+The versioned [v3.25.0 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.0/Ashlr_3.25.0_aarch64.dmg)
 is the versioned installer link. Check the release artifacts before installing.
 It is locally signed, not Apple Developer ID notarized. macOS may require **Open
 Anyway** on first launch. The desktop CI workflow remains disabled during the
@@ -15,25 +22,25 @@ sidecar (~100 MiB), Rust executable and web assets.
 
 The 3.25.1 release candidate targets this [macOS arm64 installer](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.1/Ashlr_3.25.1_aarch64.dmg).
 That candidate link is available only after its release artifacts are published;
-use the published 3.24.4 installer above until then.
+use the published 3.25.0 installer above until then.
 
 ---
 
 ## Install
 
-After release publication, download the [macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.4/Ashlr_3.24.4_aarch64.dmg)
+After release publication, download the [macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.0/Ashlr_3.25.0_aarch64.dmg)
 or use the [npm/CLI quickstart](../docs/QUICKSTART.md) on macOS, Linux and Windows.
 Other desktop formats remain subject to the draft artifact policy below.
 
 | Platform | Availability |
 |----------|-----------------------|
-| macOS arm64 | Locally signed v3.24.4 `.dmg` linked above |
+| macOS arm64 | Locally signed v3.25.0 `.dmg` linked above |
 | Windows | `.msi` / `.exe` draft only |
 | Linux | Not produced while quarantined |
 
 ### Installing the build you make yourself
 
-That policy is about *publishing*. Building Ashlr for your own Mac and keeping
+That policy is about *publishing*. Building Phantom for your own Mac and keeping
 it in the Dock is supported and is what the rest of this document describes:
 
 1. [Build it](#the-exact-steps-on-this-mac), including the current CLI sidecar
@@ -47,7 +54,7 @@ it in the Dock is supported and is what the rest of this document describes:
 3. Check that the installed app and bundled server report this release.
    Gatekeeper may ask you to right-click → Open on first launch; see
    [First open on a local build](#first-open-on-an-unsigned-build-gatekeeper).
-4. With Ashlr running, right-click its Dock icon → **Options → Keep in Dock**.
+4. With Phantom running, right-click its Dock icon → **Options → Keep in Dock**.
 
 To update later, repeat steps 1–3 from the new clean release checkout.
 `ship:local` backs up replaced files and uses the stable "Ashlr Local"
@@ -64,12 +71,12 @@ Nothing in `~/.ashlr` is removed; config, seats and window state survive.
   process while the server boots. It shows what is happening, and if the server
   never comes up it says exactly why (see [Launch states](#launch-states)).
 - Starts `ashlr verse --port 7777 --no-open --json`, reads the tokens it prints,
-  and then shows the **Ashlr Verse** window at `http://127.0.0.1:7777/verse/`
+  and then shows the **Phantom** window at `http://127.0.0.1:7777/verse/`
   with those tokens already handed to the page (see [Token handoff](#token-handoff)).
 - Presents a real macOS menu bar, an overlay title bar with the traffic lights
   inset into the console's own header strip, and remembers where the window was.
 - Closing the Verse window hides it to the menu-bar (tray) item. **Quit** — from
-  ⌘Q, the Ashlr menu, or the tray — kills the sidecar and exits. No resident
+  ⌘Q, the Phantom menu, or the tray — kills the sidecar and exits. No resident
   daemon is started.
 - While the window is out of sight it keeps you informed (see
   [While Verse is hidden](#while-verse-is-hidden)): a native banner when a chat
@@ -161,7 +168,7 @@ window.addEventListener('ashlr:desktop-command', (e) => {
 
 | Command | Sent by |
 |---|---|
-| `open-settings` | **Ashlr → Settings…** (⌘,) |
+| `open-settings` | **Phantom → Settings…** (⌘,) |
 | `toggle-theme` | **View → Toggle Light / Dark** (⇧⌘L) |
 | `open-needs-you` | Tray **Needs you…**; a clicked "Needs you" or seat-health banner |
 | `new-chat` | Tray **New chat** |
@@ -232,7 +239,7 @@ setDesktopPreference('globalHotkey', true); // false in a browser
 The workbench top bar shows the desktop's power source, the configured system
 idle-sleep timer and separately whether its **idle-sleep request is active**.
 Automatic is enabled by default and can be switched to System settings. The
-screen can sleep; Ashlr does not change the system power plan, lock settings or
+screen can sleep; Phantom does not change the system power plan, lock settings or
 lid behavior. Manual sleep, thermal limits and battery restrictions still apply.
 
 The native app reads authenticated chat activity and owner-verified resident
@@ -508,7 +515,7 @@ as text and frame it as untrusted for the agent.
 - Grants are clamped to each app's ceiling — browsers `read`, terminals / IDEs
   `click`, the rest `full` — and never widened. The hard denylist (password
   managers, Keychain / Passwords, authentication prompts, the custody helper,
-  Ashlr itself, anything without a bundle id) is never captured or driven.
+  Phantom itself, anything without a bundle id) is never captured or driven.
 - The target is resolved natively: the app under the point for mouse ops, the
   frontmost app for `type` / `key`.
 - Secure text fields: never read, never typed into (nor while any app holds
@@ -560,7 +567,7 @@ loaded at run time); older macOS answers `unsupported`.
 
 | State | What you see |
 |---|---|
-| Starting | Brand mark, "Starting Ashlr Verse", an indeterminate hairline. |
+| Starting | Brand mark, "Starting Phantom", an indeterminate hairline. |
 | Port in use | "Port is already in use", the `lsof -ti tcp:7777` command to find the holder, and three buttons: **Use the server that is already running** (opens the console against it — you paste its read token once), **Try again**, **Quit**. |
 | Sidecar failed to spawn | The spawn error, and the `prepare-sidecar.mjs` fix. |
 | Sidecar exited early | The exit code plus the last few output lines. |
@@ -590,7 +597,7 @@ record is a JSON object), is dropped rather than displayed.
 
 | Menu | Items |
 |---|---|
-| **Ashlr** | About Ashlr · Settings… ⌘, · Services · Hide ⌘H / Hide Others / Show All · Quit Ashlr ⌘Q |
+| **Phantom** | About Phantom · Settings… ⌘, · Services · Hide ⌘H / Hide Others / Show All · Quit Phantom ⌘Q |
 | **Edit** | Undo ⌘Z · Redo ⇧⌘Z · Cut ⌘X · Copy ⌘C · Paste ⌘V · Select All ⌘A |
 | **View** | Reload ⌘R · Toggle Light / Dark ⇧⌘L · Zoom In ⌘= / Zoom Out ⌘− / Actual Size ⌘0 · Toggle Full Screen |
 | **Window** | Minimize ⌘M · Zoom · Close ⌘W |
@@ -609,7 +616,7 @@ the other two:
 
 | How the app ends | What reaps the sidecar |
 |---|---|
-| ⌘Q, the Ashlr menu, the tray's Quit | `RunEvent::Exit` → `reap_sidecar`, which kills the sidecar **and its worker children** (the Bun binary runs its projection/background workers as separate processes that hold file locks in `~/.ashlr`). |
+| ⌘Q, the Phantom menu, the tray's Quit | `RunEvent::Exit` → `reap_sidecar`, which kills the sidecar **and its worker children** (the Bun binary runs its projection/background workers as separate processes that hold file locks in `~/.ashlr`). |
 | A signal — `pkill`, `kill`, Ctrl-C on a foreground run | An async-signal-safe handler kills the recorded pid, then `_exit`s. |
 | SIGKILL or a crash — nothing of ours runs | The **next launch** repairs it. Before the port is probed, the ownership record written at spawn time is read back; if the app that wrote it is gone while its sidecar is still alive, that sidecar is orphaned and is killed. |
 
@@ -639,9 +646,9 @@ lsof -ti tcp:7777                        # expect: no output
 | Running › ‹chat› | One row per running chat (up to 8, then "N more running"): shows the window and opens that chat |
 | Needs you (N)… | Shows the window and opens the Needs-you drawer |
 | New chat | Shows the window and starts a chat |
-| Stop running chats… | A native confirm ("Stop every running chat?"), then cancels each running turn with the mutation token. Disabled when nothing runs, or when the window adopted a server Ashlr did not start (no mutation token). Queued follow-ups are held, not sent. |
-| Show Ashlr Verse | Show + focus the window |
-| Quit Ashlr | Kills the sidecar, exits |
+| Stop running chats… | A native confirm ("Stop every running chat?"), then cancels each running turn with the mutation token. Disabled when nothing runs, or when the window adopted a server Phantom did not start (no mutation token). Queued follow-ups are held, not sent. |
+| Show Phantom | Show + focus the window |
+| Quit Phantom | Kills the sidecar, exits |
 
 The menu-bar title reads `● N` while N chats run and is empty otherwise.
 Left-clicking the tray icon toggles the window; clicking the Dock icon while
@@ -690,11 +697,11 @@ focused) and notifications are on — raises banners:
   inside that minute also navigates — the accepted trade. Any tray action or
   the hotkey clears the armed target first.
 - **Signing.** A Developer ID–signed bundle delivers through
-  `tauri-plugin-notification` (Ashlr's icon). Anything else — ad-hoc (every
+  `tauri-plugin-notification` (Phantom's icon). Anything else — ad-hoc (every
   local `cargo tauri build`), unsigned, `cargo run` — uses `osascript` with the
   text as argv, because macOS can silently drop plugin banners from an app it
   cannot identify. Those banners show as Script Editor, and clicking one opens
-  Script Editor rather than Ashlr; the tray and the Dock badge are the reliable
+  Script Editor rather than Phantom; the tray and the Dock badge are the reliable
   signal on such builds. `codesign -dv` decides once per launch, off the main
   thread.
 - The "local server keeps stopping" alert is the one banner that ignores focus:
@@ -1069,7 +1076,7 @@ desktop/
    the launch window. No record within 30 s → the timeout launch state.
 7. Window moves and resizes are written back (throttled), and on every exit.
 8. The window's close button hides it to the tray. **Every** exit path — ⌘Q,
-   the Ashlr menu, the tray, a signal, or the next launch after a crash — reaps
+   the Phantom menu, the tray, a signal, or the next launch after a crash — reaps
    the sidecar and its worker children, so no orphan `ashlr verse` is left
    behind.
 
@@ -1121,7 +1128,7 @@ from the repo root.
 It should not be — see
 [The sidecar never outlives the window](#the-sidecar-never-outlives-the-window).
 If one survives (say the app was SIGKILLed), the next launch kills it before
-probing the port, so just launch Ashlr again. To clear it by hand:
+probing the port, so just launch Phantom again. To clear it by hand:
 `pkill -f "Contents/MacOS/ashlr verse"`.
 
 **`cargo tauri build` fails at `bundle_dmg.sh`**
