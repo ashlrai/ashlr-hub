@@ -1058,3 +1058,66 @@ describe('the fold tests’ width stubs', () => {
     probe.remove();
   });
 });
+
+// Async feedback must not displace the draft or change the Send/Queue gates.
+describe('settings feedback', () => {
+  it('keeps handoff guidance visible alongside an initial settings error', async () => {
+    const normalFetch = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith('/api/verse/session-controls/')) return Promise.reject(new Error('Settings offline'));
+      return normalFetch(input, init);
+    }));
+    const user = userEvent.setup();
+    render(<Composer {...props({ handoffDraft: true })} />);
+    await user.type(screen.getByRole('textbox', { name: 'Message' }), 'Reviewed handoff');
+    expect(screen.getByText(/Handoff note drafted from the previous chat/)).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Settings offline');
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeEnabled();
+  });
+
+  it('shows an initial read failure and retries while retaining the draft', async () => {
+    const normalFetch = globalThis.fetch;
+    let rejectRead!: (error: Error) => void;
+    const delayed = new Promise<Response>((_resolve, reject) => { rejectRead = reject; });
+    let reads = 0;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith('/api/verse/session-controls/') && ++reads === 1) return delayed;
+      return normalFetch(input, init);
+    }));
+    const user = userEvent.setup();
+    render(<Composer {...props()} />);
+    expect(screen.getByText('Loading chat settings…')).toBeInTheDocument();
+    const box = screen.getByRole('textbox', { name: 'Message' });
+    await user.type(box, 'Keep this draft');
+    await act(async () => rejectRead(new Error('Network unavailable')));
+    expect(screen.getByRole('alert')).toHaveTextContent('Network unavailable');
+    await user.click(screen.getByRole('button', { name: 'Retry settings' }));
+    await screen.findByRole('button', { name: /^Permission mode:/ });
+    expect(box).toHaveValue('Keep this draft');
+    expect(screen.queryByRole('button', { name: 'Retry settings' })).not.toBeInTheDocument();
+    expect(server.posts(/session-controls/)).toHaveLength(0);
+  });
+
+  it('shows the pending change and keeps the draft and controls until acknowledgement', async () => {
+    const normalFetch = globalThis.fetch;
+    let finish!: (value: Response) => void;
+    const delayed = new Promise<Response>((resolve) => { finish = resolve; });
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith('/api/verse/session-controls/') && init?.method === 'POST') return delayed;
+      return normalFetch(input, init);
+    }));
+    const user = userEvent.setup();
+    await renderReady();
+    const box = screen.getByRole('textbox', { name: 'Message' });
+    await user.type(box, 'Keep writing');
+    await user.click(screen.getByRole('button', { name: /^Permission mode:/ }));
+    await user.click(screen.getByRole('menuitemradio', { name: /^Plan/ }));
+    expect(screen.getByText('Updating chat settings…')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Permission mode: Accept edits' })).toBeDisabled();
+    expect(box).toHaveValue('Keep writing');
+    await act(async () => finish(json(controlsView({ permissionMode: 'plan' }))));
+    await screen.findByRole('button', { name: 'Permission mode: Plan' });
+    expect(screen.queryByText('Updating chat settings…')).not.toBeInTheDocument();
+    expect(box).toHaveValue('Keep writing');
+  });
+});

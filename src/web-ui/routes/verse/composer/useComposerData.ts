@@ -23,6 +23,7 @@ import type {
   VerseSessionControlsUpdate,
 } from '../../../../core/verse/workbench-types.js';
 import { VERSE_ATTACHMENT_MAX_BYTES } from '../../../../core/verse/workbench-types.js';
+import { ApiError } from '../../../data/client.js';
 import { describeContextError } from '../context/use-token-gate.js';
 import {
   deleteAttachment,
@@ -45,58 +46,110 @@ export type GateRun = <T>(reason: string, action: () => Promise<T>) => Promise<T
 
 export interface SessionControlsState {
   view: VerseSessionControlsResponse | null;
-  /** True until the first read answered (or failed). */
+  /** A read is in flight; keep a successful view visible while refreshing. */
   loading: boolean;
-  /** Why the last read or write failed, in the server's words. */
   error: string | null;
+  /** Only a codeless 404 means this server predates chat settings. */
+  unsupported: boolean;
   pending: boolean;
+  retry: () => void;
   update: (update: VerseSessionControlsUpdate, reason: string) => Promise<boolean>;
+}
+
+function controlsReadError(err: unknown): string {
+  if (err instanceof ApiError && err.status === 401) {
+    return 'The read session expired. Reconnect to Phantom to read chat settings.';
+  }
+  return describeContextError(err);
 }
 
 export function useSessionControls(sessionId: string | null, running: boolean, run: GateRun): SessionControlsState {
   const [view, setView] = useState<VerseSessionControlsResponse | null>(null);
   const [loading, setLoading] = useState(sessionId !== null);
   const [error, setError] = useState<string | null>(null);
+  const [unsupported, setUnsupported] = useState(false);
   const [pending, setPending] = useState(false);
+  const [nonce, setNonce] = useState(0);
+  const readEpoch = useRef(0);
+  const boundSession = useRef(sessionId);
+  const scopeEpoch = useRef(0);
+  const currentSession = useRef(sessionId);
+  currentSession.current = sessionId;
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; readEpoch.current += 1; };
+  }, []);
+  const retry = useCallback(() => setNonce((value) => value + 1), []);
 
   useEffect(() => {
+    if (boundSession.current !== sessionId) {
+      boundSession.current = sessionId;
+      scopeEpoch.current += 1;
+      readEpoch.current += 1;
+      setView(null);
+      setPending(false);
+      setUnsupported(false);
+    }
     if (!sessionId) {
       setView(null);
       setLoading(false);
+      setError(null);
+      setUnsupported(false);
       return undefined;
     }
     const abort = new AbortController();
+    const epoch = ++readEpoch.current;
+    const isCurrent = () => !abort.signal.aborted && epoch === readEpoch.current && currentSession.current === sessionId;
+    setLoading(true);
+    setError(null);
     fetchSessionControls(sessionId, abort.signal)
-      .then((next) => { setView(next); setError(null); })
-      .catch((err: unknown) => {
-        if (abort.signal.aborted) return;
-        // An older server (no route) leaves the pickers hidden rather than broken.
-        setView(null);
-        setError(describeContextError(err));
+      .then((next) => {
+        if (!isCurrent()) return;
+        setView(next);
+        setUnsupported(false);
       })
-      .finally(() => { if (!abort.signal.aborted) setLoading(false); });
+      .catch((err: unknown) => {
+        if (!isCurrent()) return;
+        if (err instanceof ApiError && err.status === 404 && !err.code) {
+          setView(null);
+          setUnsupported(true);
+        } else {
+          // A failed refresh must not erase the last successful controls.
+          setError(controlsReadError(err));
+        }
+      })
+      .finally(() => { if (isCurrent()) setLoading(false); });
     return () => abort.abort();
     // `running` is a dependency on purpose: `appliesNextTurn` flips with it.
-  }, [sessionId, running]);
+  }, [sessionId, running, nonce]);
 
   const update = useCallback(async (change: VerseSessionControlsUpdate, reason: string): Promise<boolean> => {
     if (!sessionId) return false;
+    // A read started before this write cannot overwrite its acknowledgement.
+    readEpoch.current += 1;
+    setLoading(false);
     setPending(true);
     setError(null);
+    const scope = scopeEpoch.current;
+    const isCurrent = () => mounted.current && currentSession.current === sessionId && scope === scopeEpoch.current;
     try {
-      const next = await run(reason, () => updateSessionControls(sessionId, change));
-      if (!next) return false;
+      const next = await run(reason, () => isCurrent() ? updateSessionControls(sessionId, change) : Promise.resolve(null));
+      if (!next || !isCurrent()) return false;
+      readEpoch.current += 1;
+      setLoading(false);
       setView(next);
+      setUnsupported(false);
       return true;
     } catch (err) {
-      setError(describeContextError(err));
+      if (isCurrent()) setError(describeContextError(err));
       return false;
     } finally {
-      setPending(false);
+      if (isCurrent()) setPending(false);
     }
   }, [sessionId, run]);
 
-  return { view, loading, error, pending, update };
+  return { view, loading, error, unsupported, pending, retry, update };
 }
 
 // ---------------------------------------------------------------------------

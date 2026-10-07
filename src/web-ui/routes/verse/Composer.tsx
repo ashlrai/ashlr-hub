@@ -55,6 +55,7 @@ import { VERSE_QUEUE_MAX } from '../../../core/verse/workbench-types.js';
 import { MutationTokenDialog } from '../../components/auth/MutationTokenDialog.js';
 import { IconPlus } from '../../components/primitives/icons.js';
 import { Tooltip } from '../../components/primitives/Tooltip.js';
+import { RefreshIndicator } from '../../components/primitives/RefreshIndicator.js';
 import { costHint, loadDraft, loadHistory, pushHistory, saveDraft, type CostHint } from './chat/composer-state.js';
 import { AttachmentChips } from './composer/AttachmentChips.js';
 import { BypassConfirmDialog } from './composer/BypassConfirmDialog.js';
@@ -1028,11 +1029,10 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
           <span className="visually-hidden"> This is an estimate; the provider counts the real total.</span>
         </p>
       ) : null}
-      <p id={helpId} className={`${styles.help} ${showHint || tooLong || listening || running || disabled || historyAt !== -1 || showHandoffHelp || note || controls.error || followUps.error ? '' : styles.helpQuiet}`}>
+      <p id={helpId} className={`${styles.help} ${showHint || tooLong || listening || running || disabled || historyAt !== -1 || showHandoffHelp || note || controls.error || controls.loading || controls.pending || controls.unsupported || followUps.error ? '' : styles.helpQuiet}`}>
         {tooLong ? <span role="alert" className={styles.helpError}>Message is over 64 KB — trim it before sending.</span>
           : followUps.error ? <span role="alert" className={styles.helpError}>{followUps.error}</span>
-            : controls.error && view ? <span role="alert" className={styles.helpError}>{controls.error}</span>
-              : note ? <span role={note.error ? 'alert' : 'status'} className={note.error ? styles.helpError : undefined}>{note.text}</span>
+            : note ? <span role={note.error ? 'alert' : 'status'} className={note.error ? styles.helpError : undefined}>{note.text}</span>
                 : listening ? 'Listening… Esc stops dictation.'
                   : disabled && disabledReason ? disabledReason
                     : running ? (queueAvailable
@@ -1044,6 +1044,14 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
                           : showHint
                             ? <><kbd>Enter</kbd> sends · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>@</kbd> files · <kbd>/</kbd> commands · <kbd>!</kbd> playbooks · <kbd>↑</kbd> recalls</>
                             : null}
+        {(controls.error || controls.pending || controls.loading || controls.unsupported) ? (
+          <span className={cstyles.controlsFeedback}>
+            {controls.error ? <><span role="alert" className={styles.helpError}>{controls.error}</span><button type="button" className={cstyles.retryControls} onClick={controls.retry} disabled={disabled || controls.loading || controls.pending}>Retry settings</button></>
+              : controls.pending ? <><RefreshIndicator label="Updating chat settings" />Updating chat settings…</>
+              : controls.loading ? <><RefreshIndicator label={view ? 'Refreshing chat settings' : 'Loading chat settings'} />{view ? 'Refreshing chat settings…' : 'Loading chat settings…'}</>
+                : <>This server does not support chat settings yet — update Phantom and restart <code>ashlr verse</code>.</>}
+          </span>
+        ) : null}
       </p>
       {/* Mounted whenever there are pickers, not only while the row is
           compact: an open sheet must never be unmounted by a fold (it would
