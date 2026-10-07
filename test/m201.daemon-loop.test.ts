@@ -8359,6 +8359,88 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     });
   });
 
+  it.each([
+    '[TITRR: tests: still failing after 4 attempt(s) - dropped, no proposal filed]',
+    '[TITRR: tests: still failing - budget exceeded after attempt 4 - dropped, no proposal filed]',
+  ])('A1h5d1: final verification refusal is gate-blocked: %s', async (prefix) => {
+    const { items } = enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock final verification refusal' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-final-verification-refusal', status: 'done',
+      result: `${prefix}\nprivate test output must not become a diagnostic`,
+      proposalOutcome: { kind: 'proposal-disabled', reason: 'proposal filing disabled for this api-model attempt' },
+      runEventSummary: {
+        status: 'done', proposalCreated: false, diffFiles: 2, diffLines: 5,
+        actionCounts: { proposalDisabled: 1, proposalCaptureAttempts: 0, diffFiles: 2, diffLines: 5 },
+      },
+    });
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
+    expect(result.reason).toBe('ok');
+    expect(result.proposalsCreated).toBe(0);
+    expect(result.dispatches?.[0]?.production).toMatchObject({
+      outcome: 'gate-blocked', runId: 'run-final-verification-refusal',
+      reason: 'verification-failed: TITRR final tests did not pass; no proposal filed',
+      diffFiles: 2, diffLines: 5,
+    });
+    expect(loadWorkedLedger().events.filter((event) => event.itemId === items[0]!.id)).toEqual([
+      expect.objectContaining({ outcome: 'empty' }),
+    ]);
+    const event = readDispatchProductionEvents({ limit: 1 })[0];
+    expect(event).toMatchObject({
+      outcome: 'gate-blocked', proposalCreated: false,
+      reason: expect.stringMatching(/^d1_[a-f0-9]{64}$/),
+      runEventSummary: { actionCounts: { proposalBlocked: 1, proposalDisabled: 0 } },
+      learningLabel: {
+        learningKind: 'diagnostic-no-proposal', policySuppressed: false,
+        diagnosticNoProposal: true, diagnosticAttempt: true,
+        attemptShape: { captureOrGateBlocked: 1, policyDisabled: 0 },
+      },
+    });
+    expect(readAgentActions().find((action) => action.action === 'daemon:dispatch' && action.itemId === items[0]!.id))
+      .toMatchObject({ outcome: 'no-proposal' });
+    expect(JSON.stringify(result.dispatches)).not.toContain('private test output');
+    expect(JSON.stringify(event)).not.toContain('private test output');
+  });
+
+  it.each([
+    { label: 'missing captures', captures: undefined },
+    { label: 'negative captures', captures: -1 },
+    { label: 'fractional captures', captures: 0.1 },
+    { label: 'nonfinite captures', captures: Number.NaN },
+    { label: 'infinite captures', captures: Number.POSITIVE_INFINITY },
+    { label: 'actual capture', captures: 1, expected: 'proposal-disabled' },
+    { label: 'unanchored annotation', captures: 0, resultPrefix: 'private preface\n' },
+    { label: 'unknown annotation', captures: 0, annotation: '[TITRR: other failure]' },
+    { label: 'annotation suffix', captures: 0, resultSuffix: ' trailing private prose' },
+    { label: 'zero attempts', captures: 0, annotation: '[TITRR: tests: still failing after 0 attempt(s) - dropped, no proposal filed]' },
+    { label: 'saved proposal reference', captures: 0, proposalId: 'saved-proposal' },
+    { label: 'aborted producer', captures: 0, status: 'aborted' },
+  ])('A1h5d2: verification diagnosis refuses $label', async ({ captures, expected, resultPrefix = '', resultSuffix = '', annotation, proposalId, status = 'done' }) => {
+    enrollWithItems(1);
+    mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock unproven verification refusal' });
+    mockEngineTierOf.mockImplementation((backend: unknown) => backend === 'local-coder' ? 'mid' : 'local');
+    mockRunGoal.mockResolvedValueOnce({
+      id: 'run-unproven-verification-refusal', status,
+      result: `${resultPrefix}${annotation ?? '[TITRR: tests: still failing after 4 attempt(s) - dropped, no proposal filed]'}${resultSuffix}`,
+      proposalOutcome: { kind: 'proposal-disabled', reason: 'proposal filing disabled for this api-model attempt' },
+      runEventSummary: {
+        status, proposalCreated: false, ...(proposalId ? { proposalId } : {}), diffFiles: 2, diffLines: 5,
+        actionCounts: { proposalDisabled: 1, ...(captures !== undefined ? { proposalCaptureAttempts: captures } : {}), diffFiles: 2, diffLines: 5 },
+      },
+    });
+    const result = await tick({
+      ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { allowedBackends: ['local-coder'] },
+    } as AshlrConfig, { dryRun: false });
+    expect(result.dispatches?.[0]?.production?.outcome).toBe(expected ?? 'proposal-capture-error');
+    expect(result.dispatches?.[0]?.production?.reason).not.toContain('verification-failed');
+    expect(result.proposalsCreated).toBe(0);
+  });
+
   it('A1h5e: done diff capture-missing works without action count telemetry', async () => {
     const { items } = enrollWithItems(1);
     mockRouteBackend.mockReturnValue({ backend: 'local-coder', tier: 'mid', reason: 'mock done diff no counts' });
