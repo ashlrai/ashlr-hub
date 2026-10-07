@@ -60,6 +60,15 @@ repositories, and describe how you will know it worked. The Leader refines a
 plan through its existing planning cadence. Independent ready tasks enter the
 same resident queue and resource router used by other fleet work.
 
+Expand a saved outcome and select **Enable manager** to use the shared frontier
+Manager for planning and review. Its status shows actual planning, reviewing,
+replanning, waiting or failure; the recorded route names the selected engine and
+model. Enablement uses your current outcome revision and existing fleet
+authority. If a response is uncertain, retry preserves the original command;
+**Use current manager revision** explicitly replaces a stale revision. Resume a
+paused outcome before enabling its Manager. Existing chat-linked Managers keep
+their conversation, and ordinary outcomes retain the Leader planning path.
+
 ```mermaid
 flowchart LR
   U[Desired result] --> L[Leader plan]

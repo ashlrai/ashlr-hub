@@ -33,6 +33,9 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   allowance blocks new contacts without discarding valid terminal evidence.
 - Round native credit-balance tooltips while retaining exact accounting readings,
   and describe uncapped fleet volume settings without large sentinel numbers.
+- Refresh pending Devin consumption from the server cache every five seconds
+  during the sidebar's first minute, then return to its normal cadence. Hidden
+  windows stop polling, and an open Resources drawer owns the refresh instead.
 - Honor account-level budget-read opt-outs. Prune deleted knowledge chunks only
   after complete scans; partial or failed listings preserve the existing index.
 - Bound native fleet startup output capture and clear the busy state if worker
