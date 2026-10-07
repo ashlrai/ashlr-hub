@@ -138,9 +138,9 @@ describe('cmdHelp routing', () => {
     expect(await cmdHelp([])).toBe(0);
     const text = output();
     expect(text).toContain('Phantom');
-    expect(text).toContain('the ashlr CLI for agentic engineers');
+    expect(text).toContain('phm, the CLI for agentic engineers (ashlr remains compatible)');
     expect(text).toContain('autonomy');
-    expect(text).toContain('ashlr help <topic>');
+    expect(text).toContain('phm help <topic>');
     // The summary must NOT include every command (that is --all's job).
     expect(text).not.toContain('onboard --rollback');
   });

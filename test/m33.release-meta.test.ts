@@ -36,6 +36,13 @@ beforeEach(() => {
 });
 
 describe('package.json publish shape', () => {
+  it('publishes both workbench aliases through the same canonical launcher', () => {
+    const lock = JSON.parse(readFileSync(join(REPO_ROOT, 'package-lock.json'), 'utf8'));
+    expect(pkg['bin']).toEqual({ ashlr: 'bin/ashlr', phm: 'bin/ashlr' });
+    expect(lock.packages[''].bin).toEqual(pkg['bin']);
+    expect((pkg['bin'] as Record<string, string>)['phantom']).toBeUndefined();
+  });
+
   it('is the public scoped package; provenance is never baked into publishConfig', () => {
     expect(pkg['name']).toBe('@ashlr/hub');
     expect(pkg['private']).toBeUndefined();

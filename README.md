@@ -300,6 +300,12 @@ check identity and quota, are in
 The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
+The next source candidate adds `phm` as the primary CLI command. Both `phm` and
+`ashlr` use the same workbench entrypoint; existing `ashlr` scripts keep working.
+The published 3.25.0 archive below uses `ashlr`. When building this source,
+`./install.sh` installs both aliases and refuses unrelated files or links.
+The separate Phantom Secrets command remains `phantom`.
+
 ```sh
 npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.0/ashlr-hub-3.25.0.tgz
 ashlr --version

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — build ashlr-hub and install the `ashlr` CLI into ~/.local/bin
+# install.sh — build Phantom and install phm + compatible ashlr into ~/.local/bin
 #
 # Idempotent: safe to re-run after pulling updates.
 # Usage: ./install.sh
@@ -9,7 +9,7 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_SRC="$REPO_DIR/bin/ashlr"
 INSTALL_DIR="$HOME/.local/bin"
-INSTALL_DEST="$INSTALL_DIR/ashlr"
+INSTALL_ALIASES=(phm ashlr)
 
 # ── colours ──────────────────────────────────────────────────────────────────
 bold='\033[1m'
@@ -24,7 +24,7 @@ warn() { printf "  ${yellow}warn${reset} %s\n" "$*"; }
 fail() { printf "  ${red}fail${reset} %s\n" "$*" >&2; exit 1; }
 
 echo ""
-printf "${bold}ashlr-hub installer${reset}\n"
+printf "${bold}Phantom installer${reset}\n"
 echo "────────────────────────────────────────"
 
 # ── 1. Verify Node ────────────────────────────────────────────────────────────
@@ -72,25 +72,48 @@ if [[ ! -d "$INSTALL_DIR" ]]; then
   ok "created $INSTALL_DIR"
 fi
 
-# ── 6. Symlink ────────────────────────────────────────────────────────────────
-log "Symlinking ashlr → $INSTALL_DEST..."
-
-# Remove stale symlink or warn about a real file
-if [[ -L "$INSTALL_DEST" ]]; then
-  EXISTING_TARGET=$(readlink "$INSTALL_DEST")
-  if [[ "$EXISTING_TARGET" == "$BIN_SRC" ]]; then
-    ok "symlink already up-to-date ($INSTALL_DEST → $BIN_SRC)"
-  else
-    warn "Replacing existing symlink: $EXISTING_TARGET → $BIN_SRC"
-    ln -sf "$BIN_SRC" "$INSTALL_DEST"
-    ok "symlink updated"
-  fi
-elif [[ -e "$INSTALL_DEST" ]]; then
-  fail "$INSTALL_DEST exists and is not a symlink. Remove it manually and retry."
-else
-  ln -s "$BIN_SRC" "$INSTALL_DEST"
-  ok "symlink created ($INSTALL_DEST → $BIN_SRC)"
-fi
+# ── 6. Preflight both aliases, then create only absent links ──────────────────
+# No alias may overwrite another tool, including an unrelated dangling link.
+# Preflight all destinations before writing either; never force a replacement.
+node -e '
+const fs = require("node:fs");
+const path = require("node:path");
+const [source, directory] = process.argv.slice(1);
+const destinations = ["phm", "ashlr"].map(name => path.join(directory, name));
+const created = [];
+const stat = target => {
+  try { return fs.lstatSync(target); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+};
+try {
+  for (const target of destinations) {
+    const item = stat(target);
+    if (item && !(item.isSymbolicLink() && fs.readlinkSync(target) === source)) {
+      throw new Error(target + " belongs to another file or link. Move it manually and retry.");
+    }
+  }
+  for (const target of destinations) {
+    const existing = stat(target);
+    if (existing && existing.isSymbolicLink() && fs.readlinkSync(target) === source) continue;
+    // Exact-path exclusive creation refuses even a newly appeared directory.
+    fs.symlinkSync(source, target);
+    created.push({ target, identity: fs.lstatSync(target) });
+    console.log("  symlink created (" + target + " → " + source + ")");
+  }
+} catch (error) {
+  for (const { target, identity } of created.reverse()) {
+    const current = stat(target);
+    // Roll back only links this invocation created and that still match.
+    if (current && current.isSymbolicLink() && current.dev === identity.dev &&
+        current.ino === identity.ino && current.birthtimeMs === identity.birthtimeMs &&
+        current.ctimeMs === identity.ctimeMs && fs.readlinkSync(target) === source) {
+      fs.unlinkSync(target);
+    }
+  }
+  console.error("  fail " + error.message);
+  process.exitCode = 1;
+}
+' "$BIN_SRC" "$INSTALL_DIR"
 
 # ── 7. PATH check ────────────────────────────────────────────────────────────
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
@@ -103,26 +126,23 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
 fi
 
 # ── 8. Smoke-test ─────────────────────────────────────────────────────────────
-log "Verifying \`ashlr help\`..."
-
-# Use the resolved symlink target directly so we don't depend on PATH being reloaded
-ASHLR_CMD="$INSTALL_DEST"
-
-if "$ASHLR_CMD" help &>/dev/null; then
-  ok "\`ashlr help\` succeeded"
-else
-  # Show output for diagnosis
-  echo ""
-  "$ASHLR_CMD" help || true
-  fail "\`ashlr help\` exited non-zero. Check the output above."
-fi
+for ALIAS in "${INSTALL_ALIASES[@]}"; do
+  log "Verifying $ALIAS help..."
+  if "$INSTALL_DIR/$ALIAS" help &>/dev/null; then
+    ok "$ALIAS help succeeded"
+  else
+    "$INSTALL_DIR/$ALIAS" help || true
+    fail "$ALIAS help exited non-zero. Check the output above."
+  fi
+done
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 printf "${green}${bold}Installation complete.${reset}\n"
 echo ""
-echo "  ashlr index           # scan Desktop and build the index"
-echo "  ashlr go              # fuzzy-jump to any project"
-echo "  ashlr status          # repo health overview"
-echo "  ashlr help            # full command reference"
+echo "  phm index           # scan Desktop and build the index"
+echo "  phm go              # fuzzy-jump to any project"
+echo "  phm status          # repo health overview"
+echo "  phm help            # full command reference"
+echo "  ashlr remains a compatible alias; phantom belongs to Phantom Secrets."
 echo ""

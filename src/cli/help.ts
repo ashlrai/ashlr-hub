@@ -744,7 +744,7 @@ function renderTopic(topic: HelpTopic): void {
 function renderSummary(): void {
   const c = makeColors(isTty());
   console.log('');
-  console.log(c.bold('  Phantom') + c.dim(' — the ashlr CLI for agentic engineers'));
+  console.log(c.bold('  Phantom') + c.dim(' — phm, the CLI for agentic engineers (ashlr remains compatible)'));
   console.log('');
   for (const topic of TOPICS) {
     const entries = entriesForTopic(topic);
@@ -753,17 +753,17 @@ function renderSummary(): void {
     console.log(`    ${c.cyan(pad(topic, 14))}  ${TOPIC_LABELS[topic]} ${c.dim(`(${unique}, …)`)}`);
   }
   console.log('');
-  console.log('  ' + c.dim('ashlr help <topic>') + '      full table for one topic');
-  console.log('  ' + c.dim('ashlr help --search <t>') + ' find a command by keyword');
-  console.log('  ' + c.dim('ashlr help --all') + '        every command (the legacy full table)');
-  console.log('  ' + c.dim('ashlr docs --agent') + '      the agent contract cheat sheet');
+  console.log('  ' + c.dim('phm help <topic>') + '      full table for one topic');
+  console.log('  ' + c.dim('phm help --search <t>') + ' find a command by keyword');
+  console.log('  ' + c.dim('phm help --all') + '        every command (the legacy full table)');
+  console.log('  ' + c.dim('phm docs --agent') + '      the agent contract cheat sheet');
   console.log('');
 }
 
 function renderAll(): void {
   const c = makeColors(isTty());
   console.log('');
-  console.log(c.bold('  Phantom') + c.dim(' — every ashlr command'));
+  console.log(c.bold('  Phantom') + c.dim(' — every command (phm or ashlr)'));
   for (const topic of TOPICS) {
     console.log('');
     console.log('  ' + c.bold(TOPIC_LABELS[topic]));
