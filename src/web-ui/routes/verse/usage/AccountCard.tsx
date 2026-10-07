@@ -29,6 +29,7 @@ import type { CSSProperties, ReactNode } from 'react';
 import { formatDecimalMetric, formatMetric } from '../../../components/charts/format-metric.js';
 import { StatusBadge, type Tone } from '../../../components/primitives/StatusBadge.js';
 import { ENGINE_LABEL } from '../verse-model.js';
+import { nativeCreditBalanceTitle } from '../resources/codex-credit-value.js';
 import { accountCreditDetail, type AccountCardModel, type AccountVerdictState } from './accounts-model.js';
 import { WindowMeter } from './WindowMeter.js';
 import styles from './usage.module.css';
@@ -56,7 +57,7 @@ function CreditsRow({ credits, historical }: { credits: AccountCardModel['credit
   return (
     <div className={styles.creditsRow}>
       <span className={styles.figureLabel}>{historical ? 'Last reported credits' : 'Credits'}</span>
-      <span className={styles.num} title={credits.balance ?? undefined}>
+      <span className={styles.num} title={nativeCreditBalanceTitle(credits.balance) ?? undefined}>
         {value ?? 'not reported'}
       </span>
       <p className={styles.reason}>

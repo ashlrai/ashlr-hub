@@ -125,7 +125,7 @@ describe('seatSubscription — credits are not the window', () => {
     expect(view.summary).toBe('primary window limit reached · credits available');
     // Round only the label; retain exact native units separately without currency inference.
     expect(view.credits).toBe('2,000 credits available');
-    expect(view.creditsTitle).toBe('Exact native balance: 2048.4196250000 credits. Not dollars or subscription percentage.');
+    expect(view.creditsTitle).toBe('Provider balance: 2,000 credits. Not dollars or subscription percentage.');
   });
 
   it('reports the same window as blocked when the server says exhausted', () => {
@@ -310,13 +310,13 @@ describe('native credit labels retain exact account evidence', () => {
   it.each([
     ['412.8921985000', '410'], ['62497.7860000000', '62,000'],
     ['0.000001', '0.000001'], ['9007199254740993.125', '9,000,000,000,000,000'],
-  ])('shortens only the visible %s balance', (balance, display) => {
+  ])('rounds visible and tooltip %s units while retaining the raw balance', (balance, display) => {
     const view = seatSubscription({ ...CODEX_CREDITS_SEAT, capacity: { ...CODEX_CREDITS_SEAT.capacity!,
       creditsExpiresAt: new Date(now + 1).toISOString(),
       credits: { hasCredits: true, unlimited: false, balance, spendControlReached: true },
     } }, now);
     expect(view.credits).toBe(`${display} credits available`);
-    expect(view.creditsTitle).toBe(`Exact native balance: ${balance} credits. Not dollars or subscription percentage.`);
+    expect(view.creditsTitle).toBe(`Provider balance: ${display} credits. Not dollars or subscription percentage.`);
     expect(view.creditBalance).toBe(balance);
     expect(view.creditSpendControlReached).toBe(true);
     expect(view.creditState).toBe('held');

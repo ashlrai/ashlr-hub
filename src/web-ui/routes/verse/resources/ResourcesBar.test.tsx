@@ -428,7 +428,8 @@ describe('visible Codex subscription and credit balances', () => {
     const cmp = screen.getByRole('button', { name: /^Cash Margin Partners:/ });
     expect(within(personal).getByText('100% used')).toBeInTheDocument();
     expect(within(personal).getByText('Credits ≈$82')).toBeInTheDocument();
-    expect(personal).toHaveAttribute('title', 'Exact native balance: 2048.4196250000 credits.');
+    expect(personal).toHaveAttribute('title', 'Provider balance: 2,000 credits.');
+    expect(personal.getAttribute('aria-label')).not.toContain('2048.4196250000');
     expect(personal.textContent).not.toContain('2048.4196250000');
     expect(within(cmp).getByText('63% used')).toBeInTheDocument();
     expect(within(cmp).getByText('Credits ≈$10')).toBeInTheDocument();

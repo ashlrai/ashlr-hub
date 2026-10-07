@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { estimatedCreditValue, formatNativeCreditUnits } from './codex-credit-value.js';
+import { estimatedCreditValue, formatNativeCreditUnits, nativeCreditBalanceTitle } from './codex-credit-value.js';
 describe('published personal-plan credit value estimate', () => {
   it.each(['free', 'go', 'plus', 'pro'])('uses the public equivalence for known personal %s plans', (plan) => {
     expect(estimatedCreditValue('2500', plan)).toBe('$100');
@@ -26,6 +26,7 @@ describe('readable native credit units', () => {
     ['999.999', '1,000'], ['9007199254740993.125', '9,000,000,000,000,000'],
   ])('formats %s without floating-point evidence loss', (raw, display) => {
     expect(formatNativeCreditUnits(raw)).toBe(display);
+    expect(nativeCreditBalanceTitle(raw)).toBe(`Provider balance: ${display} credits.`);
   });
   it('rounds a maximum-length whole balance without floating-point overflow', () => {
     const raw = '9'.repeat(64);
@@ -34,9 +35,11 @@ describe('readable native credit units', () => {
   it.each([null, undefined, 2500, '', '-1', '01', '1e6', 'Infinity', 'NaN', '1.', ' 1', '1'.repeat(65)])(
     'does not coerce a malformed balance %j into units', (raw) => {
       expect(formatNativeCreditUnits(raw)).toBeNull();
+      expect(nativeCreditBalanceTitle(raw)).toBeNull();
     });
   it('never invokes object conversions', () => {
     const conversion = () => { throw Error('Must not coerce native metadata'); };
     expect(formatNativeCreditUnits({ toString: conversion, valueOf: conversion })).toBeNull();
+    expect(nativeCreditBalanceTitle({ toString: conversion, valueOf: conversion })).toBeNull();
   });
 });

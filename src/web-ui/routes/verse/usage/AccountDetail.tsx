@@ -25,6 +25,7 @@ import { formatDecimalMetric, formatMetric } from '../../../components/charts/fo
 import { StatusBadge, type Tone } from '../../../components/primitives/StatusBadge.js';
 import { relativePhrase } from '../context/context-model.js';
 import { ENGINE_LABEL } from '../verse-model.js';
+import { nativeCreditBalanceTitle } from '../resources/codex-credit-value.js';
 import { accountCreditDetail, type AccountCardModel, type AccountVerdictState } from './accounts-model.js';
 import { WindowMeter } from './WindowMeter.js';
 import styles from './usage.module.css';
@@ -193,7 +194,7 @@ export function AccountDetail({
           {credits ? (
             <div className={styles.creditsRow}>
               <span className={styles.figureLabel}>{historical ? 'Last reported credits' : 'Credits'}</span>
-              <span className={styles.num} title={credits.balance ?? undefined}>
+              <span className={styles.num} title={nativeCreditBalanceTitle(credits.balance) ?? undefined}>
                 {credits.unlimited
                   ? 'unlimited'
                   : credits.balanceValue !== null

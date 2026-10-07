@@ -18,7 +18,7 @@
  * disagree about one seat. Text wraps at word boundaries; anything long also
  * carries its full text as a tooltip.
  */
-import { estimatedCreditValue, formatNativeCreditUnits, CODEX_CREDIT_VALUE_SOURCE, CODEX_CREDIT_VALUE_CHECKED } from './codex-credit-value.js';
+import { estimatedCreditValue, formatNativeCreditUnits, nativeCreditBalanceTitle, CODEX_CREDIT_VALUE_SOURCE, CODEX_CREDIT_VALUE_CHECKED } from './codex-credit-value.js';
 import type { BudgetMode } from '../../../../core/routing/types.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { accountActions, type AccountAction } from '../apps/apps-model.js';
@@ -163,7 +163,7 @@ export function ResourceCard({ row, status, settled, mode, busy, onAction, readi
           {row.windows.length === 0 ? <p className={styles.subtle}>Connection status and usage are separate. No percentage has been supplied.</p> : null}
           {row.engine === 'codex' && row.creditState !== undefined && row.creditState !== 'unknown' ? <p className={styles.subtle}>
             {row.creditState === 'none' ? 'Native provider reports no available credits. ' : ''}
-            {row.creditBalance !== null && row.creditBalance !== undefined ? <span title={`Exact native balance: ${row.creditBalance} credits.`}>Native balance {formatNativeCreditUnits(row.creditBalance) ?? 'unknown'} credit units. </span> : null}
+            {row.creditBalance !== null && row.creditBalance !== undefined ? <span title={nativeCreditBalanceTitle(row.creditBalance) ?? undefined}>Native balance {formatNativeCreditUnits(row.creditBalance) ?? 'unknown'} credit units. </span> : null}
             Estimated credit value: {estimatedCreditValue(row.creditBalance, row.plan) ?? 'unknown'}.
             {' '}Personal-plan reference $0.04 per credit; not actual purchase price or attributed spend.
             {' '}<a href={CODEX_CREDIT_VALUE_SOURCE} target="_blank" rel="noreferrer">Published reference</a> checked {CODEX_CREDIT_VALUE_CHECKED}.

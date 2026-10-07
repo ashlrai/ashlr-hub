@@ -17,7 +17,7 @@
  * drawer's cloud read, so it adds no poll of its own for accounts.
  */
 import { codexCreditsAvailable } from '../../../../core/resources/codex-credits.js';
-import { estimatedCreditValue, formatNativeCreditUnits } from './codex-credit-value.js';
+import { estimatedCreditValue, formatNativeCreditUnits, nativeCreditBalanceTitle } from './codex-credit-value.js';
 import { useMemo, useState, type CSSProperties, type ReactNode } from 'react';
 import { formatMetric } from '../../../components/charts/format-metric.js';
 import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
@@ -51,7 +51,7 @@ export interface BarRow {
   /** Independent Codex credit reading, including unknown/unconfirmed states. */
   creditLabel?: string;
   creditHeld?: boolean;
-  /** Exact provider evidence is available only on deliberate title inspection. */
+  /** Raw provider reading retained here; display metadata formats it at render. */
   exactCreditBalance?: string;
   /** Spoken + hover summary. */
   summary: string;
@@ -204,7 +204,7 @@ function RowTip({ row }: { row: BarRow }) {
         <ProviderLogo engine={row.engine} size={14} />
         <strong>{row.name}</strong>
       </div>
-      <div className={styles.tipSummary} title={row.exactCreditBalance === undefined ? undefined : `Exact native balance: ${row.exactCreditBalance} credits.`}>{row.summary.slice(row.name.length + 2)}</div>
+      <div className={styles.tipSummary} title={nativeCreditBalanceTitle(row.exactCreditBalance) ?? undefined}>{row.summary.slice(row.name.length + 2)}</div>
       {row.detail.map((line) => (
         <div key={line} className={styles.tipLine}>{line}</div>
       ))}
@@ -255,7 +255,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
             className={styles.row}
             data-level={row.level}
             aria-label={`${row.summary}. Open Resources`}
-            title={row.exactCreditBalance === undefined ? undefined : `Exact native balance: ${row.exactCreditBalance} credits.`}
+            title={nativeCreditBalanceTitle(row.exactCreditBalance) ?? undefined}
             onClick={() => openResources()}
           >
             {expanded ? (
