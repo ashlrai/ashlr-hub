@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const projections = vi.hoisted(() => ({ factory: vi.fn(), campaign: vi.fn(), universe: vi.fn(), readiness: vi.fn() }));
+const projections = vi.hoisted(() => ({ factory: vi.fn(), campaign: vi.fn(), universe: vi.fn(), projection: vi.fn(), readiness: vi.fn() }));
 vi.mock('../src/core/universe/campaign-readiness.js', async (original) => ({
   ...await original<typeof import('../src/core/universe/campaign-readiness.js')>(), readUniverseCampaignReadiness: projections.readiness,
 }));
@@ -13,7 +13,7 @@ vi.mock('../src/core/universe/firm-engineering-control-handler.js', async (origi
 }));
 vi.mock('../src/core/universe/campaign-store.js', async (original) => ({
   ...await original<typeof import('../src/core/universe/campaign-store.js')>(),
-  readUniverseCampaign: projections.campaign, campaignUniverse: projections.universe,
+  readUniverseCampaign: projections.campaign, campaignUniverse: projections.universe, readUniverseCampaignProjection: projections.projection,
 }));
 import { createResourceConsoleEngineeringOwner, validateResourceConsoleEngineeringCatalog, prepareResourceConsoleEngineeringEnrollments,
   type ResourceConsoleEngineeringCatalog } from '../src/core/resources/console-engineering.js';
@@ -131,9 +131,10 @@ async function ownerFixture() {
   const runtimeFile = join(root, 'runtime.json'); save(runtimeFile, runtime);
   const campaignBudget = { maxGenerations: 3, maxDurationMs: 60_000, maxModelRequests: 3, maxStagnantGenerations: 2, maxReportedTokens: null };
   projections.readiness.mockReturnValue({ sourceState: 'healthy', automaticAction: 'run', observedState: 'ready', disposition: 'startable' });
-  projections.campaign.mockReturnValue({ definition: { budget: campaignBudget } });
-  projections.universe.mockReturnValue({ manifest: { seed: { repo: project }, objective: 'Fixed fixture objective',
+  projections.campaign.mockReturnValue({ sourceState: 'healthy', definition: { budget: campaignBudget } });
+  projections.universe.mockReturnValue({ sourceState: 'healthy', manifest: { seed: { repo: project }, objective: 'Fixed fixture objective',
     budget: { maxTrials: 1, maxDurationMs: 1000, trialTimeoutMs: 500, maxParallel: 1 } } });
+  projections.projection.mockImplementation(() => ({ campaign: projections.campaign(), universe: projections.universe() }));
   const run = vi.fn(emit);
   projections.factory.mockReturnValue({ nodeInput: { bindingDigest: 'b'.repeat(64), requestDigest: 'c'.repeat(64) },
     handler: { effectClass: 'resource-completion', constitutionVersion: 'fixture', policyEpoch: 0, bindingDigest: 'b'.repeat(64), run } });
@@ -222,13 +223,59 @@ describe('owned console engineering evidence', () => {
   it('shares the exact prepared enrollment identity with startup without publishing graph records', async () => {
     const f = await ownerFixture(); const owner = f.create();
     try {
+      projections.projection.mockClear();
       const projects = f.supervisor.projects()!;
       const prepared = prepareResourceConsoleEngineeringEnrollments({ ...f.options, projects,
         projectBindings: projects.map((project) => f.supervisor.engineeringBinding(project.id).project) });
       expect(prepared.map((entry) => entry.summary)).toEqual(owner.catalog());
       expect(prepared[0]!.definition.hostEnrollmentDigest).toBe(owner.catalog()[0]!.enrollmentDigest);
+      expect(projections.projection).toHaveBeenCalledExactlyOnceWith('campaign', { root: f.options.catalog.enrollments[0]!.host.root });
       expect(readdirSync(f.graphRoot)).toEqual([]); expect(f.run).not.toHaveBeenCalled();
     } finally { await owner.close(); await f.supervisor.close(); }
+  });
+  it('reads a fresh coherent summary on each construction while keeping enrollment identity', async () => {
+    const f = await ownerFixture();
+    try {
+      const projects = f.supervisor.projects()!;
+      const input = { ...f.options, projects, projectBindings: projects.map((project) => f.supervisor.engineeringBinding(project.id).project) };
+      const first = prepareResourceConsoleEngineeringEnrollments(input)[0]!;
+      projections.universe.mockReturnValue({ sourceState: 'healthy', manifest: { seed: { repo: f.project }, objective: 'Changed current objective',
+        budget: { maxTrials: 1, maxDurationMs: 1000, trialTimeoutMs: 500, maxParallel: 1 } } });
+      const second = prepareResourceConsoleEngineeringEnrollments(input)[0]!;
+      expect(first.summary.objective).toBe('Fixed fixture objective'); expect(second.summary.objective).toBe('Changed current objective');
+      expect(second.summary.enrollmentDigest).toBe(first.summary.enrollmentDigest); expect(second.definition).toEqual(first.definition);
+      expect(projections.projection).toHaveBeenCalledTimes(2);
+      // Catalog validation and binding construction remain separate factory reads.
+      expect(projections.factory).toHaveBeenCalledTimes(4);
+      expect(readdirSync(f.graphRoot)).toEqual([]); expect(f.run).not.toHaveBeenCalled();
+    } finally { await f.supervisor.close(); }
+  });
+  it.each(['null-universe', 'degraded-campaign', 'degraded-universe'])('refuses later %s evidence without graph publication or launch', async problem => {
+    const f = await ownerFixture();
+    try {
+      projections.projection.mockImplementation(() => ({
+        campaign: { ...projections.campaign(), ...(problem === 'degraded-campaign' ? { sourceState: 'degraded' } : {}) },
+        universe: problem === 'null-universe' ? null : { ...projections.universe(), ...(problem === 'degraded-universe' ? { sourceState: 'degraded' } : {}) },
+      }));
+      const projects = f.supervisor.projects()!;
+      expect(() => prepareResourceConsoleEngineeringEnrollments({ ...f.options, projects,
+        projectBindings: projects.map((project) => f.supervisor.engineeringBinding(project.id).project) })).toThrow('Engineering campaign evidence unavailable');
+      expect(projections.factory).toHaveBeenCalledTimes(2); expect(projections.projection).toHaveBeenCalledOnce();
+      expect(readdirSync(f.graphRoot)).toEqual([]); expect(f.run).not.toHaveBeenCalled();
+    } finally { await f.supervisor.close(); }
+  });
+  it('retains missing-source and wrong-project refusal without graph publication', async () => {
+    const f = await ownerFixture();
+    try {
+      const projects = f.supervisor.projects()!;
+      const input = { ...f.options, projects, projectBindings: projects.map((project) => f.supervisor.engineeringBinding(project.id).project) };
+      projections.projection.mockImplementationOnce(() => { throw new Error('Missing private campaign evidence'); });
+      expect(() => prepareResourceConsoleEngineeringEnrollments(input)).toThrow('Missing private campaign evidence');
+      projections.universe.mockReturnValue({ sourceState: 'healthy', manifest: { seed: { repo: join(root, 'another-project') }, objective: 'Wrong project',
+        budget: { maxTrials: 1, maxDurationMs: 1000, trialTimeoutMs: 500, maxParallel: 1 } } });
+      expect(() => prepareResourceConsoleEngineeringEnrollments(input)).toThrow('Engineering campaign belongs to another project');
+      expect(readdirSync(f.graphRoot)).toEqual([]); expect(f.run).not.toHaveBeenCalled();
+    } finally { await f.supervisor.close(); }
   });
   it('keeps startup/catalog/status read-only and exposes separate experiment/campaign budgets', async () => {
     const f = await ownerFixture(); const owner = f.create();

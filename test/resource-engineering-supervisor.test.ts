@@ -14,13 +14,13 @@ import * as graph from '../src/core/universe/control-graph.js';
 import * as controllerStore from '../src/core/universe/portfolio-controller-store.js';
 import * as provenance from '../src/core/foundry/provenance.js';
 import * as policy from '../src/core/sandbox/policy.js';
-const hooks = vi.hoisted(() => ({ factory: vi.fn(), campaign: vi.fn(), universe: vi.fn(), readiness: vi.fn(), receipt: vi.fn() }));
+const hooks = vi.hoisted(() => ({ factory: vi.fn(), campaign: vi.fn(), universe: vi.fn(), projection: vi.fn(), readiness: vi.fn(), receipt: vi.fn() }));
 vi.mock('../src/core/universe/firm-engineering-control-handler.js', async original => ({
   ...await original<object>(), createFirmEngineeringControlHandler: hooks.factory,
 }));
 vi.mock('../src/core/universe/campaign-readiness.js', async original => ({ ...await original<object>(), readUniverseCampaignReadiness: hooks.readiness }));
 vi.mock('../src/core/universe/campaign-store.js', async original => ({
-  ...await original<object>(), readUniverseCampaign: hooks.campaign, campaignUniverse: hooks.universe,
+  ...await original<object>(), readUniverseCampaign: hooks.campaign, campaignUniverse: hooks.universe, readUniverseCampaignProjection: hooks.projection,
 }));
 vi.mock('../src/core/universe/campaign-delivery-recovery.js', async original => ({ ...await original<object>(), readCompletedCampaignDelivery: hooks.receipt }));
 let root: string;
@@ -48,9 +48,10 @@ function fixture() {
     observationsPath: control.observationsFile, workspace: transport };
   const runtimeFile = join(root, 'runtime.json'); save(runtimeFile, runtime);
   const budget = { maxGenerations: 1, maxDurationMs: 60_000, maxModelRequests: 1, maxStagnantGenerations: 1, maxReportedTokens: null };
-  hooks.campaign.mockReturnValue({ definition: { budget } });
-  hooks.universe.mockReturnValue({ manifest: { seed: { repo: project }, objective: 'Inert enrolled objective',
+  hooks.campaign.mockReturnValue({ sourceState: 'healthy', definition: { budget } });
+  hooks.universe.mockReturnValue({ sourceState: 'healthy', manifest: { seed: { repo: project }, objective: 'Inert enrolled objective',
     budget: { maxTrials: 1, maxDurationMs: 60_000, trialTimeoutMs: 1_000, maxParallel: 1 } } });
+  hooks.projection.mockImplementation(() => ({ campaign: hooks.campaign(), universe: hooks.universe() }));
   let observed = 0;
   const ready = { sourceState: 'healthy', automaticAction: 'run', observedState: 'ready', disposition: 'startable',
     recordsDigest: 'a'.repeat(64), expectedIdentity: { universeId: 'universe', definitionDigest: 'b'.repeat(64),

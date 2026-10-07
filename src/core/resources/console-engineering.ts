@@ -6,7 +6,7 @@ import { readKillSwitch } from '../sandbox/policy.js';
 import { acquireLocalStoreLockWithOutcome, releaseLocalStoreLock, ownsLocalStoreLock } from '../fleet/local-store-lock.js';
 import { readImmutablePrivateRecords, writeImmutablePrivateRecord, type ImmutablePrivateRecordStoreConfig } from '../util/immutable-private-record-store.js';
 import { canonical, digest, inspectPrivateDirectory } from '../universe/artifacts.js';
-import { campaignUniverse, readUniverseCampaign } from '../universe/campaign-store.js';
+import { readUniverseCampaign, readUniverseCampaignProjection } from '../universe/campaign-store.js';
 import { readUniverseCampaignReadiness } from '../universe/campaign-readiness.js';
 import { portfolioControllerDirectory, readPortfolioControllerEvents } from '../universe/portfolio-controller-store.js';
 import { readCompletedCampaignDelivery } from '../universe/campaign-delivery-recovery.js';
@@ -252,8 +252,11 @@ export function prepareResourceConsoleEngineeringEnrollments(options: {
       nodes: [{ id: row.host.nodeId, kind: 'deliver', requires: [], input: binding.nodeInput }] });
     const definitionDigest = digest(canonical(definition));
     const campaigns = row.host.definition.tasks.map((task) => {
-      const campaign = readUniverseCampaign(task.campaignId, { root: row.host.root });
-      const universe = campaignUniverse(campaign, { root: row.host.root });
+      // Reuse this observation only; later admission still reads current evidence.
+      const { campaign, universe } = readUniverseCampaignProjection(task.campaignId, { root: row.host.root });
+      if (campaign.sourceState !== 'healthy' || universe === null || universe.sourceState !== 'healthy') {
+        fail('UNAVAILABLE', 'Engineering campaign evidence unavailable');
+      }
       if (universe.manifest.seed.repo !== scope.project.workspace) fail('CONFLICT', 'Engineering campaign belongs to another project');
       return { id: task.campaignId, dependsOn: task.dependsOn, objective: universe.manifest.objective.slice(0, 512),
         branch: row.host.deliveryPlan.deliveries.find((target) => target.campaignId === task.campaignId)!.branch,
