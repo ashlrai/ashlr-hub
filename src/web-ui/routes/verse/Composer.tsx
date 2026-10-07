@@ -261,8 +261,12 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   const sendInterceptor = useRef<SendInterceptor | null>(null);
   const [managerMode, setManagerMode] = useState(false);
   const registerInterceptor = useCallback((fn: SendInterceptor | null) => {
+    const wasManager = sendInterceptor.current?.handlesRunning === true;
+    const nextManager = fn?.handlesRunning === true;
     sendInterceptor.current = fn;
-    setManagerMode(fn?.handlesRunning === true);
+    // Interceptors refresh with draft/advice changes. An unchanged flag must
+    // not schedule another composer commit during a synchronous footer resize.
+    if (wasManager !== nextManager) setManagerMode(nextManager);
   }, []);
 
   // ---- dictation (voice/) ---------------------------------------------------
