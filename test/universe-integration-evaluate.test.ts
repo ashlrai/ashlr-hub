@@ -31,6 +31,7 @@ vi.mock('../src/core/universe/execution.js', () => ({
   assertUniverseExecution: mocks.assertExecution,
 }));
 vi.mock('../src/core/universe/store.js', () => ({
+  readRecords: vi.fn(() => []),
   manifestRecord: vi.fn(() => ({ manifestDigest: 'a'.repeat(64), comparatorDigest: 'b'.repeat(64),
     manifest: { objective: 'Evaluate this exact candidate', seed: { repo: '/repo', revision: 'c'.repeat(40) }, evaluation: { timeoutMs: 1_000 } },
     seedArtifact: { path: '/tmp/seed', digest: 'd'.repeat(64), revision: 'c'.repeat(40) }, evaluationCommand: ['/bin/true'],
