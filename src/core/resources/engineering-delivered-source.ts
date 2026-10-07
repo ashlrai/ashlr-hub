@@ -1,8 +1,8 @@
 /** Fresh delivered-source proof only; not graph completion, owner custody or launch authority. */
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
 import { canonical, digest, readArtifactSnapshot } from '../universe/artifacts.js';
-import { campaignUniverse, readUniverseCampaign } from '../universe/campaign-store.js';
-import { readCompletedCampaignDelivery } from '../universe/campaign-delivery-recovery.js';
+import { readUniverseCampaign } from '../universe/campaign-store.js';
+import { readCompletedCampaignDeliveryProjection } from '../universe/campaign-delivery-recovery.js';
 import { decodeUtf8Excerpt } from '../util/utf8-excerpt.js';
 import type { createResourceEngineeringPreparationRegistry, ResourceEngineeringPreparationRegistration } from './engineering-preparation-registry.js';
 import type { ResourceEngineeringSuccessorSource } from './engineering-preparation-types.js';
@@ -57,9 +57,12 @@ function deliveredSource(row: ResourceEngineeringPreparationRegistration,
     const target = enrollment.host.deliveryPlan.deliveries[0]!;
     if (target.campaignId !== campaignId) return null;
     const campaign = readUniverseCampaign(campaignId, { root: enrollment.host.root });
-    const receipt = readCompletedCampaignDelivery(campaign, target, { root: enrollment.host.root });
-    if (!receipt) return null;
-    const universe = campaignUniverse(campaign, { root: enrollment.host.root });
+    // Recovery already freshly verifies the durable campaign and its Universe.
+    // Reuse only this invocation's coherent projection; artifact bytes below
+    // and every later registration/source read remain independently checked.
+    const projection = readCompletedCampaignDeliveryProjection(campaign, target, { root: enrollment.host.root });
+    if (!projection) return null;
+    const { receipt, universe } = projection;
     const trial = universe.runs.find(run => run.id === receipt.runId)?.trials.find(item => item.id === receipt.trialId);
     if (universe.sourceState !== 'healthy' || !trial?.artifact || trial.artifact.digest !== receipt.artifactDigest) return null;
     const artifact = readArtifactSnapshot(trial.artifact.path);
