@@ -5,8 +5,11 @@
  * operable seat names, and the same markup at 375 (C0's viewport mock) and
  * in dark (token-probe contrast of the colours the strip uses).
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, cleanup, render, renderHook, screen, waitFor, within } from '@testing-library/react';
+import { StrictMode, type ReactNode } from 'react';
+import { evictAll, invalidateObserved } from '../../../data/cache.js';
+import { SectionVisibilityProvider } from '../shell/section-visibility.js';
 import userEvent from '@testing-library/user-event';
 import type { BudgetView } from '../../../../core/routing/policy.js';
 import { contrastRatio } from '../../../design/contrast.js';
@@ -21,7 +24,7 @@ import {
   LOCAL_SEAT_V2,
   UNREAD_SEAT,
 } from '../seat-fixtures.test-support.js';
-import { CapacityStrip } from './CapacityStrip.js';
+import { CapacityStrip, useCapacityData } from './CapacityStrip.js';
 import { buildCapacityRows } from './capacity-strip-model.js';
 import { barRows } from '../resources/ResourcesBar.js';
 import { readFileSync } from 'node:fs';
@@ -230,5 +233,55 @@ describe('CapacityStrip styles', () => {
     const used = /\.used \{[^}]*\}/.exec(source)![0];
     expect(used).toContain('var(--data-seq-5)');
     expect(source).not.toMatch(/background:[^;]*--accent/);
+  });
+});
+
+
+// A hidden surface suppresses the existing polls; these are mount-read counts,
+// never provider probes or live startup latency measurements.
+describe('useCapacityData budget opt-out', () => {
+  const wrapper = ({ children }: { children: ReactNode }) => <StrictMode>
+    <SectionVisibilityProvider visible={false}>{children}</SectionVisibilityProvider>
+  </StrictMode>;
+  let reads: string[];
+  beforeEach(() => {
+    evictAll();
+    reads = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
+      const path = String(input);
+      reads.push(path);
+      const body = path === '/api/verse/budget' ? BUDGET : path === '/api/verse/health' ? { seats: [] }
+        : { seats: [], projects: [], sessions: [], dispatchEnabled: false, localRuntime: { ollama: { reachable: false, models: [], baseUrl: 'http://example.invalid' } } };
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }));
+  });
+  afterEach(() => { cleanup(); evictAll(); vi.unstubAllGlobals(); });
+  const budgetReads = () => reads.filter(path => path === '/api/verse/budget').length;
+
+  it('does not read a budget for summary-only consumers, including observed renewal', async () => {
+    const hook = renderHook(() => useCapacityData({ withBudget: false }), { wrapper });
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    expect(hook.result.current.budget).toBeNull();
+    expect(budgetReads()).toBe(0);
+    await act(async () => { invalidateObserved('verse-budget'); });
+    expect(budgetReads()).toBe(0);
+    expect(reads.filter(path => path === '/api/verse/bootstrap')).toHaveLength(1);
+    expect(reads.filter(path => path === '/api/verse/health')).toHaveLength(1);
+  });
+
+  it('keeps real budget readers shared while an opted-out summary stays idle', async () => {
+    const summary = renderHook(({ enabled }) => useCapacityData({ withBudget: enabled }), { initialProps: { enabled: false }, wrapper });
+    const real = renderHook(() => useCapacityData(), { wrapper });
+    await waitFor(() => expect(real.result.current.budget).toEqual(BUDGET));
+    expect(summary.result.current.budget).toBeNull();
+    expect(budgetReads()).toBe(1);
+    summary.rerender({ enabled: true });
+    expect(summary.result.current.budget).toEqual(BUDGET);
+    expect(budgetReads()).toBe(1);
+    summary.rerender({ enabled: false });
+    real.unmount();
+    await act(async () => { invalidateObserved('verse-budget'); });
+    expect(budgetReads()).toBe(1);
+    expect(summary.result.current.budget).toBeNull();
   });
 });

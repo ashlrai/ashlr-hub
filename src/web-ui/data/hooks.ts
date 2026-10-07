@@ -36,7 +36,11 @@ import { subscribeTheme, getTheme, setTheme, cycleTheme, type ThemePreference } 
  */
 export const DEFAULT_QUERY_FRESH_MS = 10_000;
 
+const DISABLED_QUERY_SNAPSHOT: QueryEntry<never> = { data: undefined, error: undefined, status: 'idle', updatedAt: null };
+
 export interface UseQueryOptions {
+  /** Subscribe/fetch on mount. False stays idle; shared reads are never cancelled. Default true. */
+  enabled?: boolean;
   /** Override `DEFAULT_QUERY_FRESH_MS` for this subscription. 0 = always fetch. */
   freshMs?: number;
 }
@@ -51,20 +55,22 @@ export interface UseQueryOptions {
  */
 export function useQuery<T>(def: QueryDef<T>, options?: UseQueryOptions): QueryEntry<T> {
   const freshMs = options?.freshMs ?? DEFAULT_QUERY_FRESH_MS;
+  const enabled = options?.enabled ?? true;
   const snapshot = useSyncExternalStore(
-    useCallback((listener) => subscribeQuery(def.key, listener), [def.key]),
-    () => getQuerySnapshot<T>(def.key),
-    () => getQuerySnapshot<T>(def.key),
+    useCallback((listener) => enabled ? subscribeQuery(def.key, listener) : () => {}, [def.key, enabled]),
+    () => enabled ? getQuerySnapshot<T>(def.key) : DISABLED_QUERY_SNAPSHOT,
+    () => enabled ? getQuerySnapshot<T>(def.key) : DISABLED_QUERY_SNAPSHOT,
   );
 
   useEffect(() => {
+    if (!enabled) return;
     // Cache refreshers outlive any one component. Binding the stored fetcher
     // to this component's AbortSignal poisons later SSE invalidations after
     // unmount, so the shared cache owns the request lifetime.
     void ensureQuery(def.key, () => def.fetch(), freshMs);
-    // Re-fetch only when the resource identity changes, not on every render.
+    // Re-fetch on identity, freshness or admission changes, not every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- def.fetch is re-created per render on purpose; only def.key identifies the resource.
-  }, [def.key, freshMs]);
+  }, [def.key, freshMs, enabled]);
 
   return snapshot;
 }

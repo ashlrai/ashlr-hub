@@ -376,7 +376,7 @@ export function useCapacityData(opts: { withBudget?: boolean; withHealth?: boole
   const bootstrap = useQuery(verseBootstrapQuery);
   useSeatsRefresh(visible);
   const health = useSeatHealth(visible && withHealth);
-  const budget = useQuery(budgetQuery);
+  const budget = useQuery(budgetQuery, { enabled: withBudget });
   const refetchBudget = useRefetch(budgetQuery);
   usePollWhileVisible(refetchBudget, CAPACITY_BUDGET_POLL_MS, { enabled: withBudget });
   const data = bootstrap.data as VerseBootstrap | undefined;
