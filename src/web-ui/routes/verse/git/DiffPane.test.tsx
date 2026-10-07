@@ -96,6 +96,8 @@ describe('DiffPane', () => {
     const user = userEvent.setup();
     renderPane();
     const list = await screen.findByRole('listbox', { name: 'Changed files' });
+    // The listbox renders before its initial selection has settled.
+    await screen.findByRole('grid', { name: /Changes in notes\/new.md/ });
     list.focus();
     await user.keyboard('{ArrowDown}');
     expect(within(list).getByRole('option', { selected: true })).toHaveAttribute('data-path', 'src/a.ts');
