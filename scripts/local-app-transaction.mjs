@@ -148,10 +148,18 @@ export function launchedAppIsOwned(io) {
   const processes = readProcesses(io);
   const desktop = processes.get(record.desktopPid);
   const sidecar = processes.get(record.sidecarPid);
+  const baseArgs = `${record.sidecarPath} verse --port 7777 --no-open --json`;
+  // Match only the two exact Verse forms emitted by native sidecar_args;
+  // remote startup requires its fixed home config and private token handoff.
+  const remoteArgs = `${baseArgs} --remote-config ${join(io.home, '.ashlr', 'verse-remote.json')} --desktop-token-handoff`;
   if (!desktop || desktop.args !== join(PHANTOM_APP_PATH, 'Contents/MacOS', NATIVE_EXECUTABLE) ||
-      !sidecar || sidecar.ppid !== record.desktopPid || sidecar.args !== `${record.sidecarPath} verse --port 7777 --no-open --json`) return false;
+      !sidecar || sidecar.ppid !== record.desktopPid || (sidecar.args !== baseArgs && sidecar.args !== remoteArgs)) return false;
   const listener = io.exec('/usr/sbin/lsof', ['-nP', '-a', '-p', String(record.sidecarPid), '-iTCP:7777', '-sTCP:LISTEN', '-Fp']);
-  return listener.status === 0 && listener.stdout.trim() === `p${record.sidecarPid}`;
+  // lsof -Fp emits the selected process followed by its listening file records.
+  const fields = listener.stdout.split('\n');
+  if (fields.at(-1) === '') fields.pop();
+  return listener.status === 0 && fields[0] === `p${record.sidecarPid}` && fields.length > 1 &&
+    fields.slice(1).every((field) => /^f[0-9]+$/u.test(field));
 }
 
 /** Existing local release layout; this is compatibility/ownership, not new launch authority. */
