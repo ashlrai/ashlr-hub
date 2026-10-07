@@ -1,6 +1,8 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, readFileSync, writeFileSync, symlinkSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, symlinkSync, mkdirSync, renameSync, linkSync, chmodSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
+import * as privateStorage from '../src/core/util/private-storage.js';
+import * as preferences from '../src/core/verse/preferences.js';
 import { pathToFileURL } from 'node:url';
 import { useTmpHome, makePolicy } from './helpers/leader-310b-fakes.js';
 import { HUB_REPOSITORY_IDENTITY } from '../src/core/authority/repository-binding.js';
@@ -312,6 +314,115 @@ describe('durable article maintenance uses the normal task lane', () => {
   it('an unsafe storage ancestor cannot be followed to enable maintenance', () => {
     const elsewhere = join(home.home(), 'elsewhere'); mkdirSync(elsewhere); symlinkSync(elsewhere, join(home.home(), '.ashlr'), 'dir');
     expect(() => readReleaseArticles()).toThrow(); expect(() => configureReleaseArticles(true)).toThrow(); expect(existsSync(join(elsewhere, 'release-articles', 'manifest.json'))).toBe(false);
+  });
+  // Exercise the real Linux adapter contract on every host: POSIX metadata is
+  // checked by this caller, unlike the Darwin/Windows ACL adapter branches.
+  function callerCheckedAssurance(): void {
+    const actual = privateStorage.assurePrivateStoragePath;
+    vi.spyOn(privateStorage, 'assurePrivateStoragePath').mockImplementation((path, kind, mode, options) =>
+      actual(path, kind, mode, { ...options, platform: 'linux' }));
+  }
+  it.each(['.ashlr', 'release-articles'])('rejects a missing manifest under a symlinked %s with caller-checked assurance', (part) => {
+    callerCheckedAssurance(); const elsewhere = join(home.home(), 'elsewhere'); mkdirSync(elsewhere, { mode: 0o700 });
+    if (part === 'release-articles') mkdirSync(join(home.home(), '.ashlr'), { mode: 0o700 });
+    symlinkSync(elsewhere, part === '.ashlr' ? join(home.home(), part) : releaseArticlePaths().directory, 'dir');
+    expect(() => readReleaseArticles()).toThrow(/unsafe/);
+    expect(() => configureReleaseArticles(true)).toThrow(/unsafe/);
+    expect(existsSync(join(elsewhere, 'manifest.json'))).toBe(false);
+    expect(existsSync(join(elsewhere, 'release-articles'))).toBe(false);
+  });
+  it('rejects an existing enabled manifest reached through an ancestor symlink on the caller-checked path', () => {
+    configureReleaseArticles(true); const elsewhere = join(home.home(), 'elsewhere');
+    renameSync(join(home.home(), '.ashlr'), elsewhere); symlinkSync(elsewhere, join(home.home(), '.ashlr'), 'dir');
+    callerCheckedAssurance(); expect(() => readReleaseArticles()).toThrow(/unsafe/);
+    expect(() => configureReleaseArticles(false)).toThrow(/unsafe/);
+    expect(JSON.parse(readFileSync(join(elsewhere, 'release-articles', 'manifest.json'), 'utf8')).enabled).toBe(true);
+  });
+  it('refuses dangling ancestors rather than reporting safely missing configuration', () => {
+    callerCheckedAssurance(); symlinkSync(join(home.home(), 'does-not-exist'), join(home.home(), '.ashlr'), 'dir');
+    expect(() => readReleaseArticles()).toThrow(/unsafe/);
+    expect(() => configureReleaseArticles(true)).toThrow(/unsafe/);
+    expect(existsSync(join(home.home(), 'does-not-exist'))).toBe(false);
+  });
+  it('keeps truly missing state observational without creating or changing directories', () => {
+    callerCheckedAssurance(); expect(readReleaseArticles().enabled).toBe(false);
+    expect(existsSync(join(home.home(), '.ashlr'))).toBe(false);
+    mkdirSync(join(home.home(), '.ashlr'), { mode: 0o700 });
+    const before = lstatSync(join(home.home(), '.ashlr'), { bigint: true });
+    expect(readReleaseArticles().enabled).toBe(false);
+    expect(existsSync(releaseArticlePaths().directory)).toBe(false);
+    const after = lstatSync(join(home.home(), '.ashlr'), { bigint: true });
+    expect(after.ino).toBe(before.ino); expect(after.mode).toBe(before.mode); expect(after.ctimeNs).toBe(before.ctimeNs);
+  });
+  it('refuses hard-linked manifest authority on the caller-checked path', () => {
+    configureReleaseArticles(true); callerCheckedAssurance();
+    linkSync(releaseArticlePaths().file, join(home.home(), 'second-manifest.json'));
+    expect(() => readReleaseArticles()).toThrow(/unsafe/);
+  });
+  it('refuses a manifest replaced during platform assurance without applying the replacement', () => {
+    configureReleaseArticles(true); const { file } = releaseArticlePaths(); const old = readFileSync(file, 'utf8');
+    const actual = privateStorage.assurePrivateStoragePath;
+    vi.spyOn(privateStorage, 'assurePrivateStoragePath').mockImplementation((path, kind, mode, options) => {
+      const proof = actual(path, kind, mode, { ...options, platform: 'linux' });
+      if (path === file) { renameSync(file, `${file}.old`); writeFileSync(file, old.replace('"enabled":true', '"enabled":false'), { mode: 0o600 }); }
+      return proof;
+    });
+    expect(() => readReleaseArticles()).toThrow(/unsafe/);
+  });
+  it('refuses a manifest replaced during capped reading instead of accepting old authority', () => {
+    configureReleaseArticles(true); callerCheckedAssurance(); const { file } = releaseArticlePaths();
+    const actual = preferences.readPrivateFileCapped;
+    vi.spyOn(preferences, 'readPrivateFileCapped').mockImplementation((path, bound) => {
+      const bytes = actual(path, bound);
+      renameSync(path, `${path}.old`); writeFileSync(path, bytes!.text.replace('"enabled":true', '"enabled":false'), { mode: 0o600 });
+      return bytes;
+    });
+    expect(() => readReleaseArticles()).toThrow(/changed during read/);
+    expect(JSON.parse(readFileSync(file, 'utf8')).enabled).toBe(false);
+  });
+  it('keeps existing unsafe POSIX modes unchanged during a refused observational read', () => {
+    configureReleaseArticles(true); const directory = releaseArticlePaths().directory;
+    if (process.platform === 'win32') {
+      // Windows modes are not its authority boundary; its existing ACL helper
+      // must refuse this same read rather than substituting Unix chmod rules.
+      vi.spyOn(privateStorage, 'assurePrivateStoragePath').mockReturnValue({ ok: false, reason: 'untrusted-ancestor-owner' });
+      expect(() => readReleaseArticles()).toThrow(/unsafe/);
+    } else {
+      callerCheckedAssurance(); chmodSync(directory, 0o722);
+      const before = lstatSync(directory, { bigint: true });
+      expect(() => readReleaseArticles()).toThrow(/unsafe/);
+      expect(lstatSync(directory, { bigint: true }).mode).toBe(before.mode);
+    }
+  });
+  it('does not reinterpret disappearance during platform assurance as safely missing state', () => {
+    mkdirSync(join(home.home(), '.ashlr'), { mode: 0o700 }); const actual = privateStorage.assurePrivateStoragePath;
+    vi.spyOn(privateStorage, 'assurePrivateStoragePath').mockImplementation((path, kind, mode, options) => {
+      const proof = actual(path, kind, mode, { ...options, platform: 'linux' });
+      renameSync(path, `${path}.removed`); return proof;
+    });
+    expect(() => readReleaseArticles()).toThrow(/unsafe/);
+    expect(existsSync(releaseArticlePaths().directory)).toBe(false);
+  });
+  it('rechecks inspected parents before accepting a missing manifest', () => {
+    mkdirSync(releaseArticlePaths().directory, { recursive: true, mode: 0o700 }); const actual = privateStorage.assurePrivateStoragePath;
+    const elsewhere = join(home.home(), 'elsewhere'); const parent = join(home.home(), '.ashlr'); const directory = releaseArticlePaths().directory;
+    vi.spyOn(privateStorage, 'assurePrivateStoragePath').mockImplementation((path, kind, mode, options) => {
+      const proof = actual(path, kind, mode, { ...options, platform: 'linux' });
+      if (path === directory) { renameSync(parent, elsewhere); symlinkSync(elsewhere, parent, 'dir'); }
+      return proof;
+    });
+    expect(() => readReleaseArticles()).toThrow(/changed during read/);
+    expect(existsSync(join(elsewhere, 'release-articles', 'manifest.json'))).toBe(false);
+  });
+  it('rechecks parent inodes after reading even when the leaf inode remains unchanged', () => {
+    configureReleaseArticles(true); callerCheckedAssurance(); const { file } = releaseArticlePaths();
+    const before = lstatSync(file, { bigint: true }); const actual = preferences.readPrivateFileCapped;
+    vi.spyOn(preferences, 'readPrivateFileCapped').mockImplementation((path, bound) => {
+      const bytes = actual(path, bound); const parent = join(home.home(), '.ashlr'); const elsewhere = join(home.home(), 'elsewhere');
+      renameSync(parent, elsewhere); symlinkSync(elsewhere, parent, 'dir'); return bytes;
+    });
+    expect(() => readReleaseArticles()).toThrow(/changed during read/);
+    expect(lstatSync(file, { bigint: true }).ino).toBe(before.ino);
   });
   it('unknown private manifest fields are refused rather than exported into CLI output', () => {
     configureReleaseArticles(true); const manifest = readReleaseArticles();

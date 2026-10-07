@@ -1,6 +1,6 @@
 /** Release-backed content maintenance through the existing signed repository task lane. */
 import { createHash, randomBytes } from 'node:crypto';
-import { lstatSync, mkdirSync, realpathSync } from 'node:fs';
+import { lstatSync, mkdirSync, realpathSync, type BigIntStats } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { evaluateStandingAuthority } from './authority/effective-config.js';
@@ -59,36 +59,67 @@ export function releaseArticlePaths(): { home: string; directory: string; file: 
   return { home, directory, file: join(directory, 'manifest.json') };
 }
 function empty(): ReleaseArticleManifest { return { v: 1, enabled: false, repository: 'ashlrai/ashlr-hub', records: [], observation: null }; }
+function safeStoragePath(stat: BigIntStats, kind: 'directory' | 'file'): boolean {
+  return !stat.isSymbolicLink() && (kind === 'directory' ? stat.isDirectory() : stat.isFile() && stat.nlink === 1n)
+    && (typeof process.getuid !== 'function' || stat.uid === BigInt(process.getuid()))
+    && (process.platform === 'win32' || (stat.mode & 0o022n) === 0n);
+}
+function inspectStoragePath(path: string, kind: 'directory' | 'file', anchorPath: string, mode: 'secure-created' | 'inspect-owned' = 'inspect-owned'): BigIntStats {
+  const before = lstatSync(path, { bigint: true });
+  // Linux assurance deliberately delegates POSIX metadata checks to its caller.
+  // Do these before platform-specific ACL checks so no symlink is followed.
+  if (!safeStoragePath(before, kind)) throw new Error('Release article storage is unsafe');
+  const proof = assurePrivateStoragePath(path, kind, mode, { anchorPath });
+  let after: BigIntStats;
+  try { after = lstatSync(path, { bigint: true }); }
+  catch { throw new Error('Release article storage changed during inspection'); }
+  if (!proof.ok || !safeStoragePath(after, kind) || before.dev !== after.dev || before.ino !== after.ino) throw new Error('Release article storage is unsafe');
+  return after;
+}
+function assertStorageDirectories(directories: { path: string; stat: BigIntStats }[]): void {
+  for (const { path, stat: before } of directories) {
+    let after: BigIntStats;
+    try { after = lstatSync(path, { bigint: true }); }
+    catch { throw new Error('Release article storage changed during read'); }
+    if (!safeStoragePath(after, 'directory') || before.dev !== after.dev || before.ino !== after.ino ||
+      before.mode !== after.mode || before.uid !== after.uid || before.gid !== after.gid) throw new Error('Release article storage changed during read');
+  }
+}
 function privateDirectory(): void {
   const paths = releaseArticlePaths(); let anchor = paths.home;
   for (const part of ['.ashlr', 'release-articles']) {
     const directory = join(anchor, part); let created = false;
     try { mkdirSync(directory, { mode: 0o700 }); created = true; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    const before = lstatSync(directory, { bigint: true });
-    const proof = assurePrivateStoragePath(directory, 'directory', created ? 'secure-created' : 'inspect-owned', { anchorPath: anchor });
-    const after = lstatSync(directory, { bigint: true });
-    if (!proof.ok || !before.isDirectory() || before.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino) throw new Error('Release article storage is unsafe');
+    inspectStoragePath(directory, 'directory', anchor, created ? 'secure-created' : 'inspect-owned');
     anchor = directory;
   }
 }
 export function readReleaseArticles(): ReleaseArticleManifest {
-  const paths = releaseArticlePaths();
-  try { lstatSync(paths.file); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Release article storage is unreadable');
-    // Missing is empty only after existing ancestors are inspected. An empty
-    // symlink target must not masquerade as healthy disabled configuration.
-    for (const directory of [join(paths.home, '.ashlr'), paths.directory]) {
-      try { lstatSync(directory); }
-      catch (missing) { if ((missing as NodeJS.ErrnoException).code === 'ENOENT') break; throw new Error('Release article storage is unreadable'); }
-      if (!assurePrivateStoragePath(directory, 'directory', 'inspect-owned', { anchorPath: paths.home }).ok) throw new Error('Release article storage is unsafe');
+  const paths = releaseArticlePaths(); let anchor = paths.home;
+  const directories: { path: string; stat: BigIntStats }[] = [];
+  // Inspect from the canonical home outward before even probing the leaf. A
+  // missing manifest behind an unsafe ancestor is never healthy empty state.
+  for (const directory of [join(paths.home, '.ashlr'), paths.directory]) {
+    try { directories.push({ path: directory, stat: inspectStoragePath(directory, 'directory', anchor) }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') { assertStorageDirectories(directories); return empty(); }
+      throw new Error('Release article storage is unsafe');
     }
-    return empty();
+    anchor = directory;
   }
-  if (!assurePrivateStoragePath(paths.file, 'file', 'inspect-owned', { anchorPath: paths.home }).ok) throw new Error('Release article storage is unsafe');
+  let before: BigIntStats;
+  try { before = inspectStoragePath(paths.file, 'file', paths.directory); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') { assertStorageDirectories(directories); return empty(); }
+    throw new Error('Release article storage is unsafe');
+  }
   const bytes = readPrivateFileCapped(paths.file, STORE_BYTES);
   if (!bytes || bytes.truncated) throw new Error('Release article manifest is unreadable');
+  const after = lstatSync(paths.file, { bigint: true });
+  if (!safeStoragePath(after, 'file') || before.dev !== after.dev || before.ino !== after.ino ||
+    before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) throw new Error('Release article manifest changed during read');
+  assertStorageDirectories(directories);
   const raw = JSON.parse(bytes.text) as ReleaseArticleManifest;
   if (!raw || !exactKeys(raw, 'enabled,observation,records,repository,v') || raw.v !== 1 || typeof raw.enabled !== 'boolean' || !['ashlrai/ashlr-hub', 'ashlrai/phantom'].includes(raw.repository) || !Array.isArray(raw.records)) throw new Error('Invalid release article manifest');
   if (raw.observation !== null && (!raw.observation || !['verified', 'pending-public-verification'].includes(raw.observation.state) ||
