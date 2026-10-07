@@ -367,7 +367,7 @@ describe('runDoctor — report structure', () => {
     expect(externalReportProbes.tools).toHaveBeenCalledOnce();
     expect(externalReportProbes.identity).toHaveBeenCalledOnce();
     expect(report.checks.find((check) => check.id === 'ashlr-tools-installed'))
-      .toMatchObject({ status: 'warn', detail: 'No ecosystem tools installed; 0/0 installed' });
+      .toMatchObject({ label: 'Phantom tools installed', status: 'warn', detail: 'No ecosystem tools installed; 0/0 installed' });
     expect(report.checks.find((check) => check.id === 'identity'))
       .toMatchObject({ status: 'warn', detail: 'Not logged in to Phantom cloud — identity unavailable' });
   }, 15_000);
@@ -692,6 +692,19 @@ describe('runDoctor — config check', () => {
 // ---------------------------------------------------------------------------
 // Fix field — structured remediation hints
 // ---------------------------------------------------------------------------
+
+describe('runDoctor — compatible CLI installation guidance', () => {
+  it('uses the scoped package when the compatible ashlr command is absent', async () => {
+    process.env.PATH = '';
+    const report = await runDoctor(makeConfig(tmpHome));
+    expect(report.checks.find(check => check.id === 'ashlr')).toMatchObject({
+      label: 'Phantom CLI installed (ashlr)', status: 'fail',
+      fix: 'Run: npm install -g @ashlr/hub  (or ensure ~/.local/bin is on PATH)',
+    });
+    expect(report.checks.find(check => check.id === 'mcp-plugin')?.label)
+      .toBe('Phantom MCP plugin registered (ashlr)');
+  });
+});
 
 describe('runDoctor — fix hints', () => {
   beforeEach(() => {
