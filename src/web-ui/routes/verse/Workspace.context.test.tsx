@@ -136,7 +136,7 @@ describe('Workspace — the context ring', () => {
     const meter = screen.getByRole('meter', { name: 'Context window' });
     expect(meter).toHaveTextContent('30%');
     expect(meter.getAttribute('aria-valuetext')).toContain('300k / 1M');
-    expect(meter.getAttribute('aria-valuetext')).toContain('compacts at about 367k');
+    expect(meter.getAttribute('aria-valuetext')).toContain('compacts at about 370k');
     expect(meter).toHaveAttribute('data-tone', 'warn');
     // The compaction point is drawn on the ring.
     expect(meter.querySelector('[data-testid="compaction-tick"]')).not.toBeNull();
@@ -154,7 +154,7 @@ describe('Workspace — the context ring', () => {
     const meter = screen.getByRole('meter');
     expect(meter.getAttribute('aria-valuetext')).toContain('120k / 256k');
     expect(meter).not.toHaveAttribute('data-tone', 'over');
-    expect(meter.getAttribute('title')).toContain('Verse passes this window to Claude Code');
+    expect(meter.getAttribute('title')).toContain('Phantom passes this window to Claude Code');
     expect(screen.queryByRole('region', { name: 'Context advice' })).toBeNull();
   });
 });
@@ -201,7 +201,7 @@ describe('Workspace — context mode, from the ⋯ menu', () => {
 
     view1.rerender(<Workspace {...props({ view: viewFor(getVerseSessionState(s.id).session) })} />);
     const meter = screen.getByRole('meter');
-    expect(meter.getAttribute('aria-valuetext')).toContain('compacts at about 967k');
+    expect(meter.getAttribute('aria-valuetext')).toContain('compacts at about 970k');
     expect(meter).toHaveAttribute('data-tone', 'ok');
     // …and the menu now offers the way back, warning that it compacts.
     const again = await openActions(user);

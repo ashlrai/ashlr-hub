@@ -15,8 +15,12 @@ import { buildCapacityRows, type CapacityRow, type CapacityWindowRow } from '../
 import { capacity, nativeSeat, seatWindow } from '../seat-fixtures.test-support.js';
 import { barRows, ResourcesBar } from './ResourcesBar.js';
 import { getResourcesUi, reloadResourcesUiForTest, RESOURCES_STORAGE_KEY, setResourcesBar } from './resources-store.js';
+import { reloadResourceOrderForTest, RESOURCE_ORDER_KEY } from './resource-order.js';
 
 const NOW = Date.parse('2026-09-25T02:00:00Z');
+
+beforeEach(() => { localStorage.removeItem(RESOURCE_ORDER_KEY); reloadResourceOrderForTest(); });
+afterEach(() => { localStorage.removeItem(RESOURCE_ORDER_KEY); reloadResourceOrderForTest(); });
 
 vi.mock('../usage/CapacityStrip.js', async (original) => ({
   ...await original<typeof import('../usage/CapacityStrip.js')>(),
@@ -95,11 +99,11 @@ describe('barRows', () => {
     const cloud = row({ seatId: 'devin', engine: 'devin', label: 'Devin (cloud)', windows: [] });
     const cli = row({ seatId: 'devin-cli', engine: 'devin', label: 'Devin (CLI)', windows: [] });
     const projected = barRows([cloud, cli], { healthRead: true, now: NOW, devinConsumption: consumption });
-    expect(projected[0]).toMatchObject({ value: '3.125 ACUs consumed', leftPercent: null, level: 'unknown' });
+    expect(projected[0]).toMatchObject({ value: '3.1 ACUs consumed', leftPercent: null, level: 'unknown' });
     expect(projected[0]!.detail).toContain('Balance, subscription limits and resets are not reported. No personal CLI allocation is inferred.');
     expect(projected[1]!.value).not.toContain('consumed');
     expect(barRows([cloud], { healthRead: true, now: NOW })[0]!.value).toBe('consumption not reported');
-    expect(barRows([cloud], { healthRead: true, now: NOW + 400_000, devinConsumption: consumption })[0]!.value).toBe('3.125 ACUs consumed · last');
+    expect(barRows([cloud], { healthRead: true, now: NOW + 400_000, devinConsumption: consumption })[0]!.value).toBe('3.1 ACUs consumed · last');
   });
 
   it('gives local models a full idle battery and no percentage', () => {
@@ -143,6 +147,78 @@ describe('the bar switch', () => {
     setResourcesBar(false);
     reloadResourcesUiForTest();
     expect(getResourcesUi().bar).toBe(false);
+  });
+});
+
+describe('custom resource order', () => {
+  beforeEach(() => {
+    vi.spyOn(Date, 'now').mockReturnValue(NOW);
+    vi.mocked(useCapacityData).mockReturnValue({ seats: [
+      nativeSeat(capacity(), { id: 'codex-a', engine: 'codex', label: 'Personal Codex' }),
+      nativeSeat(capacity(), { id: 'codex-b', engine: 'codex', label: 'Work Codex' }),
+    ], health: null, budget: null, loading: false, refreshing: false, readFailed: false, rosterUnavailable: false, pendingSeatIds: [] });
+    vi.mocked(useQuery).mockImplementation(query => ({ data: query.key === 'verse-resources-cloud' ? {
+      credits: { remainingUsd: 100, totalUsd: 250, running: 0, sessionsToday: 0 },
+    } : undefined } as never));
+  });
+  afterEach(() => { vi.restoreAllMocks(); vi.mocked(useQuery).mockReturnValue({ data: undefined } as never); });
+
+  const ids = (container: HTMLElement) => [...container.querySelectorAll('[data-resource-id]')].map(row => row.getAttribute('data-resource-id'));
+
+  it('moves independent accounts with keyboard controls and restores the same DOM order', () => {
+    const first = render(<ResourcesBar expanded />);
+    expect(ids(first.container)).toEqual(['account:codex-a', 'account:codex-b', 'budget:cloud']);
+    expect(screen.getByRole('button', { name: 'Move Personal Codex up' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Move Work Codex up' }));
+    expect(ids(first.container)).toEqual(['account:codex-b', 'account:codex-a', 'budget:cloud']);
+    expect(screen.getByRole('status')).toHaveTextContent('Work Codex moved to position 1 of 3.');
+    first.unmount(); reloadResourceOrderForTest();
+    const reloaded = render(<ResourcesBar expanded={false} />);
+    expect(ids(reloaded.container)).toEqual(['account:codex-b', 'account:codex-a', 'budget:cloud']);
+    fireEvent.click(screen.getByRole('button', { name: 'Move Work Codex down' }));
+    expect(ids(reloaded.container)).toEqual(['account:codex-a', 'account:codex-b', 'budget:cloud']);
+  });
+
+  it('drags cloud estimates with accounts and ignores an unrelated external drag', () => {
+    const view = render(<ResourcesBar expanded />);
+    const row = (id: string) => view.container.querySelector(`[data-resource-id="${id}"]`)!;
+    const dataTransfer = { effectAllowed: '', dropEffect: '', setData: vi.fn() };
+    fireEvent.dragStart(row('budget:cloud'), { dataTransfer });
+    fireEvent.dragOver(row('account:codex-a'), { dataTransfer });
+    fireEvent.drop(row('account:codex-a'), { dataTransfer });
+    expect(ids(view.container)).toEqual(['budget:cloud', 'account:codex-a', 'account:codex-b']);
+    expect(dataTransfer.setData).toHaveBeenCalledWith('application/x-ashlr-resource', 'budget:cloud');
+    fireEvent.drop(row('account:codex-b'), { dataTransfer });
+    expect(ids(view.container)).toEqual(['budget:cloud', 'account:codex-a', 'account:codex-b']);
+  });
+
+  it('ignores removed accounts and appends new accounts without reordering on a reading', () => {
+    localStorage.setItem(RESOURCE_ORDER_KEY, JSON.stringify(['account:gone', 'budget:cloud', 'account:codex-b', 'account:codex-a']));
+    reloadResourceOrderForTest();
+    const view = render(<ResourcesBar expanded />);
+    expect(ids(view.container)).toEqual(['budget:cloud', 'account:codex-b', 'account:codex-a']);
+    const current = vi.mocked(useCapacityData).getMockImplementation()!();
+    vi.mocked(useCapacityData).mockReturnValue({ ...current, seats: [...current.seats,
+      nativeSeat(capacity(), { id: 'codex-new', engine: 'codex', label: 'New Codex' })] });
+    view.rerender(<ResourcesBar expanded />);
+    expect(ids(view.container)).toEqual(['budget:cloud', 'account:codex-b', 'account:codex-a', 'account:codex-new']);
+  });
+
+  it('keeps Devin cloud consumption, CLI account and tracked budget independently reorderable', () => {
+    vi.mocked(useCapacityData).mockReturnValue({ seats: [
+      nativeSeat(capacity(), { id: 'devin', engine: 'devin', label: 'Devin (cloud)' }),
+      nativeSeat(capacity(), { id: 'devin-cli', engine: 'devin', label: 'Devin (CLI)' }),
+    ], health: null, budget: null, loading: false, refreshing: false, readFailed: false, rosterUnavailable: false, pendingSeatIds: [] });
+    vi.mocked(useQuery).mockImplementation(query => ({ data: query.key === 'verse-devin' ? { value: {
+      status: { enabled: true, connected: true }, budget: { acuBudgetTotal: 50, acuRemaining: 40, acuUsed: 10, acuInFlight: 0,
+        reportedAcuUsed: 10, unconfirmedAcuExposure: 0, paused: false, running: 0, sessionsToday: 0 },
+    } } : undefined } as never));
+    const view = render(<ResourcesBar expanded />);
+    expect(ids(view.container)).toEqual(['account:devin', 'account:devin-cli', 'budget:devin']);
+    expect(screen.getByRole('button', { name: /Devin \(cloud\): consumption not reported · remaining quota unknown/ })).toBeInTheDocument();
+    expect(screen.getByText('Devin budget')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Move Devin tracked budget up' }));
+    expect(ids(view.container)).toEqual(['account:devin', 'budget:devin', 'account:devin-cli']);
   });
 });
 
@@ -235,17 +311,18 @@ describe('Devin tracked exposure in the bar', () => {
 
 describe('Codex credits are independent of the quota battery', () => {
   it('shows native credits and estimated value when the window is spent without filling the battery', () => {
-    const account = row({ engine: 'codex', plan: 'pro', cls: 'tight', credits: '2,048.42 credits available',
+    const account = row({ engine: 'codex', plan: 'pro', cls: 'tight', credits: '2,000 credits available',
       creditBalance: '2048.4196250000', connection: { connection: 'exhausted' } as CapacityRow['connection'],
       windows: [win({ usedPercent: 100, limitReached: true })] });
     const result = barRows([account], { healthRead: true, now: NOW })[0]!;
     expect(result.value).toBe('100% used'); expect(result.leftPercent).toBe(0);
-    expect(result.creditLabel).toBe('Credits ≈$81.94'); expect(result.level).toBe('out');
+    expect(result.creditLabel).toBe('Credits ≈$82'); expect(result.level).toBe('out');
     expect(result.summary).toContain('Credits available');
-    expect(result.summary).toContain('estimated credit value $81.94');
-    expect(result.detail).toContain('2,048.42 credits available');
-    expect(result.detail).toContain('Exact native balance: 2048.4196250000 credits.');
-    expect(result.detail.some((line) => line.includes('Estimated credit value $81.94'))).toBe(true);
+    expect(result.summary).toContain('estimated credit value $82');
+    expect(result.detail).toContain('2,000 credits available');
+    expect(result.exactCreditBalance).toBe('2048.4196250000');
+    expect(result.detail.join(' ')).not.toContain('2048.4196250000');
+    expect(result.detail.some((line) => line.includes('Estimated credit value $82'))).toBe(true);
     expect(result.detail.some((line) => line.includes('autonomous credit spending is not admitted'))).toBe(true);
   });
   it('reports a vendor spend-control hold separately from its remaining balance', () => {
@@ -350,9 +427,11 @@ describe('visible Codex subscription and credit balances', () => {
     const personal = screen.getByRole('button', { name: /^Personal Codex:/ });
     const cmp = screen.getByRole('button', { name: /^Cash Margin Partners:/ });
     expect(within(personal).getByText('100% used')).toBeInTheDocument();
-    expect(within(personal).getByText('Credits ≈$81.94')).toBeInTheDocument();
+    expect(within(personal).getByText('Credits ≈$82')).toBeInTheDocument();
+    expect(personal).toHaveAttribute('title', 'Exact native balance: 2048.4196250000 credits.');
+    expect(personal.textContent).not.toContain('2048.4196250000');
     expect(within(cmp).getByText('63% used')).toBeInTheDocument();
-    expect(within(cmp).getByText('Credits ≈$10.00')).toBeInTheDocument();
+    expect(within(cmp).getByText('Credits ≈$10')).toBeInTheDocument();
     expect(personal.querySelector('[aria-hidden="true"][data-level] > [style]')).toHaveStyle({ '--fill': '0%' });
     expect(cmp.querySelector('[aria-hidden="true"][data-level] > [style]')).toHaveStyle({ '--fill': '37%' });
   });
@@ -361,7 +440,7 @@ describe('visible Codex subscription and credit balances', () => {
     showAccounts(true, true);
     const personal = screen.getByRole('button', { name: /^Personal Codex:/ });
     expect(within(personal).getByText('100% used')).toBeInTheDocument();
-    expect(within(personal).getByText('Credits ≈$81.94')).toBeInTheDocument();
+    expect(within(personal).getByText('Credits ≈$82')).toBeInTheDocument();
     expect(within(personal).getByText('Held')).toBeInTheDocument();
     expect(personal).toHaveAccessibleName(/credit spending held/);
     expect(within(screen.getByRole('button', { name: /^Cash Margin Partners:/ })).queryByText('Held')).toBeNull();
@@ -370,13 +449,13 @@ describe('visible Codex subscription and credit balances', () => {
   it('keeps the independent quota, credits and every window in collapsed keyboard tooltips', () => {
     showAccounts(false);
     const cmp = screen.getByRole('button', { name: /^Cash Margin Partners:/ });
-    expect(cmp).toHaveAccessibleName(/subscription 63% used.*Credits ≈\$10\.00/);
+    expect(cmp).toHaveAccessibleName(/subscription 63% used.*Credits ≈\$10/);
     fireEvent.focus(cmp);
     const tooltip = screen.getByRole('tooltip');
     expect(tooltip.textContent).toContain('63% used');
     expect(tooltip.textContent).toContain('27% used');
     expect(tooltip.textContent).toContain('250 credits available');
-    expect(tooltip.textContent).toContain('Estimated credit value $10.00');
+    expect(tooltip.textContent).toContain('Estimated credit value $10');
   });
 });
 
@@ -402,10 +481,11 @@ describe('readable historical native credit units', () => {
         reading: { hasCredits: true, unlimited: false, balance: '62497.7860000000' },
       } }),
     ], { healthRead: true, now: NOW });
-    expect(projected[0]!.creditLabel).toBe('Credits <0.01 units · last');
-    expect(projected[1]!.creditLabel).toBe('Credits 62,497.79 units · last');
-    expect(projected[0]!.detail).toContain('Exact prior native balance: 0.000001 credits.');
-    expect(projected[1]!.detail).toContain('Exact prior native balance: 62497.7860000000 credits.');
+    expect(projected[0]!.creditLabel).toBe('Credits 0.000001 units · last');
+    expect(projected[1]!.creditLabel).toBe('Credits 62,000 units · last');
+    expect(projected[0]!.exactCreditBalance).toBe('0.000001');
+    expect(projected[1]!.exactCreditBalance).toBe('62497.7860000000');
+    expect(projected[1]!.detail.join(' ')).not.toContain('62497.7860000000');
     for (const value of projected) {
       expect(value.detail.join(' ')).toContain('current balance and availability are unconfirmed');
       expect(value.detail.join(' ')).not.toContain('Estimated credit value');

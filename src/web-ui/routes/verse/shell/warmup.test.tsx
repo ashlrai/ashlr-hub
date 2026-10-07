@@ -36,6 +36,11 @@ const readsInFlight = () => {
 /** Fast gate for tests: no quiet period, no gap, quick busy re-checks (jsdom has no requestIdleCallback). */
 const FAST: WarmupOptions = { quietMs: 0, gapMs: 0, pollMs: 5 };
 
+// These cases measure scheduling and operator admission, not Vite's cold query-module
+// transform. Keep the lazy production import, but resolve that dependency before timing
+// the scheduler, as the end-to-end fixture already does for section modules.
+beforeAll(() => import('./surface-prefetch.js'), 30_000);
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A deferred value: a read the test finishes when it chooses. */
@@ -176,6 +181,9 @@ describe('the warm-up, end to end through VerseApp', () => {
     // Transform every section once up front (a cold one can outlast findBy's
     // window), THEN start recording: the preload itself is not the shell's.
     await Promise.all(Object.values(SECTION_MODULES).map((load) => load()));
+    // Match ChatSection's first-paint fixture: importing the section alone leaves
+    // its sidebar/workspace cold. Rail load recording below still starts empty.
+    await import('../sections/ChatSection.js').then((module) => module.preloadChatSurface());
     for (const [key, load] of Object.entries(SECTION_MODULES)) {
       SECTION_MODULES[key] = () => {
         requested.push(key);

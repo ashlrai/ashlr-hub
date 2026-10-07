@@ -30,6 +30,7 @@
  *    reads already in cache and within the freshness window
  *    (data/hooks.ts DEFAULT_QUERY_FRESH_MS).
  */
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Button } from '../../../components/primitives/index.js';
 import {
@@ -105,7 +106,7 @@ function StepBody({ children }: { children: ReactNode }) {
 function WelcomeStep() {
   return (
     <StepBody>
-      <p className={styles.lead}>Verse runs your chats and this machine’s agent fleet from one local server.</p>
+      <p className={styles.lead}>{PRODUCT_NAME} runs your chats and this machine’s agent fleet from one local server.</p>
       {/*
         The five rail surfaces, in ⌘1–⌘5 order, with the same one-line blurbs
         the missing-section fallback uses — one description per surface, not

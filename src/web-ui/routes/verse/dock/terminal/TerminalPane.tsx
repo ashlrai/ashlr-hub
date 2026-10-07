@@ -648,7 +648,7 @@ export function TerminalPane({ sessionId, roots, request, onSendToChat, visible,
           compact
           icon={<TerminalGlyph size={20} />}
           title="Terminal needs the desktop app"
-          body="This Verse server has no built-in terminal. Open the project in Terminal instead, or use the Ashlr desktop app."
+          body="This Phantom server has no built-in terminal. Open the project in Terminal instead, or use the Phantom desktop app."
           action={deps.platform === 'mac' ? (
             <Button size="sm" variant="subtle" icon={<IconExternalLink />} onClick={() => void openExternal()}>Open in Terminal</Button>
           ) : undefined}

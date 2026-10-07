@@ -155,7 +155,7 @@ describe('DevinResource', () => {
     expect(section.textContent).toContain('Cached Devin API /self observation.');
     expect(screen.getByRole('region', { name: 'Devin subscription and purchased credits' }).textContent).toContain('Subscription-only spending is unverified.');
     expect(section.textContent).not.toMatch(/live|fresh|0%|org-x|Ashlr Verse/);
-    expect(screen.getByText('3.125 ACUs consumed')).toBeInTheDocument();
+    expect(screen.getByText('3.1 ACUs consumed')).toBeInTheDocument();
     expect(screen.getByText('tracked budget')).toBeInTheDocument();
     expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual(['/api/verse/devin']);
     expect(posts).toHaveLength(0);
@@ -202,11 +202,11 @@ describe('DevinResource', () => {
     await userEvent.click(within(section).getByRole('button', { name: 'Read consumption' }));
     await waitFor(() => expect(posts).toHaveLength(1));
     expect(posts[0]).toEqual({ url: '/api/verse/devin/consumption/refresh', body: {}, token: TOKEN });
-    expect(await within(section).findByText('3.125 ACUs consumed')).toBeTruthy();
+    expect(await within(section).findByText('3.1 ACUs consumed')).toBeTruthy();
     expect(within(section).queryByRole('meter')).toBeNull();
     expect(section.textContent).not.toMatch(/\$|% left|resets (Mon|Tue|Wed|Thu|Fri|Sat|Sun)/);
     await userEvent.click(within(section).getByText('Daily consumption (1 reporting buckets)'));
-    expect(await within(section).findByText('Provider date 123 · 3.125 ACUs')).toBeTruthy();
+    expect(await within(section).findByText('Provider date 123 · 3.1 ACUs')).toBeTruthy();
     expect(within(section).getByText(/cascade: not reported/)).toBeTruthy();
     expect(within(section).getByText(/zero defaults when product data is unavailable/)).toBeTruthy();
   });
@@ -240,14 +240,14 @@ describe('DevinResource', () => {
     const measuredZero = consumption({ report: { totalAcus: 0, days: [{ date: 123, acus: 0,
       products: { devin: 0, cascade: 0, terminal: 0, automation: null, review: null } }] } });
     expect(devinConsumptionEvidence(measuredZero)?.value).toBe('0 ACUs consumed');
-    expect(devinConsumptionEvidence(consumption({ report: { totalAcus: 3.125, days: [] } }))?.value).toBe('3.125 ACUs consumed');
+    expect(devinConsumptionEvidence(consumption({ report: { totalAcus: 3.125, days: [] } }))?.value).toBe('3.1 ACUs consumed');
   });
 
   it.each([false, true])('retains a positive fractional aggregate without daily buckets (stale: %s)', async stale => {
     overview = { ...(overview as Record<string, unknown>), consumption: consumption({ stale, report: { totalAcus: 0.03125, days: [] } }) };
     mount();
     const section = await screen.findByRole('region', { name: 'Devin organization consumption' });
-    expect(within(section).getByText(`0.03125 ACUs consumed${stale ? ' · last' : ''}`)).toBeInTheDocument();
+    expect(within(section).getByText(`0.031 ACUs consumed${stale ? ' · last' : ''}`)).toBeInTheDocument();
     expect(within(section).queryByText('No consumption reported')).toBeNull();
     expect(within(section).getByText('Daily consumption (0 reporting buckets)')).toBeInTheDocument();
     expect(within(section).queryByRole('list')).toBeNull();
@@ -261,7 +261,7 @@ describe('DevinResource', () => {
       error: { code: 'forbidden', reason: 'ViewOrgConsumption permission is required. Session access is separate.' } }) };
     mount();
     const section = await screen.findByRole('region', { name: 'Devin organization consumption' });
-    expect(within(section).getByText('3.125 ACUs consumed · last')).toBeTruthy();
+    expect(within(section).getByText('3.1 ACUs consumed · last')).toBeTruthy();
     expect(within(section).getByText(/Session access is separate/)).toBeTruthy();
     expect(screen.getByText('Connected')).toBeTruthy();
     expect(within(section).queryByRole('img')).toBeNull();
@@ -279,7 +279,7 @@ describe('DevinResource', () => {
     expect(within(list).getAllByRole('listitem')).toHaveLength(20);
     await userEvent.click(within(section).getByRole('button', { name: 'Next' }));
     expect(within(list).getAllByRole('listitem')).toHaveLength(5);
-    expect(within(section).getByText('Provider date 24 · 0.125 ACUs')).toBeTruthy();
+    expect(within(section).getByText('Provider date 24 · 0.13 ACUs')).toBeTruthy();
     expect(within(section).getByText('Page 2 of 2')).toBeTruthy();
   });
 
@@ -299,7 +299,7 @@ describe('DevinResource', () => {
   it('rejects malformed additive usage instead of rendering a false balance', async () => {
     overview = { generatedAt: 'x', status: status(), tasks: [], budget: budget({ reportedAcuUsed: -1, unconfirmedAcuExposure: 10 }) };
     mount();
-    expect(await screen.findByText('Unrecognized response — update Ashlr.')).toBeTruthy();
+    expect(await screen.findByText('Unrecognized response — update Phantom.')).toBeTruthy();
     expect(screen.queryByText(/ACUs.*available/)).toBeNull();
   });
 

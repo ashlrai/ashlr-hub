@@ -1,7 +1,7 @@
 {
   "name": "@ashlr/hub",
   "version": "3.24.3",
-  "description": "Local-first command center for agentic engineers.",
+  "description": "Phantom by AshlrAI: the open-source engineering agent workbench for CLI accounts, local models and autonomous fleets.",
   "publishConfig": {
     "access": "public"
   },
@@ -18,6 +18,9 @@
   "keywords": [
     "cli",
     "agentic",
+    "phantom",
+    "coding-agents",
+    "agent-orchestration",
     "mcp",
     "local-first",
     "raycast",

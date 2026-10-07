@@ -124,7 +124,7 @@ describe('seatSubscription — credits are not the window', () => {
     expect(view.cls).toBe('tight');
     expect(view.summary).toBe('primary window limit reached · credits available');
     // Round only the label; retain exact native units separately without currency inference.
-    expect(view.credits).toBe('2,048.42 credits available');
+    expect(view.credits).toBe('2,000 credits available');
     expect(view.creditsTitle).toBe('Exact native balance: 2048.4196250000 credits. Not dollars or subscription percentage.');
   });
 
@@ -297,7 +297,7 @@ describe('native Codex credit freshness and balance', () => {
     expect(seatSubscription({ ...seat, capacity: { ...seat.capacity!, creditsExpiresAt: undefined } }, now).credits).toBeNull();
     expect(seatSubscription({ ...seat, capacity: { ...seat.capacity!, creditsExpiresAt: new Date(now).toISOString() } }, now).credits).toBeNull();
     expect(seatSubscription({ ...seat, capacity: { ...seat.capacity!, creditsExpiresAt: new Date(now + 1).toISOString() } }, now).credits)
-      .toBe('2,048.42 credits available');
+      .toBe('2,000 credits available');
   });
   it.each([{ hasCredits: false, unlimited: false, balance: '12' }, { hasCredits: true, unlimited: false, balance: '0.0000' }])( 'does not label a false or zero balance available', (credits) => {
       expect(seatSubscription({ ...CODEX_CREDITS_SEAT, capacity: { ...CODEX_CREDITS_SEAT.capacity!, credits } }).credits).toBeNull();
@@ -308,8 +308,8 @@ describe('native Codex credit freshness and balance', () => {
 describe('native credit labels retain exact account evidence', () => {
   const now = Date.parse('2026-09-20T18:32:30.000Z');
   it.each([
-    ['412.8921985000', '412.89'], ['62497.7860000000', '62,497.79'],
-    ['0.000001', '<0.01'], ['9007199254740993.125', '9,007,199,254,740,993.13'],
+    ['412.8921985000', '410'], ['62497.7860000000', '62,000'],
+    ['0.000001', '0.000001'], ['9007199254740993.125', '9,000,000,000,000,000'],
   ])('shortens only the visible %s balance', (balance, display) => {
     const view = seatSubscription({ ...CODEX_CREDITS_SEAT, capacity: { ...CODEX_CREDITS_SEAT.capacity!,
       creditsExpiresAt: new Date(now + 1).toISOString(),

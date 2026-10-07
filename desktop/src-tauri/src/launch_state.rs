@@ -100,7 +100,7 @@ impl LaunchPhase {
         match self {
             LaunchPhase::Starting => LaunchPayload {
                 phase: "starting",
-                headline: "Starting Ashlr Verse".to_string(),
+                headline: "Starting Phantom".to_string(),
                 message: "Bringing up the local server on 127.0.0.1:7777.".to_string(),
                 hint: String::new(),
                 detail: Vec::new(),
@@ -135,7 +135,7 @@ impl LaunchFailure {
             LaunchFailure::PortInUse { port } => (
                 "Port is already in use",
                 format!(
-                    "Something is already listening on 127.0.0.1:{port}, so Ashlr could not start its own server there."
+                    "Something is already listening on 127.0.0.1:{port}, so Phantom could not start its own server there."
                 ),
                 format!(
                     "If that is your own `ashlr verse` or `ashlr serve`, use it — you will be asked to paste its read token once. Otherwise find the process with `lsof -ti tcp:{port}`, stop it, and try again."
@@ -143,13 +143,13 @@ impl LaunchFailure {
                 vec![ACTION_USE_RUNNING, ACTION_RETRY_SECONDARY, ACTION_QUIT],
             ),
             LaunchFailure::SpawnFailed { reason } => (
-                "The Ashlr server could not be launched",
+                "The Phantom server could not be launched",
                 format!("The bundled `ashlr` sidecar failed to start: {reason}"),
-                "This usually means the app bundle is incomplete. Reinstall Ashlr, or rebuild it with `node desktop/scripts/prepare-sidecar.mjs` before `cargo tauri build`.".to_string(),
+                "This usually means the app bundle is incomplete. Reinstall Phantom, or rebuild it with `node desktop/scripts/prepare-sidecar.mjs` before `cargo tauri build`.".to_string(),
                 vec![ACTION_RETRY, ACTION_QUIT],
             ),
             LaunchFailure::SidecarExited { code } => (
-                "The Ashlr server stopped while starting",
+                "The Phantom server stopped while starting",
                 match code {
                     Some(code) => format!("The bundled `ashlr` sidecar exited with code {code} before it was ready."),
                     None => "The bundled `ashlr` sidecar was terminated before it was ready.".to_string(),
@@ -158,7 +158,7 @@ impl LaunchFailure {
                 vec![ACTION_RETRY, ACTION_QUIT],
             ),
             LaunchFailure::Timeout { seconds } => (
-                "The Ashlr server did not come up",
+                "The Phantom server did not come up",
                 format!(
                     "The server did not report that it was listening within {seconds} seconds."
                 ),

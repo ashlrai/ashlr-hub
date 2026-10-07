@@ -18,7 +18,7 @@ import { setVerseSection } from '../verse-ui-store.js';
 /** Why a filled command cannot be pasted from here, or null when it can. Pure over its inputs. */
 export function commandPasteUnavailableReason(input: { activeSessionId: string | null; terminalLanded?: boolean }): string | null {
   const landed = input.terminalLanded ?? isSlotAvailable('terminal-pane');
-  if (!landed) return 'This build has no Verse terminal yet.';
+  if (!landed) return 'This build has no Phantom terminal yet.';
   if (input.activeSessionId === null) return 'Open a chat first — the command is pasted into its terminal.';
   return null;
 }

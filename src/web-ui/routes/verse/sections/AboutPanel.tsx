@@ -2,6 +2,7 @@
  * routes/verse/sections/AboutPanel.tsx — what this is and which build it is.
  * The version comes from package.json at build time (./app-version.ts).
  */
+import { PRODUCT_COMPANY, PRODUCT_DESCRIPTOR } from '../../../app/product-brand.js';
 import { IconExternalLink } from '../../../components/primitives/icons.js';
 import { Tag } from '../../../components/primitives/index.js';
 import { APP_NAME, APP_VERSION } from './app-version.js';
@@ -16,11 +17,10 @@ export function AboutPanel() {
           <p className={styles.aboutName}>{APP_NAME}</p>
           <p className={styles.aboutLine}>
             <Tag mono>v{APP_VERSION}</Tag>
-            <span>ashlr-hub — local-first command center for agentic engineers.</span>
+            <span>{PRODUCT_DESCRIPTOR} · by {PRODUCT_COMPANY}</span>
           </p>
           <p className={styles.aboutLine}>
-            Every session, token and artifact stays on this machine. The console talks to one local server and no
-            third-party service.
+            The workbench connects to a local server. Agent and cloud sessions use the providers and accounts you connect.
           </p>
           <p className={styles.aboutLine}>
             <a

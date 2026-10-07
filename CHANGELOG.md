@@ -13,6 +13,16 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Added
 
+- Present the engineering workbench as Phantom by AshlrAI, using the existing
+  blue ghost across desktop, phone and public pages while preserving package,
+  CLI, saved-data and signed-authority identities.
+- Explore real recorded Fleet runs in an optional ghost world with repository
+  grouping, task inspection and links to existing run controls.
+- Drag resource rows into a saved order or move them with keyboard controls;
+  multiple accounts and Devin cloud, CLI and budget remain distinct.
+- Explore an explicitly illustrated workflow on the landing page, with manual
+  playback, selectable roles and responsive layouts.
+
 - Qualify the complete Mac backend in four independent hosted partitions and
   one serial isolated lane, retaining case deadlines and recording actual
   passed, skipped and todo results. Candidate checkouts must match GitHub's
@@ -34,6 +44,13 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   recording prompt contents or changing provider token reporting.
 
 ### Fixed
+
+- Show resource balances, costs, tokens and performance metrics with two
+  significant figures while retaining exact source readings for inspection.
+- Isolate composer read caches between fake servers and freeze the fleet routing
+  fixture clock so crossing UTC midnight cannot change its quota scenario.
+- Fail local gates on every actual failure, including formerly known failing
+  files, and remove obsolete prose assertions while retaining current contracts.
 
 - Keep default fleet status scoped to builtin resources instead of probing
   unconfigured providers and local runtimes.

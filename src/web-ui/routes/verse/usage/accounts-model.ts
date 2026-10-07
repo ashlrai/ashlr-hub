@@ -201,7 +201,7 @@ export const REASON_COPY: Record<string, string> = {
   'collector-not-running':
     'No account collector is running in this server, so these cards fall back to whatever shared evidence exists.',
   'collector-owned':
-    'Another Ashlr process (usually the desktop app’s Verse or the fleet daemon’s 5-minute sample) holds the metadata lease; Verse reads its shared evidence and takes over when it is released.',
+    'Another Phantom process (usually the desktop app’s Phantom or the fleet daemon’s 5-minute sample) holds the metadata lease; Phantom reads its shared evidence and takes over when it is released.',
   'collector-start-failed':
     'The metadata collectors could not be started in this server, so no probe has run.',
   'connection-polling-paused':

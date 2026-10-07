@@ -15,6 +15,7 @@
  * Until the runtime lands the frame draws with BOOT_CONTEXT (mobile-context.ts):
  * no badges, no actions, skeletons where data goes.
  */
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 import { Component, Suspense, useCallback, useEffect, type ComponentType, type ReactNode } from 'react';
 import { preloadedLazy } from '../shell/preloaded.js';
 import { BOOT_CONTEXT, MobileContext, type MobileContextValue } from './mobile-context.js';
@@ -108,7 +109,7 @@ function Frame({ route, context, overlays }: FrameProps) {
         </ChunkBoundary>
       </main>
       {overlays}
-      <nav className={styles.tabbar} aria-label="Verse">
+      <nav className={styles.tabbar} aria-label={PRODUCT_NAME}>
         {TABS.map(({ id, label, Glyph }) => {
           const badge = id === 'needs' ? needsCount : id === 'agents' ? workingCount : null;
           const spoken = badge ? `${label}, ${badge} ${id === 'needs' ? 'waiting' : 'working'}` : label;

@@ -33,7 +33,7 @@ describe('Historical startup usage display', () => {
     expect(projected.historicalUsage).toBeNull(); expect(projected.credits).toBeNull();
     expect(projected.creditState).toBe('unknown'); expect(projected.windows[0]?.usedPercent).toBe(22);
     const display = barRows([projected], { now: NOW, healthRead: false })[0]!;
-    expect(display.value).toBe('22% used'); expect(display.creditLabel).toBe('Credits ≈$999.98 · last');
+    expect(display.value).toBe('22% used'); expect(display.creditLabel).toBe('Credits ≈$1,000 · last');
     expect(display.detail.join(' ')).toContain('current balance and availability are unconfirmed');
     const zero = buildCapacityRows([{ ...s, capacity: capacity({ windows: [w], binding: w,
       credits: { hasCredits: false, unlimited: false, balance: '0' }, creditsExpiresAt: new Date(NOW + 1).toISOString() }) }], { now: NOW })[0]!;
@@ -43,8 +43,9 @@ describe('Historical startup usage display', () => {
     expect(resourceCreditHistory({ ...s, engine: 'claude' }, NOW)).toBeNull();
     const unknownPlan = buildCapacityRows([{ ...s, lastKnownUsage: history({ creditHistory: { ...creditHistory, planType: null } }) }], { now: NOW })[0]!;
     const unknownPlanDisplay = barRows([unknownPlan], { now: NOW, healthRead: false })[0]!;
-    expect(unknownPlanDisplay.creditLabel).toBe('Credits 24,999.5 units · last');
-    expect(unknownPlanDisplay.detail).toContain('Exact prior native balance: 24999.50 credits.');
+    expect(unknownPlanDisplay.creditLabel).toBe('Credits 25,000 units · last');
+    // Exact evidence is retained in title metadata; visible detail uses rounded units.
+    expect(unknownPlanDisplay.exactCreditBalance).toBe('24999.50');
   });
   it('roundtrips display-only Claude identity history without promoting current usage or credits', () => {
     const recorded = history({ identitySource: 'native-account-checked-display-identity' });

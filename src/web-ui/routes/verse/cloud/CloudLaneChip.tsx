@@ -28,7 +28,7 @@ export function CloudLaneChip({ classes = {} }: { classes?: CloudLaneChipClasses
   const overview = read.data?.value ?? null;
   if (!overview) return null;
   const running = inFlightCount(overview.tasks);
-  const title = `Claude Code cloud sessions Verse launched that have not delivered a PR yet. ${overview.budget.sessionsToday} of ${overview.budget.budget.maxSessionsPerDay} sessions used today.`;
+  const title = `Claude Code cloud sessions Phantom launched that have not delivered a PR yet. ${overview.budget.sessionsToday} of ${overview.budget.budget.maxSessionsPerDay} sessions used today.`;
   return (
     <li className={`${classes.lane ?? ''} ${styles.laneChip}`} data-active={running > 0 || undefined} title={title} aria-label={`Cloud: ${running} running`}>
       <span className={classes.name}>Cloud</span>

@@ -15,8 +15,8 @@ describe('Funnel', () => {
   it('writes conversions in words and never guesses around an unknown stage', () => {
     const { container } = render(<Funnel title="Pipeline" width={700} stages={stages} />);
     const label = screen.getByRole('img').getAttribute('aria-label')!;
-    expect(label).toContain('Verified 133 (25% of previous)');
-    expect(label).toContain('Passed 1 (0.8% of previous)');
+    expect(label).toContain('Verified 130 (25% of previous)');
+    expect(label).toContain('Passed 1 (0.75% of previous)');
     expect(label).toContain('Judged ship unknown (— of previous)');
     expect(label).toContain('Merged 0 (— of previous)');
     expect(container.querySelectorAll('[data-unknown="true"]')).toHaveLength(1);
@@ -40,8 +40,8 @@ describe('Funnel', () => {
   it('carries every rate in the table', () => {
     render(<Funnel title="P" width={700} stages={stages} />);
     showTable();
-    expect(screen.getAllByRole('cell', { name: '24.5%' })).toHaveLength(2); // of previous = of first
-    expect(screen.getByRole('cell', { name: '0.2%' })).toBeInTheDocument();
+    expect(screen.getAllByRole('cell', { name: '25%' })).toHaveLength(2); // of previous = of first
+    expect(screen.getByRole('cell', { name: '0.18%' })).toBeInTheDocument();
   });
 });
 
@@ -57,9 +57,9 @@ describe('Funnel V3.10.1 — zero is an empty track', () => {
     for (const t of tracks) expect(t.getAttribute('class')).toMatch(/trackEmpty/);
   });
 
-  it('sizes bars as a share of the first stage', () => {
+  it('sizes bars from exact readings while labels use two significant figures', () => {
     const { container } = render(
-      <Funnel title="Pipeline" width={700} stages={[{ id: 'a', label: 'Filed', value: 100 }, { id: 'b', label: 'Verified', value: 50 }]} />,
+      <Funnel title="Pipeline" width={700} stages={[{ id: 'a', label: 'Filed', value: 542 }, { id: 'b', label: 'Verified', value: 133 }]} />,
     );
     const widthOf = (id: string) => {
       const d = container.querySelector(`[data-stage="${id}"] [data-role="bar"]`)!.getAttribute('d')!;
@@ -67,7 +67,9 @@ describe('Funnel V3.10.1 — zero is an empty track', () => {
       return Math.max(...xs) - Math.min(...xs);
     };
     const track = Number(container.querySelector('[data-role="track"]')!.getAttribute('width'));
-    expect(widthOf('a')).toBeCloseTo(track, 0);
-    expect(widthOf('b')).toBeCloseTo(track / 2, 0);
+    // SVG path coordinates intentionally round to one decimal pixel.
+    expect(widthOf('a')).toBeCloseTo(track, 1);
+    expect(widthOf('b')).toBeCloseTo(track * (133 / 542), 1);
+    expect(screen.getByRole('img')).toHaveAttribute('aria-label', 'Pipeline: Filed 540, Verified 130 (25% of previous).');
   });
 });

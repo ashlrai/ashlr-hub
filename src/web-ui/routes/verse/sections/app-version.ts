@@ -10,4 +10,4 @@
 import { version } from '../../../../../package.json';
 
 export const APP_VERSION: string = version;
-export const APP_NAME = 'Ashlr Verse';
+export { PRODUCT_NAME as APP_NAME } from '../../../app/product-brand.js';

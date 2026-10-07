@@ -416,7 +416,7 @@ export function LeaderConversation({ leader, actions, dormant }: LeaderConversat
       <header className={styles.head}>
         <span className={styles.heading}>
           <h3 id={titleId} className={styles.title}>Leader</h3>
-          <span className={styles.caption}>One conversation across Verse, Telegram and the CLI</span>
+          <span className={styles.caption}>One conversation across Phantom, Telegram and the CLI</span>
         </span>
         {dormant ? (
           <span className={styles.dormant} title="The Leader still reads, answers and writes memos. With autonomy off, every memo is a dry run: its actions are shown, never applied.">

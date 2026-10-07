@@ -139,7 +139,7 @@ export function CloudCredits({ readiness = null, onReadinessAction, readinessBus
           <p className={styles.fine}>Credits show here once this build has the cloud lane.</p>
         </>
       ) : credits === null ? (
-        <p className={styles.subtle}>Unrecognized response — update Ashlr.</p>
+        <p className={styles.subtle}>Unrecognized response — update Phantom.</p>
       ) : (
         <Credits credits={credits} />
       )}

@@ -46,7 +46,7 @@ export function CloudCreditsPanel({ now = Date.now() }: { now?: number }) {
           Cloud credits
         </h3>
         <p className={usage.panelNote}>
-          What Claude Code cloud sessions launched by Verse have cost, as an estimate, and the limits Verse keeps them inside.
+          What Claude Code cloud sessions launched by Phantom have cost, as an estimate, and the limits Phantom keeps them inside.
         </p>
       </div>
       {!view || !meter ? (

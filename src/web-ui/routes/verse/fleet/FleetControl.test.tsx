@@ -246,7 +246,7 @@ describe('the header', () => {
     expect(region).toHaveTextContent('Running');
     expect(region).toHaveTextContent('2 agents working');
     expect(region).toHaveTextContent('#2 · 2 repos · 20 d left · 2a (2/4)');
-    expect(region).toHaveTextContent('$3.50 of $20.00 cap');
+    expect(region).toHaveTextContent('$3.5 of $20 cap');
     expect(region).toHaveTextContent(/Running · pid 4242/);
     // Start is not needed while it runs; Pause and Stop are.
     expect(within(region).getByRole('button', { name: /^Start/ })).toBeDisabled();

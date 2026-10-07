@@ -83,7 +83,7 @@ const PARTIAL_WINDOW_FRACTION = 0.05;
  * readings: it starts when Verse opened, so an empty left edge is not idle
  * time. Repeating it under every card said the same thing N times.
  */
-const SINCE_OPENED = 'Lines without recorded history start when Verse opened.';
+const SINCE_OPENED = 'Lines without recorded history start when Phantom opened.';
 
 /** Why a line starts late in its window — only asked when it does. */
 function lateStartNote(burn: SeatBurn, firstSeen: number | null, formatTime: (ms: number) => string): string | undefined {

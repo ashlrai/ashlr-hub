@@ -1,7 +1,7 @@
 /**
  * CloudCard — Command's cloud lane card in each of its states (loading, not
  * in this build, empty, running, pr-open, failed, budget-refused), and its
- * writes going through Command's guarded actions: Improve Verse confirms
+ * writes going through Command's guarded actions: Improve Phantom confirms
  * first, Dismiss confirms first, the self-improvement switch and the budget
  * popover send exactly what changed.
  */
@@ -66,10 +66,10 @@ describe('CloudCard states', () => {
     expect(within(card()).getByText(ESTIMATE_NOTE, { exact: false })).toBeInTheDocument();
     expect(within(card()).getByRole('link', { name: 'Check the real balance on claude.ai' })).toHaveAttribute('href', 'https://claude.ai/settings/usage');
     expect(within(card()).getByText(/^3 of 20 sessions today · 0 running · resets /)).toBeInTheDocument();
-    expect(within(card()).getByText('No cloud tasks yet. Start one with New cloud task, or let Verse improve itself.')).toBeInTheDocument();
+    expect(within(card()).getByText('No cloud tasks yet. Start one with New cloud task, or let Phantom improve itself.')).toBeInTheDocument();
     expect(within(card()).getByRole('switch', { name: 'Self-improvement' })).toHaveAttribute('aria-checked', 'true');
     expect(within(card()).getByRole('button', { name: 'New cloud task' })).toBeEnabled();
-    expect(within(card()).getByRole('button', { name: 'Improve Verse' })).toBeEnabled();
+    expect(within(card()).getByRole('button', { name: 'Improve Phantom' })).toBeEnabled();
     // No ISO instant reaches the page.
     expect(card().textContent).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:/);
   });
@@ -139,7 +139,7 @@ describe('CloudCard states', () => {
     expect(await within(card()).findByTestId('cloud-budget-refused')).toHaveTextContent(`New launches are paused: ${reason}`);
     const launch = within(card()).getByRole('button', { name: 'New cloud task' });
     expect(launch).toBeDisabled();
-    expect(within(card()).getByRole('button', { name: 'Improve Verse' })).toBeDisabled();
+    expect(within(card()).getByRole('button', { name: 'Improve Phantom' })).toBeDisabled();
     await user.hover(launch.parentElement!);
     expect(await screen.findByRole('tooltip')).toHaveTextContent(reason);
   });
@@ -166,7 +166,7 @@ describe('CloudCard states', () => {
   it('warns when the estimate is under the reserve', async () => {
     stubCloudFetch(overview({ budget: budgetView({ estimatedSpentUsd: 220 }) }));
     render(<Host />);
-    expect(await within(card()).findByText('Under the $40 reserve, so Verse stops launching self-improvement tasks.')).toBeInTheDocument();
+    expect(await within(card()).findByText('Under the $40 reserve, so Phantom stops launching self-improvement tasks.')).toBeInTheDocument();
   });
 
   it('gives every icon button a tooltip', async () => {
@@ -180,14 +180,14 @@ describe('CloudCard states', () => {
 });
 
 describe('CloudCard actions', () => {
-  it('Improve Verse confirms first, then launches the next backlog item and links the session', async () => {
+  it('Improve Phantom confirms first, then launches the next backlog item and links the session', async () => {
     setMutationToken(TOKEN);
     const launched = task('running', { title: 'Tighten the tracker tests', origin: 'self-improve', requestedBy: 'self-improve' });
     const { posted } = stubCloudFetch(overview(), { post: (url) => (url.endsWith('/improve') ? json({ launched: [launched], skipped: [] }) : undefined) });
     const user = userEvent.setup();
     render(<Host />);
-    await user.click(await within(card()).findByRole('button', { name: 'Improve Verse' }));
-    const dialog = screen.getByRole('dialog', { name: 'Improve Verse now?' });
+    await user.click(await within(card()).findByRole('button', { name: 'Improve Phantom' }));
+    const dialog = screen.getByRole('dialog', { name: 'Improve Phantom now?' });
     expect(dialog).toHaveTextContent('Launches “Tighten the tracker tests” as a cloud session on ashlrai/ashlr-hub, estimated at $3.');
     expect(posted).toEqual([]);
     await user.click(within(dialog).getByRole('button', { name: 'Launch' }));
@@ -197,12 +197,12 @@ describe('CloudCard actions', () => {
     expect(within(status).getByRole('link', { name: /Open in Claude/ })).toHaveAttribute('href', launched.sessionUrl);
   });
 
-  it('Improve Verse reports a skip in the server’s words', async () => {
+  it('Improve Phantom reports a skip in the server’s words', async () => {
     setMutationToken(TOKEN);
     stubCloudFetch(overview(), { post: () => json({ launched: [], skipped: [{ itemId: 'si-tests', reason: '4 of 4 self-improvement launches used today.' }] }) });
     const user = userEvent.setup();
     render(<Host />);
-    await user.click(await within(card()).findByRole('button', { name: 'Improve Verse' }));
+    await user.click(await within(card()).findByRole('button', { name: 'Improve Phantom' }));
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Launch' }));
     expect(await within(card()).findByRole('status')).toHaveTextContent('4 of 4 self-improvement launches used today.');
   });
@@ -212,7 +212,7 @@ describe('CloudCard actions', () => {
     const user = userEvent.setup();
     render(<Host />);
     await user.click(await within(card()).findByRole('switch', { name: 'Self-improvement' }));
-    expect(await screen.findByRole('dialog', { name: 'Unlock actions' })).toHaveTextContent('Stop Verse launching its own self-improvement tasks.');
+    expect(await screen.findByRole('dialog', { name: 'Unlock actions' })).toHaveTextContent('Stop Phantom launching its own self-improvement tasks.');
     expect(posted).toEqual([]);
   });
 

@@ -15,6 +15,7 @@
  *   - short sentences for the serving runtime and each local model's context.
  */
 import { CLOUD_BALANCE_URL, type CloudOverviewResponse } from '../../../../core/cloud/types.js';
+import { formatMetricUsd } from '../../../components/charts/format-metric.js';
 import { costBasisOf, seatTier, tierRank, type CostBasis, type ResourceTier } from '../../../../core/routing/tiers.js';
 import type { ServingRuntimeSnapshot, VerseSeat } from '../../../data/api-types.js';
 import { accountStatus, accountStatusRank, type AccountStatusKind, type CapacityRow } from '../usage/capacity-strip-model.js';
@@ -107,7 +108,7 @@ function text(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }
 
-const DEFAULT_ESTIMATE_NOTE = 'An estimate from the sessions Verse launched — the real balance is on claude.ai.';
+const DEFAULT_ESTIMATE_NOTE = 'An estimate from the sessions Phantom launched — the real balance is on claude.ai.';
 
 /** Narrow a GET /api/verse/cloud body; null when it is not one. */
 export function projectCloudCredits(raw: unknown): CloudCreditsView | null {
@@ -140,10 +141,9 @@ export function projectCloudCredits(raw: unknown): CloudCreditsView | null {
   };
 }
 
-/** "$212" / "$3.50" — whole dollars once the cents stop mattering. */
+/** Two significant figures; only display values are rounded. */
 export function formatUsd(value: number): string {
-  const v = Math.max(0, value);
-  return v >= 100 || Number.isInteger(v) ? `$${Math.round(v)}` : `$${v.toFixed(2)}`;
+  return formatMetricUsd(Math.max(0, value));
 }
 
 // ---------------------------------------------------------------------------

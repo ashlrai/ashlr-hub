@@ -4,8 +4,8 @@ import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
 import { canonical, digest, inspectPrivateDirectory } from './artifacts.js';
 import { readUniverseCampaign } from './campaign-store.js';
 import { validateUniverseCampaignDeliveryPlan } from './campaign-delivery.js';
-import { readCompletedCampaignDelivery } from './campaign-delivery-recovery.js';
-import { assertComparatorUnchanged, manifestRecord, projectUniverse, universePath } from './store.js';
+import { readCompletedCampaignDeliveryProjection } from './campaign-delivery-recovery.js';
+import { assertComparatorUnchanged, manifestRecord, universePath } from './store.js';
 import type { UniverseCampaignDeliveryOrigin, UniverseCampaignDeliverySource } from './campaign-handoff-types.js';
 export type { UniverseCampaignDeliveryOrigin, UniverseCampaignDeliverySource } from './campaign-handoff-types.js';
 
@@ -41,12 +41,16 @@ export function readUniverseCampaignDeliverySource(input: unknown, requestDigest
     throw new Error('Campaign successor source identity changed');
   }
   const directory = universePath(root, campaign.definition.universeId);
-  const record = manifestRecord(directory); const universe = projectUniverse(directory);
+  const record = manifestRecord(directory);
   assertComparatorUnchanged(record);
+  // The independently fresh receipt read supplies this observation's Universe.
+  // Historical recovery remains receipt-only; successor admission still requires idleness.
+  const projection = readCompletedCampaignDeliveryProjection(campaign, source.delivery, { root });
+  if (!projection) throw new Error('Campaign successor delivery is unavailable or changed');
+  const { receipt, universe } = projection;
   if (universe.sourceState !== 'healthy' || universe.activeRun || record.manifestDigest !== campaign.manifestDigest ||
       record.comparatorDigest !== campaign.comparatorDigest) throw new Error('Campaign successor source is not healthy and idle');
-  const receipt = readCompletedCampaignDelivery(campaign, source.delivery, { root });
-  if (!receipt || digest(canonical(receipt)) !== source.expectedDeliveryDigest) throw new Error('Campaign successor delivery is unavailable or changed');
+  if (digest(canonical(receipt)) !== source.expectedDeliveryDigest) throw new Error('Campaign successor delivery is unavailable or changed');
   return { schemaVersion: 1, requestDigest, sourceRootDigest: digest(canonical({ domain: 'campaign-source-root-v1', root })),
     campaignId: source.campaignId, universeId: campaign.definition.universeId, definitionDigest: campaign.definitionDigest,
     manifestDigest: campaign.manifestDigest, comparatorDigest: campaign.comparatorDigest, deliveryDigest: source.expectedDeliveryDigest,

@@ -164,6 +164,8 @@ describe('formatters', () => {
   it('formats bytes at model scale', () => {
     expect(formatBytes(64 * 1024 ** 3)).toBe('64 GB');
     expect(formatBytes(1.5 * 1024 ** 3)).toBe('1.5 GB');
+    expect(formatBytes(123.456 * 1024 ** 3)).toBe('120 GB');
+    expect(formatBytes(0.0123456 * 1024 ** 3)).toBe('13 MB');
     expect(formatBytes(null)).toBe('—');
   });
 

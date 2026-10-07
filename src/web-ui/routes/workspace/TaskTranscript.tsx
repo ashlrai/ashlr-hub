@@ -50,7 +50,7 @@ export function TaskTranscript({ id, canDelete, unlocked, onUnlock, onDelete, on
   }
   return <section aria-label="Retained task transcript" className={styles.transcript}>
     <h3>Local transcript</h3>
-    <p className={styles.caption}>Stored on this computer until deleted, including submitted attachment text. Not encrypted by Ashlrverse.</p>
+    <p className={styles.caption}>Stored on this computer until deleted, including submitted attachment text. Not encrypted by Phantom.</p>
     <div className={styles.transcriptActions}>
       <button type="button" className={styles.subtleButton} disabled={loading || deleting} onClick={() => { void read(); }}>
         {loading ? 'Reading transcript…' : transcript ? 'Reload transcript' : 'Read transcript'}

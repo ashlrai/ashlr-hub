@@ -18,7 +18,7 @@ const MUT = 'd'.repeat(64);
  * Fresh installs use Work with me; adopting tokens does not force Command.
  */
 async function expectShellOnChat(): Promise<void> {
-  const rail = await screen.findByRole('navigation', { name: 'Verse sections' });
+  const rail = await screen.findByRole('navigation', { name: 'Phantom sections' });
   expect(within(rail).getByRole('button', { name: /^Chat/ })).toHaveAttribute('aria-current', 'page');
   expect(within(rail).getByRole('button', { name: /^Command/ })).not.toHaveAttribute('aria-current');
   const modes = screen.getByRole('navigation', { name: 'How you work' });
@@ -59,7 +59,7 @@ describe('VerseConsoleApp', () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(null, { status: 401 }));
     vi.stubGlobal('fetch', fetchMock);
     render(<VerseConsoleApp />);
-    expect(await screen.findByRole('heading', { name: 'Connect to Ashlr Verse' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Connect to Phantom' })).toBeInTheDocument();
     expect(screen.getAllByText(/ashlr verse/).length).toBeGreaterThan(0);
     // No read session, no injected tokens: nothing is fetched until a token is pasted.
     expect(fetchMock).not.toHaveBeenCalled();
@@ -72,7 +72,7 @@ describe('VerseConsoleApp', () => {
     window.__ASHLR_TOKENS__ = { readToken: READ, token: MUT };
     render(<VerseConsoleApp />);
     await expectShellOnChat();
-    expect(screen.queryByRole('heading', { name: 'Connect to Ashlr Verse' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Connect to Phantom' })).not.toBeInTheDocument();
     const sessionCall = state.calls.find((c) => c.path === '/api/session')!;
     expect(sessionCall.method).toBe('POST');
     expect(sessionCall.headers['x-ashlr-token']).toBe(READ);
@@ -95,13 +95,13 @@ describe('VerseConsoleApp', () => {
     window.__ASHLR_TOKENS__ = { readToken: READ, token: MUT };
     render(<VerseConsoleApp />);
 
-    const rail = await screen.findByRole('navigation', { name: 'Verse sections' });
+    const rail = await screen.findByRole('navigation', { name: 'Phantom sections' });
     expect(within(rail).getByRole('button', { name: /^Fleet/ })).toHaveAttribute('aria-current', 'page');
     expect(within(rail).getByRole('button', { name: /^Command/ })).not.toHaveAttribute('aria-current');
     const modes = screen.getByRole('navigation', { name: 'How you work' });
     expect(within(modes).getByRole('button', { name: 'Work for me' })).toHaveAttribute('aria-pressed', 'true');
     expect(within(modes).getByRole('button', { name: 'Work with me' })).toHaveAttribute('aria-pressed', 'false');
-    expect(screen.queryByRole('heading', { name: 'Connect to Ashlr Verse' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Connect to Phantom' })).not.toBeInTheDocument();
     expect(state.calls.find((c) => c.path === '/api/session')).toMatchObject({
       method: 'POST', headers: { 'x-ashlr-token': READ },
     });
@@ -228,10 +228,10 @@ describe('listenForSidecarRestart (desktop sidecar restart → immediate re-adop
     vi.stubGlobal('fetch', fetch);
     act(() => markCheckComplete(false));
     render(<VerseConsoleApp />);
-    expect(await screen.findByRole('heading', { name: 'Connect to Ashlr Verse' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Connect to Phantom' })).toBeInTheDocument();
     window.__ASHLR_TOKENS__ = { readToken: READ2, token: MUT2 };
     act(() => { window.dispatchEvent(new CustomEvent(SIDECAR_RESTARTED_EVENT)); });
     await expectShellOnChat();
-    expect(screen.queryByRole('heading', { name: 'Connect to Ashlr Verse' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Connect to Phantom' })).not.toBeInTheDocument();
   });
 });

@@ -60,7 +60,7 @@ export function SurfaceNotInBuild({ label, blurb }: { label: string; blurb: stri
     <div className={styles.missing} role="status">
       <h1 className={styles.missingTitle}>{label} isn't in this build yet</h1>
       <p className={styles.missingBody}>{blurb}</p>
-      <p className={styles.missingBody}>It appears here as soon as it ships. Everything else in Verse works normally.</p>
+      <p className={styles.missingBody}>It appears here as soon as it ships. Everything else in Phantom works normally.</p>
     </div>
   );
 }

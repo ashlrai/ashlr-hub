@@ -12,6 +12,7 @@ import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import { formatDayLabel, formatPercent } from '../../../components/charts/format.js';
 import { isAbsolutePath, projectName } from '../verse-model.js';
 import { usedPercentText } from '../percent-text.js';
+import { formatMetric, formatMetricUsd } from '../../../components/charts/format-metric.js';
 
 /** What we render when a value genuinely is not known. */
 export const UNKNOWN = '—';
@@ -118,16 +119,17 @@ export function repoDisplayName(repo: string): string {
 
 export function formatUsd(value: number | null | undefined): string {
   if (typeof value !== 'number' || !Number.isFinite(value)) return UNKNOWN;
-  return `$${value.toFixed(2)}`;
+  return formatMetricUsd(value);
 }
 
 export function formatCount(value: number | null | undefined): string {
   if (typeof value !== 'number' || !Number.isFinite(value)) return UNKNOWN;
-  return String(value);
+  return formatMetric(value);
 }
 
 /** "4m 12s" / "1h 06m" / "12s" — for durations and countdowns alike. */
 export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms)) return UNKNOWN;
   const total = Math.max(0, Math.round(ms / 1000));
   if (total < 60) return `${total}s`;
   const minutes = Math.floor(total / 60);

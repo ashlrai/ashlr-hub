@@ -230,7 +230,7 @@ describe('ResourcesDrawer — accounts', () => {
     expect(card.getByText('Credits available')).toBeInTheDocument();
     expect(card.getAllByText('2,500 credits available').length).toBeGreaterThan(0);
     fireEvent.click(card.getByText('Usage details'));
-    expect(card.getByText(/Estimated credit value: \$100.00/)).toBeInTheDocument();
+    expect(card.getByText(/Estimated credit value: \$100/)).toBeInTheDocument();
     expect(card.getByText(/not actual purchase price or attributed spend/)).toBeInTheDocument();
     expect(card.getByRole('link', { name: 'Published reference' })).toHaveAttribute('href', 'https://developers.openai.com/community/students');
     expect(card.getByText('limit reached')).toBeInTheDocument();
@@ -457,7 +457,7 @@ describe('ResourcesDrawer — cloud credits', () => {
     cloud = CLOUD;
     render(<ResourcesDrawer mode="docked" now={NOW} />);
     const card = within(cardOf('Claude cloud estimate'));
-    expect(await card.findByText('$212 of $250 left')).toBeInTheDocument();
+    expect(await card.findByText('$210 of $250 left')).toBeInTheDocument();
     expect(card.getByText('estimate')).toBeInTheDocument();
     expect(card.getByText('2 running · 5 of 20 today')).toBeInTheDocument();
     expect(card.getByText(/Estimated at \$3 a session/)).toBeInTheDocument();
@@ -692,7 +692,7 @@ describe('ResourcesDrawer — equal partners (3.15)', () => {
     expect(within(devinButton).getByText('38 ACUs budget')).toBeInTheDocument();
     expect(devinButton.querySelector('svg[data-provider="devin"]')).toHaveAttribute('viewBox', '0 0 425 425');
     expect(devinButton.textContent).not.toMatch(/^DDevin/);
-    expect(await screen.findByText('$212 est.')).toBeInTheDocument();
+    expect(await screen.findByText('$210 est.')).toBeInTheDocument();
     expect(calls.every((c) => c.method === 'GET')).toBe(true);
   });
 

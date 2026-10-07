@@ -15,6 +15,7 @@
  * its cap, messages Verse sent, and its PR onward once there is one.
  */
 import { lazy, Suspense, useState } from 'react';
+import { formatMetric, formatMetricUsd } from '../../../components/charts/format-metric.js';
 import type { DevinDailyConsumption } from '../../../../core/devin/client.js';
 import type { DevinTaskV1 } from '../../../../core/devin/types.js';
 import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
@@ -108,7 +109,7 @@ function ConsumptionHistory({ days }: { days: DevinDailyConsumption['days'] }) {
   const pages = Math.max(1, Math.ceil(days.length / 20));
   const current = Math.min(page, pages - 1);
   return <details onToggle={event => setOpen(event.currentTarget.open)}>
-    <summary>Daily consumption ({days.length} reporting buckets)</summary>
+    <summary>Daily consumption ({formatMetric(days.length)} reporting buckets)</summary>
     {open ? <>
       <ul aria-label="Devin daily consumption">
         {days.slice(current * 20, (current + 1) * 20).map(day => <li key={day.date}>
@@ -142,7 +143,7 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
   if (!overview) {
     return (
       <li className={styles.card} data-resource="devin" data-devin="unrecognised">
-        <p className={styles.subtle}>{read.data.reason ?? 'Unrecognized response — update Ashlr.'}</p>
+        <p className={styles.subtle}>{read.data.reason ?? 'Unrecognized response — update Phantom.'}</p>
       </li>
     );
   }
@@ -221,10 +222,10 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
             <span className={styles.meterValue} aria-hidden="true">{Math.round(leftPercent)}% left</span>
           </div>
           <p className={styles.subtle}>
-            {budget.running} running · {budget.sessionsToday} today · {formatAcu(budget.acuToday)} today, used or held
+            {formatMetric(budget.running)} running · {formatMetric(budget.sessionsToday)} today · {formatAcu(budget.acuToday)} today, used or held
           </p>
           {usage ? <p className={styles.subtle}>
-            {formatAcu(usage.reported)} reported usage + adjustment · {formatAcu(usage.held)} held exposure · about ${budget.estimatedUsdUsed} for recorded usage
+            {formatAcu(usage.reported)} reported usage + adjustment · {formatAcu(usage.held)} held exposure · about {formatMetricUsd(budget.estimatedUsdUsed)} for recorded usage
             <span className={styles.pill} data-tone="neutral" title={budget.estimateNote}>estimate</span>
           </p> : <p className={styles.fine}>This server combines reservations and usage. Recorded cost coverage is unavailable.</p>}
           {!budget.canLaunch.ok ? (

@@ -23,7 +23,7 @@ describe('Credit balance disclosure', () => {
     const { fetchMock, posted } = stubSurfaceFetch({ routes: { [CREDIT_POOLS_PATH]: fixture() } });
     render(<CreditPools accountNames={new Map([['sample-claude', 'My Claude']])} />);
     expect(fetchMock).not.toHaveBeenCalled(); await userEvent.setup().click(screen.getByText('Credit balances'));
-    await screen.findByText('$12.34 last recorded'); expect(screen.getByText('$9.75 last recorded')).toBeVisible();
+    await screen.findByText('$12 last recorded'); expect(screen.getByText('$9.8 last recorded')).toBeVisible();
     expect(screen.getByText('Cloud gift')).toBeVisible(); expect(screen.getByText('Purchased usage credits')).toBeVisible();
     expect(screen.getByText('Recorded total: $15')).toBeVisible(); expect(screen.getByText('Recorded grant: $50')).toBeVisible();
     expect(screen.getAllByText('My Claude')).toHaveLength(2); expect(screen.getByText('Expiry unknown')).toBeVisible();

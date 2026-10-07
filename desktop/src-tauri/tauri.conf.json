@@ -16,7 +16,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Ashlr Verse",
+        "title": "Phantom",
         "width": 1280,
         "height": 820,
         "minWidth": 900,
@@ -34,7 +34,7 @@
       },
       {
         "label": "launch",
-        "title": "Ashlr",
+        "title": "Phantom",
         "width": 480,
         "height": 300,
         "resizable": false,
@@ -54,7 +54,7 @@
     "trayIcon": {
       "iconPath": "icons/tray.png",
       "iconAsTemplate": true,
-      "tooltip": "Ashlr"
+      "tooltip": "Phantom"
     }
   },
 
@@ -68,8 +68,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "shortDescription": "Ashlr Verse — local operator console for Claude, Codex, Grok and Ollama seats",
-    "longDescription": "Ashlr is a local-first autonomous engineering platform. This desktop app starts the bundled ashlr sidecar in Verse mode, hands the window its per-process read and mutation tokens, and shows the Verse operator console at http://127.0.0.1:7777/verse/ with a system tray icon for quick access.",
+    "shortDescription": "Phantom — local operator console for Claude, Codex, Grok and Ollama seats",
+    "longDescription": "Phantom by AshlrAI is a local-first engineering agent workbench. This desktop app starts the bundled ashlr sidecar in Verse mode, hands the window its per-process read and mutation tokens, and shows the Verse operator console at http://127.0.0.1:7777/verse/ with a system tray icon for quick access.",
     "copyright": "Copyright © 2024 Mason Wyatt / Evero Consulting",
     "category": "DeveloperTool",
     "macOS": {

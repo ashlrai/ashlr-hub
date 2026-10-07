@@ -22,6 +22,7 @@
  *
  * Pure: no React, no I/O.
  */
+import { formatMetric } from '../../../components/charts/format-metric.js';
 import { modelDisplayName, modelDisplayText } from '../../../../core/verse/model-display-name.js';
 import type { LocalModel, LocalModelsSnapshot, LocalRuntimeStatus } from './usage-contract.js';
 
@@ -242,10 +243,8 @@ export function buildLocalModelsView(
 export function formatBytes(bytes: number | null): string {
   if (bytes === null || !Number.isFinite(bytes)) return '—';
   const gb = bytes / 1024 ** 3;
-  if (gb >= 10) return `${gb.toFixed(0)} GB`;
-  if (gb >= 1) return `${gb.toFixed(1)} GB`;
-  const mb = bytes / 1024 ** 2;
-  return `${Math.round(mb)} MB`;
+  if (gb >= 1) return `${formatMetric(gb)} GB`;
+  return `${formatMetric(bytes / 1024 ** 2)} MB`;
 }
 
 /** "expires in 4m 12s" material. Past-due reads as expired, never negative. */

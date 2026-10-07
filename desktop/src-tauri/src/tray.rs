@@ -11,8 +11,8 @@
 //!  │ New chat                 │ → Chat, composer focused
 //!  │ Stop running chats…      │ → native confirm, then cancel each turn
 //!  │ ──────────────────────── │
-//!  │ Show Ashlr Verse         │
-//!  │ Quit Ashlr               │
+//!  │ Show Phantom         │
+//!  │ Quit Phantom               │
 //!  └──────────────────────────┘
 //! ```
 //!
@@ -93,7 +93,7 @@ pub fn dock_badge(needs_you: usize) -> Option<i64> {
 
 /// The tooltip, which also serves VoiceOver.
 pub fn tray_tooltip(model: &TrayModel) -> String {
-    let mut parts = vec!["Ashlr Verse".to_string()];
+    let mut parts = vec!["Phantom".to_string()];
     match model.running.len() {
         0 => {}
         1 => parts.push("1 chat running".to_string()),
@@ -160,8 +160,8 @@ pub fn menu_rows(model: &TrayModel) -> Vec<Row> {
         model.can_stop && !model.running.is_empty(),
     ));
     rows.push(Row::Separator);
-    rows.push(item(ID_SHOW, "Show Ashlr Verse", true));
-    rows.push(item(ID_QUIT, "Quit Ashlr", true));
+    rows.push(item(ID_SHOW, "Show Phantom", true));
+    rows.push(item(ID_QUIT, "Quit Phantom", true));
     rows
 }
 
@@ -188,7 +188,7 @@ pub fn stop_confirm_text(running: usize) -> (String, String) {
 pub fn stop_result_text(stopped: usize, failed: usize) -> Option<String> {
     (failed > 0).then(|| {
         format!(
-            "Stopped {stopped} of {}. {failed} could not be stopped — open Ashlr and stop {} from the chat.",
+            "Stopped {stopped} of {}. {failed} could not be stopped — open Phantom and stop {} from the chat.",
             stopped + failed,
             if failed == 1 { "it" } else { "them" }
         )
@@ -230,8 +230,8 @@ mod tests {
                 "New chat",
                 "(off) Stop running chats…",
                 "—",
-                "Show Ashlr Verse",
-                "Quit Ashlr"
+                "Show Phantom",
+                "Quit Phantom"
             ]
         );
         assert_eq!(tray_title(0), None);
@@ -256,14 +256,14 @@ mod tests {
                 "New chat",
                 "Stop running chats…",
                 "—",
-                "Show Ashlr Verse",
-                "Quit Ashlr"
+                "Show Phantom",
+                "Quit Phantom"
             ]
         );
         assert_eq!(tray_title(2).as_deref(), Some("● 2"));
         assert_eq!(
             tray_tooltip(&model),
-            "Ashlr Verse — 2 chats running — 3 need you"
+            "Phantom — 2 chats running — 3 need you"
         );
         match &rows[1] {
             Row::Item { id, .. } => assert_eq!(
@@ -363,7 +363,7 @@ mod tests {
         assert_eq!(stop_result_text(3, 0), None);
         assert_eq!(
             stop_result_text(2, 1).as_deref(),
-            Some("Stopped 2 of 3. 1 could not be stopped — open Ashlr and stop it from the chat.")
+            Some("Stopped 2 of 3. 1 could not be stopped — open Phantom and stop it from the chat.")
         );
         assert!(stop_result_text(0, 2).unwrap().contains("stop them"));
     }

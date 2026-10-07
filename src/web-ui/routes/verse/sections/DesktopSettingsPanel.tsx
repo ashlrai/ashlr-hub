@@ -42,17 +42,17 @@ function hotkeyNote(state: DesktopState): string {
     const why = error ?? 'another app already uses it';
     return `${accelerator} is not active: ${why}. Free the shortcut in that app, or turn this off.`;
   }
-  return `Press ${accelerator} in any app to bring Verse forward with the composer focused.`;
+  return `Press ${accelerator} in any app to bring Phantom forward with the composer focused.`;
 }
 
 function notificationsNote(state: DesktopState): string {
   const base = state.notifications.enabled
-    ? 'Finished and failed chats, and new items that need you — only while Verse is in the background.'
+    ? 'Finished and failed chats, and new items that need you — only while Phantom is in the background.'
     : 'Off. The tray and the Dock badge still show what needs you.';
   // Unsigned local builds deliver through osascript (notify.rs): say so, or
   // the operator goes looking for "Ashlr" in Notification settings.
   if (state.notifications.delivery === 'script') {
-    return `${base} On this unsigned build banners appear as Script Editor, and clicking one opens Script Editor rather than Verse.`;
+    return `${base} On this unsigned build banners appear as Script Editor, and clicking one opens Script Editor rather than Phantom.`;
   }
   return base;
 }
@@ -81,7 +81,7 @@ export function DesktopSettingsPanel() {
         <p className={styles.panelNote} aria-busy={isDesktopShell() || undefined}>
           {isDesktopShell()
             ? 'Reading the desktop app’s settings…'
-            : 'The system-wide shortcut and notifications are available in the Verse desktop app.'}
+            : 'The system-wide shortcut and notifications are available in the Phantom desktop app.'}
         </p>
       </Panel>
     );

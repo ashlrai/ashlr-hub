@@ -83,7 +83,7 @@ export function CloudBudgetForm({ budget, onSave, onCancel, busy, disabled = fal
       <Switch
         checked={form.selfImprove}
         onChange={(next) => edit({ selfImprove: next })}
-        label="Verse may launch self-improvement tasks on its own"
+        label="Phantom may launch self-improvement tasks on its own"
         disabled={disabled || busy}
       />
       {note ? <p className={styles.muted} role="status">{note}</p> : null}

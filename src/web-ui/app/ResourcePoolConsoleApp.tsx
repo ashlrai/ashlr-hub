@@ -1,3 +1,5 @@
+import { VerseMark } from '../routes/verse/rail-icons.js';
+import { PRODUCT_NAME } from './product-brand.js';
 import { useEffect } from 'react';
 import { SessionGate } from '../components/auth/SessionGate.js';
 import { clearReadSession, markCheckComplete } from '../data/auth-store.js';
@@ -17,9 +19,7 @@ function ScopedResourceWorkspace() {
     <SkipToContent />
     <header className={styles.bar}>
       <div className={styles.identity}><div className={styles.brand}>
-        <svg className={styles.brandMark} viewBox="54 67 146 124" aria-hidden="true" focusable="false">
-          <path fill="currentColor" d="M106 76H123V115H100L113 154L99 179H72L59 156Z M130 76H147L194 156L181 179H154L140 154L153 115H130Z" /><path fill="#2563EB" d="M110 121H143L133 152H120Z" />
-        </svg><strong>Ashlrverse</strong><span className={styles.workspace}>Resources</span></div>
+        <VerseMark size={24} /><strong>{PRODUCT_NAME}</strong><span className={styles.workspace}>Resources</span></div>
         {scope.data ? <><span className={styles.scopeBadge}>{scope.data.readOnly
           ? scope.data.allocationWritable ? 'Fleet policy controls · tasks disabled' : 'Read-only console' : 'Foreground task console'}</span>
           <details className={styles.store}><summary>Resource store</summary><code aria-label="Resource store">{scope.data.root}</code></details></> : null}</div>
@@ -50,7 +50,7 @@ export function ResourcePoolConsoleApp() {
     return () => { cancelled = true; };
   }, [phase]);
   if (phase === 'checking') return <p className={styles.checking} role="status">Checking for an existing resource session…</p>;
-  if (phase === 'unauthenticated') return <SessionGate heading="Connect to Ashlrverse resources"
+  if (phase === 'unauthenticated') return <SessionGate heading={`Connect to ${PRODUCT_NAME} resources`}
     command="ashlr resources pool console --root /absolute/resource-store --pool /absolute/pool.json --bindings /absolute/bindings.json --observations /absolute/observations.json" />;
   return <ScopedResourceWorkspace />;
 }

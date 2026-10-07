@@ -812,7 +812,7 @@ export function ChatSection() {
       <div className={styles.main}>
         {bootstrap.status === 'error' && !bootstrap.data ? (
           <div role="alert" className={styles.banner}>
-            <span>{bootstrap.error?.message ?? 'Could not load Verse.'}</span>
+            <span>{bootstrap.error?.message ?? 'Could not load Phantom.'}</span>
             <button type="button" onClick={refetchBootstrap}>Retry</button>
           </div>
         ) : dispatchOff ? (

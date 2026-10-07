@@ -31,9 +31,9 @@
  * What the import graph cannot see: a test that reads a changed file with fs instead of
  * importing it (fixtures, scripts read as text). `gate:full` covers that.
  *
- * Known failures (scripts/gate-known-failures.json): a failing test FILE listed there is
- * reported as KNOWN and does not fail the gate. Any other failing file, an unhandled error,
- * or vitest failing without naming a file fails it.
+ * Known failures (scripts/gate-known-failures.json) supply diagnostic reasons only.
+ * Every failing file, unhandled error, missing JSON report, or non-zero Vitest exit
+ * fails the gate; a listed file never receives a passing exemption.
  *
  * Writes only to .ashlr-gate/ (logs, eslint cache, tsbuildinfo, the scratch web build,
  * vitest JSON reports), dist/ (the root build, as `npm run build` does) and OS temp (the
@@ -201,14 +201,14 @@ function toRepoPath(file) {
 /**
  * Pure: turn a vitest run into a gate status.
  * @param {{ exitCode: number | null, report: any, log: string, known: Set<string> }} input
- * @returns {{ status: 'pass' | 'known' | 'fail', failedFiles: string[], knownFiles: string[],
+ * @returns {{ status: 'pass' | 'fail', failedFiles: string[], knownFiles: string[],
  *   tests: { passed: number, failed: number, total: number, files: number } | null, note: string | null }}
  */
 export function evaluateVitest({ exitCode, report, log, known }) {
   const unhandled = /Unhandled (?:Errors?|Rejection)/.test(log);
   if (!report || !Array.isArray(report.testResults)) {
     return {
-      status: exitCode === 0 && !unhandled ? 'pass' : 'fail',
+      status: 'fail',
       failedFiles: [], knownFiles: [], tests: null,
       note: 'no vitest JSON report was written',
     };
@@ -218,7 +218,7 @@ export function evaluateVitest({ exitCode, report, log, known }) {
     .map((result) => toRepoPath(result.name))
     .sort();
   const knownFiles = failed.filter((file) => known.has(file));
-  const failedFiles = failed.filter((file) => !known.has(file));
+  const failedFiles = failed;
   const tests = {
     passed: report.numPassedTests ?? 0,
     failed: report.numFailedTests ?? 0,
@@ -235,7 +235,7 @@ export function evaluateVitest({ exitCode, report, log, known }) {
   } else if (exitCode !== 0 && failed.length === 0) {
     status = 'fail';
     note = `vitest exited ${exitCode} without a failing test file`;
-  } else if (knownFiles.length > 0) status = 'known';
+  }
   return { status, failedFiles, knownFiles, tests, note };
 }
 
@@ -477,7 +477,7 @@ async function main() {
   const steps = [];
   const record = (step) => {
     steps.push(step);
-    say(`  ${step.status === 'pass' ? '✓' : step.status === 'known' ? '~' : step.status === 'skipped' ? '-' : '✗'} ${step.name} ${step.durationMs == null ? '' : formatDuration(step.durationMs)}`);
+    say(`  ${step.status === 'pass' ? '✓' : step.status === 'skipped' ? '-' : '✗'} ${step.name} ${step.durationMs == null ? '' : formatDuration(step.durationMs)}`);
     return step;
   };
 
@@ -518,7 +518,7 @@ async function main() {
 
   const durationMs = performance.now() - started;
   // A skipped step never passes: it was skipped because something before it failed.
-  const ok = steps.every((step) => step.status === 'pass' || step.status === 'known');
+  const ok = steps.every((step) => step.status === 'pass');
   const knownHits = steps.flatMap((step) => step.verdict?.knownFiles ?? []);
 
   if (args.json) {

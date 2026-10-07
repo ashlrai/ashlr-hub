@@ -130,11 +130,11 @@ describe('models and modes', () => {
 
 describe('picker and dialog wording', () => {
   it('gives each model its own window and compaction point', () => {
-    expect(modelContextPhrase(FABLE)).toBe('1M ctx · compacts ≈367k');
-    expect(modelContextPhrase(FABLE, 'expansive')).toBe('1M ctx · compacts ≈967k (expansive)');
-    expect(modelContextPhrase(HAIKU)).toBe('200k ctx · compacts ≈167k');
-    expect(modelContextPhrase(GPT6)).toBe('258k ctx · compacts ≈245k');
-    expect(modelContextPhrase(GPT6, 'expansive')).toBe('828k ctx · compacts ≈785k (expansive)');
+    expect(modelContextPhrase(FABLE)).toBe('1M ctx · compacts ≈370k');
+    expect(modelContextPhrase(FABLE, 'expansive')).toBe('1M ctx · compacts ≈970k (expansive)');
+    expect(modelContextPhrase(HAIKU)).toBe('200k ctx · compacts ≈170k');
+    expect(modelContextPhrase(GPT6)).toBe('260k ctx · compacts ≈240k');
+    expect(modelContextPhrase(GPT6, 'expansive')).toBe('830k ctx · compacts ≈780k (expansive)');
     expect(modelContextPhrase(GROK)).toBe('500k ctx · compacts ≈400k');
     expect(modelContextPhrase(LOCAL)).toBe('64k ctx · compacts ≈33k');
   });
@@ -149,7 +149,7 @@ describe('picker and dialog wording', () => {
 
   it('writes the long form with both budgets and the provenance', () => {
     expect(modelContextSentence(FABLE)).toBe(
-      `1M-token window; compacts at about 367k in Standard. Expansive runs to about 967k before compacting. Window ${WINDOW_SOURCE_TEXT['cli-catalog']}.`,
+      `1M-token window; compacts at about 370k in Standard. Expansive runs to about 970k before compacting. Window ${WINDOW_SOURCE_TEXT['cli-catalog']}.`,
     );
     expect(modelContextSentence(GROK)).toBe(`500k-token window; compacts at about 400k. Window ${WINDOW_SOURCE_TEXT['provider-catalog']}.`);
     expect(modelContextSentence(MYSTERY)).toBe('Context window unknown for this model.');
@@ -157,12 +157,12 @@ describe('picker and dialog wording', () => {
 
   it('explains what each mode costs with arithmetic, not adjectives', () => {
     const standard = contextModeDescription('claude', FABLE, 'standard');
-    expect(standard).toContain('Compacts at about 367k');
+    expect(standard).toContain('Compacts at about 370k');
     expect(standard).toContain('re-sends the whole context');
     const expansive = contextModeDescription('claude', FABLE, 'expansive');
-    expect(expansive).toContain('Runs to about 967k');
+    expect(expansive).toContain('Runs to about 970k');
     // 967k / 367k — exactly how much more a full expansive turn re-sends.
-    expect(expansive).toContain('re-sends 2.6× the tokens of one at 367k');
+    expect(expansive).toContain('re-sends 2.6× the tokens of one at 370k');
     expect(expansive).not.toContain('OpenAI');
     // Codex carries the ONE shared metering caveat, worded as reported (single source).
     const codex = contextModeDescription('codex', GPT6, 'expansive');
@@ -175,7 +175,7 @@ describe('picker and dialog wording', () => {
     expect(expansiveMeteringNote('codex')).toBe(CODEX_EXPANSIVE_METERING_NOTE);
     expect(expansiveMeteringNote('claude')).toBeNull();
     expect(expansiveMeteringNote(null)).toBeNull();
-    expect(contextModeDescription('codex', GPT55, 'standard')).toBe("Compacts at about 245k — the CLI's own default budget for this model.");
+    expect(contextModeDescription('codex', GPT55, 'standard')).toBe("Compacts at about 240k — the CLI's own default budget for this model.");
   });
 
   it('says why a model offers no mode choice', () => {
@@ -201,17 +201,17 @@ describe('context fit', () => {
 
   it('explains every verdict, and says HOW to split', () => {
     expect(fitExplanation({ verdict: 'fits', tokens: 100_000, option: FABLE, mode: 'standard' }))
-      .toBe('All ~100k tokens of tracked code fits well inside this model\'s budget (compacts ≈367k), with room left for the conversation.');
-    expect(fitExplanation({ verdict: 'tight', tokens: 300_000, option: FABLE, mode: 'standard' })).toMatch(/under the ≈367k compaction point/);
+      .toBe('All ~100k tokens of tracked code fits well inside this model\'s budget (compacts ≈370k), with room left for the conversation.');
+    expect(fitExplanation({ verdict: 'tight', tokens: 300_000, option: FABLE, mode: 'standard' })).toMatch(/under the ≈370k compaction point/);
     const needs = fitExplanation({ verdict: 'expansive', tokens: 300_000, option: GPT6, mode: 'standard' });
-    expect(needs).toContain('only Expansive (≈785k) takes it all');
+    expect(needs).toContain('only Expansive (≈780k) takes it all');
     expect(needs).toContain('Switch to Expansive');
     expect(fitExplanation({ verdict: 'tight', tokens: 300_000, option: FABLE, mode: 'standard' }))
-      .toContain('Expansive (≈967k) would hold it with room to spare.');
+      .toContain('Expansive (≈970k) would hold it with room to spare.');
     expect(fitExplanation({ verdict: 'tight', tokens: 300_000, option: HAIKU, mode: 'standard' })).not.toContain('Expansive');
     const split = fitExplanation({ verdict: 'split', tokens: 2_000_000, option: FABLE, mode: 'standard', floor: true });
     expect(split).toMatch(/^At least ~2M tokens/);
-    expect(split).toContain('even Expansive (≈967k)');
+    expect(split).toContain('even Expansive (≈970k)');
     expect(split).toContain('fan it out across several chats');
     expect(split).toContain('narrow this chat');
   });
@@ -224,9 +224,9 @@ describe('context fit', () => {
     // No expansive budget: the mode resolves to Standard, and so does the verdict.
     expect(modelFit(300_000, HAIKU, 'expansive', 'claude')).toBe('split');
     expect(fitExplanation({ verdict: 'fits', tokens: 300_000, option: FABLE, mode: 'expansive' }))
-      .toBe("All ~300k tokens of tracked code fits well inside this model's Expansive budget (compacts ≈967k), with room left for the conversation.");
+      .toBe("All ~300k tokens of tracked code fits well inside this model's Expansive budget (compacts ≈970k), with room left for the conversation.");
     expect(fitExplanation({ verdict: 'tight', tokens: 700_000, option: FABLE, mode: 'expansive' }))
-      .toMatch(/fits under the ≈967k compaction point of the Expansive budget/);
+      .toMatch(/fits under the ≈970k compaction point of the Expansive budget/);
   });
 
   it('adds the seat engine’s estimated fixed prompt, not one flat figure', () => {

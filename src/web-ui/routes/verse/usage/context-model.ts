@@ -49,6 +49,7 @@ import type {
   VerseWindowSource,
 } from '../../../../core/verse/types.js';
 import { CODEX_EXPANSIVE_METERING_NOTE, formatContextWindow, modelOptionFor, seatUnavailableReason, sessionContextBudget, WINDOW_SOURCE_TEXT } from '../verse-model.js';
+import { formatMetric } from '../../../components/charts/format-metric.js';
 import { formatTokens } from '../verse-readouts.js';
 import { formatWholePercent } from '../autonomy/format.js';
 
@@ -188,7 +189,7 @@ export function expansiveRatioSentence(option: VerseModelOption | null | undefin
   const stdCap = standard ? standard.autoCompactAt ?? standard.contextWindow : null;
   const expCap = expansive ? expansive.autoCompactAt ?? expansive.contextWindow : null;
   if (stdCap === null || expCap === null || stdCap <= 0) return null;
-  return `A turn at ${formatTokens(expCap)} re-sends ${(expCap / stdCap).toFixed(1)}× the tokens of one at ${formatTokens(stdCap)}.`;
+  return `A turn at ${formatTokens(expCap)} re-sends ${formatMetric(expCap / stdCap)}× the tokens of one at ${formatTokens(stdCap)}.`;
 }
 
 /**
@@ -216,8 +217,8 @@ export function contextModeDescription(engine: VerseEngine, option: VerseModelOp
 
 /** Why a model offers no mode choice, for the one line where the selector would be. */
 export function noModeReason(engine: VerseEngine, option: VerseModelOption): string {
-  if (!budgetFor(option, 'standard')) return 'This model’s window is unknown, so Verse cannot offer a larger budget for it.';
-  if (engine === 'grok' || engine === 'local') return 'One budget: this CLI compacts at its own fixed point, and Verse cannot raise it per chat.';
+  if (!budgetFor(option, 'standard')) return 'This model’s window is unknown, so Phantom cannot offer a larger budget for it.';
+  if (engine === 'grok' || engine === 'local') return 'One budget: this CLI compacts at its own fixed point, and Phantom cannot raise it per chat.';
   return 'One budget: this model has no larger window to expand into.';
 }
 

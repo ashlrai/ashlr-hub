@@ -267,7 +267,7 @@ export function OvernightPanel({
         <p className={autonomy.empty}>
           <span className={autonomy.emptyStrong}>Unreadable reading. </span>
           {read.reason ??
-            'Unrecognized response — update Ashlr.'}
+            'Unrecognized response — update Phantom.'}
         </p>
       ) : status.armed ? (
         <>

@@ -167,9 +167,9 @@ describe('requestMode', () => {
 
 describe('budgetLine / offersExpansive', () => {
   it('states the window and the compaction point per mode', () => {
-    expect(budgetLine(FABLE, 'standard')).toBe('1M window · compacts ≈367k');
-    expect(budgetLine(FABLE, 'expansive')).toBe('1M window · compacts ≈967k');
-    expect(budgetLine(GPT6, 'expansive')).toBe('828k window · compacts ≈785k');
+    expect(budgetLine(FABLE, 'standard')).toBe('1M window · compacts ≈370k');
+    expect(budgetLine(FABLE, 'expansive')).toBe('1M window · compacts ≈970k');
+    expect(budgetLine(GPT6, 'expansive')).toBe('830k window · compacts ≈780k');
     expect(budgetLine(HAIKU, 'expansive')).toBeNull();
   });
 
@@ -281,7 +281,7 @@ describe('bytes', () => {
   });
 
   it('formats bytes for a narrow panel', () => {
-    expect(formatBytes(512)).toBe('512 B');
+    expect(formatBytes(512)).toBe('510 B');
     expect(formatBytes(1536)).toBe('1.5 KB');
     expect(formatBytes(64 * 1024)).toBe('64 KB');
     expect(formatBytes(-1)).toBe('—');

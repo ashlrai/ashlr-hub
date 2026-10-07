@@ -175,7 +175,7 @@ describe('the access sheet', () => {
     expect(within(dialog).getByText('Never available')).toBeInTheDocument();
     expect(within(dialog).getByText('(not running)')).toBeInTheDocument();
     expect(within(dialog).getByRole('button', { name: 'Allow selected' })).toBeDisabled();
-    expect(within(dialog).getByText(/Grants last until you close this chat, restart Verse, or press KILL/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/Grants last until you close this chat, restart Phantom, or press KILL/)).toBeInTheDocument();
   });
 
   it('allows only the ticked apps, arms native and posts once', async () => {

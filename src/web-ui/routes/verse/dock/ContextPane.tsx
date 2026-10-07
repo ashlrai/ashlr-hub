@@ -73,7 +73,7 @@ export function ContextPane({ session, seats, events, roots, rootsError, onHando
         <section className={styles.section} aria-labelledby="dock-context-handoff">
           <h3 id="dock-context-handoff" className={styles.sectionTitle}>Handoff</h3>
           <p className={styles.muted}>
-            Verse drafts a note from this chat&apos;s log — free — and opens a fresh chat with it in the message box. Nothing is sent until you press Send.
+            Phantom drafts a note from this chat&apos;s log — free — and opens a fresh chat with it in the message box. Nothing is sent until you press Send.
           </p>
           <button type="button" className={styles.action} onClick={onHandoff} disabled={handoffDisabledReason !== null}
             title={handoffDisabledReason ?? undefined}>

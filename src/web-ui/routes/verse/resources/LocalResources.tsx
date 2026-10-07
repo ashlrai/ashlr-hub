@@ -139,7 +139,7 @@ export function LocalResources({ status, onOpenUsage, now, readiness = null, onR
               ) : null}
             </div>
           ) : runtime.managedElsewhere ? (
-            <p className={styles.subtle}>Started and stopped outside Verse.</p>
+            <p className={styles.subtle}>Started and stopped outside Phantom.</p>
           ) : null}
         </div>
       ) : null}

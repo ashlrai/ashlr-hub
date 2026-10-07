@@ -95,7 +95,7 @@ describe('OnboardingFlow — the chip', () => {
     const chip = screen.getByRole('region', { name: 'Getting started' });
     expect(chip).toHaveTextContent('Getting started1/6');
     expect(within(chip).getByRole('button', { name: /Getting started/ })).toHaveAttribute('aria-expanded', 'false');
-    expect(screen.queryByText('Welcome to Verse')).not.toBeInTheDocument();
+    expect(screen.queryByText('Welcome to Phantom')).not.toBeInTheDocument();
     // The chip reads nothing: no step has mounted, so no step's query ran.
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -104,12 +104,12 @@ describe('OnboardingFlow — the chip', () => {
     const user = userEvent.setup();
     render(<OnboardingFlow />);
     await user.click(screen.getByRole('button', { name: /Getting started/ }));
-    expect(screen.getByText('Welcome to Verse')).toBeInTheDocument();
+    expect(screen.getByText('Welcome to Phantom')).toBeInTheDocument();
     expect(screen.getByText('Getting started · 1 of 6')).toBeInTheDocument();
     expect(getOnboardingState().expanded).toBe(true);
 
     await user.click(screen.getByRole('button', { name: 'Minimize getting started' }));
-    expect(screen.queryByText('Welcome to Verse')).not.toBeInTheDocument();
+    expect(screen.queryByText('Welcome to Phantom')).not.toBeInTheDocument();
     const reopen = screen.getByRole('button', { name: /Getting started/ });
     expect(reopen).toHaveFocus();
     expect(getOnboardingState()).toMatchObject({ open: true, expanded: false, dismissedAt: null, completedAt: null });
@@ -143,13 +143,13 @@ describe('OnboardingFlow — presence and dismissal', () => {
 
   it('opens on a first run and names the step it is on', () => {
     render(<OnboardingFlow />);
-    expect(screen.getByText('Welcome to Verse')).toBeInTheDocument();
+    expect(screen.getByText('Welcome to Phantom')).toBeInTheDocument();
     expect(screen.getByText('Getting started · 1 of 6')).toBeInTheDocument();
   });
 
   it('welcomes in one sentence', () => {
     render(<OnboardingFlow />);
-    const lead = screen.getByText(/^Verse runs your chats/);
+    const lead = screen.getByText(/^Phantom runs your chats/);
     expect(lead.textContent!.match(/[.!?](\s|$)/g)).toHaveLength(1);
   });
 
@@ -172,7 +172,7 @@ describe('OnboardingFlow — presence and dismissal', () => {
     expect(container.querySelector('[aria-modal="true"]')).toBeNull();
     // It is a region, so a screen reader can reach it deliberately and skip
     // past it just as easily.
-    expect(screen.getByRole('region', { name: 'Welcome to Verse' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Welcome to Phantom' })).toBeInTheDocument();
   });
 
   it('Skip closes it and records the answer so it never returns', async () => {
@@ -180,11 +180,11 @@ describe('OnboardingFlow — presence and dismissal', () => {
     const { rerender } = render(<OnboardingFlow />);
     await user.click(screen.getByRole('button', { name: 'Skip setup' }));
 
-    expect(screen.queryByText('Welcome to Verse')).not.toBeInTheDocument();
+    expect(screen.queryByText('Welcome to Phantom')).not.toBeInTheDocument();
     expect(JSON.parse(localStorage.getItem(VERSE_ONBOARDING_STORAGE_KEY)!).dismissedAt).toEqual(expect.any(String));
 
     rerender(<OnboardingFlow />);
-    expect(screen.queryByText('Welcome to Verse')).not.toBeInTheDocument();
+    expect(screen.queryByText('Welcome to Phantom')).not.toBeInTheDocument();
   });
 
   /**
@@ -204,7 +204,7 @@ describe('OnboardingFlow — presence and dismissal', () => {
     render(<OnboardingFlow />);
     screen.getByRole('button', { name: 'Minimize getting started' }).focus();
     await user.keyboard('{Escape}');
-    expect(screen.queryByText('Welcome to Verse')).not.toBeInTheDocument();
+    expect(screen.queryByText('Welcome to Phantom')).not.toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Getting started' })).toBeInTheDocument();
     expect(getOnboardingState().dismissedAt).toBeNull();
     expect(getOnboardingState().open).toBe(true);
@@ -217,7 +217,7 @@ describe('OnboardingFlow — presence and dismissal', () => {
     // other transient surface while the tour happens to be open.
     document.body.focus();
     await user.keyboard('{Escape}');
-    expect(screen.getByText('Welcome to Verse')).toBeInTheDocument();
+    expect(screen.getByText('Welcome to Phantom')).toBeInTheDocument();
     expect(getOnboardingState().dismissedAt).toBeNull();
   });
 
@@ -453,7 +453,7 @@ describe('OnboardingPanel — replay from Settings', () => {
     expect(screen.getByText(/Skipped\./)).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Replay' }));
-    expect(screen.getByText('Welcome to Verse')).toBeInTheDocument();
+    expect(screen.getByText('Welcome to Phantom')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Showing' })).toBeDisabled();
   });
 

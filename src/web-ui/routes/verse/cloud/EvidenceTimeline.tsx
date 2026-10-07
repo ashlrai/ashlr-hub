@@ -59,7 +59,7 @@ export type TimelineRead = { timeline: CloudTimelineResponse; reason: null } | {
 /** Operator words for a timeline read that did not answer — never a path, never a trace. */
 function absence(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.status === 404) return 'Verse has no evidence for this task — it is not in the task store, or this build has no timeline yet.';
+    if (err.status === 404) return 'Phantom has no evidence for this task — it is not in the task store, or this build has no timeline yet.';
     if (err.status === 503) return 'The timeline failed to load on the server.';
     return `The timeline answered HTTP ${err.status}.`;
   }
@@ -73,10 +73,10 @@ export function cloudTimelineQuery(taskId: string): QueryDef<TimelineRead> {
       // The id came from the server, but it is spliced into a request path:
       // only a cloud (`ct_…`) or Devin (`dv_…`) id Verse issues gets one.
       const path = evidenceTimelinePath(taskId);
-      if (!path) return { timeline: null, reason: 'That task id is not one Verse issued.' };
+      if (!path) return { timeline: null, reason: 'That task id is not one Phantom issued.' };
       try {
         const timeline = narrowTimeline(await apiGet<unknown>(path, signal));
-        return timeline ? { timeline, reason: null } : { timeline: null, reason: 'Unrecognized response — update Ashlr.' };
+        return timeline ? { timeline, reason: null } : { timeline: null, reason: 'Unrecognized response — update Phantom.' };
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) throw err;
         if (err instanceof DOMException && err.name === 'AbortError') throw err;

@@ -167,7 +167,7 @@ export interface McpSeatRow {
   engine: VerseEngine | null;
   monogram: string;
   servers: McpServer[];
-  /** "loads 2 servers", "loads none — isolated by Verse". */
+  /** "loads 2 servers", "loads none — isolated by Phantom". */
   loads: string;
   isolated: boolean;
   /** Plain language for the seat's reason; the code rides beside it. */
@@ -187,7 +187,7 @@ export function mcpSeatRows(snapshot: McpSnapshot): McpSeatRow[] {
       engine,
       monogram: engine ? ENGINE_MONOGRAM[engine] : seat.label.slice(0, 1).toUpperCase(),
       servers: seat.servers,
-      loads: n > 0 ? `loads ${n} server${n === 1 ? '' : 's'}` : isolated ? 'loads none — isolated by Verse' : 'loads none',
+      loads: n > 0 ? `loads ${n} server${n === 1 ? '' : 's'}` : isolated ? 'loads none — isolated by Phantom' : 'loads none',
       isolated,
       sentence: reasonSentence(SEAT_REASON_COPY, seat.reason, 'Hub cannot say what this seat would load.'),
       reason: seat.reason,

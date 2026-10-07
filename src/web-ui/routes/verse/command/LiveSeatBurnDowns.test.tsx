@@ -147,7 +147,7 @@ describe('LiveSeatBurnDowns — recorded seat history', () => {
     render(<LiveSeatBurnDowns budget={budgetView('live', now)} />);
     const grok = await screen.findByRole('figure', { name: 'Grok (grok-a) · weekly' });
     const grid = screen.getByRole('group', { name: 'Seat windows' });
-    await waitFor(() => expect(grid).toHaveAttribute('title', 'Lines without recorded history start when Verse opened.'));
+    await waitFor(() => expect(grid).toHaveAttribute('title', 'Lines without recorded history start when Phantom opened.'));
     expect(grok).not.toHaveTextContent('Verse opened');
   });
 
@@ -157,6 +157,6 @@ describe('LiveSeatBurnDowns — recorded seat history', () => {
     render(<LiveSeatBurnDowns budget={budgetView('live', now)} />);
     await screen.findByRole('figure', { name: 'Grok (grok-a) · weekly' });
     const grid = screen.getByRole('group', { name: 'Seat windows' });
-    await waitFor(() => expect(grid).toHaveAttribute('title', 'Lines without recorded history start when Verse opened.'));
+    await waitFor(() => expect(grid).toHaveAttribute('title', 'Lines without recorded history start when Phantom opened.'));
   });
 });

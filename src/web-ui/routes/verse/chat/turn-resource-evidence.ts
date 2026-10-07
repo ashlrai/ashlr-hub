@@ -69,7 +69,7 @@ function toolLabel(name: unknown): { label: string; mcp: boolean } {
   const server = /^mcp:/i.test(trimmed) ? trimmed.slice(4, trimmed.indexOf('.')) : trimmed.split('__')[1];
   const family = server === 'ashlr' || server === 'plugin_ashlr_ashlr' ? 'Ashlr MCP'
     : server === 'ashlr-efficiency' ? 'Ashlr efficiency MCP'
-      : server === 'ashlr-verse' ? 'Verse MCP' : 'Other MCP';
+      : server === 'ashlr-verse' ? 'Phantom MCP' : 'Other MCP';
   return { label: `${family}: ${tool}`, mcp: true };
 }
 

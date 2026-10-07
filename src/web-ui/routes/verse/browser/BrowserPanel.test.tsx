@@ -157,9 +157,9 @@ describe('web UI fallback (no desktop browser contract)', () => {
     render(<BrowserPanel sessionId="s-1" deps={h.deps} />);
     await go('5173');
     const shot = screen.getByRole('button', { name: 'Screenshot' });
-    expect(shot).toHaveAttribute('title', 'Screenshots need the Ashlr desktop app');
+    expect(shot).toHaveAttribute('title', 'Screenshots need the Phantom desktop app');
     await userEvent.setup().click(shot);
-    expect(await screen.findByRole('alert')).toHaveTextContent(/Screenshots need the Ashlr desktop app/);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Screenshots need the Phantom desktop app/);
     expect(screen.getByRole('button', { name: 'Pick an element' })).toBeDisabled();
   });
 
@@ -167,7 +167,7 @@ describe('web UI fallback (no desktop browser contract)', () => {
     const h = harness();
     render(<BrowserPanel sessionId="s-1" deps={h.deps} />);
     await go('7777');
-    expect(screen.getByRole('status')).toHaveTextContent(/Verse itself/);
+    expect(screen.getByRole('status')).toHaveTextContent(/Phantom itself/);
     await go('javascript:alert(1)');
     expect(screen.getByRole('status')).toHaveTextContent(/not an address|Only http/);
   });

@@ -11,7 +11,8 @@ function fixture(patch: Partial<WorkspaceViewProps> = {}) {
   return props;
 }
 async function draft(user: ReturnType<typeof userEvent.setup>, text = 'Inspect the parser and explain the boundary.') {
-  await user.type(screen.getByLabelText('Task prompt'), text);
+  // Submission/draft boundaries need one controlled input, not a timed key stream that can outlive a failed test.
+  fireEvent.change(screen.getByLabelText('Task prompt'), { target: { value: text } });
   await user.selectOptions(screen.getByLabelText('Task worker'), 'local-a');
 }
 function textFile(name: string, text: string) {
@@ -68,7 +69,7 @@ describe('project task workspace', () => {
 
   it.each(['missing-worker', 'timeout', 'tokens', 'oversized-prompt'] as const)('rejects %s before calling the submission boundary', async (mode) => {
     const props = fixture(); const user = userEvent.setup(); render(<WorkspaceView {...props} />);
-    await user.type(screen.getByLabelText('Task prompt'), 'Inspect this project.');
+    fireEvent.change(screen.getByLabelText('Task prompt'), { target: { value: 'Inspect this project.' } });
     if (mode !== 'missing-worker') await user.selectOptions(screen.getByLabelText('Task worker'), 'local-a');
     if (mode === 'timeout') fireEvent.change(screen.getByLabelText('Task timeout in seconds'), { target: { value: '901' } });
     if (mode === 'tokens') fireEvent.change(screen.getByLabelText('Task output token limit'), { target: { value: '16385' } });

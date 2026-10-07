@@ -21,6 +21,7 @@
  * one-point "trend" or back-filling a shape nobody measured.
  */
 import { useEffect, useRef, type ReactNode } from 'react';
+import { formatDecimalMetric, formatMetric } from '../../../components/charts/format-metric.js';
 import { StatusBadge, type Tone } from '../../../components/primitives/StatusBadge.js';
 import { relativePhrase } from '../context/context-model.js';
 import { ENGINE_LABEL } from '../verse-model.js';
@@ -196,8 +197,8 @@ export function AccountDetail({
                 {credits.unlimited
                   ? 'unlimited'
                   : credits.balanceValue !== null
-                    ? credits.balanceValue.toLocaleString('en-US', { maximumFractionDigits: 2 })
-                    : (credits.balance ?? 'not reported')}
+                    ? formatDecimalMetric(credits.balance) ?? formatMetric(credits.balanceValue)
+                    : (formatDecimalMetric(credits.balance) ?? credits.balance ?? 'not reported')}
               </span>
               <p className={styles.reason}>
                 {accountCreditDetail(credits, historical)}

@@ -436,7 +436,7 @@ export function AccessSheet({
           Allow selected
         </button>
       </div>
-      <p className={styles.footnote}>Grants last until you close this chat, restart Verse, or press KILL. Esc stops the agent at any time.</p>
+      <p className={styles.footnote}>Grants last until you close this chat, restart Phantom, or press KILL. Esc stops the agent at any time.</p>
     </Sheet>
   );
 }
@@ -528,7 +528,7 @@ export function OnboardingSheet({
   ];
   return (
     <Sheet titleId={titleId} title="Let Ashlr see and use this Mac" onEscape={onClose}>
-      <p className={styles.body}>Agents in Verse need two macOS permissions before they can use the apps you grant them.</p>
+      <p className={styles.body}>Agents in Phantom need two macOS permissions before they can use the apps you grant them.</p>
       <ul className={styles.permissions}>
         {rows.map((row) => (
           <li key={row.kind} className={styles.permissionRow}>

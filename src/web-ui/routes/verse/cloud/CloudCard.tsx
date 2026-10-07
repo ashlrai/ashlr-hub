@@ -2,7 +2,7 @@
  * routes/verse/cloud/CloudCard.tsx — the cloud lane on Command (3.11 unit C3;
  * mounted by sections/CommandSection.tsx beside the burn-downs).
  *
- *   Cloud                                  [New cloud task] [Improve Verse] [Edit budget] [↻]
+ *   Cloud                                  [New cloud task] [Improve Phantom] [Edit budget] [↻]
  *   Credits remaining              $212 of $250 · estimate
  *   ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇░░░░░
  *   Estimated at $3 per session — Claude doesn't expose the credit balance…  Check usage on claude.ai ↗
@@ -20,7 +20,7 @@
  *
  * States: loading, not in this build (404 — renders nothing), empty, running, pr-open, failed,
  * and budget-refused (the launch gate closed — its plain sentence is shown,
- * and New cloud task / Improve Verse are disabled with that sentence as
+ * and New cloud task / Improve Phantom are disabled with that sentence as
  * their tooltip).
  */
 import { lazy, Suspense, useId, useRef, useState } from 'react';
@@ -110,7 +110,7 @@ export function CloudTaskRow({ task, actions, now }: { task: CloudTaskV1; action
                 actions.act(() => dismissCloudTask(task.id), `Dismiss the cloud task “${task.title}”.`, {
                   confirm: {
                     title: 'Dismiss this cloud task?',
-                    body: `Verse stops tracking “${task.title}”. Nothing on GitHub or claude.ai changes — the session and any PR stay where they are.`,
+                    body: `Phantom stops tracking “${task.title}”. Nothing on GitHub or claude.ai changes — the session and any PR stay where they are.`,
                     confirmLabel: 'Dismiss',
                   },
                 })
@@ -204,7 +204,7 @@ function CloudBody({ overview, actions, now, onNotice }: { overview: CloudOvervi
           label="Self-improvement"
           disabled={actions.busy || actions.readOnly}
           onChange={(enabled) =>
-            actions.act(() => updateCloudBudget({ selfImprove: { enabled } }), enabled ? 'Let Verse launch its own self-improvement tasks.' : 'Stop Verse launching its own self-improvement tasks.', {
+            actions.act(() => updateCloudBudget({ selfImprove: { enabled } }), enabled ? 'Let Phantom launch its own self-improvement tasks.' : 'Stop Phantom launching its own self-improvement tasks.', {
               onDone: () => onNotice({ tone: 'success', text: enabled ? `Self-improvement is on — up to ${si.maxPerDay} a day.` : 'Self-improvement is off.' }),
             })
           }
@@ -212,7 +212,7 @@ function CloudBody({ overview, actions, now, onNotice }: { overview: CloudOvervi
         <span className={`${styles.muted} ${styles.toggleText}`}>{selfImproveLine(view)}</span>
       </div>
       {shown.length === 0 ? (
-        <CardNote>No cloud tasks yet. Start one with New cloud task, or let Verse improve itself.</CardNote>
+        <CardNote>No cloud tasks yet. Start one with New cloud task, or let Phantom improve itself.</CardNote>
       ) : (
         <ul className={styles.tasks} aria-label="Cloud tasks">
           {shown.map((t) => <CloudTaskRow key={t.id} task={t} actions={actions} now={now} />)}
@@ -245,7 +245,7 @@ export function CloudCard({ actions, now = Date.now() }: { actions: SurfaceActio
     if (!overview || !nextUp) return;
     actions.act(() => runCloudImprove({ count: 1 }), 'Launch the next self-improvement task as a cloud session.', {
       confirm: {
-        title: 'Improve Verse now?',
+        title: 'Improve Phantom now?',
         body: `Launches “${nextUp.title}” as a cloud session on ${nextUp.repo ?? overview.budget.budget.selfImprove.repo}${estimate !== null ? `, estimated at ${formatDollars(estimate)}` : ''}. It delivers a draft PR; nothing merges on its own.`,
         confirmLabel: 'Launch',
       },
@@ -270,7 +270,7 @@ export function CloudCard({ actions, now = Date.now() }: { actions: SurfaceActio
       </Tooltip>
       <Tooltip label={improveBlock ?? (nextUp ? `Launch the next backlog item: ${nextUp.title}` : 'Launch the next backlog item')}>
         <Button size="sm" disabled={locked || improveBlock !== null} onClick={improve}>
-          Improve Verse
+          Improve Phantom
         </Button>
       </Tooltip>
       <Tooltip label="Credits, per-session estimate and daily caps">

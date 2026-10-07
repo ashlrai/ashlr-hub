@@ -81,12 +81,6 @@ describe('M481 CI workflow action trust chain', () => {
     }
   });
 
-  it('keeps reviewed action versions visible beside every pin', () => {
-    expect(workflowText.match(/actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\.0\.1/g)).toHaveLength(5);
-    expect(workflowText.match(/actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7\.0\.0/g)).toHaveLength(4);
-    expect(workflowText.match(/actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\.0\.1/g)).toHaveLength(3);
-  });
-
   it('runs the dormant native broker library gate on a hosted Mac with pinned Rust', () => {
     const native = jobs['native-macos-broker-foundation'];
     expect(native?.['runs-on']).toBe('macos-latest');

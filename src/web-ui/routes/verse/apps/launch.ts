@@ -42,9 +42,9 @@ export function inVerseAvailability(input: {
   slotLanded?: boolean;
 }): InVerseAvailability {
   const landed = input.slotLanded ?? isSlotAvailable('terminal-pane');
-  if (!landed) return { available: false, reason: 'This build has no Verse terminal yet.' };
+  if (!landed) return { available: false, reason: 'This build has no Phantom terminal yet.' };
   if (input.terminalAvailable !== true) {
-    return { available: false, reason: input.terminalReason ?? 'The Verse terminal needs the desktop app.' };
+    return { available: false, reason: input.terminalReason ?? 'The Phantom terminal needs the desktop app.' };
   }
   if (input.activeSessionId === null) return { available: false, reason: 'Open a chat first — its terminal hosts the agent.' };
   return { available: true, reason: null };

@@ -12,6 +12,7 @@
  * page only draws them. A value the server did not send is unknown, never 0.
  * Framework-free; tested directly.
  */
+import { formatMetric } from '../../../components/charts/format-metric.js';
 import type { AuthorityStatusV1 } from '../../../../core/authority/types.js';
 import type { CloudTaskV1 } from '../../../../core/cloud/types.js';
 import type {
@@ -93,12 +94,12 @@ export function ago(iso: string, now: number): string {
   if (ms < MINUTE) return 'just now';
   if (ms < HOUR) return `${Math.floor(ms / MINUTE)} m ago`;
   if (ms < DAY) return `${Math.floor(ms / HOUR)} h ago`;
-  return `${Math.floor(ms / DAY)} d ago`;
+  return `${formatMetric(Math.floor(ms / DAY))} d ago`;
 }
 
-/** Hours as the rollout reports them (one decimal), without a trailing ".0". */
+/** Display the recorded hours with the shared metric precision. */
 function hours(n: number): string {
-  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+  return formatMetric(n);
 }
 
 // ---------------------------------------------------------------------------

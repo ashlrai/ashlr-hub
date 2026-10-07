@@ -25,6 +25,7 @@
  * nobody opened.
  */
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { formatMetric } from '../../../components/charts/format-metric.js';
 import type { VerseEvent, VerseSeat, VerseSession } from '../../../data/api-types.js';
 import {
   VERSE_HANDOFF_MAX_CHARS,
@@ -474,7 +475,7 @@ function HandoffDialogBody({ session, seats, onClose, onCreated, initialTarget }
                 ? preview ? 'Rebuilding…' : 'Reading this chat’s log…'
                 : preview ? (
                   <>
-                    {text.length.toLocaleString()} chars · ~{liveTokens.toLocaleString()} tokens
+                    {formatMetric(text.length)} chars · ~{formatMetric(liveTokens)} tokens
                     {' · '}{preview.stats.turnsCovered} {preview.stats.turnsCovered === 1 ? 'turn' : 'turns'}
                     {' · '}{preview.stats.filesTouched} {preview.stats.filesTouched === 1 ? 'file' : 'files'} touched
                     {edited ? ' · edited' : ''}

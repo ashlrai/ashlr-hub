@@ -543,7 +543,7 @@ export function NeedsYouScreen() {
     if (activity.status === 'idle' || activity.status === 'loading') {
       body = <SkeletonList rows={3} label="Loading what needs you" />;
     } else if (activity.status === 'unavailable' && !activity.error) {
-      body = <ErrorState title="Needs you isn’t available" reason="Verse on your Mac does not serve Needs you in this build. Update Ashlr on the Mac." onRetry={() => void refreshActivity()} />;
+      body = <ErrorState title="Needs you isn’t available" reason="Phantom on your Mac does not serve Needs you in this build. Update Phantom on the Mac." onRetry={() => void refreshActivity()} />;
     } else {
       body = <ErrorState title="Couldn’t load Needs you" reason={activity.error ?? 'Your Mac did not answer.'} onRetry={() => void refreshActivity()} />;
     }

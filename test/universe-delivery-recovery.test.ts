@@ -11,7 +11,7 @@ vi.mock('../src/core/universe/campaign-store.js', () => ({ campaignUniverse: sou
   } }));
 vi.mock('../src/core/universe/delivery.js', () => ({ readUniverseDeliveries: sources.deliveries }));
 vi.mock('../src/core/universe/store.js', () => ({ manifestRecord: sources.manifest, universePath: () => '/synthetic/universe' }));
-import { readCompletedCampaignDelivery } from '../src/core/universe/campaign-delivery-recovery.js';
+import { readCompletedCampaignDelivery, readCompletedCampaignDeliveryProjection } from '../src/core/universe/campaign-delivery-recovery.js';
 
 beforeEach(() => { for (const source of Object.values(sources)) source.mockReset(); });
 
@@ -38,12 +38,25 @@ function fixture() {
   sources.manifest.mockReturnValue({ seedArtifact: { digest: 'seed' } });
   const read = () => readCompletedCampaignDelivery(campaign as unknown as UniverseCampaignSummary,
     { branch: 'codex/improvement', baseCommit: 'base' }, { root: '/synthetic' });
-  return { campaign, universe, run, trial, parent, receipt, deliveries, read };
+  const readProjection = () => readCompletedCampaignDeliveryProjection(campaign as unknown as UniverseCampaignSummary,
+    { branch: 'codex/improvement', baseCommit: 'base' }, { root: '/synthetic' });
+  return { campaign, universe, run, trial, parent, receipt, deliveries, read, readProjection };
 }
 
 describe('Independent existing-delivery recovery provenance', () => {
   it('accepts an already verified strict improvement from the exact campaign run', () => {
     const f = fixture(); expect(f.read()).toEqual(f.receipt);
+  });
+
+  it('returns the fresh receipt Universe without changing historical recovery for an unrelated active run', () => {
+    const f = fixture();
+    const first = f.readProjection(); expect(first?.receipt).toBe(f.receipt); expect(first?.universe).toBe(f.universe);
+    const current = { ...f.universe, activeRun: { id: 'unrelated-running-run' } };
+    sources.universe.mockReturnValue(current);
+    expect(f.readProjection()?.universe).toBe(current);
+    expect(f.read()).toEqual(f.receipt);
+    sources.universe.mockReturnValue(null);
+    expect(f.readProjection()).toBeNull(); expect(f.read()).toBeNull();
   });
 
   it.each([

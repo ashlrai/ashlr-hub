@@ -7,6 +7,7 @@
  * path and these are not: a value exported from the store rides in its
  * first-paint chunk whoever imports it.
  */
+import { formatMetric } from '../../components/charts/format-metric.js';
 import type { VerseEvent } from '../../data/api-types.js';
 
 /**
@@ -32,15 +33,15 @@ export function lastTurnActivityAt(events: readonly VerseEvent[]): string | null
 }
 
 /**
- * "123k" / "1.2M" — compact token counts for the meter and usage rows.
+ * "120k" / "1.2M" — compact token counts for the meter and usage rows.
  *
- * The unit is chosen AFTER rounding: choosing it first printed 999,500–
- * 999,999 as "1000k" (and 999.5–999.9 as "1000"), a band a 1M Claude chat in
- * Expansive can actually reach.
+ * Two significant figures are display-only. Choose the unit AFTER rounding,
+ * so counts near a unit boundary read "1k" or "1M", never "1000" or "1000k".
  */
 export function formatTokens(n: number | null | undefined): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return '—';
-  if (Math.round(n) < 1000) return String(Math.round(n));
-  if (Math.round(n / 1000) < 1000) return `${Math.round(n / 1000)}k`;
-  return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  const rounded = Number(Math.round(n).toPrecision(2));
+  if (Math.abs(rounded) < 1000) return formatMetric(rounded);
+  if (Math.abs(rounded) < 1_000_000) return `${formatMetric(rounded / 1000)}k`;
+  return `${formatMetric(rounded / 1_000_000)}M`;
 }

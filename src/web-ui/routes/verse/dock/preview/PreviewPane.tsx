@@ -655,7 +655,7 @@ function AddressNote({ note, onDismiss }: { note: PreviewAddress; onDismiss: () 
           <a href={note.url} target="_blank" rel="noopener noreferrer">Open in browser ↗</a>
         </span>
       ) : note.kind === 'self' ? (
-        <span>That address is Verse itself.</span>
+        <span>That address is Phantom itself.</span>
       ) : (
         <span>Enter a local address, like <code>localhost:5173</code>.</span>
       )}

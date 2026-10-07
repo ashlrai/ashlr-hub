@@ -1,4 +1,5 @@
 /** Display-only scheduling evidence. Never infer quota tokens or change admission. */
+import { formatMetric } from '../../../components/charts/format-metric.js';
 import type { ObservedPercentiles } from '../../../../core/routing/scheduling-types.js';
 import { formatDuration, percentText } from '../autonomy/format.js';
 
@@ -129,11 +130,11 @@ export function schedulingEvidence(budget: unknown, seat: { seatId: string; engi
       forecastSummary = { recorded: `Last selected task · ${recordingAge}. Not the current task or model.`, duration: null, fit: null };
     }
     if (duration) {
-      const line = `Middle half of observed durations ${formatDuration(duration.p25)}–${formatDuration(duration.p75)} · ${duration.samples} samples.`;
+      const line = `Middle half of observed durations ${formatDuration(duration.p25)}–${formatDuration(duration.p75)} · ${formatMetric(duration.samples)} samples.`;
       forecast.push(line);
       forecastSummary!.duration = line;
     }
-    if (tokens) forecast.push(`Observed task tokens ${Math.round(tokens.p25).toLocaleString()}–${Math.round(tokens.p75).toLocaleString()} · ${tokens.samples} samples; not remaining account tokens.`);
+    if (tokens) forecast.push(`Observed task tokens ${formatMetric(tokens.p25)}–${formatMetric(tokens.p75)} · ${formatMetric(tokens.samples)} samples; not remaining account tokens.`);
     if (duration || tokens) forecast.push(cohortSeat === null
       ? 'Historical engine/model/task-kind cohort pooled across accounts; account attribution unavailable. Estimates are not a completion guarantee.'
       : 'Historical engine/model/account/task-kind cohort. Estimates are not a completion guarantee.');

@@ -10,6 +10,7 @@ import type { Tone } from '../../components/primitives/StatusBadge.js';
 import { budgetFor, canonicalModelId, claudeAutocompactFlag, reconcileAutoCompactAt } from '../../../core/verse/context-math.js';
 import { engineTier, orderByTier, seatTier } from '../../../core/routing/tiers.js';
 import { usedPercentText } from './percent-text.js';
+import { formatMetric } from '../../components/charts/format-metric.js';
 import { formatTokens } from './verse-readouts.js';
 
 /**
@@ -205,7 +206,7 @@ export function windowSourceText(source: VerseWindowSource, engine: VerseEngine 
   const from = source === 'runtime' ? 'measured from the local model server'
     : source === 'fallback' ? 'a default estimate — the model server did not report one'
     : WINDOW_SOURCE_TEXT[source];
-  return `${from}; Verse passes this window to Claude Code for this chat`;
+  return `${from}; Phantom passes this window to Claude Code for this chat`;
 }
 
 /**
@@ -383,8 +384,8 @@ export function formatElapsed(ms: number): string {
 
 export function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return '—';
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  if (ms < 1000) return ms >= 995 ? '<1s' : `${formatMetric(ms)}ms`;
+  if (ms < 60_000) return `${formatMetric(ms / 1000)}s`;
   return formatElapsed(ms);
 }
 

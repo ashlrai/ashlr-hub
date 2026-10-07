@@ -101,13 +101,13 @@ describe('EvidenceTimeline', () => {
   it('a server without the route says so, in words', async () => {
     stubCloudFetch(null);
     render(<EvidenceTimeline taskId={ID} title="Fix" open onClose={() => {}} now={NOW} />);
-    expect(await screen.findByRole('note')).toHaveTextContent('Verse has no evidence for this task');
+    expect(await screen.findByRole('note')).toHaveTextContent('Phantom has no evidence for this task');
   });
 
   it('never requests a path for an id Verse did not issue', async () => {
     const stub = stubCloudFetch(null);
     render(<EvidenceTimeline taskId="../../etc" title="Fix" open onClose={() => {}} now={NOW} />);
-    expect(await screen.findByRole('note')).toHaveTextContent('That task id is not one Verse issued.');
+    expect(await screen.findByRole('note')).toHaveTextContent('That task id is not one Phantom issued.');
     expect(stub.fetchMock).not.toHaveBeenCalled();
   });
 

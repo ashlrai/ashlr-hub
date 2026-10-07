@@ -319,15 +319,15 @@ describe('Transcript — V3.9 compaction and handoff', () => {
     render(<Transcript transcript={transcript} loaded loadError={null} engine="claude" />);
     const divider = screen.getByRole('log').querySelector('[data-kind="compaction"]') as HTMLElement;
     expect(divider).not.toBeNull();
-    expect(divider).toHaveTextContent('Auto-compacted 812k → 41k in 1m 58s');
+    expect(divider).toHaveTextContent('Auto-compacted 810k → 41k in 1m 58s');
     expect(divider).toHaveTextContent('Earlier turns now reach the agent only as a summary');
   });
 
   it('says only what the CLI recorded when it gives no counts (codex rollouts)', () => {
     expect(describeCompaction({ trigger: 'auto', preTokens: null, postTokens: null, durationMs: null }, 'codex')).toBe('Codex compacted its context');
     expect(describeCompaction({ trigger: 'auto', preTokens: null, postTokens: null, durationMs: null })).toBe('The CLI compacted its context');
-    expect(describeCompaction({ trigger: 'manual', preTokens: 300_000, postTokens: null, durationMs: 4_000 }, 'grok')).toBe('Compacted on request at 300k in 4.0s');
-    expect(describeCompaction({ trigger: 'auto', preTokens: 967_391, postTokens: 19_001, durationMs: null }, 'claude')).toBe('Auto-compacted 967k → 19k');
+    expect(describeCompaction({ trigger: 'manual', preTokens: 300_000, postTokens: null, durationMs: 4_000 }, 'grok')).toBe('Compacted on request at 300k in 4s');
+    expect(describeCompaction({ trigger: 'auto', preTokens: 967_391, postTokens: 19_001, durationMs: null }, 'claude')).toBe('Auto-compacted 970k → 19k');
   });
 
   it('does not let a compaction between Stop and turn-done turn the stop into a failure', () => {

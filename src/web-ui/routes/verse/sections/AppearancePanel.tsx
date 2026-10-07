@@ -16,6 +16,7 @@
  * allowed to make it unreadable without being told.
  */
 import { useId } from 'react';
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 import { Button, Input, Meter, Segmented, Slider, StatusBadge, Switch, Tag } from '../../../components/primitives/index.js';
 import { IconAlert, IconCheck, IconMonitor, IconMoon, IconSun } from '../../../components/primitives/icons.js';
 import { accentHex, contrastRatio } from '../../../design/contrast.js';
@@ -289,7 +290,7 @@ export function AppearancePanel({ appearance, onChange, onReset }: AppearancePan
 
       <SettingRow label="Preview" description="Live, using the real components." stacked>
         <div className={styles.preview}>
-          <p className={styles.previewHeading}>Ashlr Verse</p>
+          <p className={styles.previewHeading}>{PRODUCT_NAME}</p>
           <p className={styles.previewBody}>
             Body copy stays in the UI sans at the reading measure; numerals like{' '}
             <span className={styles.previewNumerals}>18,420 / 66,000</span> use the display face.

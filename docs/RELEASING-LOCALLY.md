@@ -51,23 +51,25 @@ macOS and the login keychain.
   file changed since the merge-base with `origin/master` (`--base <ref>` to change that),
   plus a smoke set that always runs (`scripts/gate-smoke.json`).
 
-`prepublishOnly` builds the source, checks the first-paint budget and docs,
-typechecks and lints, then runs the complete backend suite as three deterministic shards,
-with at most two shards active, one worker and a private HOME per shard. Nine isolated real-I/O suites then run
-one at a time in separate process homes, followed by the two Hub campaign cases
-in their own homes. This prevents competing fixtures from consuming bounded
-CLI startup, Git capture, and graph deadlines; all fourteen backend stages
-must pass before the complete web suite. A failed test stops its shard early
-and cancels the other shards, saving time on a bad candidate. The web timing assertions are
-load-sensitive, so no backend workers remain when it starts. The complete
-transcript suite runs after the other DOM suites, retaining its existing
-streaming target and every test case. `npm run gate`
-remains useful for fast changed-file feedback while coding, and `gate:full`
-for serial full-suite diagnosis. Running either immediately before
-`prepublishOnly` duplicates test work without adding release coverage.
+`prepublishOnly` follows the order in `package.json`: build, first-paint budget,
+docs, typecheck, lint, the complete web suite, then the complete backend suite.
+Web tests run before any backend workers start so their timing assertions do
+not compete with backend fixtures. The complete transcript suite runs after
+the other DOM suites, retaining its streaming target and every test case.
 
-A version bump (in `package.json` and `package-lock.json`) or a script edit does not widen
-the run; a dependency change in either file, or a change to a vitest config or vitest setup
+The backend runner uses four deterministic general shards, with at most two
+active, one worker and a private HOME per shard. It then runs twelve isolated
+real-I/O suites and the two Hub campaign cases serially, each in its own process
+home: fourteen isolated invocations after the four general shards. This prevents
+competing fixtures from consuming bounded CLI startup, Git capture and graph
+deadlines. Every stage must pass; a failed test stops its shard early and cancels
+the other active shards. `npm run gate` remains useful for related-test feedback
+while coding, and `gate:full` for serial full-suite diagnosis. Running either
+immediately before `prepublishOnly` duplicates test work without adding release
+coverage.
+
+For `npm run gate`, a version bump (in `package.json` and `package-lock.json`)
+or a script edit does not widen the run; a dependency change in either file, or a change to a vitest config or vitest setup
 file, runs that suite in full. Logs, the eslint cache and vitest JSON reports go to `.ashlr-gate/` (gitignored).
 `--json` prints a machine-readable result instead of the table.
 
@@ -76,10 +78,11 @@ Use **`npm run gate:full`** to diagnose such changes when you are not running
 `prepublishOnly`; it runs the same static checks plus every backend and web test.
 The release `prepublishOnly` run already covers every test, so running both duplicates work.
 
-**Known failures.** `scripts/gate-known-failures.json` lists the test files that fail on a
-healthy machine (the table under "A full `vitest run` is not the gate" below). A failure in a listed file is shown
-as `KNOWN` and does not fail the gate; a failure anywhere else does. Delete an entry the day
-its cause is fixed.
+**Known-failure diagnostics.** `scripts/gate-known-failures.json` associates test
+files with investigation notes; it does not waive failures. Every failed file
+is shown as `FAIL`, including listed files. Missing or invalid Vitest JSON,
+unhandled errors, and non-zero exits also fail the gate. Keep the notes current
+and remove an entry when its cause is fixed.
 
 **`npm run ship:local`** (`scripts/ship-local.mjs`, macOS only) refuses a dirty tree
 (`--allow-dirty` installs it as `releases/<sha>-dirty-<time>`), then:
@@ -127,7 +130,7 @@ behind their choices.
 
 ## Before you publish
 
-`npm run gate` runs all of this for you. By hand, these are the static checks:
+`npm run prepublishOnly` runs the complete release checks. `npm run gate` provides focused development feedback and does not replace them. For diagnosis, these are the static checks:
 
 ```sh
 npm run build        # must exit 0 — see "the build used to be broken" below
@@ -135,9 +138,7 @@ npx tsc --noEmit -p tsconfig.json
 npx eslint .
 ```
 
-Then the suites that matter, which take seconds rather than the full run's
-half hour (the gate replaces this fixed list with the tests your change reaches plus
-`scripts/gate-smoke.json`):
+For focused diagnosis, the following example covers local runtime and adapter behavior. It is not the complete release suite; the gate selects affected tests plus `scripts/gate-smoke.json`:
 
 ```sh
 npx vitest run \
@@ -179,27 +180,27 @@ repo. Redirect to a file and read `$?`:
 npx vitest run <files> > /tmp/v.log 2>&1; echo $?
 ```
 
-## A full `vitest run` is not the gate, and here is why
+## Investigating a full-suite failure
 
-It takes over half an hour and fails ~4 suites on a healthy machine. Those
-failures are environmental, and re-diagnosing them wastes an afternoon. They are the
-entries in `scripts/gate-known-failures.json`:
+A direct `vitest run` bypasses the hermetic wrapper and the serial isolation in
+`test:ci:sharded`. Earlier runs recorded fixture and load failures summarized
+below. These are historical investigation notes, not proof that a current
+failure is expected or harmless; `scripts/gate-known-failures.json` retains
+reason metadata and never exempts a failing file from the gate.
 
-| Suite | Why it fails |
+| Earlier observation | Investigation context |
 |---|---|
-| `resource-engineering-*-acceptance` | `Console read failed: ECONNRESET`; ~12 minutes each even when failing |
-| `m571.local-production-gate` | a leftover `desktop/src-tauri/gen` from a previous Tauri build; the gate requires it absent |
-| `m201.daemon-loop` | one TieredPool concurrency-cap assertion, flaky under load |
-| `universe-portfolio-controller` | passes 51/51 alone, fails ~6 under full-suite concurrency |
+| `resource-engineering-*-acceptance` | Console connection resets during long concurrent fixture work |
+| `m571.local-production-gate` | A leftover `desktop/src-tauri/gen` from a previous Tauri build |
+| `m201.daemon-loop` | A TieredPool concurrency-cap assertion under load |
+| `universe-portfolio-controller` | Different results alone and under full-suite concurrency |
 
-Before blaming a change for any failure, check reachability first — it is
-cheaper and stronger evidence than re-running a flaky suite:
-
-```sh
-git grep -n "<module>" HEAD -- src test
-```
-
-A module nothing imports cannot break unrelated suites.
+For a current failure, preserve its log and reproduce the entire affected file
+with `npm run test:ci -- <file>`. Compare the same commit under the applicable
+isolated lane before attributing the cause. Import reachability is useful for
+choosing focused tests, but fixtures read as text, configuration and shared
+process state can affect tests without a direct import. Full release checks
+still require every applicable stage to pass.
 
 ## The build used to be broken on a stock npm
 

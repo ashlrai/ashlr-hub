@@ -1367,7 +1367,7 @@ fn handle_unexpected_exit(handle: &AppHandle, mode: SidecarMode, attempt: u64, g
                 sidecar_supervisor::RESTART_WINDOW.as_secs() / 60
             );
             let body = format!(
-                "It stopped {exits_in_window} times in {} minutes, so Ashlr stopped restarting it. Quit and reopen Ashlr.",
+                "It stopped {exits_in_window} times in {} minutes, so Phantom stopped restarting it. Quit and reopen Phantom.",
                 sidecar_supervisor::RESTART_WINDOW.as_secs() / 60
             );
             // Off the caller's thread: this can run inside the async runtime,
@@ -1376,7 +1376,7 @@ fn handle_unexpected_exit(handle: &AppHandle, mode: SidecarMode, attempt: u64, g
             let handle = handle.clone();
             thread::spawn(move || {
                 let delivery = current_delivery(&handle);
-                notify::deliver(&handle, delivery, "Ashlr: the local server keeps stopping", &body);
+                notify::deliver(&handle, delivery, "Phantom: the local server keeps stopping", &body);
             });
         }
     }
@@ -1786,11 +1786,11 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             existing.set_icon_with_as_template(Some(icon), false)?;
             existing.set_menu(Some(menu))?;
             existing.set_show_menu_on_left_click(false)?;
-            existing.set_tooltip(Some("Ashlr Verse"))?;
+            existing.set_tooltip(Some("Phantom"))?;
             existing
         }
         None => TrayIconBuilder::with_id(CONFIG_TRAY_ID)
-            .tooltip("Ashlr Verse")
+            .tooltip("Phantom")
             .icon(icon)
             .menu(&menu)
             .show_menu_on_left_click(false)
@@ -1957,7 +1957,7 @@ fn stop_running_chats_inner(app: &AppHandle, state: &AppState) {
         // The menu row is disabled in this state; this is the race where the
         // sidecar stopped between rendering and clicking.
         app.dialog()
-            .message("Ashlr's local server is restarting. Try again in a moment, or stop the chat from its window.")
+            .message("Phantom's local server is restarting. Try again in a moment, or stop the chat from its window.")
             .title("Can't stop chats right now")
             .kind(MessageDialogKind::Info)
             .blocking_show();

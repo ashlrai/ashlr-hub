@@ -560,7 +560,7 @@ export function ChangesPanel({
         <EmptyState
           compact
           title="No checkpoints yet"
-          body="Before every turn Verse takes a checkpoint of this chat’s repositories. Send a message and the agent’s changes appear here, ready to review or undo."
+          body="Before every turn Phantom takes a checkpoint of this chat’s repositories. Send a message and the agent’s changes appear here, ready to review or undo."
         />
       </section>
     );

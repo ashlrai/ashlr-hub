@@ -26,11 +26,11 @@ const OPUS_1M = CLAUDE_1M_SEAT.models[0]!;
 const GPT6 = CODEX_EXPANSIVE_SEAT.models[0]!;
 
 describe('ContextMeter — a full-window track with the compaction point marked', () => {
-  it('labels "142k / 1M · compacts ≈367k", with the tick at the compaction point', () => {
+  it('labels "140k / 1M · compacts ≈370k", with the tick at the compaction point', () => {
     render(<ContextMeter contextTokens={142_000} contextWindow={1_000_000} autoCompactAt={367_000} mode="standard" engine="claude" source="cli-catalog" />);
     const meter = screen.getByRole('meter', { name: 'Context window' });
-    expect(meter).toHaveTextContent('142k / 1M');
-    expect(meter).toHaveTextContent('· compacts ≈367k');
+    expect(meter).toHaveTextContent('140k / 1M');
+    expect(meter).toHaveTextContent('· compacts ≈370k');
     expect(meter).toHaveTextContent('14%');
     expect(meter).toHaveAttribute('aria-valuenow', '14');
     expect(meter).toHaveAttribute('data-tone', 'ok');
@@ -63,7 +63,7 @@ describe('ContextMeter — a full-window track with the compaction point marked'
   it('marks an upper-bound reading with ≤ and says why in the tooltip', () => {
     render(<ContextMeter contextTokens={180_000} contextWindow={258_400} autoCompactAt={244_800} exact={false} engine="codex" />);
     const meter = screen.getByRole('meter');
-    expect(meter).toHaveTextContent('≤180k / 258k');
+    expect(meter).toHaveTextContent('≤180k / 260k');
     expect(meter).toHaveAttribute('data-exact', 'false');
     expect(meter.getAttribute('title')).toContain('Upper bound');
     expect(meter.getAttribute('title')).toContain('When it compacts, Codex replaces the earlier conversation');
@@ -74,7 +74,7 @@ describe('ContextMeter — a full-window track with the compaction point marked'
     render(<ContextMeter contextTokens={697_060} contextWindow={258_400} autoCompactAt={244_800} exact={false} engine="codex" />);
     const meter = screen.getByRole('meter');
     expect(meter).toHaveAttribute('data-tone', 'unknown');
-    expect(meter).toHaveTextContent('≤697k / 258k');
+    expect(meter).toHaveTextContent('≤700k / 260k');
     expect(meter).toHaveTextContent('≤270%');
     expect(meter.getAttribute('aria-valuetext')).not.toContain('past the window');
     const title = meter.getAttribute('title') ?? '';
@@ -90,7 +90,7 @@ describe('ContextMeter — a full-window track with the compaction point marked'
     const meter = screen.getByRole('meter');
     expect(meter).toHaveAttribute('aria-valuenow', '62');
     expect(meter).toHaveAttribute('data-tone', 'ok');
-    expect(meter).toHaveTextContent('123k / 200k');
+    expect(meter).toHaveTextContent('120k / 200k');
     expect(meter).not.toHaveTextContent('compacts');
     expect(within(meter).queryByTestId('compaction-tick')).toBeNull();
     expect(meter.getAttribute('title')).toContain('compaction point is unknown');
@@ -134,7 +134,7 @@ describe('ContextMeter — a full-window track with the compaction point marked'
     expect(old.title).toContain('source not recorded');
     // On a local seat nothing is "reported by the CLI": Verse measures it and tells the CLI.
     const local = describeContext({ contextTokens: 1, contextWindow: 65_536, autoCompactAt: 32_536, engine: 'local', source: 'runtime' });
-    expect(local.title).toContain('Window: measured from the local model server; Verse passes this window to Claude Code for this chat.');
+    expect(local.title).toContain('Window: measured from the local model server; Phantom passes this window to Claude Code for this chat.');
     expect(local.title).not.toContain('reported by the CLI');
     expect(windowSourceText('provider-catalog', 'claude')).toBe("from this seat's own model catalog");
   });
@@ -225,8 +225,8 @@ describe('ContextModeControl', () => {
     const standard = within(menu).getByRole('menuitemradio', { name: /Standard/ });
     const expansive = within(menu).getByRole('menuitemradio', { name: /Expansive/ });
     expect(standard).toHaveAttribute('aria-checked', 'true');
-    expect(standard).toHaveTextContent('compacts ≈367k of 1M');
-    expect(expansive).toHaveTextContent('compacts ≈967k of 1M');
+    expect(standard).toHaveTextContent('compacts ≈370k of 1M');
+    expect(expansive).toHaveTextContent('compacts ≈970k of 1M');
     expect(menu).toHaveTextContent('up to ≈2.6× near the expansive limit');
     expect(menu).toHaveTextContent('Applies from the next turn');
     // Re-choosing the current mode is a no-op.
@@ -304,7 +304,7 @@ describe('ContextModeControl', () => {
     const menu = screen.getByRole('menu', { name: 'Context mode' });
     expect(within(menu).getByRole('menuitemradio', { name: /Standard/ })).toHaveTextContent('compacts on the next turn');
     const warn = within(menu).getByTestId('standard-compacts');
-    expect(warn).toHaveTextContent('This chat holds ≈600k — past Standard\'s ≈367k compaction point, so switching to Standard makes Claude Code compact on the next turn: one summarization call that spends usage on this seat.');
+    expect(warn).toHaveTextContent('This chat holds ≈600k — past Standard\'s ≈370k compaction point, so switching to Standard makes Claude Code compact on the next turn: one summarization call that spends usage on this seat.');
     expect(warn).toHaveTextContent('prompt cache starts over');
     // …and the "cache is kept" promise is NOT made in that case.
     expect(menu).not.toHaveTextContent('prompt cache are kept');
@@ -327,7 +327,7 @@ describe('ContextModeControl', () => {
       budget={{ contextTokens: 400_000, exact: false, contextWindow: 828_400, autoCompactAt: 784_800 }} />);
     await user.click(screen.getByRole('button', { name: 'Context mode: Expansive' }));
     expect(screen.getByRole('menuitemradio', { name: /Standard/ })).toHaveTextContent('may compact on the next turn');
-    expect(screen.getByTestId('standard-compacts')).toHaveTextContent('This chat holds up to ≈400k. If the real prompt is past Standard\'s ≈245k compaction point');
+    expect(screen.getByTestId('standard-compacts')).toHaveTextContent('This chat holds up to ≈400k. If the real prompt is past Standard\'s ≈240k compaction point');
     second.unmount();
 
     render(<ContextModeControl mode="standard" option={GPT6} engine="codex" onChange={vi.fn()}
@@ -420,7 +420,7 @@ describe('expansiveCostCopy', () => {
 
 describe('expansiveCostRatio', () => {
   it('is the ratio of the two compaction points, and null without a real expansive mode', () => {
-    expect(expansiveCostRatio(OPUS_1M)).toBe(2.6); // 967k / 367k
+    expect(expansiveCostRatio(OPUS_1M)).toBe(2.6); // 970k / 370k
     expect(expansiveCostRatio(GPT6)).toBe(3.2); // 784.8k / 244.8k
     expect(expansiveCostRatio(CODEX_EXPANSIVE_SEAT.models[1])).toBeNull();
     expect(expansiveCostRatio(GROK_SEAT.models[0])).toBeNull();
@@ -614,7 +614,7 @@ describe('Compact now', () => {
     render(<CompactPanel engine="claude" budget={BUDGET} running={false} dispatchEnabled empty={false} onSend={onSend} onClose={onClose} />);
     const panel = screen.getByRole('region', { name: 'Compact this chat' });
     expect(panel).toHaveTextContent('Claude Code replaces the conversation so far with a summary');
-    expect(panel).toHaveTextContent('at ≈367k');
+    expect(panel).toHaveTextContent('at ≈370k');
     expect(panel).toHaveTextContent('Spends usage on this seat');
     expect(panel).toHaveTextContent('(≈300k tokens)');
     await user.type(screen.getByLabelText('Keep in focus (optional)'), 'the auth refactor');

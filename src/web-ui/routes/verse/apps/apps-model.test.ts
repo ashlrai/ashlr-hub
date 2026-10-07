@@ -79,9 +79,9 @@ describe('MCP', () => {
   it('says what each seat loads, isolated seats in their own words', () => {
     const rows = mcpSeatRows(snapshot);
     expect(rows.map((r) => [r.seatId, r.loads, r.monogram])).toEqual([
-      ['claude-a', 'loads none — isolated by Verse', 'C'],
+      ['claude-a', 'loads none — isolated by Phantom', 'C'],
       ['codex-a', 'loads 1 server', 'X'],
-      ['local', 'loads none — isolated by Verse', 'L'],
+      ['local', 'loads none — isolated by Phantom', 'L'],
     ]);
     expect(rows[1]!.sentence).toBe("Read from this account's own private configuration.");
   });

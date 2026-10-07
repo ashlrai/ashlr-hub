@@ -68,7 +68,7 @@ describe('VerseMobileApp', () => {
     vi.stubGlobal('fetch', fetch);
     act(() => markCheckComplete(false));
     render(<VerseMobileApp />);
-    expect(await screen.findByText('Phone pairing is not enabled on this Mac yet. Open Verse on your Mac to finish gateway setup.')).toBeInTheDocument();
+    expect(await screen.findByText('Phone pairing is not enabled on this Mac yet. Open Phantom on your Mac to finish gateway setup.')).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Connect to your Mac' })).not.toBeInTheDocument();
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch.mock.calls[0]![0]).toBe('/remote/session');
@@ -127,7 +127,7 @@ describe('VerseMobileApp', () => {
     });
     act(() => markCheckComplete(true));
     render(<VerseMobileApp />);
-    expect(await screen.findByRole('navigation', { name: 'Verse' })).toBeInTheDocument();
+    expect(await screen.findByRole('navigation', { name: 'Phantom' })).toBeInTheDocument();
     await waitFor(() => expect(document.head.querySelector('link[rel="manifest"]')).not.toBeNull());
     expect(document.head.querySelector('meta[name="apple-mobile-web-app-capable"]')?.getAttribute('content')).toBe('yes');
   });
@@ -137,7 +137,7 @@ describe('VerseMobileApp', () => {
     stubFetch({ 'GET /api/verse/bootstrap': bootstrap(), 'GET /api/verse/activity': activityResponse() });
     act(() => markCheckComplete(true));
     render(<VerseMobileApp />);
-    await screen.findByRole('navigation', { name: 'Verse' });
+    await screen.findByRole('navigation', { name: 'Phantom' });
     for (const store of [localStorage, sessionStorage]) {
       for (let i = 0; i < store.length; i += 1) {
         const key = store.key(i)!;

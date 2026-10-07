@@ -1,4 +1,5 @@
 import { useId, useState } from 'react';
+import { formatDecimalMetric } from '../../../components/charts/format-metric.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { optionalQuery } from '../command/surface-data.js';
@@ -40,8 +41,8 @@ function CreditPoolReading({ accountNames }: { accountNames: ReadonlyMap<string,
         const display = creditPoolDisplay(row, now);
         return <li key={`${row.provider}:${row.accountId}:${row.poolId}`}>
           <div className={styles.heading}><strong>{display.title}</strong><span>{accountNames.get(row.accountId) ?? row.accountId}</span></div>
-          <p className={styles.amount}>{display.amountText}</p>
-          {row.total !== null && row.identityState === 'matched' ? <p className={styles.note}>Recorded {row.kind === 'gifted-cloud' ? 'grant' : 'total'}: ${row.total}</p> : null}
+          <p className={styles.amount} title={row.amount === null ? undefined : `Exact recorded reading: ${row.amount} ${row.unit}`}>{display.amountText}</p>
+          {row.total !== null && row.identityState === 'matched' ? <p className={styles.note} title={`Exact recorded total: ${row.total} USD`}>Recorded {row.kind === 'gifted-cloud' ? 'grant' : 'total'}: ${formatDecimalMetric(row.total)}</p> : null}
           <p className={styles.note}>{display.sourceText}</p>
           <p className={styles.note}>Captured <time dateTime={display.capturedAt} title={display.capturedAt}>{new Date(display.capturedAt).toLocaleString()}</time></p>
           <p className={styles.note}>{display.expiryText}{display.expiresAt ? <> · <time dateTime={display.expiresAt} title={display.expiresAt}>{new Date(display.expiresAt).toLocaleString()}</time></> : null}</p>

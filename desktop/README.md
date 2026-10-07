@@ -818,13 +818,15 @@ npm run build:binary                        # → dist-bin/ashlr + dist-bin/publ
 node desktop/scripts/prepare-sidecar.mjs    # → desktop/src-tauri/binaries/ashlr-aarch64-apple-darwin
                                             #   desktop/src-tauri/resources/public/
 
-# 3. (Once, or after editing icons/icon.svg.)
+# 3. (Once, or after editing the Phantom icon source icons/icon.svg.)
 cd desktop && npm run icons                 # = cargo tauri icon src-tauri/icons/icon.svg
 
 # 4. Release build — the .app and the .dmg.
 #    beforeBundleCommand runs the bundle policy assertion, then dmg-preflight.
 cd desktop && cargo tauri build
 ```
+
+The native app icon is generated from the tracked Phantom ghost SVG on the existing rounded-square canvas. The five bundle icon outputs are generated locally, not checked in; the monochrome `tray.png` remains a separate tracked template icon. See [icon generation and provenance](src-tauri/icons/PLACEHOLDER.md). This artwork change preserves the compatible `Ashlr.app` bundle identity and signing.
 
 Timing on this Mac: about 6 minutes cold (the release profile is `lto = true`,
 `codegen-units = 1`, `panic = "abort"`), about 90 seconds when only the bundling

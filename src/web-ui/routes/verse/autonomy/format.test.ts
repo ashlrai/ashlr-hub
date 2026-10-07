@@ -22,7 +22,7 @@ describe('autonomy formatting', () => {
   it('never renders an absent value as zero', () => {
     expect(formatUsd(null)).toBe(UNKNOWN);
     expect(formatUsd(undefined)).toBe(UNKNOWN);
-    expect(formatUsd(4.5)).toBe('$4.50');
+    expect(formatUsd(4.5)).toBe('$4.5');
     expect(formatInterval(null)).toBe(UNKNOWN);
     expect(formatInterval(900_000)).toBe('every 15m');
     expect(formatInterval(930_000)).toBe('every 15m 30s');
@@ -49,15 +49,15 @@ describe('autonomy formatting', () => {
       const meter = budgetMeter(4.5, 25);
       expect(meter.state).toBe('ok');
       expect(meter.percent).toBe(18);
-      expect(meter.label).toBe('$4.50 of $25.00 today · 18%');
-      expect(meter.note).toBe('$20.50 left today.');
+      expect(meter.label).toBe('$4.5 of $25 today · 18%');
+      expect(meter.note).toBe('$21 left today.');
     });
 
     it('words the share by the one percent rule: "99%" just short of the cap, "<1%" for a sliver', () => {
-      expect(budgetMeter(24.9, 25).label).toBe('$24.90 of $25.00 today · 99%');
+      expect(budgetMeter(24.9, 25).label).toBe('$25 of $25 today · 99%');
       expect(budgetMeter(24.9, 25).state).toBe('warn');
-      expect(budgetMeter(0.1, 25).label).toBe('$0.10 of $25.00 today · <1%');
-      expect(budgetMeter(30, 25).label).toBe('$30.00 of $25.00 today · 100%');
+      expect(budgetMeter(0.1, 25).label).toBe('$0.1 of $25 today · <1%');
+      expect(budgetMeter(30, 25).label).toBe('$30 of $25 today · 100%');
     });
 
     it('warns past 70% and says so past 100%', () => {
@@ -76,7 +76,7 @@ describe('autonomy formatting', () => {
      * `todayUsd` belongs to `todayDate`. The daemon writes the figure once a
      * day and leaves it there, so a machine that last ticked three weeks ago
      * answers `{todayUsd: 0, todayDate: "2026-09-01"}` — which used to render
-     * as "$0.00 of $50.00 today · 0%" with a green meter. That is a fabricated
+     * as "$0 of $50.00 today · 0%" with a green meter. That is a fabricated
      * statement about today on the number an operator checks before walking
      * away from an autonomous loop.
      */
@@ -88,7 +88,7 @@ describe('autonomy formatting', () => {
       // The ledger day as a person reads a date, never the raw ISO key.
       expect(meter.note).toBe('Nothing has been recorded today — the last ledger day is Sep 1.');
       expect(meter.note).not.toContain('2026-09-01');
-      expect(meter.label).not.toContain('$0.00 of');
+      expect(meter.label).not.toContain('$0 of');
       expect(meter.label).toContain(UNKNOWN);
     });
 
@@ -186,10 +186,10 @@ describe('autonomy formatting', () => {
 
     it('keeps the budget line from claiming 0% of a cap that real spend has touched', () => {
       const now = new Date('2026-09-20T09:00:00');
-      expect(budgetMeter(0.05, 25, localDateKey(now), now).label).toBe('$0.05 of $25.00 today · <1%');
-      expect(budgetMeter(4.5, 25, localDateKey(now), now).label).toBe('$4.50 of $25.00 today · 18%');
+      expect(budgetMeter(0.05, 25, localDateKey(now), now).label).toBe('$0.05 of $25 today · <1%');
+      expect(budgetMeter(4.5, 25, localDateKey(now), now).label).toBe('$4.5 of $25 today · 18%');
       // Over the cap the text stops at 100%, like the bar.
-      expect(budgetMeter(30, 25, localDateKey(now), now).label).toBe('$30.00 of $25.00 today · 100%');
+      expect(budgetMeter(30, 25, localDateKey(now), now).label).toBe('$30 of $25 today · 100%');
     });
   });
 

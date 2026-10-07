@@ -71,10 +71,10 @@ pub fn next_zoom(current: f64, id: &str) -> Option<f64> {
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let about = PredefinedMenuItem::about(
         app,
-        Some("About Ashlr"),
+        Some("About Phantom"),
         Some(
             AboutMetadataBuilder::new()
-                .name(Some("Ashlr Verse"))
+                .name(Some("Phantom"))
                 .version(Some(env!("CARGO_PKG_VERSION")))
                 .copyright(Some("Copyright © 2024 Mason Wyatt / Evero Consulting"))
                 .build(),
@@ -86,7 +86,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 
     let app_menu = Submenu::with_items(
         app,
-        "Ashlr",
+        "Phantom",
         true,
         &[
             &about,
@@ -95,11 +95,11 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::services(app, None)?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::hide(app, Some("Hide Ashlr"))?,
+            &PredefinedMenuItem::hide(app, Some("Hide Phantom"))?,
             &PredefinedMenuItem::hide_others(app, None)?,
             &PredefinedMenuItem::show_all(app, None)?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::quit(app, Some("Quit Ashlr"))?,
+            &PredefinedMenuItem::quit(app, Some("Quit Phantom"))?,
         ],
     )?;
 

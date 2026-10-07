@@ -557,7 +557,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
   // -------------------------------------------------------------------------
 
   const queryTab = useCallback((what: NativeQuery, timeoutMs = 6_000, approved?: ApprovedPage): Promise<unknown> => {
-    if (!native) return Promise.reject(new Error('Needs the Ashlr desktop app.'));
+    if (!native) return Promise.reject(new Error('Needs the Phantom desktop app.'));
     if (!openedRef.current.has(tab.id)) return Promise.reject(new Error('No page is open.'));
     return nativeRequest(native, (req) => ({ op: 'query', tab: tab.id, req, what, ...(approved ? { approved } : {}) }), timeoutMs);
   }, [native, tab.id]);
@@ -595,7 +595,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
   }, [devtoolsOpen, mode, visible, tab.url, readConsole]);
 
   const takeScreenshot = useCallback(async (clip?: BrowserClip): Promise<BrowserScreenshot & { scale?: number; origin?: { x: number; y: number } }> => {
-    if (!native) throw new Error('Screenshots need the Ashlr desktop app — a web page cannot capture another site\'s frame.');
+    if (!native) throw new Error('Screenshots need the Phantom desktop app — a web page cannot capture another site\'s frame.');
     if (!native.capabilities.screenshot) throw new Error('This desktop shell cannot take screenshots on this platform yet (macOS only).');
     if (!openedRef.current.has(tab.id)) throw new Error('No page is open.');
     const data = await nativeRequest(native, (req) => ({ op: 'screenshot', tab: tab.id, req, ...(clip ? { clip } : {}) }), 20_000);
@@ -949,7 +949,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
   const frameable = tab.url ? parseBrowserAddress(tab.url, verseOrigin) : null;
   const canCapture = mode === 'native' && tab.url !== null;
   const screenshotTitle = mode !== 'native'
-    ? 'Screenshots need the Ashlr desktop app'
+    ? 'Screenshots need the Phantom desktop app'
     : native?.capabilities.screenshot ? 'Screenshot' : 'Screenshots are macOS-only in this desktop shell';
 
   return (
@@ -1024,7 +1024,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
           <IconButton variant="ghost" size="sm" icon={<CameraGlyph />} aria-label="Screenshot" title={screenshotTitle}
             disabled={!tab.url || busy === 'shot'} onClick={() => void onScreenshot()} />
           <IconButton variant={picking ? 'subtle' : 'ghost'} size="sm" icon={<PickGlyph />} aria-label={picking ? 'Cancel element picker' : 'Pick an element'}
-            aria-pressed={picking} title={canCapture ? (picking ? 'Cancel picking (Esc in the page)' : 'Pick an element') : 'The element picker needs the Ashlr desktop app'}
+            aria-pressed={picking} title={canCapture ? (picking ? 'Cancel picking (Esc in the page)' : 'Pick an element') : 'The element picker needs the Phantom desktop app'}
             disabled={!canCapture} onClick={() => void onPick()} />
           <IconButton variant={devtoolsOpen ? 'subtle' : 'ghost'} size="sm" icon={<ConsoleGlyph />} aria-label="Console" aria-pressed={devtoolsOpen}
             title="Console and network errors" onClick={() => setDevtoolsOpen((o) => !o)} />
@@ -1039,7 +1039,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
 
       {addressNote ? (
         <div className={styles.note} role="status">
-          {addressNote.kind === 'self' ? 'That address is Verse itself — it cannot open inside its own browser.' : addressNote.kind === 'invalid' ? addressNote.reason : null}
+          {addressNote.kind === 'self' ? 'That address is Phantom itself — it cannot open inside its own browser.' : addressNote.kind === 'invalid' ? addressNote.reason : null}
           <button type="button" className={styles.noteClose} aria-label="Dismiss" onClick={() => setAddressNote(null)}><IconX size={12} /></button>
         </div>
       ) : null}
@@ -1115,7 +1115,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
               <GlobeGlyph size={28} />
               <p className={styles.externalTitle}>{shortAddress(tab.url)} can’t be shown in the web UI</p>
               <p className={styles.externalBody}>
-                A browser tab can only frame local dev servers (and most sites refuse framing). The Ashlr desktop app shows any site here, with screenshots and console.
+                A browser tab can only frame local dev servers (and most sites refuse framing). The Phantom desktop app shows any site here, with screenshots and console.
               </p>
               <Button size="sm" variant="primary" icon={<ExternalGlyph />} onClick={() => openExternally(tab.url!)}>Open in your browser</Button>
             </div>
@@ -1130,7 +1130,7 @@ export function BrowserPanel({ sessionId, visible = true, deps: depsOverride }: 
             </header>
             {mode !== 'native' ? (
               <p className={styles.muted}>
-                A page in an embedded frame belongs to another origin, so its console cannot be read from here. Open this page in the Ashlr desktop app to capture console output and failed requests (or use your browser’s developer tools).
+                A page in an embedded frame belongs to another origin, so its console cannot be read from here. Open this page in the Phantom desktop app to capture console output and failed requests (or use your browser’s developer tools).
               </p>
             ) : !tab.url ? (
               <p className={styles.muted}>Open a page to see its console.</p>

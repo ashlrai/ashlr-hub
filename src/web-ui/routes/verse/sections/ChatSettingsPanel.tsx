@@ -98,7 +98,7 @@ export function narrowControlDefaults(raw: unknown): VerseSessionControlDefaults
 function loadFailure(err: unknown): string {
   // 404: a server before C3's route; 501: an engine without the methods.
   if (err instanceof ApiError && (err.status === 404 || err.status === 501)) {
-    return 'This server can’t set new-chat defaults yet — update Ashlr and restart `ashlr verse`.';
+    return 'This server can’t set new-chat defaults yet — update Phantom and restart `ashlr verse`.';
   }
   return 'Couldn’t read the new-chat defaults. Reopen Settings to try again.';
 }

@@ -57,8 +57,8 @@ describe('AutonomySection', () => {
     await waitFor(() => expect(screen.getByText('Running')).toBeInTheDocument());
 
     // Spend against the cap, as one line.
-    expect(screen.getByText('$4.50 of $25.00 today · 18%')).toBeInTheDocument();
-    expect(screen.getByText('$20.50 left today.')).toBeInTheDocument();
+    expect(screen.getByText('$4.5 of $25 today · 18%')).toBeInTheDocument();
+    expect(screen.getByText('$21 left today.')).toBeInTheDocument();
     // Direction mode and last tick outcome.
     expect(screen.getByText('auto-merge-ready')).toBeInTheDocument();
     expect(screen.getAllByText(/· ok$/).length).toBeGreaterThan(0);

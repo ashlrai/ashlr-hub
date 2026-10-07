@@ -77,7 +77,7 @@ describe('CapacityStrip', () => {
 
   it('shows credits as a separate fact, never folded into the window', () => {
     render(<CapacityStrip seats={[CODEX_CREDITS_SEAT]} />);
-    expect(screen.getByText('2,048.42 credits available')).toHaveAttribute('title', 'Exact native balance: 2048.4196250000 credits.');
+    expect(screen.getByText('2,000 credits available')).toHaveAttribute('title', 'Exact native balance: 2048.4196250000 credits.');
     expect(screen.getByText('limit reached')).toBeInTheDocument();
   });
 
@@ -89,7 +89,7 @@ describe('CapacityStrip', () => {
       },
     }));
     render(<CapacityStrip seats={seats} />);
-    for (const [display, raw] of [['412.89', '412.8921985000'], ['62,497.79', '62497.7860000000'], ['<0.01', '0.000001']]) {
+    for (const [display, raw] of [['410', '412.8921985000'], ['62,000', '62497.7860000000'], ['0.000001', '0.000001']]) {
       expect(screen.getByText(`${display} credits available`)).toHaveAttribute('title', `Exact native balance: ${raw} credits.`);
     }
     expect(screen.getAllByText('limit reached')).toHaveLength(3);
@@ -109,14 +109,14 @@ describe('CapacityStrip', () => {
     }];
     try {
       render(<CapacityStrip seats={seats} />);
-      expect(screen.getByText('2,048.42 credits available')).toBeInTheDocument();
+      expect(screen.getByText('2,000 credits available')).toBeInTheDocument();
       act(() => { vi.advanceTimersByTime(60_000); });
-      expect(screen.queryByText('2,048.42 credits available')).not.toBeInTheDocument();
+      expect(screen.queryByText('2,000 credits available')).not.toBeInTheDocument();
       expect(screen.queryByText(/limit reached · credits available/)).not.toBeInTheDocument();
       expect(screen.getByText('limit reached')).toBeInTheDocument();
       // The same cached evidence remains intact, but only the separately dated history can describe it.
       const sidebar = barRows(buildCapacityRows(seats, { now: Date.now() }), { healthRead: true, now: Date.now() })[0]!;
-      expect(sidebar.creditLabel).toBe('Credits ≈$81.94 · last');
+      expect(sidebar.creditLabel).toBe('Credits ≈$82 · last');
       expect(sidebar.detail.join(' ')).toContain('current balance and availability are unconfirmed');
       expect(seats[0]!.capacity.credits!.balance).toBe('2048.4196250000');
     } finally { vi.useRealTimers(); }
@@ -131,7 +131,7 @@ describe('CapacityStrip', () => {
     try {
       render(<CapacityStrip seats={seats} accounts={{ healthRead: true, now }} />);
       act(() => { vi.advanceTimersByTime(60_000); });
-      expect(screen.getByText('2,048.42 credits available')).toBeInTheDocument();
+      expect(screen.getByText('2,000 credits available')).toBeInTheDocument();
     } finally { vi.useRealTimers(); }
   });
 

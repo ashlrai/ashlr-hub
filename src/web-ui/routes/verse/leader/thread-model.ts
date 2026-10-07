@@ -1,3 +1,4 @@
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 /**
  * routes/verse/leader/thread-model.ts — pure helpers behind the Leader
  * conversation on Mind (and its one-line preview on Command).
@@ -315,7 +316,7 @@ export function awaitingReply(entries: readonly ThreadEntry[], awaiting: Readonl
 }
 
 export const CHANNEL_LABEL: Readonly<Record<LeaderThreadChannel, string>> = {
-  verse: 'Verse',
+  verse: PRODUCT_NAME,
   telegram: 'Telegram',
   cli: 'CLI',
   system: 'System',

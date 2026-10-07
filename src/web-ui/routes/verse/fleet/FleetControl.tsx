@@ -16,6 +16,7 @@
  *
  * ⌘K and the keys (command-keys.ts fleet.*) run the same handlers.
  */
+import { formatMetricUsd } from '../../../components/charts/format-metric.js';
 import { useRef, useState, type ReactNode } from 'react';
 import type { FleetControlActionResultV1, FleetControlStateV1, FleetNextAction } from '../../../../core/fleet/fleet-control-types.js';
 import { Button } from '../../../components/primitives/Button.js';
@@ -72,7 +73,7 @@ function keyHint(id: string): string | null {
 
 function money(n: number | null): string {
   if (n === null) return '$—';
-  return n >= 100 ? `$${Math.round(n)}` : `$${n.toFixed(2)}`;
+  return formatMetricUsd(n);
 }
 
 /** Syntax only; native validates the actual directory, origin and installer. */
@@ -453,7 +454,7 @@ function BlockerRow({
       ) : !clickable && command ? (
         <span className={styles.blockerCommand}>
           <span className={styles.muted}>
-            {needsNative && !nativeCapable ? 'Open the Ashlr desktop app to do this with a click, or run:' : action.kind === 'setup' ? 'Finish the remaining setup steps (GitHub App, trust root, Claude token):' : 'Run:'}
+            {needsNative && !nativeCapable ? 'Open the Phantom desktop app to do this with a click, or run:' : action.kind === 'setup' ? 'Finish the remaining setup steps (GitHub App, trust root, Claude token):' : 'Run:'}
           </span>
           <CopyCommand command={command} />
         </span>

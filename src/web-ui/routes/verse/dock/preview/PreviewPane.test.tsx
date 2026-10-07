@@ -223,7 +223,7 @@ describe('PreviewPane — address bar', () => {
     expect(screen.getByRole('link', { name: 'Open in browser ↗' })).toHaveAttribute('rel', 'noopener noreferrer');
     await user.clear(bar);
     await user.type(bar, '7970{Enter}');
-    expect(screen.getByText('That address is Verse itself.')).toBeInTheDocument();
+    expect(screen.getByText('That address is Phantom itself.')).toBeInTheDocument();
     await user.clear(bar);
     await user.type(bar, 'javascript:alert(1){Enter}');
     expect(screen.getByText(/Enter a local address/)).toBeInTheDocument();

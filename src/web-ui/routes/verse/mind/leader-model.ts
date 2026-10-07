@@ -8,6 +8,7 @@
  *
  * Framework-free; tested directly.
  */
+import { formatMetric } from '../../../components/charts/format-metric.js';
 import type { LeaderAction, LeaderExpectedDelta, LeaderMemoSummary, LeaderStateV1 } from '../../../../core/vision/leader-types.js';
 
 /** Actions a Veto can still act on: applied (undo) or scheduled (cancel). */
@@ -51,7 +52,7 @@ export function expectedDeltaText(d: LeaderExpectedDelta | null): string | null 
   if (!d) return null;
   const by = Date.parse(d.byDate);
   const when = Number.isFinite(by) ? new Date(by).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) : d.byDate;
-  const n = Number.isInteger(d.delta) ? String(Math.abs(d.delta)) : Math.abs(d.delta).toFixed(1);
+  const n = formatMetric(Math.abs(d.delta));
   return `${d.delta >= 0 ? '+' : '−'}${n} ${METRIC_UNIT[d.metric] ?? d.metric} by ${when}`;
 }
 

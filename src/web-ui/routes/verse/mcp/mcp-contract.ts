@@ -341,13 +341,13 @@ export function projectCliHealth(raw: unknown): CliHealthSnapshot | null {
  */
 export const SEAT_REASON_COPY: Record<string, string> = {
   'mcp-seat-isolated-by-adapter':
-    'Verse launches every turn on this seat with an empty MCP configuration, so it loads no MCP '
+    'Phantom launches every turn on this seat with an empty MCP configuration, so it loads no MCP '
     + 'servers at all — whatever is configured elsewhere on this machine.',
   'mcp-account-config-absent':
     'This account has no MCP configuration file of its own, so it starts with none.',
   'mcp-account-config-not-json':
     'This account keeps its MCP servers in a TOML config that the provider CLI reads directly. '
-    + 'Hub does not parse or rewrite it, so it cannot list what is in there.',
+    + 'Phantom does not parse or rewrite it, so it cannot list what is in there.',
   'mcp-account-config-read':
     'Read from this account\'s own private configuration.',
   'mcp-account-config-unreadable':

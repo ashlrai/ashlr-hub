@@ -100,7 +100,7 @@ export function creditsMeter(view: CloudBudgetView): CreditsMeterView {
   const warning = remaining <= 0
     ? 'The estimate says the credits are spent. Check the real balance on claude.ai and adjust the budget.'
     : remaining < reserve
-      ? `Under the ${formatDollars(reserve)} reserve, so Verse stops launching self-improvement tasks.`
+      ? `Under the ${formatDollars(reserve)} reserve, so Phantom stops launching self-improvement tasks.`
       : null;
   return {
     value: Math.max(0, remaining),
@@ -128,7 +128,7 @@ export function sessionsLine(view: CloudBudgetView, now: number = Date.now()): s
 
 export function selfImproveLine(view: CloudBudgetView): string {
   const si = view.budget.selfImprove;
-  if (!si.enabled) return 'Self-improvement is off. Verse launches cloud tasks only when you ask.';
+  if (!si.enabled) return 'Self-improvement is off. Phantom launches cloud tasks only when you ask.';
   return `${view.selfImproveToday} of ${si.maxPerDay} self-improvement launches today, on ${si.repo}. Stops under a ${formatDollars(si.reserveUsd)} estimated balance.`;
 }
 
@@ -267,7 +267,7 @@ export function taskDetail(task: CloudTaskV1, now: number = Date.now()): string 
   return task.stateReason ? safeCloudProse(task.stateReason, now) : null;
 }
 
-/** Dismiss is offered for anything Verse is still tracking; merged and closed tasks are already done. */
+/** Dismiss is offered for anything Phantom is still tracking; merged and closed tasks are already done. */
 export function canDismiss(task: Pick<CloudTaskV1, 'state'>): boolean {
   return task.state !== 'merged' && task.state !== 'closed';
 }
@@ -337,11 +337,11 @@ export const BUDGET_FIELDS: ReadonlyArray<{
   max: number;
 }> = [
   { field: 'total', label: 'Credits on the account', hint: 'What claude.ai says you have.', money: true, integer: false, min: 0, max: 100_000 },
-  { field: 'spent', label: 'Already spent', hint: 'Spent before Verse tracked it, or a correction after checking.', money: true, integer: false, min: -100_000, max: 100_000 },
-  { field: 'perSession', label: 'Estimate per session', hint: 'Flat cost Verse counts for each launch.', money: true, integer: false, min: 0.01, max: 1_000 },
+  { field: 'spent', label: 'Already spent', hint: 'Spent before Phantom tracked it, or a correction after checking.', money: true, integer: false, min: -100_000, max: 100_000 },
+  { field: 'perSession', label: 'Estimate per session', hint: 'Flat cost Phantom counts for each launch.', money: true, integer: false, min: 0.01, max: 1_000 },
   { field: 'maxPerDay', label: 'Sessions per day', hint: 'From every origin, counted per local day.', money: false, integer: true, min: 0, max: 500 },
   { field: 'maxConcurrent', label: 'Running at once', hint: 'Launching or running together.', money: false, integer: true, min: 1, max: 50 },
-  { field: 'selfImproveMax', label: 'Self-improvement per day', hint: 'Launches Verse may make on its own.', money: false, integer: true, min: 0, max: 100 },
+  { field: 'selfImproveMax', label: 'Self-improvement per day', hint: 'Launches Phantom may make on its own.', money: false, integer: true, min: 0, max: 100 },
   { field: 'selfImproveMaxOpen', label: 'Open self-improvement PRs', hint: 'Self-improvement waits while this many await review.', money: false, integer: true, min: 1, max: 50 },
   { field: 'reserve', label: 'Reserve', hint: 'Self-improvement stops under this estimated balance.', money: true, integer: false, min: 0, max: 100_000 },
 ];

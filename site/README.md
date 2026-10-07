@@ -1,6 +1,8 @@
 # site/
 
-The landing page and ecosystem page for **verse.ashlr.ai**.
+The Phantom by AshlrAI landing page and ecosystem page at **verse.ashlr.ai**.
+The domain, CLI, package and installation names stay compatible; see
+[the product naming guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/PHANTOM-BRAND.md).
 
 Two standalone HTML pages (`index.html` and `ecosystem.html`). No source build,
 runtime dependencies, or framework; Vercel's root configuration skips package
@@ -44,6 +46,28 @@ On `/ecosystem`, check aggregate and each repository, both date ranges, the
 keyboard-operated date slider, and the repository links. If JavaScript is
 unavailable, the project descriptions and links remain readable; if the data
 is missing or invalid, the page must show an error instead of a false zero.
+
+## Interactive Phantom world
+
+The illustrated world uses local HTML, SVG, CSS and `assets/phantom-world.js`;
+it has no provider calls, agent dispatch, sign-in or telemetry. Resource cards
+explain connection types rather than reporting live account availability. The
+Work with me and Work for me controls choose example workflows, and each stage
+shows illustrative task evidence. Preserve the visible demo label and result
+statement: no repository changed and no tests or releases ran.
+
+Playback starts only when requested and stops at the last stage. It pauses when
+the page is hidden or the scene leaves the viewport, and tears down timers and
+listeners on page exit. Returning from the browser cache restores an idle scene.
+Reduced motion removes animation; stage buttons and text remain available.
+Without JavaScript, the first stage and resource descriptions remain readable.
+Keep local image dimensions and the scene aspect ratio reserved to avoid layout
+shifts. Check keyboard controls, visible focus and provider-label contrast at
+phone and desktop widths before deployment.
+
+This public demo is separate from the in-app Fleet world, which shows recorded
+run membership and task evidence. Neither surface should invent collaboration
+edges or turn an illustrative result into a claim of live work.
 
 ## Individual and team entry paths
 

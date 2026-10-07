@@ -62,6 +62,7 @@ const FleetAdvanced = lazy(() => import('../fleet/Advanced.js').then((m) => ({ d
 // The rollout ladder (3.14) lives here since 3.15 — Command links to it.
 const AutonomyStatus = lazy(() => import('../command/AutonomyStatus.js'));
 const OutcomesPanel = lazy(() => import('../fleet/OutcomesPanel.js').then(m => ({ default: m.OutcomesPanel })));
+const FleetWorld = lazy(() => import('../fleet/FleetWorld.js'));
 
 export function FleetSection() {
   const { compact } = useViewport();
@@ -85,6 +86,8 @@ export function FleetSection() {
   // One Touch ID sheet for Start's grant step, the blocker and "Edit scope".
   const grantFlow = useGrantFlow(actions);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [worldOpen, setWorldOpen] = useState(false);
+  const worldId = useId();
   const advancedId = useId();
   const live = fleet.data?.value ?? null;
   const off = useAutonomyOff();
@@ -146,7 +149,15 @@ export function FleetSection() {
         </Cell>
       ) : null}
       <Cell span={12}>
-        <SteerPanel live={live} actions={actions} now={now} />
+        <Button size="sm" variant="ghost" aria-expanded={worldOpen} aria-controls={worldId} onClick={() => setWorldOpen(open => !open)}>
+          {worldOpen ? 'Close agent world' : 'Explore agent world'}
+        </Button>
+        <div id={worldId}>
+          {worldOpen ? <Suspense fallback={<p className={styles.muted} aria-busy="true">Loading the agent world…</p>}>
+            <FleetWorld read={fleet.data} refreshing={fleet.status === 'refreshing'} readFailed={fleet.status === 'error'} />
+          </Suspense> : null}
+        </div>
+        <div id="fleet-working-runs"><SteerPanel live={live} actions={actions} now={now} /></div>
         <Suspense fallback={<p className={styles.muted}>Loading allowance controls…</p>}>
           <ResetSpendingControl view={budget.data ?? null} nowMs={now} readOnly={actions.readOnly}
             onReviewGrant={() => grantFlow.open('re-approve', 'Review subscription reserve floors and producer roles before allowance reserve shrinking.')} />

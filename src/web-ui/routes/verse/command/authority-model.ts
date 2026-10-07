@@ -17,6 +17,7 @@
  *
  * Framework-free; tested directly.
  */
+import { formatMetric } from '../../../components/charts/format-metric.js';
 import type { AuthorityGrantDraft, AuthorityStatusV1, AutonomySwitch, GrantState } from '../../../../core/authority/types.js';
 import { darkSinceLabel } from '../fleet/dark-since.js';
 
@@ -190,9 +191,9 @@ export function verdictParts(v: VerdictInputs): VerdictPart[] {
   } else if (!anyFleet) {
     parts.push({ key: 'fleet', text: 'fleet status unknown', tone: 'unknown' });
   } else {
-    if (v.building !== null) parts.push({ key: 'building', text: `${v.building} building` });
-    if (v.mergedToday !== null) parts.push({ key: 'merged', text: `${v.mergedToday} merged today` });
-    if (v.revertsToday !== null) parts.push({ key: 'reverts', text: `${v.revertsToday} revert${v.revertsToday === 1 ? '' : 's'}`, tone: v.revertsToday > 0 ? 'warning' : undefined });
+    if (v.building !== null) parts.push({ key: 'building', text: `${formatMetric(v.building)} building` });
+    if (v.mergedToday !== null) parts.push({ key: 'merged', text: `${formatMetric(v.mergedToday)} merged today` });
+    if (v.revertsToday !== null) parts.push({ key: 'reverts', text: `${formatMetric(v.revertsToday)} revert${v.revertsToday === 1 ? '' : 's'}`, tone: v.revertsToday > 0 ? 'warning' : undefined });
   }
   // The reserve is what autonomy leaves you; with autonomy off it reserves nothing.
   if (v.reserve && v.authority?.effectiveSwitch !== 'off') parts.push({ key: 'reserve', text: `${v.reserve.label} ${Math.round(v.reserve.percent)}% reserved for you` });

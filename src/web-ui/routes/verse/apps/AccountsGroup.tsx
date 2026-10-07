@@ -141,7 +141,7 @@ export function AccountsGroup({
               <span className={styles.commandLabel}>Run this in a terminal</span>
               <CopyPill text={commandText(fixing.connection.fixCommand)} what={`the fix for ${fixing.label}`} />
             </div>
-            <p>Verse shows the command and never runs it for you: it changes which CLI this seat is pinned to.</p>
+            <p>Phantom shows the command and never runs it for you: it changes which CLI this seat is pinned to.</p>
             <div className={styles.dialogActions}>
               <Button ref={closeRef} variant="subtle" onClick={() => setFixing(null)}>Done</Button>
             </div>

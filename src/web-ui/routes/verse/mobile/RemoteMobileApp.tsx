@@ -1,4 +1,5 @@
 /** Phone gateway entry: Access identity, a Mac-approved passkey, then Verse. */
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { markCheckComplete, setRemoteActGranted } from '../../../data/auth-store.js';
 import { useAuthPhase } from '../../../data/hooks.js';
@@ -187,7 +188,7 @@ export function RemoteMobileApp({ shell, Button, ui }: { shell: ReactNode; Butto
   return (
     <main className={ui.app}>
       <div className={ui.scroller} style={{ paddingTop: 'calc(env(safe-area-inset-top) + var(--space-6))' }}>
-        <h1 className={ui.largeTitle}>Verse on your phone</h1>
+        <h1 className={ui.largeTitle}>{PRODUCT_NAME} on your phone</h1>
         {view.kind === 'loading' ? <p role="status">Checking this phone’s gateway session…</p> : null}
         {view.kind === 'error' ? (
           <>
@@ -215,7 +216,7 @@ export function RemoteMobileApp({ shell, Button, ui }: { shell: ReactNode; Butto
             ) : view.session.capabilities.pairing ? (
               <div className={ui.card}>
                 <h2>Pair this phone</h2>
-                <p>Enter the one-time code shown on your Mac. Your Mac must approve the new passkey before this phone can read Verse.</p>
+                <p>Enter the one-time code shown on your Mac. Your Mac must approve the new passkey before this phone can read Phantom.</p>
                 <div className={ui.field}>
                   <label className={ui.label} htmlFor="remote-pair-code">Pairing code</label>
                   <input id="remote-pair-code" className={ui.input} value={code} autoComplete="off" onChange={(event) => setCode(event.target.value)} />
@@ -227,7 +228,7 @@ export function RemoteMobileApp({ shell, Button, ui }: { shell: ReactNode; Butto
                 <Button variant="primary" disabled={!code.trim() || !label.trim() || busy} onClick={() => void pair()}>Create passkey</Button>
                 {deviceId ? <Button variant="plain" disabled={busy} onClick={() => setPairing(false)}>Back to sign in</Button> : null}
               </div>
-            ) : <p role="status">Phone pairing is not enabled on this Mac yet. Open Verse on your Mac to finish gateway setup.</p>}
+            ) : <p role="status">Phone pairing is not enabled on this Mac yet. Open Phantom on your Mac to finish gateway setup.</p>}
             {actionError ? <p className={ui.error} role="alert">{actionError}</p> : null}
           </>
         ) : null}

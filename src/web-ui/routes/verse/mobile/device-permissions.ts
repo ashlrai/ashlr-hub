@@ -73,7 +73,7 @@ export function resolveDevicePermissions(input: PermissionInput): DevicePermissi
   if (scopes?.gatewayWritesEnabled === false) return { ...base, act: 'unavailable', actReason: 'The phone gateway is read-only. Actions are available on your Mac.' };
   if (scopes && !scopes.act) return { ...base, act: 'unavailable', actReason: 'This device was paired read-only. Pair it again with act permission to approve or start work.' };
   if (dispatchEnabled === null) return { ...base, act: 'unavailable', actReason: 'Checking whether this Mac allows actions. Wait for it to answer.' };
-  if (dispatchEnabled === false) return { ...base, act: 'unavailable', actReason: 'Your Mac started Verse without dispatch, so nothing can be changed from here. Run `ashlr verse` on the Mac to act.' };
+  if (dispatchEnabled === false) return { ...base, act: 'unavailable', actReason: 'Your Mac started Phantom without dispatch, so nothing can be changed from here. Run `ashlr verse` on the Mac to act.' };
   if (!holdsMutation) return { ...base, act: 'locked', actReason: 'Actions ask for the mutation token `ashlr verse` printed. It stays in memory for 20 idle minutes, never on disk.' };
   return { ...base, act: 'unlocked', actReason: null };
 }

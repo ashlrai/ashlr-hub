@@ -26,6 +26,7 @@
  * so the relationship to the detail region is announced rather than implied.
  */
 import type { CSSProperties, ReactNode } from 'react';
+import { formatDecimalMetric, formatMetric } from '../../../components/charts/format-metric.js';
 import { StatusBadge, type Tone } from '../../../components/primitives/StatusBadge.js';
 import { ENGINE_LABEL } from '../verse-model.js';
 import { accountCreditDetail, type AccountCardModel, type AccountVerdictState } from './accounts-model.js';
@@ -48,8 +49,8 @@ function CreditsRow({ credits, historical }: { credits: AccountCardModel['credit
     ? 'unlimited'
     : credits.balance !== null
       ? credits.balanceValue !== null
-        ? credits.balanceValue.toLocaleString('en-US', { maximumFractionDigits: 2 })
-        : credits.balance
+        ? formatDecimalMetric(credits.balance) ?? formatMetric(credits.balanceValue)
+        : formatDecimalMetric(credits.balance) ?? credits.balance
       : null;
 
   return (

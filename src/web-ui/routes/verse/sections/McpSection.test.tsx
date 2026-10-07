@@ -62,7 +62,7 @@ describe('McpSection (folded into Apps & Accounts)', () => {
     expect(await within(group).findByRole('note')).toHaveTextContent(`Configured, but unused. ${MCP.notes[0]} ${MCP.machine.note}`);
     expect(await within(group).findByRole('alert')).toHaveTextContent('Claude Max: 2.1.279, pinned 2.1.280.');
     expect(within(group).getByText(/Claude and local seats do not load account-configured MCP servers/)).toBeInTheDocument();
-    expect(within(group).getByText(/Verse’s own agent tools are controlled separately per chat/)).toBeInTheDocument();
+    expect(within(group).getByText(/Phantom’s own agent tools are controlled separately per chat/)).toBeInTheDocument();
     expect(within(group).getByText(/Codex and Grok seats load their own account’s config/)).toBeInTheDocument();
     expect(within(group).getByText(/refused on a folder that is not enrolled/)).toBeInTheDocument();
 
@@ -77,7 +77,7 @@ describe('McpSection (folded into Apps & Accounts)', () => {
     render(<McpSection />);
     const group = await screen.findByRole('region', { name: 'MCP servers' });
     expect(within(group).getByText(/Claude and local seats do not load account-configured MCP servers/)).toBeInTheDocument();
-    expect(within(group).getByText(/Verse’s own agent tools are controlled separately per chat/)).toBeInTheDocument();
+    expect(within(group).getByText(/Phantom’s own agent tools are controlled separately per chat/)).toBeInTheDocument();
     expect(within(group).getByText(/refused on a folder that is not enrolled/)).toBeInTheDocument();
     expect(await within(group).findByText(/This server does not expose \/api\/verse\/mcp/)).toBeInTheDocument();
   });

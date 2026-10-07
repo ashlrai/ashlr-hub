@@ -10,7 +10,7 @@
  *     (SPEC-310C §2 order), portalled out of the composer;
  *   - a queue read that answers `{}` no longer takes the composer down.
  */
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VerseQueueResponse } from '../../../core/verse/workbench-types.js';
@@ -207,10 +207,11 @@ describe('interactive guide drafts', () => {
     const onSend = vi.fn(async () => true);
     render(<Harness sessionId="vs_1" {...props({ onSend })} />);
     const box = screen.getByRole('textbox', { name: 'Message' });
-    await user.type(box, 'My existing note');
+    // This checks draft identity/editing, not per-keystroke timing. Keyboard flows above remain real user events.
+    fireEvent.change(box, { target: { value: 'My existing note' } });
     await user.click(screen.getByRole('button', { name: 'Explain this project' }));
     await waitFor(() => expect(box).toHaveValue('My existing note\n\nRead this project and explain its structure and main entry points. Do not edit files.'));
-    await user.type(box, ' Please focus on tests.');
+    fireEvent.change(box, { target: { value: `${(box as HTMLTextAreaElement).value} Please focus on tests.` } });
     expect((box as HTMLTextAreaElement).value).toContain('Please focus on tests.');
     expect(onSend).not.toHaveBeenCalled();
     const requests = vi.mocked(fetch).mock.calls;

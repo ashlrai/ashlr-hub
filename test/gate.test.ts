@@ -1,6 +1,6 @@
 /**
  * scripts/gate.mjs — the pure parts of the fast local release gate: argument parsing,
- * test selection, and how a vitest run becomes PASS / KNOWN / FAIL. Plus the two data
+ * test selection, and how a vitest run becomes PASS / FAIL. Plus the two data
  * files it reads, which must only name test files that exist.
  */
 import { existsSync, readFileSync } from 'node:fs';
@@ -139,14 +139,15 @@ describe('evaluateVitest', () => {
     expect(v.tests).toEqual({ passed: 9, failed: 1, total: 10, files: 1 });
   });
 
-  it('reports a failure in a listed file as known, not failed', () => {
+  it('fails a listed file while preserving its diagnostic metadata', () => {
     const v = evaluateVitest({ exitCode: 1, report: report([['test/a.test.ts', 'passed'], ['test/flaky.test.ts', 'failed']]), log: '', known });
-    expect(v).toMatchObject({ status: 'known', knownFiles: ['test/flaky.test.ts'], failedFiles: [] });
+    expect(v).toMatchObject({ status: 'fail', knownFiles: ['test/flaky.test.ts'], failedFiles: ['test/flaky.test.ts'] });
+    expect(evaluateVitest({ exitCode: 0, report: report([['test/flaky.test.ts', 'failed']]), log: '', known }).status).toBe('fail');
   });
 
   it('fails on any unlisted failing file, even next to a known one', () => {
     const v = evaluateVitest({ exitCode: 1, report: report([['test/b.test.ts', 'failed'], ['test/flaky.test.ts', 'failed']]), log: '', known });
-    expect(v).toMatchObject({ status: 'fail', failedFiles: ['test/b.test.ts'], knownFiles: ['test/flaky.test.ts'] });
+    expect(v).toMatchObject({ status: 'fail', failedFiles: ['test/b.test.ts', 'test/flaky.test.ts'], knownFiles: ['test/flaky.test.ts'] });
   });
 
   it('fails on unhandled errors that no file owns', () => {
@@ -157,7 +158,7 @@ describe('evaluateVitest', () => {
   it('fails when vitest exits non-zero without a failing file, or writes no report', () => {
     expect(evaluateVitest({ exitCode: 1, report: report([['test/a.test.ts', 'passed']]), log: '', known }).status).toBe('fail');
     expect(evaluateVitest({ exitCode: 1, report: null, log: '', known }).status).toBe('fail');
-    expect(evaluateVitest({ exitCode: 0, report: null, log: '', known }).status).toBe('pass');
+    expect(evaluateVitest({ exitCode: 0, report: null, log: '', known }).status).toBe('fail');
   });
 });
 
@@ -172,13 +173,13 @@ describe('output', () => {
   it('renders an aligned table', () => {
     const table = renderTable([
       { name: 'build', status: 'pass', durationMs: 1000, detail: null },
-      { name: 'tests-backend', status: 'known', durationMs: 61_000, detail: 'related' },
+      { name: 'tests-backend', status: 'fail', durationMs: 61_000, detail: 'related' },
     ]);
     expect(table.split('\n')).toEqual([
       'step           status  duration  detail',
       '-------------  ------  --------  -------',
       'build          PASS    1.0s',
-      'tests-backend  KNOWN   1m01s     related',
+      'tests-backend  FAIL    1m01s     related',
     ]);
   });
 });

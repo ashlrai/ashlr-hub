@@ -92,8 +92,8 @@ describe('projectCloudCredits — GET /api/verse/cloud, narrowed', () => {
   });
 
   it('formats dollars', () => {
-    expect(formatUsd(212)).toBe('$212');
-    expect(formatUsd(3.5)).toBe('$3.50');
+    expect(formatUsd(212)).toBe('$210');
+    expect(formatUsd(3.5)).toBe('$3.5');
     expect(formatUsd(-4)).toBe('$0');
   });
 });

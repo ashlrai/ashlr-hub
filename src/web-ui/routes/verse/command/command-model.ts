@@ -8,6 +8,7 @@
  * week with one unreadable day has no honest "vs prior 7d". Framework-free;
  * tested directly.
  */
+import { formatMetric, formatMetricUsd } from '../../../components/charts/format-metric.js';
 import type { FleetLiveSnapshotV1, FleetLiveRun } from '../../../../core/fleet/fleet-types.js';
 import type { LeaderStateV1 } from '../../../../core/vision/leader-types.js';
 import type { LearningStateV1 } from '../../../../core/learn/harness-types.js';
@@ -98,9 +99,9 @@ export function meteredCost(d: FleetHistoryDay): number | null {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
 }
 
-const signedInt = (v: number) => (v > 0 ? `+${v}` : String(v));
-const signedPts = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1)}`;
-const signedUsd = (v: number) => `${v > 0 ? '+' : v < 0 ? '−' : ''}$${Math.abs(v).toFixed(2)}`;
+const signedInt = (v: number) => `${v > 0 ? '+' : ''}${formatMetric(v)}`;
+const signedPts = (v: number) => `${v > 0 ? '+' : ''}${formatMetric(v)}`;
+const signedUsd = (v: number) => `${v > 0 ? '+' : v < 0 ? '−' : ''}${formatMetricUsd(Math.abs(v))}`;
 
 /** "2h 14m", "38m", "3d 2h". */
 export function formatSpan(ms: number | null): string {
@@ -110,7 +111,7 @@ export function formatSpan(ms: number | null): string {
   const h = Math.floor(m / 60);
   if (h < 48) return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
   const d = Math.floor(h / 24);
-  return h % 24 ? `${d}d ${h % 24}h` : `${d}d`;
+  return h % 24 ? `${formatMetric(d)}d ${h % 24}h` : `${formatMetric(d)}d`;
 }
 
 /** Mean daily post-merge green % across repos, per day (oldest first, 14 days). */
@@ -142,11 +143,11 @@ export function buildKpis({ fleet, history, learning, policy }: KpiInputs): Kpi[
   const spend7 = windowSum(days, spend, 7);
   const spendPrior = windowSum(days, spend, 7, 7);
   const capPerDay = policy ? policy.spend.meteredUsdPerDay : null;
-  const spendValue = spend7 === null ? '—' : `$${spend7.toFixed(2)}${capPerDay !== null ? ` / $${(capPerDay * 7).toFixed(0)}` : ''}`;
+  const spendValue = spend7 === null ? '—' : `${formatMetricUsd(spend7)}${capPerDay !== null ? ` / ${formatMetricUsd(capPerDay * 7)}` : ''}`;
   const meteredKnown = days.some((d) => meteredCost(d) !== null);
   // One short line. Subscriptions are window usage, not dollars: they live
   // on the seat burn-downs, not in this caption.
-  const capWords = capPerDay === null ? 'per-token APIs only' : capPerDay === 0 ? 'metered APIs off' : `cap $${capPerDay}/day`;
+  const capWords = capPerDay === null ? 'per-token APIs only' : capPerDay === 0 ? 'metered APIs off' : `cap ${formatMetricUsd(capPerDay)}/day`;
   const spendCaption = meteredKnown ? capWords : `${capWords} · not reported yet`;
 
   // Lift — the active harness's own experiment (null = baseline in force).
@@ -158,16 +159,16 @@ export function buildKpis({ fleet, history, learning, policy }: KpiInputs): Kpi[
     {
       id: 'merged',
       label: 'Merged · 7d',
-      value: merged7 === null ? '—' : String(merged7),
+      value: formatMetric(merged7),
       delta: mergedDelta === null ? null : { value: mergedDelta, unit: Math.abs(mergedDelta) === 1 ? 'merge' : 'merges', versus: 'vs prior 7d', goodWhenPositive: true, format: signedInt },
       trend: days.length ? lastValues(days, merges, 14) : undefined,
       trendLabel: 'Merges per day, last 14 days',
-      caption: fleet?.summary.mergedToday != null ? `${fleet.summary.mergedToday} today` : 'fleet merges on default branches',
+      caption: fleet?.summary.mergedToday != null ? `${formatMetric(fleet.summary.mergedToday)} today` : 'fleet merges on default branches',
     },
     {
       id: 'green',
       label: 'Post-merge green',
-      value: green === null ? '—' : `${Math.round(green)}%`,
+      value: green === null ? '—' : `${formatMetric(green)}%`,
       delta: greenDelta === null ? null : { value: greenDelta, unit: 'pts', versus: 'vs prior 7d', goodWhenPositive: true, format: signedPts },
       trend: gTrend.length ? gTrend : undefined,
       trendLabel: 'Post-merge green percent per day',
@@ -257,13 +258,13 @@ export function sinceYouLooked({ lastLookedAt, fleet, leader, activity }: SinceI
   const merged = count('merged');
   const reverted = count('reverted');
   const failed = count('failed') + count('refused');
-  if (merged) out.push({ id: 'merged', text: `${merged} merged`, tone: 'success' });
-  if (reverted) out.push({ id: 'reverted', text: `${reverted} reverted`, tone: 'danger' });
-  if (failed) out.push({ id: 'failed', text: `${failed} refused or failed`, tone: 'warning' });
+  if (merged) out.push({ id: 'merged', text: `${formatMetric(merged)} merged`, tone: 'success' });
+  if (reverted) out.push({ id: 'reverted', text: `${formatMetric(reverted)} reverted`, tone: 'danger' });
+  if (failed) out.push({ id: 'failed', text: `${formatMetric(failed)} refused or failed`, tone: 'warning' });
   const memos = (leader?.timeline ?? []).filter((m) => Date.parse(m.at) > t && m.status === 'ok').length;
-  if (memos) out.push({ id: 'memos', text: `${memos} new memo${memos === 1 ? '' : 's'}`, tone: 'info' });
+  if (memos) out.push({ id: 'memos', text: `${formatMetric(memos)} new memo${memos === 1 ? '' : 's'}`, tone: 'info' });
   const fresh = (activity?.needsYou ?? []).filter((i) => Date.parse(i.since) > t).length;
-  if (fresh) out.push({ id: 'needs', text: `${fresh} new for you`, tone: 'warning' });
+  if (fresh) out.push({ id: 'needs', text: `${formatMetric(fresh)} new for you`, tone: 'warning' });
   return out;
 }
 

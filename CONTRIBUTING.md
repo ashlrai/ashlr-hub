@@ -62,24 +62,42 @@ To install the CLI while developing:
 
 `bin/ashlr` is a thin ESM shim that imports `dist/cli/index.js`, so the installed binary always runs the compiled output. For fast iteration, use `npm run dev` (runs `src/cli/index.ts` directly through `tsx`).
 
-### Definition of green
+### Focused iteration
 
-A source change is locally verified when these checks pass:
+Run the affected existing files while editing. These commands use the same
+hermetic backend runner and web configuration as the complete suites:
 
 ```sh
-npm run typecheck
-npm run lint
-npm run test:ci:sharded
-npm run test:web
+npm run test:ci -- --maxWorkers=1 --fileParallelism=false test/gate.test.ts test/m481.ci-action-pins.test.ts test/m522.production-promotion-docs.test.ts
+npm run test:web -- src/web-ui/routes/verse/usage/CapacityStrip.test.tsx src/web-ui/routes/verse/resources/ResourcesBar.test.tsx --maxWorkers=1 --no-file-parallelism
 npm run check:docs
-npm run build
 ```
 
+Choose the files relevant to your change; the examples are independent backend
+and web selections. If a selected test reads compiled output or copied assets,
+run `npm run build` first. Include `npm run typecheck` and `npm run lint` in a
+source-only check; the complete release command below already runs them.
+`npm run gate` also provides related-test and smoke feedback,
+but its import graph cannot discover dependencies read as text: select those
+files explicitly. Neither focused commands nor the gate replace release checks.
+
+### Definition of green
+
+For the complete local source release check, run the canonical script once:
+
+```sh
+npm run prepublishOnly
+```
+
+It builds first, then checks first paint, docs, types and lint, runs the complete
+web suite, and finally runs the exhaustive backend partitions and isolated
+cases. Running `gate:full` or repeating these full suites immediately beforehand
+adds duplicate work rather than release coverage.
+
 Preserve meaningful coverage. Backend tests live under `test/`; DOM tests live
-beside the web features under `src/web-ui/`. Start with focused tests while
-iterating, then run the applicable full gates. Report skipped or unavailable
+beside the web features under `src/web-ui/`. Report skipped or unavailable
 platform checks separately. A passing source suite is not installed-artifact,
-provider, production or user-acceptance evidence. Release work uses the stronger
+provider, production or user-acceptance evidence. Release work also follows the
 [local production gate](docs/RELEASING.md#local-verification-for-the-340-successor).
 
 ### Running tests hermetically on the local host

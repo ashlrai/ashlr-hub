@@ -43,6 +43,7 @@
  * arrive as VERSE_ANCHOR_EVENT and are revealed by shell/reveal-anchor.ts
  * (listened for by shell/anchor-requests.ts).
  */
+import { PRODUCT_NAME } from '../../app/product-brand.js';
 import { Suspense, lazy, useEffect, useMemo, useRef, useState, type ComponentType } from 'react';
 import { reportThemeToShell, subscribeShellCommands, isDesktopShell } from '../../app/desktop-shell.js';
 import { RouteErrorBoundary } from '../../components/primitives/RouteErrorBoundary.js';
@@ -470,7 +471,7 @@ export function VerseApp() {
       data-resources={resources.open && resources.pinned && !compact ? 'docked' : undefined}
       data-focus={focus ? 'on' : undefined}
     >
-      <nav className={styles.rail} data-rail={expanded ? 'expanded' : 'collapsed'} aria-label="Verse sections">
+      <nav className={styles.rail} data-rail={expanded ? 'expanded' : 'collapsed'} aria-label={`${PRODUCT_NAME} sections`}>
         {/*
           Desktop shell: the window's top 48px is overlaid by the OS title bar
           and the traffic lights. The rail clears it in CSS; this strip makes
@@ -478,10 +479,10 @@ export function VerseApp() {
           `--app-titlebar-height` is not set. See desktop/README.md.
         */}
         <span className={styles.railDragStrip} data-app-region="drag" aria-hidden="true" />
-        <Tooltip label="Ashlr Verse" placement="right" disabled={expanded}>
+        <Tooltip label={PRODUCT_NAME} placement="right" disabled={expanded}>
           <span className={styles.mark}>
             <VerseMark />
-            <span className="visually-hidden">Ashlr Verse</span>
+            <span className="visually-hidden">{PRODUCT_NAME}</span>
           </span>
         </Tooltip>
         <ul className={styles.railList}>
