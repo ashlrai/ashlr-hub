@@ -147,6 +147,9 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/verse/outcomes-*.ts',
   // Exact current primary→enrolled-mirror association for manager conversation scope.
   'src/core/verse/manager-scope.ts',
+  // Private message evidence and sidecar admission/reconciliation belong to the same host boundary.
+  'src/core/verse/manager-conversation.ts',
+  'src/core/verse/manager-session.ts',
   'src/core/vision/leader-preferences.ts',
   // Sandbox, policy and routing
   'src/core/sandbox/**',

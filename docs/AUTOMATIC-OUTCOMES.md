@@ -24,6 +24,35 @@ Manual selections remain pinned. Local-only projects retain their local-only
 boundary. A failed handoff preserves the draft; it does not send a duplicate
 turn. Unknown project privacy is resolved before remote classification or work.
 
+### One conversation with the Manager
+
+In an existing chat, choose **Manager** in the **Auto seat** menu. **One
+conversation; Phantom plans, delegates and reviews across your resources.**
+Your project folders must each match one current enrolled repository. The
+Manager uses the resident fleet; choosing it does not activate a dormant fleet
+or authorize another account.
+
+Messages are saved in this conversation before their references reach the
+outcome. A confirmed send means **saved**, not launched or completed. You can
+send guidance while a native turn runs; that turn continues separately. If a
+response is uncertain, **Retry saved message** uses the original message
+identity and preserves a newer draft. The status line shows actual planning,
+review, queued, paused, failed, or unavailable state. **Pause manager** and
+**Resume manager** update the existing outcome.
+
+Finished Manager replies come from registered, persisted runs. Opening the
+chat or its visible status poll recovers missing replies after a restart.
+Expand **Manager · ‹model›** for the selected seat, run, stage, and complete
+actual source; the technical result protocol stays folded by default. The
+selected seat is routing provenance, not a separate billing-account receipt.
+
+This initial mode accepts text and project files. Uploaded chat attachments
+remain in your draft and require native routing. **Auto**, **Cheap-first**, and
+**Auto off** retain their existing behavior; choosing Manager is explicit.
+Switching routing modes does not pause an existing outcome; use **Pause
+manager**. Work still needs actual proposal, verification, and merge evidence to
+complete.
+
 ## Work for me
 
 In Fleet, select **New outcome**. Enter the desired result, select enrolled

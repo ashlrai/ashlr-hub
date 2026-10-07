@@ -58,9 +58,13 @@ import {
   writeSync,
 } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { homedir } from 'node:os';
+import { readStableRegularFile } from '../util/stable-file-read.js';
 import { basename, dirname, join } from 'node:path';
+import { isPersistedManagerEvent } from './manager-conversation.js';
 
 import {
+  verseSessionRoots,
   VERSE_CONTEXT_MODES,
   VERSE_REMOTE_STATES,
   VERSE_EFFORTS,
@@ -298,6 +302,9 @@ function isEvent(value: unknown): value is VerseEvent {
   const turnId = value['turnId'];
   if (VERSE_TRANSIENT_EVENT_TYPES.has(value['type'] as VerseEvent['type'])) return false;
   switch (value['type']) {
+    case 'manager-message':
+    case 'manager-result':
+      return isPersistedManagerEvent(value);
     case 'history-truncated':
       return turnId === null && isFiniteNumber(value['droppedBefore']);
     case 'source':
@@ -424,7 +431,7 @@ function readJsonFile(path: string): unknown {
  * renders folded and raw logs with the client's own buildTranscript and fails
  * the moment they diverge.
  */
-const FOLD_FLUSH_TYPES = new Set<VerseEvent['type']>(['user-message', 'thinking', 'tool-use', 'error', 'cancelled', 'turn-done']);
+const FOLD_FLUSH_TYPES = new Set<VerseEvent['type']>(['user-message', 'manager-message', 'manager-result', 'thinking', 'tool-use', 'error', 'cancelled', 'turn-done']);
 
 type TextDelta = Extract<VerseEvent, { type: 'text-delta' }>;
 
@@ -534,7 +541,7 @@ export function truncateAtTurnBoundary(
   const minStart = body.length - Math.max(1, limit - 1);
   let start = -1;
   for (let i = minStart; i < body.length; i += 1) {
-    if (body[i].type === 'user-message') { start = i; break; }
+    if (body[i].type === 'user-message' || body[i].type === 'manager-message') { start = i; break; }
   }
   if (start <= 0) start = Math.max(1, minStart);
   const kept = body.slice(start);
@@ -1037,4 +1044,20 @@ export function createVerseSessionStore(root: string): VerseSessionStore {
       for (const id of [...appendFds.keys()]) closeAppendFd(id);
     },
   };
+}
+
+/** Host-only current association lookup: no engine creation, launch read, store repair or raw conversation. */
+export function readOutcomeManagerSessionMetadata(id: string, root = join(homedir(), '.ashlr', 'verse')):
+  { id: string; roots: string[]; seatId: string; model: string; engine: string; status: string } | null {
+  if (!isValidSessionId(id)) return null;
+  const read = readStableRegularFile(join(root, 'sessions', `${id}${SESSION_SUFFIX}`), {
+    anchorPath: root, maxFileBytes: 1024 * 1024, remainingBytes: 1024 * 1024,
+  });
+  if (!read.ok) return null;
+  try {
+    const session: unknown = JSON.parse(read.text);
+    if (!isSession(session) || session.id !== id) return null;
+    return { id, roots: verseSessionRoots(session), seatId: session.seatId, model: session.model,
+      engine: session.engine, status: session.status };
+  } catch { return null; }
 }

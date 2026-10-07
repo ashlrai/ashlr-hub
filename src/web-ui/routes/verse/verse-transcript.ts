@@ -17,7 +17,7 @@
  * log, rebuilding only the turn segments that changed.
  */
 import type { VerseEvent, VerseUsage } from '../../data/api-types.js';
-import type { VerseRecoveryHow, VerseRemoteState, VerseSource, VerseThinkingKind } from '../../../core/verse/types.js';
+import type { VerseRecoveryHow, VerseRemoteState, VerseSource, VerseThinkingKind, VerseManagerResultIdentity } from '../../../core/verse/types.js';
 import { getVerseSessionState, getVerseThinkingStats, subscribeVerseStoreLifecycle, type VerseThinkingStat } from './verse-store.js';
 
 // ---------------------------------------------------------------------------
@@ -74,8 +74,8 @@ export function messagePlaybookChip(value: unknown): MessagePlaybookChip | null 
 
 export type TranscriptItem =
   /** `playbook`: 3.15 — the playbook this message's `!macro` ran (a chip under the message). */
-  | { kind: 'user'; key: string; turnId: string; at: string; text: string; playbook?: MessagePlaybookChip }
-  | { kind: 'assistant'; key: string; turnId: string; at: string; text: string; streaming: boolean }
+  | { kind: 'user'; key: string; turnId: string; at: string; text: string; playbook?: MessagePlaybookChip; manager?: { outcomeId: string; messageId: string } }
+  | { kind: 'assistant'; key: string; turnId: string; at: string; text: string; streaming: boolean; manager?: VerseManagerResultIdentity }
   | {
       kind: 'thinking';
       key: string;
@@ -240,10 +240,20 @@ function buildSegment(
   for (let i = from; i < to; i += 1) {
     const e = events[i]!;
     switch (e.type) {
-      case 'user-message': {
+      case 'user-message':
+      case 'manager-message': {
         flushPending();
-        const playbook = messagePlaybookChip(e.playbook);
-        items.push({ kind: 'user', key: `u-${e.seq}`, turnId: e.turnId, at: e.at, text: e.text, ...(playbook ? { playbook } : {}) });
+        const manager = e.type === 'manager-message' ? { outcomeId: e.outcomeId, messageId: e.messageId } : undefined;
+        const playbook = e.type === 'user-message' ? messagePlaybookChip(e.playbook) : null;
+        items.push({ kind: 'user', key: `u-${e.seq}`, turnId: e.type === 'manager-message' ? e.messageId : e.turnId,
+          at: e.at, text: e.text, ...(manager ? { manager } : {}), ...(playbook ? { playbook } : {}) });
+        break;
+      }
+      case 'manager-result': {
+        flushPending();
+        const { seq: _seq, at: _at, type: _type, turnId: _turnId, text: _text, ...manager } = e;
+        items.push({ kind: 'assistant', key: `manager-a-${e.seq}`, turnId: e.runId, at: e.at, text: e.text,
+          streaming: false, manager });
         break;
       }
       case 'turn-started':
@@ -401,7 +411,7 @@ export function buildTranscript(events: VerseEvent[], options: BuildTranscriptOp
   // Cut at every user-message: a new ask always opens a new turn, and the
   // derivation flushes its streamed text there, so nothing spans the cut.
   const starts: number[] = [0];
-  for (let i = 1; i < events.length; i += 1) if (events[i]!.type === 'user-message') starts.push(i);
+  for (let i = 1; i < events.length; i += 1) if (events[i]!.type === 'user-message' || events[i]!.type === 'manager-message') starts.push(i);
 
   const builds: Array<{ key: string; build: SegmentBuild; cached: CachedSegment | null }> = [];
   const seenKeys = new Set<string>();

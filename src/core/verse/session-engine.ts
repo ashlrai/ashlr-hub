@@ -98,6 +98,7 @@ import {
 } from './context-math.js';
 import type { SeatReadiness } from './health-types.js';
 import { legacyModelOptionFallback } from './model-windows.js';
+import { isPersistedManagerEvent, readStoredManagerEvents } from './manager-conversation.js';
 import {
   argvMarkers,
   createProcessRegistry,
@@ -124,6 +125,8 @@ import {
   type VerseErrorCode as VerseEventErrorCode,
   type VerseEvent,
   type VerseModelOption,
+  type VerseManagerMessageReference,
+  type VerseManagerResultIdentity,
   type VerseRecoveryHow,
   type VerseSeat,
   type VerseSession,
@@ -335,6 +338,12 @@ export interface VerseEngineHandle {
    * `session.remote`. Optional so test fakes and older handles conform.
    */
   recordRemoteStatus?(id: string, status: VerseRemoteStatusInput): VerseSession;
+  /** Durable interjection only: never launches or increments a native turn. */
+  recordManagerMessage?(id: string, input: { outcomeId: string; messageId: string; text: string }): Promise<VerseManagerMessageReference>;
+  /** Reads the host-validated terminal stage; callers cannot supply reply text or a run ID. */
+  recordManagerResult?(id: string, input: { outcomeId: string; stageId: string }): Promise<VerseManagerResultIdentity | null>;
+  /** Fresh complete saved inventory, including archive; null means unknown, never no replies. */
+  getManagerResultStages?(id: string, outcomeId: string): string[] | null;
   deleteSession(id: string): void;
   renameSession(id: string, title: string): VerseSession;
   /**
@@ -469,6 +478,9 @@ export const VERSE_TURN_HOOK_TIMEOUT_MS = 15_000;
 export interface VerseEngineOptions {
   /** Store root. Default `~/.ashlr/verse`. */
   root?: string;
+  /** Host readers; tests may replace them without launching a provider or fabricating a saved run. */
+  managerSessionReader?: (input: { outcomeId: string; sessionId: string; roots: readonly string[] }) => boolean;
+  managerResultReader?: (input: { outcomeId: string; stageId: string; sessionId: string }) => (Omit<VerseManagerResultIdentity, 'outcomeId' | 'stageId'> & { text: string }) | null;
   /** 3.15 checkpoint hooks (see VerseTurnHooks). Default none. */
   turnHooks?: VerseTurnHooks | null;
   spawn?: typeof nodeSpawn;
@@ -2924,6 +2936,88 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       if (!turn || turn.settled) return false;
       requestTermination(id, turn, 'cancelled');
       return true;
+    },
+
+    getManagerResultStages(id, outcomeId): string[] | null {
+      require(id);
+      if (!/^[a-z0-9](?:[a-z0-9._-]{0,78}[a-z0-9])?$/.test(outcomeId)) return null;
+      const events = readStoredManagerEvents(id, root);
+      return events ? events.flatMap(event => event.type === 'manager-result' && event.outcomeId === outcomeId ? [event.stageId] : []) : null;
+    },
+
+    async recordManagerMessage(id, input): Promise<VerseManagerMessageReference> {
+      if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
+      require(id);
+      if (!isObject(input) || Object.keys(input).length !== 3 ||
+          !isPersistedManagerEvent({ ...input, seq: 1, at: nowIso(), type: 'manager-message', turnId: null })) {
+        throw new VerseError('VERSE_INVALID', 'manager message is malformed');
+      }
+      const reader = opts.managerSessionReader ?? (await import('../daemon/outcome-manager.js')).readOutcomeManagerSession;
+      // Lazy loading may yield. Re-read the live chat and association immediately before persistence.
+      if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
+      const session = require(id);
+      if (!reader({ outcomeId: input.outcomeId, sessionId: id, roots: verseSessionRoots(session) })) {
+        throw new VerseError('VERSE_INVALID', 'manager outcome is not active for this chat and workspace');
+      }
+      const events = readStoredManagerEvents(id, root);
+      if (!events) throw new VerseError('VERSE_INVALID', 'manager chat history is unavailable');
+      const prior = events.find(event => event.type === 'manager-message' && event.messageId === input.messageId);
+      if (prior) {
+        if (prior.type !== 'manager-message' || prior.outcomeId !== input.outcomeId || prior.text !== input.text) {
+          throw new VerseError('VERSE_INVALID', 'manager message identity already names different content');
+        }
+        return { sessionId: id, messageId: prior.messageId, eventSeq: prior.seq };
+      }
+      // Unlike native stdout handling, a failed append is returned to the requester; no false acceptance.
+      const stored = store.appendEvent(id, { ...input, type: 'manager-message', turnId: null }, nowIso());
+      fanOut(id, stored);
+      if (reasoningTap) tapReasoning(id, stored);
+      return { sessionId: id, messageId: input.messageId, eventSeq: stored.seq };
+    },
+
+    async recordManagerResult(id, input): Promise<VerseManagerResultIdentity | null> {
+      if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
+      require(id);
+      if (!isObject(input) || Object.keys(input).length !== 2 ||
+          typeof input.outcomeId !== 'string' || !/^[a-z0-9](?:[a-z0-9._-]{0,78}[a-z0-9])?$/.test(input.outcomeId) ||
+          typeof input.stageId !== 'string' || !/^[a-f0-9]{64}$/.test(input.stageId)) {
+        throw new VerseError('VERSE_INVALID', 'manager result identity is malformed');
+      }
+      const helpers = opts.managerSessionReader && opts.managerResultReader ? null : await import('../daemon/outcome-manager.js');
+      if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
+      const session = require(id);
+      const roots = verseSessionRoots(session);
+      const association = opts.managerSessionReader
+        ? opts.managerSessionReader({ outcomeId: input.outcomeId, sessionId: id, roots })
+        : (() => {
+          const projection = helpers!.readOutcomeManagerSessionProjection(id, roots);
+          return projection.sourceState === 'healthy' && projection.association.outcomeId === input.outcomeId &&
+            projection.association.terminalStageIds.includes(input.stageId);
+        })();
+      if (!association) return null;
+      const result = (opts.managerResultReader ?? helpers!.readOutcomeManagerResult)({ ...input, sessionId: id });
+      if (!result) return null;
+      const event = { ...input, ...result, type: 'manager-result' as const, turnId: null };
+      if (!isPersistedManagerEvent({ ...event, seq: 1, at: nowIso() })) {
+        throw new VerseError('VERSE_INVALID', 'saved manager result is malformed');
+      }
+      const events = readStoredManagerEvents(id, root);
+      if (!events) throw new VerseError('VERSE_INVALID', 'manager chat history is unavailable');
+      const prior = events.find(candidate => candidate.type === 'manager-result' &&
+        candidate.outcomeId === input.outcomeId && candidate.stageId === input.stageId);
+      if (prior) {
+        const { seq: _seq, at: _at, ...saved } = prior;
+        if (Object.keys(saved).length !== Object.keys(event).length ||
+            Object.entries(event).some(([key, value]) => (saved as Record<string, unknown>)[key] !== value)) {
+          throw new VerseError('VERSE_INVALID', 'manager stage already names a different reply');
+        }
+      } else {
+        const stored = store.appendEvent(id, event, nowIso());
+        fanOut(id, stored);
+        if (reasoningTap) tapReasoning(id, stored);
+      }
+      const { text: _text, ...identity } = result;
+      return { ...input, ...identity };
     },
 
     recordRemoteStatus(id: string, status: VerseRemoteStatusInput): VerseSession {

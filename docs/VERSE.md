@@ -604,6 +604,25 @@ shows each turn's thinking in order. Past 40 turns the transcript keeps
 far-away turns as placeholders (the newest 10 and the running turn always
 render).
 
+### Manager conversation
+
+Choose **Manager** in the **Auto seat** menu for **One conversation; Phantom
+plans, delegates and reviews across your resources.** This is an explicit
+resident-fleet mode. It saves guidance in the existing chat and uses currently
+enrolled project targets; ordinary Auto routing and active native turns keep
+their existing behavior. The status line offers **Pause manager** and **Resume
+manager**. **Retry saved message** retains the original identity after an
+uncertain response.
+
+Actual registered run replies return to the chat and recover on reopening.
+Their **Manager · ‹model›** disclosure keeps complete source and run attribution
+available without displaying the technical protocol by default. This initial
+slice accepts text and project files; uploaded attachments stay in the draft
+for native routing. Saving a message does not authorize provider contact,
+activate the fleet, or prove work completion. See [Automatic
+work](AUTOMATIC-OUTCOMES.md#one-conversation-with-the-manager) for admission and
+recovery details. Full access defaults and explicit Plan behavior are unchanged.
+
 ### Every seat together (3.15)
 
 A line above the composer makes the seats work as one. **Auto** names the seat

@@ -218,3 +218,16 @@ describe('shared channel identity lifetime', () => {
     expect(fresh.closed).toBe(true);
   });
 });
+
+
+describe('manager SSE events', () => {
+  it('keeps actual manager messages distinct and rejects result tuples without their registered stage', () => {
+    const message = { type: 'manager-message', seq: 1, at: new Date().toISOString(), turnId: null, outcomeId: 'chat-result', messageId: 'message-1', text: 'Guide this work' };
+    expect(parseVerseEventFrame(JSON.stringify(message))).toEqual(message);
+    expect(parseVerseEventFrame(JSON.stringify({ ...message, turnId: 'native-turn' }))).toBeNull();
+    const result = { type: 'manager-result', seq: 2, at: message.at, turnId: null, outcomeId: 'chat-result', stageId: 'a'.repeat(64), attemptId: 'a'.repeat(64), runId: 'actual-run', seatId: 'selected-seat', model: 'model', engine: 'codex', resultDigest: 'b'.repeat(64), text: 'Actual reply' };
+    expect(parseVerseEventFrame(JSON.stringify(result))).toEqual(result);
+    expect(parseVerseEventFrame(JSON.stringify({ ...result, attemptId: 'different' }))).toBeNull();
+    expect(parseVerseEventFrame(JSON.stringify({ ...result, resultDigest: null }))).toBeNull();
+  });
+});

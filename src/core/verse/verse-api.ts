@@ -2200,6 +2200,10 @@ export async function handleVerseApi(
           sendJson(res, 404, { code: 'VERSE_SESSION_NOT_FOUND', error: `session not found: ${id}` });
           return true;
         }
+        if (engine.recordManagerResult) {
+          // Cross-process resident replies are recovered from saved terminal stages, not an in-memory callback.
+          await (await import('./manager-session.js')).reconcileOutcomeManagerSession(engine, id);
+        }
         const events = after === null ? engine.getEvents(id) : engine.getEvents(id, after);
         const detail: VerseSessionDetail = { session, events };
         sendJson(res, 200, detail);

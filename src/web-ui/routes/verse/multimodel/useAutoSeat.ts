@@ -21,8 +21,8 @@ import { getVerseSessionHead, subscribeVerseSession } from '../verse-store.js';
 import { firstRunnableModel } from '../verse-model.js';
 import { multimodelContextQuery } from './multimodel-queries.js';
 
-export type AutoPref = 'off' | AutoMode;
-export const AUTO_PREFS: readonly AutoPref[] = ['off', 'auto', 'cheap-first'];
+export type AutoPref = 'off' | 'manager' | AutoMode;
+export const AUTO_PREFS: readonly AutoPref[] = ['off', 'auto', 'cheap-first', 'manager'];
 const PREF_KEY = 'ashlr.verse.multimodel.v1';
 const DEFAULT_PREF: AutoPref = 'auto';
 /** Classify after this long without a keystroke. */
@@ -146,14 +146,14 @@ export function useAutoSeat(input: {
   const advisorSeats = useMemo(() => toAdvisorSeats(input.seats, context?.local), [input.seats, context?.local]);
 
   const classification = useMemo(
-    () => (draft && input.pref !== 'off' ? classifyPrompt(draft, { contextTokens }) : null),
+    () => (draft && input.pref !== 'off' && input.pref !== 'manager' ? classifyPrompt(draft, { contextTokens }) : null),
     [draft, input.pref, contextTokens],
   );
 
   const adviseWith = (cls: PromptClassification, pinnedSeatId: string | null = input.pinnedSeatId): SeatAdvice | null => {
     // No advice until the privacy check (context) has answered: a local-only
     // repo must never be routed off this Mac on a guess.
-    if (input.pref === 'off' || context === null) return null;
+    if (input.pref === 'off' || input.pref === 'manager' || context === null) return null;
     return adviseSeat({
       classification: cls,
       seats: advisorSeats,

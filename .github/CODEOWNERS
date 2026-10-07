@@ -175,6 +175,8 @@
 /src/core/vision/leader-outcomes.ts @masonwyatt23
 /src/core/verse/outcomes-*.ts @masonwyatt23
 /src/core/verse/manager-scope.ts @masonwyatt23
+/src/core/verse/manager-conversation.ts @masonwyatt23
+/src/core/verse/manager-session.ts @masonwyatt23
 /src/core/vision/leader-preferences.ts @masonwyatt23
 /src/core/sandbox/** @masonwyatt23
 /src/core/policy/** @masonwyatt23
@@ -826,6 +828,8 @@
 /test/verse-fleet-types.test.ts @masonwyatt23
 /test/verse-grok-usage-reset-315.test.ts @masonwyatt23
 /test/verse-local-fleet.test.ts @masonwyatt23
+/test/verse-manager-conversation.test.ts @masonwyatt23
+/test/verse-manager-session.test.ts @masonwyatt23
 /test/verse-multimodel-auto-316.test.ts @masonwyatt23
 /test/verse-reliability.test.ts @masonwyatt23
 /test/verse-resources-ready-314.test.ts @masonwyatt23

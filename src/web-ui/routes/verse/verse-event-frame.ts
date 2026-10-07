@@ -9,6 +9,8 @@ import type { VerseEvent, VerseEventType } from '../../data/api-types.js';
  */
 const EVENT_TYPES = [
   'user-message',
+  'manager-message',
+  'manager-result',
   'turn-started',
   'text-delta',
   'assistant-message',
@@ -46,7 +48,8 @@ void EVENT_TYPES_EXHAUSTIVE;
 
 export const VERSE_EVENT_TYPES: readonly VerseEventType[] = EVENT_TYPES;
 
-const nullableCount = (v: unknown): boolean => v === null || (typeof v === 'number' && Number.isFinite(v) && v >= 0);
+const count = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+const nullableCount = (v: unknown): boolean => v === null || count(v);
 
 /**
  * The two V3.9 frames feed arithmetic (the meter, the compaction count), so a
@@ -55,7 +58,7 @@ const nullableCount = (v: unknown): boolean => v === null || (typeof v === 'numb
  */
 function v39FieldsValid(e: Record<string, unknown>): boolean {
   if (e.type === 'context') {
-    return typeof e.contextTokens === 'number' && Number.isFinite(e.contextTokens) && e.contextTokens >= 0 &&
+    return count(e.contextTokens) &&
       typeof e.exact === 'boolean' && nullableCount(e.contextWindow) &&
       (e.autoCompactAt === undefined || nullableCount(e.autoCompactAt));
   }
@@ -66,7 +69,7 @@ function v39FieldsValid(e: Record<string, unknown>): boolean {
   return true;
 }
 
-const optionalCount = (v: unknown): boolean => v === undefined || (typeof v === 'number' && Number.isFinite(v) && v >= 0);
+const optionalCount = (v: unknown): boolean => v === undefined || count(v);
 
 /**
  * V3.10 frames that feed arithmetic or a live label (elapsed, tok/s, token
@@ -74,13 +77,21 @@ const optionalCount = (v: unknown): boolean => v === undefined || (typeof v === 
  */
 function v310FieldsValid(e: Record<string, unknown>): boolean {
   switch (e.type) {
+    case 'manager-message':
+    case 'manager-result': {
+      // Browser shape checks do not grant authority. The host has already
+      // validated the exact registered run tuple and actual text digest.
+      const message = e.type === 'manager-message';
+      const strings = message ? ['text', 'outcomeId', 'messageId'] : ['text', 'outcomeId', 'runId', 'seatId', 'model', 'engine', 'stageId', 'resultDigest'];
+      return e.turnId === null && strings.every(key => typeof e[key] === 'string') && (message || e.attemptId === e.stageId);
+    }
     case 'thinking-delta':
       return typeof e.text === 'string';
     case 'thinking-progress':
       return e.estimatedTokens !== undefined && optionalCount(e.estimatedTokens);
     case 'progress':
       return (e.phase === 'thinking' || e.phase === 'tool' || e.phase === 'writing' || e.phase === 'waiting') &&
-        typeof e.elapsedMs === 'number' && Number.isFinite(e.elapsedMs) && e.elapsedMs >= 0 &&
+        count(e.elapsedMs) &&
         (e.tool === undefined || typeof e.tool === 'string') &&
         optionalCount(e.outTokens) && optionalCount(e.tokPerSec);
     case 'status':

@@ -258,3 +258,33 @@ describe('toAdvisorSeats', () => {
     expect(toAdvisorSeats([LOCAL_SEAT], []).map((s) => s.private)).toEqual([false]);
   });
 });
+
+
+describe('explicit Manager mode', () => {
+  it('opts in without a model choice, saves the message once, and never calls native routing or classification', async () => {
+    saveAutoPref('vs_1', 'manager'); const flow = stubFlow();
+    const posts: Record<string, unknown>[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).includes('/outcomes/session/')) return Response.json({ sourceState: 'unlinked', association: null });
+      if (String(url).includes('/outcomes/interactive')) {
+        const input = JSON.parse(String(init?.body)); posts.push(input);
+        return Response.json({ sourceState: 'healthy', association: { outcomeId: input.outcomeId, revision: 3, scopeRevision: 1, paused: false, terminalStageIds: [], manager: { sourceState: 'healthy', enabled: true, mode: 'interactive', sessionId: 'vs_1', conversationRevision: 1, running: null, next: null, latest: null } } }, { status: 202 });
+      }
+      return new Response('unused', { status: 404 });
+    }));
+    const { intercept } = renderBar('Improve this work');
+    expect(screen.getByRole('combobox', { name: 'Auto seat' })).toHaveDisplayValue('Manager');
+    await act(async () => { expect(await intercept('Improve this work')).toBe('handled'); });
+    expect(posts).toHaveLength(1); expect(posts[0]?.text).toBe('Improve this work');
+    expect(flow.send).not.toHaveBeenCalled(); expect(flow.handoff).not.toHaveBeenCalled(); expect(flow.create).not.toHaveBeenCalled();
+    expect((fetch as ReturnType<typeof vi.fn>).mock.calls.some(([url]) => String(url).includes('/multimodel/label'))).toBe(false);
+  });
+  it('keeps a failed manager send held with a retry control instead of native fallback', async () => {
+    saveAutoPref('vs_1', 'manager');
+    vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL) => String(url).includes('/outcomes/session/')
+      ? Response.json({ sourceState: 'unlinked', association: null }) : new Response('unavailable', { status: 503 })));
+    const { intercept } = renderBar('Preserve this draft');
+    await act(async () => { expect(await intercept('Preserve this draft')).toBe('held'); });
+    expect(await screen.findByRole('button', { name: 'Retry saved message' })).toBeInTheDocument();
+  });
+});

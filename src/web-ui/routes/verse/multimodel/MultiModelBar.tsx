@@ -40,11 +40,12 @@ import { chatMeterQuery, invalidateChatMeter, labelPromptRemote, recordOutcome, 
 import { AUTO_PREFS, loadAutoPref, saveAutoPref, useAutoSeat, type AutoPref } from './useAutoSeat.js';
 import styles from './multimodel.module.css';
 
+const ManagerStatus = lazy(async () => ({ default: (await import('./ManagerStatus.js')).ManagerStatus }));
 const CompareDialog = lazy(async () => ({ default: (await import('./CompareDialog.js')).CompareDialog }));
 
 /** What the Composer does with a message: send it itself, or the bar already did (or held it). */
 export type SendRoute = 'send-here' | 'handled' | 'held';
-export type SendInterceptor = (text: string) => Promise<SendRoute>;
+export type SendInterceptor = ((text: string) => Promise<SendRoute>) & { handlesRunning?: boolean };
 
 export interface MultiModelBarProps {
   sessionId: string;
@@ -57,7 +58,7 @@ export interface MultiModelBarProps {
   onConsumeDraft(text: string): void;
 }
 
-const PREF_LABEL: Record<AutoPref, string> = { off: 'Auto off', auto: 'Auto', 'cheap-first': 'Cheap-first' };
+const PREF_LABEL: Record<AutoPref, string> = { off: 'Auto off', auto: 'Auto', 'cheap-first': 'Cheap-first', manager: 'Manager' };
 
 interface PendingDraft {
   text: string;
@@ -167,6 +168,17 @@ export function MultiModelBar({ sessionId, seats, text, running, registerInterce
   // ---- the send interceptor ------------------------------------------------
   const shownChoice = advice?.choice?.seatId ?? null;
   const intercept = useCallback<SendInterceptor>(async (message) => {
+    if (pref === 'manager') {
+      try {
+        const { submitManagerMessage } = await import('./manager-queries.js');
+        await submitManagerMessage(sessionId, message);
+        setNotice({ text: 'Saved for the manager. The fleet plans, delegates and reviews from this conversation.', error: false });
+        return 'handled';
+      } catch (err) {
+        setNotice({ text: err instanceof Error ? err.message : 'The manager message could not be confirmed. Your draft is preserved.', error: true });
+        return 'held';
+      }
+    }
     if (pref === 'off' || !session) return 'send-here';
     const rules = classifyPrompt(message, { contextTokens: session.usage?.contextTokens ?? 0 });
     let cls: PromptClassification = rules;
@@ -204,7 +216,8 @@ export function MultiModelBar({ sessionId, seats, text, running, registerInterce
       setNotice({ text: `Could not move this to ${choice.label}: ${err instanceof Error ? err.message : 'request failed'}. Your message is still here.`, error: true });
       return 'held';
     }
-  }, [pref, session, auto, pinned, shownChoice]);
+  }, [pref, session, sessionId, auto, pinned, shownChoice]);
+  intercept.handlesRunning = pref === 'manager';
 
   useEffect(() => {
     registerInterceptor(intercept);
@@ -248,11 +261,14 @@ export function MultiModelBar({ sessionId, seats, text, running, registerInterce
   return (
     <div className={styles.bar} role="group" aria-label="Models">
       <select className={styles.select} aria-label="Auto seat" value={pref} onChange={(e) => changePref(e.target.value as AutoPref)}
-        title="Auto picks the seat per message; Cheap-first lets local models draft and escalates only when needed">
+        title="Manager: One conversation; Phantom plans, delegates and reviews across your resources. Auto routes each message; Cheap-first drafts locally.">
         {AUTO_PREFS.map((p) => <option key={p} value={p}>{PREF_LABEL[p]}</option>)}
       </select>
 
-      {typing && pref !== 'off' ? (
+      {pref === 'manager' ? <Suspense fallback={<span className={styles.why}>Loading manager…</span>}><ManagerStatus sessionId={sessionId}
+        retryMessage={async message => { const route = await intercept(message); if (route === 'handled' && text === message) onConsumeDraft(text); }} /></Suspense> : null}
+
+      {typing && pref !== 'off' && pref !== 'manager' ? (
         <AdviceLine advice={advice} pinned={pinned} options={options} held={advice?.held ?? []}
           waiting={context === null} onPin={(id) => setPinned(id === 'auto' ? null : id)} />
       ) : null}

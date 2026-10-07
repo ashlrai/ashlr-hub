@@ -259,7 +259,11 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   const [dragging, setDragging] = useState(false);
   /** Registered by the multi-model line; consulted before every non-queued send. */
   const sendInterceptor = useRef<SendInterceptor | null>(null);
-  const registerInterceptor = useCallback((fn: SendInterceptor | null) => { sendInterceptor.current = fn; }, []);
+  const [managerMode, setManagerMode] = useState(false);
+  const registerInterceptor = useCallback((fn: SendInterceptor | null) => {
+    sendInterceptor.current = fn;
+    setManagerMode(fn?.handlesRunning === true);
+  }, []);
 
   // ---- dictation (voice/) ---------------------------------------------------
   // A FINAL transcript lands at the caret (or the end, when the box is not
@@ -294,7 +298,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   const queueFull = (queue?.items.length ?? 0) >= VERSE_QUEUE_MAX;
   const hasText = text.trim().length > 0;
   const blockedByUpload = attachments.uploading;
-  const canSend = !disabled && !sending && hasText && !tooLong && !blockedByUpload && (!running || (queueAvailable && !queueFull));
+  const canSend = !disabled && !sending && hasText && !tooLong && !blockedByUpload && (!running || managerMode || (queueAvailable && !queueFull));
   const showHint = !hintSeen && !sentHere;
   const showHandoffHelp = handoffDraft && !sentHere && hasText;
   const cost = useMemo(
@@ -694,6 +698,15 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
     setSending(true);
     setNote(null);
     try {
+      if (sendInterceptor.current?.handlesRunning) {
+        if (attachments.drafts.length) {
+          setNote({ text: 'Manager messages currently use text and project files. Remove these attachments or switch routing mode to send them in a native turn.', error: true });
+          return;
+        }
+        const route = await sendInterceptor.current(value);
+        if (route === 'handled') clearAfterSend(value);
+        if (route !== 'send-here') return;
+      }
       if (running && queueAvailable) {
         if (mode !== 'stop-and-send' && queueFull) {
           setNote({ text: `Up to ${VERSE_QUEUE_MAX} follow-ups can wait — send or remove one first.`, error: true });
@@ -721,7 +734,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
       setSending(false);
       textarea.current?.focus();
     }
-  }, [disabled, sending, tooLong, text, blockedByUpload, running, queueAvailable, queueFull, followUps, clearAfterSend, onSend]);
+  }, [disabled, sending, tooLong, text, blockedByUpload, running, queueAvailable, queueFull, followUps, clearAfterSend, onSend, attachments.drafts.length]);
 
   async function editQueued(queueId: string, queuedText: string) {
     const ok = await followUps.remove(queueId);
@@ -914,7 +927,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   // No "Sending…": a label that changes width on Enter would shift the row. The button is disabled +
   // aria-busy instead, which Composer.module.css draws as the accent, pulsing, with a progress cursor —
   // never the quiet grey of an empty box (the text stays in the box until the send is accepted).
-  const sendLabel = running ? (queueFull ? 'Queue full' : 'Queue') : locked ? 'Unlock & send' : 'Send';
+  const sendLabel = running && !managerMode ? (queueFull ? 'Queue full' : 'Queue') : locked ? 'Unlock & send' : 'Send';
   const returnKey = <span className={cstyles.sendKey} aria-hidden="true">⏎</span>;
 
   return (
@@ -1012,9 +1025,9 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
               </Tooltip>
             ) : null}
             {/* While a turn runs, Queue stays put — disabled until there is text — so typing never adds a button. */}
-            {running && !queueAvailable ? null : (
+            {running && !managerMode && !queueAvailable ? null : (
               <button key={running ? 'queue' : 'send'} type="submit" className={styles.send} disabled={!canSend} aria-busy={sending || undefined}
-                aria-label={running ? (queueFull ? 'Queue is full' : 'Queue this message — it sends when the turn ends') : locked ? 'Send (unlocks first)' : 'Send message'}>
+                aria-label={running && !managerMode ? (queueFull ? 'Queue is full' : 'Queue this message — it sends when the turn ends') : locked ? 'Send (unlocks first)' : 'Send message'}>
                 {sendLabel}{returnKey}
               </button>
             )}
@@ -1035,7 +1048,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
             : note ? <span role={note.error ? 'alert' : 'status'} className={note.error ? styles.helpError : undefined}>{note.text}</span>
                 : listening ? 'Listening… Esc stops dictation.'
                   : disabled && disabledReason ? disabledReason
-                    : running ? (queueAvailable
+                    : running && managerMode ? <><kbd>Enter</kbd> sends to the manager · the native turn continues separately</> : running ? (queueAvailable
                       ? <><kbd>Enter</kbd> queues (sends when this turn ends) · <kbd>{shortcutLabel('composer.stop-and-send')}</kbd> stops and sends · <kbd>Esc</kbd> stops</>
                       : <>Reply in progress — your draft stays here · <kbd>⌘.</kbd> or Stop interrupts the turn</>)
                       : showHandoffHelp

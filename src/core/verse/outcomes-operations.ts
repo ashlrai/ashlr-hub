@@ -2,6 +2,11 @@
 import { readdirSync, statSync } from 'node:fs';
 import { dirname, sep } from 'node:path';
 import { homedir } from 'node:os';
+import { OutcomeManagerCoordinator, projectOutcomeManager, type OutcomeManagerAdmission } from '../goals/outcome-manager.js';
+import { goalProjectMatchesRepo } from '../goals/project-match.js';
+import { readOutcomeManagerSessionMetadata } from './session-store.js';
+import { readOutcomeManagerConversation } from './manager-conversation.js';
+import { managerSessionTargetsMatch } from './manager-scope.js';
 import { OutcomeCoordinator } from '../goals/outcome-coordinator.js';
 import { outcomeDirectory } from '../goals/outcome-runtime.js';
 import { OutcomeStore } from '../goals/outcome-store.js';
@@ -25,7 +30,7 @@ export function outcomeView(state: OutcomeState): OutcomeView {
       : tasks.some(task => task.state === 'running') ? 'running'
         : tasks.some(task => task.state === 'failed' || task.state === 'aborted') ? 'failed'
           : tasks.some(task => task.state === 'proposed') ? 'waiting-verification' : 'queued';
-  return { id: state.id, revision: state.revision, scopeRevision: state.scopeRevision, scope: state.scope, status, tasks };
+  return { id: state.id, revision: state.revision, scopeRevision: state.scopeRevision, scope: state.scope, status, tasks, ...(state.manager ? { manager: projectOutcomeManager(state) } : {}) };
 }
 
 /** Neither discovery nor projection creates directories or repairs ledgers. */
@@ -59,6 +64,29 @@ function readOutcomes(): OutcomesRead {
   } catch { return unknown; }
 }
 
+/** These authenticated operations change metadata only; route/plan publication is never admitted here. */
+function managerMetadataAdmission(): OutcomeManagerAdmission {
+  const currentlyEnrolled = (repo: string) => {
+    const read = readEnrollmentRegistry();
+    return read.state === 'ready' && read.repos.includes(repo);
+  };
+  return {
+    stillAuthorized: () => readEnrollmentRegistry().state === 'ready',
+    executionRepoAllowed: (target, executionRepo) => currentlyEnrolled(target) &&
+      goalProjectMatchesRepo(target, executionRepo) && currentlyEnrolled(executionRepo),
+    routeAllowed: () => false,
+    routeCurrent: () => false,
+    planAllowed: () => false,
+    sessionAllowed: (id, state) => {
+      const session = readOutcomeManagerSessionMetadata(id);
+      const enrolled = readEnrollmentRegistry();
+      return !!session && enrolled.state === 'ready' &&
+        managerSessionTargetsMatch(session.roots, enrolled.repos, state.scope.targetRepos);
+    },
+    messageExists: (reference, state) => readOutcomeManagerConversation(reference.sessionId, state.id, [reference])?.length === 1,
+  };
+}
+
 /** Saves the desired result only. Plan refinement and dispatch belong to the Leader/host. */
 export function executeOutcomeOperation(operation: OutcomeOperation): OutcomeOperationResult {
   if (operation.kind === 'read') return readOutcomes();
@@ -81,7 +109,11 @@ export function executeOutcomeOperation(operation: OutcomeOperation): OutcomeOpe
     if (read.sourceState !== 'healthy') return { ok: false, reason: 'unknown-source' };
     if (read.state.scope.targetRepos.some(repo => !enrollment.repos.includes(repo))) return { ok: false, reason: 'unenrolled' };
   }
-  const write = operation.kind === 'start' ? coordinator.start(command, operation.id, operation.scope)
+  const manager = new OutcomeManagerCoordinator(store);
+  const write = operation.kind === 'manager-configure' ? manager.configure(command,
+    { mode: operation.mode, sessionId: operation.sessionId }, managerMetadataAdmission())
+    : operation.kind === 'manager-interject' ? manager.interject(command, operation.reference, managerMetadataAdmission())
+    : operation.kind === 'start' ? coordinator.start(command, operation.id, operation.scope)
     : operation.kind === 'edit' ? coordinator.editScope(command, operation.scope)
       : coordinator.setPaused(command, operation.kind === 'pause');
   if (write.ok) return { ok: true, disposition: write.disposition, outcome: outcomeView(write.state) };
