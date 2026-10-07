@@ -354,7 +354,6 @@ describe('M30 CI workflow', () => {
         'test/m407.verification-mutation-fence.test.ts',
         'test/m408.sandbox-creation-mutation-fence.test.ts',
         'test/m11.stream-file-sink.test.ts',
-        'test/m418.pulse-quiescence.test.ts',
         'test/m420.remote-handoff-recovery.test.ts',
         'test/m421.legacy-pulse-quiescence.test.ts',
         agentWorkTransitionsTest,
@@ -385,6 +384,7 @@ describe('M30 CI workflow', () => {
     const nativeAclEnrollmentFiles = [
       'test/m403.automerge-mutation-fence.test.ts',
       'test/m419.remote-handoff-intent.test.ts',
+      'test/m418.pulse-quiescence.test.ts',
     ];
     const windowsServiceAuthorityFiles = [
       'test/m93.windows-file-authority.test.ts',
@@ -613,6 +613,8 @@ describe('M30 CI workflow', () => {
       ...expectedFiles,
       'test/authority-codeowners-310b.test.ts',
       ...Array<string>(2).fill('test/m515.release-publish-authority-split.test.ts'),
+      ...Array<string>(2).fill('test/documentation-navigation.test.ts'),
+      ...Array<string>(2).fill('test/authority-release-truth.test.ts'),
       ...Array<string>(4).fill('test/m342.dispatch-production-ledger.test.ts'),
     ].sort());
     expect(windowsPortabilityThree).toContain('--reporter=dot');
@@ -641,6 +643,8 @@ describe('M30 CI workflow', () => {
       'test/npm-cli-launch.test.ts',
       'test/npm-cli-launch.test.ts',
       'test/m515.release-publish-authority-split.test.ts',
+      'test/documentation-navigation.test.ts',
+      'test/authority-release-truth.test.ts',
     ].sort());
     expect(windowsEntries.match(/test\/m395\.effect-terminal-retention\.test\.ts/g)).toHaveLength(
       1,
@@ -659,7 +663,7 @@ describe('M30 CI workflow', () => {
     expect(ciYml).toContain('Test native ACL enrollment fences (hermetic)');
     expect(ciYml).toContain("if: matrix.label == 'windows, portability overflow'");
     expect(ciYml).toMatch(
-      /npm run test:ci -- --maxWorkers=1 --no-file-parallelism\s+test\/m403\.automerge-mutation-fence\.test\.ts\s+test\/m419\.remote-handoff-intent\.test\.ts/u,
+      /npm run test:ci -- --maxWorkers=1 --no-file-parallelism\s+test\/m403\.automerge-mutation-fence\.test\.ts\s+test\/m419\.remote-handoff-intent\.test\.ts\s+test\/m418\.pulse-quiescence\.test\.ts/u,
     );
     expect(ciYml).toContain('windows-service-authority:');
     expect(ciYml).toContain('runs-on: windows-2022');
@@ -739,10 +743,10 @@ describe('M30 CI workflow', () => {
   });
 
   it('adds NO deploy / publish / release step (nothing public)', () => {
-    // This source-only test filename names the authority it audits; it is not an effect.
-    const effectText = ciYml.replaceAll(
-      'test/m515.release-publish-authority-split.test.ts',
-      'test/source-publication-contract.test.ts',
+    // Test module paths name the contracts being checked, not public effects.
+    const effectText = ciYml.replace(
+      /test\/(?:[\w.-]+\/)*[\w.-]+\.test\.ts/g,
+      'test/source-contract.test.ts',
     );
     expect(effectText).not.toMatch(/\b(npm\s+publish|deploy|release)\b/i);
     expect(ciYml).not.toMatch(/vercel|netlify|gh-pages|pages-deploy/i);

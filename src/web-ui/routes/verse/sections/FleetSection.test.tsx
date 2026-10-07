@@ -121,6 +121,8 @@ describe('FleetSection — live', () => {
   });
 
   it('keeps the legacy panels closed (and unfetched) until Advanced is opened', async () => {
+    // Test the disclosure's fetch boundary independently of Vite's cold transform.
+    await import('../fleet/Advanced.js');
     const { fetchMock } = stubSurfaceFetch({ kind: 'live' });
     const user = userEvent.setup();
     render(<FleetSection />);

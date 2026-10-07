@@ -945,9 +945,14 @@ function hasVerifiedLiveOwner(path: string, directory: LockDirectory): boolean {
     if (bytes.toString('utf8') !== canonical) return false;
     try { process.kill(Number(owner.pid), 0); } catch { return false; }
     const recordedStart = canonicalStartEpochSecond(owner.startRef, owner.startRefSource);
-    const observedStart = verifiedProcessStartIdentity(owner.pid);
-    if (recordedStart === undefined || !observedStart ||
-      Math.abs(recordedStart - observedStart.epochSecond) > 1) return false;
+    // This process already owns the writer's immutable start identity. Reuse it
+    // for contention classification; other owners still require a native probe.
+    const selfStart = owner.pid === process.pid ? currentStartIdentity() : null;
+    const observedStart = owner.pid === process.pid
+      ? (selfStart ? canonicalStartEpochSecond(selfStart.ref, selfStart.source) : undefined)
+      : verifiedProcessStartIdentity(owner.pid)?.epochSecond;
+    if (recordedStart === undefined || observedStart === undefined ||
+      Math.abs(recordedStart - observedStart) > 1) return false;
     return hasExpectedToken(
       path,
       { ...named, token: owner.token },

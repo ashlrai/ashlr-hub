@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 import type { PathLike } from 'node:fs';
 
 const faults = vi.hoisted(() => ({
+  rejectNativeProbe: false,
+  nativeProbeCalls: 0,
   assuranceCalls: [] as Array<{
     path: string;
     kind: string;
@@ -33,6 +35,27 @@ const faults = vi.hoisted(() => ({
   bigintIdentityRoot: undefined as string | undefined,
   bigintCanonicalReplacement: false,
 }));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawnSync: (...args: Parameters<typeof actual.spawnSync>) => {
+      const argv = args[1];
+      const processProbe = Array.isArray(argv) && (
+        (args[0] === '/bin/ps' && argv[0] === '-o' && argv[1] === 'lstart=') ||
+        (args[0] === 'powershell.exe' && argv.includes('-Command') &&
+          argv.some(argument => argument.includes('Get-Process -Id $TargetPid')))
+      );
+      // Do not intercept native ACL assurance or ordinary child processes.
+      if (processProbe) {
+        faults.nativeProbeCalls += 1;
+        if (faults.rejectNativeProbe) throw new Error('native process probe unavailable');
+      }
+      return actual.spawnSync(...args);
+    },
+  };
+});
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -248,6 +271,8 @@ function exitedChildPid(): number {
 }
 
 beforeEach(() => {
+  faults.rejectNativeProbe = false;
+  faults.nativeProbeCalls = 0;
   faults.assuranceCalls.length = 0;
   faults.assuranceSideEffect = undefined;
   faults.candidateUnlinkPath = undefined;
@@ -279,6 +304,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  faults.rejectNativeProbe = false;
+  faults.nativeProbeCalls = 0;
   faults.assuranceCalls.length = 0;
   faults.assuranceSideEffect = undefined;
   faults.candidateUnlinkPath = undefined;
@@ -369,6 +396,26 @@ describe('local store lock installation handoff', () => {
     faults.rejectAssurance = undefined;
     expect(releaseLocalStoreLock(lock)).toBe(true);
     expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
+  it('classifies its own held lock without native probes across wall-clock jumps', () => {
+    const lockPath = path.join(tmpDir, 'self-contention.lock');
+    const holder = acquireLocalStoreLock(lockPath, 0);
+    expect(holder).not.toBeNull();
+    faults.rejectNativeProbe = true;
+    faults.nativeProbeCalls = 0;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
+    try {
+      expect(acquireLocalStoreLockWithOutcome(lockPath, 0)).toEqual({
+        state: 'contended', lock: null,
+      });
+      expect(ownsLocalStoreLock(holder)).toBe(true);
+      expect(faults.nativeProbeCalls).toBe(0);
+    } finally {
+      clock.mockRestore();
+      faults.rejectNativeProbe = false;
+      releaseLocalStoreLock(holder);
+    }
   });
 
   it('secures a fresh directory and candidate before writing lock payload bytes', () => {
@@ -719,6 +766,9 @@ describe('local store lock installation handoff', () => {
     })}\n`, { encoding: 'utf8', mode: 0o600 });
 
     expect(acquireLocalStoreLock(lockPath, 0)).toBeNull();
+    expect(acquireLocalStoreLockWithOutcome(lockPath, 0)).toEqual({
+      state: 'unavailable', lock: null,
+    });
     expect(JSON.parse(fs.readFileSync(lockPath, 'utf8'))).toMatchObject({
       pid: process.pid,
       token: 'live-owner',

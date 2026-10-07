@@ -839,6 +839,20 @@ describe('release artifact contract v1', () => {
     expect(rebuilt.reason).toMatch(/platform-variant|install lifecycle|native install variance/u);
   });
 
+  it('admits the explicitly packaged Phantom brand guide without admitting broader docs', () => {
+    const release = fixture();
+    const packagePath = join(release.packageRoot, 'package.json');
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+    const files = [...packageJson['files'] as string[], 'docs/PHANTOM-BRAND.md'];
+    writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, files })}\n`);
+    write(join(release.packageRoot, 'docs', 'PHANTOM-BRAND.md'), '# Phantom by AshlrAI\n');
+    expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toMatchObject({ ok: true });
+    writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, files: [...files, 'docs'] })}\n`);
+    expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toEqual({
+      ok: false, reason: 'release package files declaration is not portable',
+    });
+  });
+
   it('refuses a root files declaration that omits required runtime entries', () => {
     const release = fixture();
     const packagePath = join(release.packageRoot, 'package.json');
