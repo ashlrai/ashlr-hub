@@ -19,6 +19,9 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Bind Phantom repository effects to fresh numeric repository identity and the
   exact current namespace. Recheck Stop and authority after metadata reads;
   redirects and replacement repositories cannot authorize writes.
+- Carry numeric repository identity in paired hosted artifact schemas, retain
+  historical signer namespaces, and recheck signed subject bytes after final
+  repository observation before admitting a build.
 
 ### Fixed
 
