@@ -9,6 +9,39 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.25.0] — 2026-10-07
+
+### Added
+
+- Add an explicit Manager mode to interactive chats and a shared resident
+  manager for autonomous outcomes. One native frontier agent plans and reviews;
+  independent work runs through the existing fleet queue and selected accounts.
+- Save manager messages, plans and actual run results with restart and archive
+  recovery. Pause/resume controls and retries preserve uncertain messages and
+  drafts. A plan remains separate from verified implementation and merge.
+- Default newly launched supported sessions to the confirmed full-access
+  preference. Existing sessions, Plan mode and host execution boundaries retain
+  their existing behavior.
+- Maintain release-backed article tasks from verified public release facts.
+  Publication requires the target repository's current enrollment and signed
+  authority; an attempted task does not count as a published article.
+
+### Fixed
+
+- Resolve the manager's exact default model before route admission and check
+  current native account profiles when recovering saved results. Exhausted
+  allowance blocks new contacts without discarding valid terminal evidence.
+- Round native credit-balance tooltips while retaining exact accounting readings,
+  and describe uncapped fleet volume settings without large sentinel numbers.
+- Honor account-level budget-read opt-outs. Prune deleted knowledge chunks only
+  after complete scans; partial or failed listings preserve the existing index.
+- Bound native fleet startup output capture and clear the busy state if worker
+  creation fails. Bind custody credential reads to one unique existing item and
+  preserve precise macOS failure diagnostics without exposing credentials.
+- Reuse incoming chat event validation to reduce startup code. Run independent
+  native broker CI checks alongside Mac suites, retaining all required jobs and
+  complete qualification before artifact admission.
+
 ## [3.24.4] — 2026-10-07
 
 ### Added
