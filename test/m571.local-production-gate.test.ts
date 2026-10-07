@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   assertExternalReceiptPath,
@@ -26,7 +26,8 @@ import {
   validateLocalProductionContract,
   writeSandboxProfiles,
 } from '../scripts/run-local-production-gate.mjs';
-import { tarballEvidence } from '../scripts/run-local-pack-smoke.mjs';
+import { npmCliPath } from '../scripts/hosted-build-artifact.mjs';
+import { installPackedTarballOffline, tarballEvidence } from '../scripts/run-local-pack-smoke.mjs';
 import { parseBoundedCommandArgs, runBoundedCommand } from '../scripts/run-bounded-command.mjs';
 import {
   canonicalizeLocalProductionGateReceipt,
@@ -159,6 +160,7 @@ function createDisposableGitRepo(prefix: string, files: Record<string, string> =
 }
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   while (scratch.length > 0) rmSync(scratch.pop()!, { recursive: true, force: true });
 });
 
@@ -660,6 +662,64 @@ describe('M571 local production gate v1', () => {
     renameSync(path, movedPath);
     symlinkSync(movedPath, path);
     expect(() => parsePrivatePackEvidence(root)).toThrow(/custody is invalid/u);
+  });
+
+  it('keeps both npm bundle aliases and the lock root equal to all runtime dependencies', () => {
+    const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+    const lock = JSON.parse(readFileSync(join(repoRoot, 'package-lock.json'), 'utf8'));
+    const runtime = Object.keys(pkg.dependencies).sort();
+    expect([...pkg.bundledDependencies].sort()).toEqual(runtime);
+    expect([...pkg.bundleDependencies].sort()).toEqual(runtime);
+    expect([...lock.packages[''].bundleDependencies].sort()).toEqual(runtime);
+  });
+
+  it('rejects an omitted npm bundle alias member and installs the corrected archive with a fresh cache', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ashlr-m571-offline-bundle-'));
+    scratch.push(root);
+    const source = join(root, 'source');
+    const dependency = join(source, 'node_modules', 'reflect-metadata');
+    mkdirSync(dependency, { recursive: true, mode: 0o700 });
+    // The local dependency is intentionally self-contained: no registry access,
+    // network-dependent setup, or source checkout resolution can make this pass.
+    writeFileSync(join(dependency, 'package.json'), JSON.stringify({
+      name: 'reflect-metadata', version: '0.2.2', main: 'index.js',
+    }));
+    writeFileSync(join(dependency, 'index.js'), 'module.exports = { bundled: true };\n');
+    const npmCli = npmCliPath();
+    vi.stubEnv('ASHLR_NPM_CLI', npmCli);
+    const pack = (corrected: boolean) => {
+      writeFileSync(join(source, 'package.json'), JSON.stringify({
+        name: '@ashlr/offline-bundle-fixture', version: '1.0.0',
+        dependencies: { 'reflect-metadata': '0.2.2' },
+        bundledDependencies: ['reflect-metadata'],
+        bundleDependencies: corrected ? ['reflect-metadata'] : [],
+      }));
+      const packDir = join(root, corrected ? 'corrected-pack' : 'broken-pack');
+      mkdirSync(packDir, { mode: 0o700 });
+      const args = ['pack', '--offline', '--ignore-scripts', '--silent', '--pack-destination', packDir];
+      const result = spawnSync(process.execPath, [npmCli, ...args],
+        { cwd: source, encoding: 'utf8', env: process.env });
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+      return join(packDir, 'ashlr-offline-bundle-fixture-1.0.0.tgz');
+    };
+    const installDir = (name: string) => {
+      const directory = join(root, name);
+      mkdirSync(directory, { mode: 0o700 });
+      writeFileSync(join(directory, 'package.json'), '{"name":"isolated-consumer","version":"1.0.0"}');
+      return directory;
+    };
+    expect(() => installPackedTarballOffline({
+      tarballPath: pack(false), installDir: installDir('broken-install'), workDir: root,
+    })).toThrow(/exited/u);
+    const corrected = installDir('corrected-install');
+    expect(() => installPackedTarballOffline({
+      tarballPath: pack(true), installDir: corrected, workDir: root,
+    })).not.toThrow();
+    const installedDependency = join(corrected, 'node_modules', '@ashlr', 'offline-bundle-fixture',
+      'node_modules', 'reflect-metadata');
+    expect(JSON.parse(readFileSync(join(installedDependency, 'package.json'), 'utf8')).version).toBe('0.2.2');
+    expect(readFileSync(join(installedDependency, 'index.js'), 'utf8')).toContain('bundled: true');
   });
 
   it('recomputes both tarball SHA-256 and npm-compatible sha512 SRI', () => {

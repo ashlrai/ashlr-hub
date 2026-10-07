@@ -211,6 +211,7 @@
     "@simplewebauthn/server",
     "jose",
     "marked",
+    "reflect-metadata",
     "tar",
     "web-push",
     "yaml"

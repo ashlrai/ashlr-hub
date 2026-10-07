@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto';
 import {
-  chmodSync, mkdirSync, openSync, closeSync, readFileSync, statSync, writeFileSync,
+  chmodSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, statSync, writeFileSync,
 } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -329,6 +329,22 @@ export function installedUniverseSmokeArgs(fixtureRoot, bin) {
     `await (${verifyInstalledUniverse.toString()})(${JSON.stringify(fixtureRoot)}, ${JSON.stringify(bin)});`];
 }
 
+// An ambient npm cache can hide an omitted bundle member. Each installation
+// gets an exclusive empty cache and empty configs, even if the caller reuses
+// its work directory. Lifecycle scripts remain disabled in this offline check.
+export function installPackedTarballOffline({ tarballPath, installDir, workDir }) {
+  const npmRoot = mkdtempSync(join(workDir, 'offline-npm-'));
+  const cache = join(npmRoot, 'cache');
+  const userconfig = join(npmRoot, 'user.npmrc');
+  const globalconfig = join(npmRoot, 'global.npmrc');
+  mkdirSync(cache, { mode: 0o700 });
+  writeFileSync(userconfig, '', { mode: 0o600, flag: 'wx' });
+  writeFileSync(globalconfig, '', { mode: 0o600, flag: 'wx' });
+  runNpm(['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund',
+    '--no-update-notifier', '--cache', cache, '--userconfig', userconfig, '--globalconfig', globalconfig, tarballPath],
+  { cwd: installDir });
+}
+
 export function runLocalPackSmoke({ repo, workDir, output }) {
   const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
   if (pkg.name !== '@ashlr/hub' || typeof pkg.version !== 'string') fail('unexpected package identity');
@@ -347,7 +363,7 @@ export function runLocalPackSmoke({ repo, workDir, output }) {
   if (bytes.length < 1) fail('packed tarball is empty');
 
   runNpm(['init', '-y'], { cwd: installDir });
-  runNpm(['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', tarballPath], { cwd: installDir });
+  installPackedTarballOffline({ tarballPath, installDir, workDir });
   const bin = process.platform === 'win32'
     ? join(installDir, 'node_modules', '.bin', 'ashlr.cmd')
     : join(installDir, 'node_modules', '.bin', 'ashlr');
