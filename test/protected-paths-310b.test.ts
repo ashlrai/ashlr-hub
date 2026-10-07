@@ -208,6 +208,9 @@ describe('G1 — ashlr-hub Tier-1 (self repo only)', () => {
     expect(isTier1ClosureRoot('src/core/routing/budget-api.ts')).toBe(false);
     expect(isTier1ClosureRoot('src/core/verse/authority-api.ts')).toBe(false);
     expect(isTier1ClosureRoot('src/core/verse/session-engine.ts')).toBe(false);
+    expect(isTier1ClosureRoot('src/core/verse/manager-scope.ts')).toBe(true);
+    expect(isTier1SourcePath('src/core/verse/manager-scope-extra.ts')).toBe(false);
+    expect(isTier1ClosureRoot('src/core/daemon/outcome-manager-host.ts')).toBe(true);
     expect(isTier1SourcePath('src/core/authority/anything/deep.ts')).toBe(true);
   });
 

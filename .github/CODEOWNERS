@@ -174,6 +174,7 @@
 /src/core/goals/outcome-*.ts @masonwyatt23
 /src/core/vision/leader-outcomes.ts @masonwyatt23
 /src/core/verse/outcomes-*.ts @masonwyatt23
+/src/core/verse/manager-scope.ts @masonwyatt23
 /src/core/vision/leader-preferences.ts @masonwyatt23
 /src/core/sandbox/** @masonwyatt23
 /src/core/policy/** @masonwyatt23
@@ -705,6 +706,8 @@
 /test/outcome-core.test.ts @masonwyatt23
 /test/outcome-daemon-loop.test.ts @masonwyatt23
 /test/outcome-dispatch.test.ts @masonwyatt23
+/test/outcome-manager-dispatch.test.ts @masonwyatt23
+/test/outcome-manager.test.ts @masonwyatt23
 /test/outcome-proposal-admission.test.ts @masonwyatt23
 /test/outcome-runtime.test.ts @masonwyatt23
 /test/outcomes-api.test.ts @masonwyatt23

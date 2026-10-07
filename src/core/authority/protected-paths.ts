@@ -145,6 +145,8 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/goals/outcome-*.ts',
   'src/core/vision/leader-outcomes.ts',
   'src/core/verse/outcomes-*.ts',
+  // Exact current primary→enrolled-mirror association for manager conversation scope.
+  'src/core/verse/manager-scope.ts',
   'src/core/vision/leader-preferences.ts',
   // Sandbox, policy and routing
   'src/core/sandbox/**',

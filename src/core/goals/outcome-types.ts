@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { OutcomeManagerState } from './outcome-manager-types.js';
 import { isAbsolute, normalize } from 'node:path';
 import type { EcosystemMissionGraphNodeV1, EcosystemMissionGraphV1 } from '../vision/mission-graph.js';
 
@@ -41,7 +42,9 @@ export interface OutcomeNode {
   completion: { attemptId: string; proposalId: string; mergeIdentity: string } | null;
 }
 export interface OutcomeState {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
+  /** Present only in v2; old immutable v1 records retain their original bytes. */
+  manager?: OutcomeManagerState;
   id: string;
   revision: number;
   scopeRevision: number;
@@ -56,7 +59,7 @@ export interface OutcomeState {
   paused: boolean;
 }
 export interface OutcomeRecord {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   revision: number;
   previousDigest: string | null;
   commandId: string;

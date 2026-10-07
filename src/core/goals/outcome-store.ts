@@ -1,3 +1,4 @@
+import { validOutcomeManagerState } from './outcome-manager-types.js';
 import { acquireLocalStoreLockWithOutcome, ownsLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { isAbsolute, join, normalize, resolve } from 'node:path';
 import { inspectPrivateDirectory, privateDirectory } from '../universe/artifacts.js';
@@ -8,7 +9,8 @@ import { normalizeOutcomeScope, outcomeCanonical, outcomeDigest, outcomeGraphObj
   type OutcomeRead, type OutcomeRecord, type OutcomeState, type OutcomeWrite } from './outcome-types.js';
 
 function validState(state: OutcomeState): boolean {
-  if (!state || state.schemaVersion !== 1 || !outcomeIdentity(state.id) ||
+  if (!state || ![1, 2].includes(state.schemaVersion) ||
+      (state.schemaVersion === 1 ? Object.hasOwn(state, 'manager') : !state.manager || !validOutcomeManagerState(state.manager, state)) || !outcomeIdentity(state.id) ||
       !Number.isSafeInteger(state.revision) || state.revision < 1 ||
       !Number.isSafeInteger(state.scopeRevision) || state.scopeRevision < 1 ||
       !Number.isSafeInteger(state.planRevision) || state.planRevision < 0 ||
@@ -75,7 +77,7 @@ function validState(state: OutcomeState): boolean {
 function parse(value: unknown): OutcomeRecord | null {
   try {
     const record = value as OutcomeRecord;
-    if (!record || record.schemaVersion !== 1 || !Number.isSafeInteger(record.revision) || record.revision < 1 ||
+    if (!record || ![1, 2].includes(record.schemaVersion) || record.schemaVersion !== record.state?.schemaVersion || !Number.isSafeInteger(record.revision) || record.revision < 1 ||
         !outcomeToken(record.commandId) || !outcomeHash(record.requestDigest) ||
         !(record.previousDigest === null || outcomeHash(record.previousDigest)) || !validState(record.state) ||
         record.state.revision !== record.revision || !outcomeHash(record.digest)) return null;
@@ -132,8 +134,8 @@ export class OutcomeStore {
    * same outer lock so an unrelated scope edit cannot discard terminal truth.
    * Operator commands and planning always retain explicit revision CAS. */
   transactCurrent(commandId: string, request: unknown,
-    update: (current: OutcomeState | null) => OutcomeState | null): OutcomeWrite {
-    return this.transactLocked(commandId, null, request, update, () => true);
+    update: (current: OutcomeState | null) => OutcomeState | null, fence: () => boolean = () => true): OutcomeWrite {
+    return this.transactLocked(commandId, null, request, update, fence);
   }
   private transactLocked(commandId: string, expectedRevision: number | null, request: unknown,
     update: (current: OutcomeState | null) => OutcomeState | null, fence: () => boolean): OutcomeWrite {
@@ -167,7 +169,7 @@ export class OutcomeStore {
     } catch { return { ok: false, reason: 'invalid' }; }
     if (!state) return { ok: false, reason: 'held' };
     state.revision = expectedRevision + 1;
-    const payload = { schemaVersion: 1 as const, revision: state.revision, previousDigest: previous?.digest ?? null,
+    const payload = { schemaVersion: state.schemaVersion, revision: state.revision, previousDigest: previous?.digest ?? null,
       commandId, requestDigest, state };
     const record = { ...payload, digest: outcomeDigest(payload) };
     if (!parse(record)) return { ok: false, reason: 'invalid' };
