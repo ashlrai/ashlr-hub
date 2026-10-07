@@ -5,8 +5,12 @@
  * ~/.local, /Applications or launchd, and no command is executed: the fake io records calls.
  */
 import { describe, expect, it } from 'vitest';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   APP_PATH,
+  APP_BUNDLE_BUILD,
   ENTITLEMENTS,
   KEEP_BACKUPS,
   LOCAL_NETWORK_ATS,
@@ -32,8 +36,9 @@ const HOME = '/isolated-home';
 const REPO = '/repo';
 
 type Entry = { name: string; mtimeMs: number };
-type Step = { id: string; title: string; argv?: string[]; wait?: { kind: string }; versions?: unknown; identity?: string; sign?: { identity: string | null; entitlements: string } };
+type Step = { links?: {current: string; dest: string}; app?: { steps: Step[]; dest: string; source: string; sourceProof: {path: string} }; id: string; title: string; argv?: string[]; wait?: { kind: string }; versions?: unknown; identity?: string; sign?: { identity: string | null; entitlements: string } };
 const HASH = 'F6674FDA4EDE6D75028DA2165382E629553DD6D6';
+const INVENTORY = 'a'.repeat(64);
 
 function ctx(overrides: Record<string, unknown> = {}) {
   return {
@@ -51,6 +56,8 @@ function ctx(overrides: Record<string, unknown> = {}) {
     dryRun: false,
     native: false,
     appExists: true,
+    selectedApp: { path: APP_PATH, signer: HASH, inventory: INVENTORY, dev: 1, ino: 2 },
+    sourceApp: null,
     listing: {
       'Contents/MacOS': [{ name: 'ashlr', mtimeMs: 10 }, { name: 'ashlr-desktop', mtimeMs: 10 }],
       'Contents/Resources': [{ name: 'public', mtimeMs: 10 }, { name: 'icon.icns', mtimeMs: 10 }],
@@ -64,11 +71,13 @@ function ctx(overrides: Record<string, unknown> = {}) {
     iconBuildMtime: null as number | null,
     installedIconMtime: 10 as number | null,
     ...overrides,
+    ...(overrides.appExists === false ? { selectedApp: null } : {}),
   };
 }
 
-const ids = (steps: Step[]) => steps.map((s) => s.id);
-const step = (steps: Step[], id: string) => steps.find((s) => s.id === id);
+const flatten = (steps: Step[]): Step[] => steps.flatMap((s) => s.app ? [s, ...s.app.steps] : [s]);
+const ids = (steps: Step[]) => flatten(steps).map((s) => s.id);
+const step = (steps: Step[], id: string) => flatten(steps).find((s) => s.id === id);
 
 describe('parseArgs', () => {
   it('reads the three flags and rejects anything else', () => {
@@ -93,15 +102,16 @@ describe('refusals', () => {
     const steps = planShip(ctx({ dirty: true, allowDirty: true })) as Step[];
     const dest = `${HOME}/.local/share/ashlr/releases/${SHA}-dirty-${stamp(NOW)}`;
     expect(step(steps, 'release-dir')?.argv).toEqual(['mkdir', '-p', dest]);
-    expect(step(steps, 'current')?.argv).toEqual(['ln', '-sfn', dest, `${HOME}/.local/share/ashlr/current`]);
+    expect(step(steps, 'native-transaction')?.app?.dest).toBe(dest);
   });
 });
 
 describe('planShip step list', () => {
   it('builds, packs, installs and repoints current in order', () => {
     const steps = planShip(ctx()) as Step[];
-    expect(ids(steps).slice(0, 9)).toEqual([
-      'entitlements-preflight', 'clean-dist', 'build', 'pack-dir', 'pack', 'release-dir', 'extract', 'current', 'build-binary',
+    expect(ids(steps).slice(0, 10)).toEqual([
+      'aliases-preflight',
+      'entitlements-preflight', 'clean-dist', 'build', 'native-quiescence', 'pack-dir', 'pack', 'release-dir', 'extract', 'build-binary',
     ]);
     expect(step(steps, 'entitlements-preflight')?.argv).toEqual(['node', `${REPO}/scripts/check-macos-entitlements.mjs`]);
     expect(step(steps, 'clean-dist')?.argv).toEqual(['rm', '-rf', `${REPO}/dist`]);
@@ -125,8 +135,8 @@ describe('planShip step list', () => {
   it('replaces the app sidecar and public dir, backing each up as *.prev-<short sha>', () => {
     const steps = planShip(ctx()) as Step[];
     expect(ids(steps)).toEqual(expect.arrayContaining([
-      'app-quit', 'app-wait-quit', 'backup-ashlr', 'install-ashlr', 'backup-public', 'install-public',
-      'plist-mic', 'plist-local-network', 'codesign', 'codesign-verify', 'app-launch',
+      'native-quiescence', 'native-transaction', 'backup-ashlr', 'install-ashlr', 'backup-public', 'install-public',
+      'plist-mic', 'plist-local-network', 'codesign', 'codesign-verify',
     ]));
     expect(step(steps, 'backup-ashlr')?.argv).toEqual([
       'mv', `${APP_PATH}/Contents/MacOS/ashlr`, `${APP_PATH}/Contents/MacOS/ashlr.prev-01234567`,
@@ -147,13 +157,15 @@ describe('planShip step list', () => {
     // Quit before touching the bundle; sign after the last copy; relaunch last.
     const order = ids(steps);
     expect(order.indexOf('entitlements-preflight')).toBeLessThan(order.indexOf('clean-dist'));
-    expect(order.indexOf('app-wait-quit')).toBeLessThan(order.indexOf('backup-ashlr'));
+    expect(order.indexOf('native-quiescence')).toBeLessThan(order.indexOf('backup-ashlr'));
     expect(order.indexOf('install-public')).toBeLessThan(order.indexOf('codesign'));
     // The plist is part of what gets signed.
     expect(order.indexOf('plist-mic')).toBeLessThan(order.indexOf('codesign'));
     expect(order.indexOf('plist-local-network')).toBeLessThan(order.indexOf('codesign'));
     expect(ids(steps)).not.toContain('signing-identity');
-    expect(order.indexOf('codesign-verify')).toBeLessThan(order.indexOf('app-launch'));
+    expect(step(steps, 'native-transaction')?.app?.dest).toBe(`${HOME}/.local/share/ashlr/releases/${SHA}`);
+    expect(order).not.toContain('current'); // pointer commit occurs only inside the verified transaction
+    expect(order).not.toContain('app-quit'); // active work is never silently quit
   });
 
   it('never removes anything but the repo dist/', () => {
@@ -207,7 +219,7 @@ describe('planShip step list', () => {
   });
 
   it('kickstarts only the launch agents that are loaded', () => {
-    const steps = planShip(ctx({ loadedAgents: ['ai.ashlr.serve'] })) as Step[];
+    const steps = planShip(ctx({ appExists: false, loadedAgents: ['ai.ashlr.serve'] })) as Step[];
     expect(step(steps, 'kickstart-ai.ashlr.serve')?.argv).toEqual(['launchctl', 'kickstart', '-k', 'gui/501/ai.ashlr.serve']);
     expect(step(steps, 'kickstart-ai.ashlr.anthropic-proxy')?.argv).toBeUndefined();
   });
@@ -275,21 +287,34 @@ describe('tarballName', () => {
 function fakeIo(overrides: Record<string, unknown> = {}) {
   const calls: string[][] = [];
   const logs: string[] = [];
+  const links = new Map<string, string>();
   let now = 0;
   const io = {
     platform: 'darwin', home: HOME, tmp: '/os-tmp', uid: 501, now: NOW, repoRoot: REPO,
     clock: () => now,
     sleep: async (ms: number) => { now += ms; },
     log: (line: string) => logs.push(line),
+    exclusiveRenamePreflight: () => {}, renameExclusive: (from: string, to: string) => { calls.push(['exclusive-rename', from, to]); },
+    readBoundedFile: () => JSON.stringify({desktopPid: 42, sidecarPid: 43, port: 7777, sidecarPath: `${APP_PATH}/Contents/MacOS/ashlr`}),
+    validateLocalPath: () => {}, readCurrentPointer: () => null, restoreCurrentPointer: () => {}, switchCurrentPointer: () => {}, writeInstallJournal: () => {}, readLink: (path: string) => links.get(path) ?? '', linkTargetExists: () => true, createAlias: (path: string, target: string) => {links.set(path, target);}, removeAlias: (path: string) => {links.delete(path);},
     readFile: () => JSON.stringify({ name: '@ashlr/hub', version: '3.11.1' }),
-    exists: (path: string) => path === APP_PATH,
+    exists: (path: string) => path === APP_PATH || (calls.some((call) => call[0] === '/usr/bin/open') && path.endsWith('.desktop-sidecar.json')),
+    lstat: (path: string) => path.includes('/.local/bin/') ? (links.has(path) ? {dev: 1, ino: 50, isSymbolicLink: true} : null) : ({ dev: 1, ino: 2, size: 1, isFile: path.endsWith('KILL') || path.endsWith('.desktop-sidecar.json'), isDirectory: !path.endsWith('KILL') && !path.endsWith('.desktop-sidecar.json'), isSymbolicLink: false }),
+    appInventory: () => INVENTORY,
+    executionLeaseCensus: async () => ({ leases: [], unknown: 0, reaped: 0 }),
+    makeInstallStage: () => '/Applications/.phantom-install-fixture',
+    removeInstallTree: () => {},
     mtime: () => null,
     list: () => [{ name: 'ashlr', mtimeMs: 1 }],
     exec: (cmd: string, argv: string[]) => {
+      if (argv.some(value => typeof value !== 'string')) throw new Error('non-string argv');
       calls.push([cmd, ...argv]);
       if (cmd === 'git' && argv[0] === 'rev-parse') return { status: 0, stdout: `${SHA}\n` };
       if (cmd === 'git' && argv[0] === 'status') return { status: 0, stdout: '' };
       if (cmd === 'launchctl' && argv[0] === 'print') return { status: argv[1].endsWith('ai.ashlr.serve') ? 0 : 113, stdout: '' };
+      if (cmd === '/bin/ps') return { status: 0, stdout: calls.some((call) => call[0] === '/usr/bin/open') ? `42 1 Wed Oct 7 16:00:00 2026 ${APP_PATH}/Contents/MacOS/ashlr-desktop\n43 42 Wed Oct 7 16:00:00 2026 ${APP_PATH}/Contents/MacOS/ashlr verse --port 7777 --no-open --json` : '' };
+      if (cmd === '/usr/sbin/lsof') return {status: 0, stdout: 'p43\n'};
+      if (cmd === '/usr/bin/plutil') return { status: 0, stdout: argv[1] === 'CFBundleIdentifier' ? 'ai.ashlr.desktop' : argv[1] === 'CFBundleExecutable' ? 'ashlr-desktop' : '3.11.1' };
       if (cmd === 'pgrep') return { status: 1, stdout: '' };
       if (cmd === 'security') return { status: 0, stdout: `  1) ${HASH} "Ashlr Local"\n` };
       return { status: 0, stdout: 'ashlr 3.11.1\n' };
@@ -307,6 +332,8 @@ describe('gatherContext', () => {
         calls.push([cmd, ...argv]);
         if (cmd === 'git' && argv[0] === 'status') return { status: 0, stdout: ' M src/x.ts\n' };
         if (cmd === 'git') return { status: 0, stdout: `${SHA}\n` };
+        if (cmd === '/usr/bin/plutil') return { status: 0, stdout: argv[1] === 'CFBundleIdentifier' ? 'ai.ashlr.desktop' : 'ashlr-desktop' };
+        if (cmd === '/usr/bin/codesign') return {status: 0, stdout: ''};
         if (cmd === 'security') return { status: 0, stdout: `  1) ${HASH} "Ashlr Local"\n     1 identities found\n` };
         return { status: argv[1]?.endsWith('ai.ashlr.serve') ? 0 : 113, stdout: '' };
       },
@@ -314,7 +341,7 @@ describe('gatherContext', () => {
     const c = gatherContext({ dryRun: true, native: false, allowDirty: false }, io);
     expect(c).toMatchObject({ dirty: true, sha: SHA, version: '3.11.1', appExists: true, loadedAgents: ['ai.ashlr.serve'] });
     expect(c.signing).toEqual({ hash: HASH, name: 'Ashlr Local', valid: true });
-    expect(calls.map((c) => c[0])).toEqual(['git', 'git', 'security', 'launchctl', 'launchctl']);
+    expect(calls.map((c) => c[0])).toEqual(['git', 'git', 'security', '/usr/bin/plutil', '/usr/bin/plutil', '/usr/bin/codesign', 'launchctl', 'launchctl']);
     expect(calls.find((c) => c[0] === 'security')).toEqual(['security', 'find-identity', '-p', 'codesigning']);
     expect(() => planShip(c)).toThrow(/uncommitted/);
   });
@@ -382,7 +409,7 @@ describe('runSteps', () => {
     expect(calls.some((call) => call[0] === 'plutil' && call[2] === 'CFBundleShortVersionString')).toBe(true);
     expect(calls.some((call) => call[0] === 'plutil' && call[2] === 'CFBundleVersion')).toBe(true);
     expect(calls.some((call) => call[0] === 'codesign')).toBe(false);
-    expect(logs.at(-1)).toMatch(/step "plist-bundle-version" failed/);
+    expect(logs.join('\n')).toMatch(/step "plist-bundle-version" failed/);
   });
 
   it('completes a full run against the fake io and waits for /verse/', async () => {
@@ -390,9 +417,9 @@ describe('runSteps', () => {
     let polls = 0;
     io.fetchStatus = async () => (++polls < 3 ? null : 200);
     const steps = planShip(gatherContext({ dryRun: false, native: false, allowDirty: false }, io));
-    expect(await runSteps(steps, io, { dryRun: false })).toBe(0);
-    expect(polls).toBe(3);
-    expect(calls.some((c) => c.join(' ') === 'launchctl kickstart -k gui/501/ai.ashlr.serve')).toBe(true);
+    expect(await runSteps(steps, io, { dryRun: false }), logs.join('\n')).toBe(0);
+    expect(polls).toBe(4);
+    expect(calls.some((c) => c.join(' ') === 'launchctl kickstart -k gui/501/ai.ashlr.serve')).toBe(false);
     expect(logs.join('\n')).toContain('http://127.0.0.1:7777/verse/ → 200');
   });
 
@@ -400,7 +427,7 @@ describe('runSteps', () => {
     const { io, logs } = fakeIo({ fetchStatus: async () => 502 });
     const steps = planShip(gatherContext({ dryRun: false, native: false, allowDirty: false }, io));
     expect(await runSteps(steps, io, { dryRun: false })).toBe(1);
-    expect(logs.at(-1)).toMatch(/answered 502/);
+    expect(logs.join('\n')).toMatch(/owned launch\/health/);
   });
 });
 
@@ -437,13 +464,9 @@ describe('stable local code signing (dictation keeps its microphone grant)', () 
     expect(codesignArgv(null, '/e.plist')).toEqual(['codesign', '--force', '--deep', '--sign', '-', '--entitlements', '/e.plist', APP_PATH]);
   });
 
-  it('plans the one-time identity step before signing when there is no trusted identity', () => {
+  it('refuses native updates without the existing valid signer instead of changing code identity', () => {
     for (const signing of [null, { hash: HASH, name: 'Ashlr Local', valid: false }]) {
-      const steps = planShip(ctx({ signing })) as Step[];
-      const order = ids(steps);
-      expect(order.indexOf('signing-identity')).toBeGreaterThan(-1);
-      expect(order.indexOf('signing-identity')).toBeLessThan(order.indexOf('codesign'));
-      expect(step(steps, 'codesign')?.sign).toEqual({ identity: null, entitlements: `${REPO}/${ENTITLEMENTS}` });
+      expect(() => planShip(ctx({ signing }))).toThrow(/existing valid Ashlr Local/);
     }
   });
 
@@ -524,34 +547,331 @@ describe('stable local code signing (dictation keeps its microphone grant)', () 
     expect(removed).toHaveLength(1);
   });
 
-  it('runSteps signs with the freshly made identity, or ad-hoc with a loud warning', async () => {
-    for (const makes of [true, false]) {
-      let trusted = false;
-      const { io: base, calls } = fakeIo();
-      const logs: string[] = [];
-      const io = {
-        ...base,
-        log: (line: string) => logs.push(line),
-        mkdtemp: () => '/os-tmp/ashlr-sign-1',
-        writeFile: () => {},
-        removeDir: () => {},
-        exec: (cmd: string, argv: string[]) => {
-          calls.push([cmd, ...argv]);
-          if (argv[0] === 'find-identity') return { status: 0, stdout: trusted ? `  1) ${HASH} "Ashlr Local"\n` : '' };
-          if (argv[0] === 'add-trusted-cert') {
-            trusted = makes;
-            return { status: makes ? 0 : 1, stdout: '' };
-          }
-          return base.exec(cmd, argv);
-        },
-      };
-      const steps = planShip(ctx({ signing: null })) as Step[];
-      calls.length = 0;
-      expect(await runSteps(steps, io, { dryRun: false })).toBe(0);
-      const sign = calls.find((c) => c[0] === 'codesign' && c[1] === '--force')!;
-      expect(sign[4]).toBe(makes ? HASH : '-');
-      expect(sign).toContain('--entitlements');
-      if (!makes) expect(logs.join('\n')).toMatch(/WARNING — signing ad-hoc/);
+  it('uses the exact valid signer during staged native maintenance without identity creation', async () => {
+    const {io, calls} = fakeIo();
+    expect(await runSteps(planShip(ctx()), io, {dryRun: false}), calls.map(c => c.join(' ')).join('\n')).toBe(0);
+    expect(calls.some((c) => c[0] === 'security' && c[1] === 'add-trusted-cert')).toBe(false);
+    for (const c of calls.filter((c) => c.includes('--sign'))) expect(c[c.indexOf('--sign') + 1]).toBe(HASH);
+  });
+});
+
+// Native migration effects remain wholly private/injected: no actual app, process, lease or signer is contacted.
+import { LEGACY_APP_PATH, inspectLocalApp, selectLocalApp, requireLocalQuiescence, installLocalApp, launchedAppIsOwned, inspectLocalAliases, createLocalAliases, removeCreatedAliases, exclusiveRenameAvailable, renamePathExclusive, ownedReleaseTarget, inspectCurrentPointer, switchLocalCurrentPointer } from '../scripts/local-app-transaction.mjs';
+
+function appIo(installed: string[] = [LEGACY_APP_PATH]) {
+  const bundles = new Map(installed.map((path) => [path, { inventory: INVENTORY, ino: 2 }]));
+  const calls: string[][] = [];
+  let unknown = 0;
+  let processes = '';
+  let kill = true;
+  let conflict = false;
+  let archiveBad = false;
+  const io = {
+    home: HOME, repoRoot: REPO, log: () => {}, exclusiveRenamePreflight: () => {}, writeInstallJournal: () => {}, readBoundedFile: () => '',
+    exists: (path: string) => bundles.has(path),
+    readFile: () => '',
+    lstat: (path: string) => path.endsWith('KILL') ? (kill ? { isFile: true, isSymbolicLink: false } : null) : { isDirectory: true, isSymbolicLink: false, dev: 1, ino: bundles.get(path)?.ino ?? 3 },
+    appInventory: (path: string) => archiveBad && path.includes('archive-check') ? 'b'.repeat(64) : bundles.get(path)?.inventory ?? INVENTORY,
+    executionLeaseCensus: async () => ({ leases: [], unknown, reaped: 0 }),
+    makeInstallStage: () => '/Applications/.phantom-install-test',
+    removeInstallTree: (path: string) => { calls.push(['cleanup', path]); bundles.delete(path); },
+    renameExclusive: (from: string, to: string, expected: {dev: number; ino: number}) => {
+      calls.push(['exclusive-rename', from, to]);
+      const record = bundles.get(from);
+      if ((conflict && from.endsWith('/Phantom.app')) || !record || bundles.has(to) || expected.dev !== 1 || expected.ino !== record.ino) throw new Error('exclusive rename refused');
+      bundles.delete(from); bundles.set(to, record);
+    },
+    exec: (cmd: string, argv: string[]) => {
+      if (argv.some(value => typeof value !== 'string')) throw new Error('non-string argv');
+      calls.push([cmd, ...argv]);
+      if (cmd === '/bin/ps') return { status: 0, stdout: processes };
+      if (cmd === '/usr/bin/plutil' && argv[0] === '-extract') return { status: 0, stdout: argv[1] === 'CFBundleIdentifier' ? 'ai.ashlr.desktop' : argv[1] === 'CFBundleExecutable' ? 'ashlr-desktop' : '3.11.1' };
+      if (cmd === '/usr/bin/ditto' && argv.length === 2) bundles.set(argv[1]!, { ...bundles.get(argv[0]!)!, ino: 3 });
+      if (cmd === '/usr/bin/ditto' && argv[0] === '-x') bundles.set(`${argv[3]}/${installed[0]?.split('/').at(-1)}`, { inventory: INVENTORY, ino: 3 });
+      if (cmd === '/bin/mv') {
+        if (conflict && argv[0]?.endsWith('/Phantom.app')) return { status: 1, stdout: '' };
+        const record = bundles.get(argv[0]!);
+        if (!record || bundles.has(argv[1]!)) return { status: 1, stdout: '' };
+        bundles.delete(argv[0]!); bundles.set(argv[1]!, record);
+      }
+      return { status: 0, stdout: '' };
+    },
+  };
+  return { io, bundles, calls, unknown: (n: number) => { unknown = n; }, processes: (s: string) => { processes = s; }, kill: (on: boolean) => { kill = on; }, refuseSwitch: () => { conflict = true; }, badArchive: () => { archiveBad = true; } };
+}
+
+const nativeInput = (selected: ReturnType<typeof selectLocalApp>) => ({ selected, source: selected?.path ?? `${REPO}/${APP_BUNDLE_BUILD}`, sourceProof: selected, signer: HASH, version: '3.11.1', native: true, entitlements: `${REPO}/${ENTITLEMENTS}`, prepare: async () => {}, health: async () => true });
+
+describe('identity-bound Phantom native migration', () => {
+  it.each([LEGACY_APP_PATH, APP_PATH])('selects only the single verified %s installation', (path) => {
+    const { io, calls } = appIo([path]);
+    expect(selectLocalApp(HASH, io)?.path).toBe(path);
+    expect(calls).toContainEqual(['/usr/bin/codesign', '--verify', '--deep', '--strict', `-R=identifier "ai.ashlr.desktop" and certificate leaf = H"${HASH}"`, path]);
+  });
+  it('keeps absent state explicit and refuses both names before reading either app', () => {
+    expect(selectLocalApp(HASH, appIo([]).io)).toBeNull();
+    const { io, calls } = appIo([APP_PATH, LEGACY_APP_PATH]);
+    expect(() => selectLocalApp(HASH, io)).toThrow(/both/); expect(calls).toEqual([]);
+  });
+  it('refuses invalid signing identity, symlinks, unrelated bundle IDs and executable names', () => {
+    const f = appIo(); expect(() => selectLocalApp(null, f.io)).toThrow(/signing identity/);
+    expect(() => inspectLocalApp(LEGACY_APP_PATH, HASH, { ...f.io, lstat: () => ({ isDirectory: true, isSymbolicLink: true }) })).toThrow(/regular app/);
+    for (const key of ['CFBundleIdentifier', 'CFBundleExecutable']) {
+      const exec = f.io.exec;
+      const io = { ...f.io, exec: (cmd: string, argv: string[]) => cmd === '/usr/bin/plutil' && argv[1] === key ? { status: 0, stdout: 'unrelated' } : exec(cmd, argv) };
+      expect(() => inspectLocalApp(LEGACY_APP_PATH, HASH, io)).toThrow(/unsupported/);
     }
+  });
+  it('refuses unsigned/other-signer bundles and changed inventory before preparation', async () => {
+    const f = appIo(); const selected = selectLocalApp(HASH, f.io);
+    expect(() => inspectLocalApp(LEGACY_APP_PATH, HASH, { ...f.io, exec: () => ({ status: 1, stdout: '' }) })).toThrow(/failed/);
+    f.bundles.get(LEGACY_APP_PATH)!.inventory = 'b'.repeat(64);
+    await expect(installLocalApp(nativeInput(selected), f.io)).rejects.toThrow(/changed/);
+    expect(f.calls.some((c) => c[0] === 'exclusive-rename')).toBe(false);
+  });
+  it('requires prior Stop, known drained leases, complete process records and closed native/sidecar', async () => {
+    const f = appIo(); f.kill(false); await expect(requireLocalQuiescence(f.io)).rejects.toThrow(/Stop/);
+    f.kill(true); f.unknown(1); await expect(requireLocalQuiescence(f.io)).rejects.toThrow(/leases/);
+    f.unknown(0); f.processes('unparseable'); await expect(requireLocalQuiescence(f.io)).rejects.toThrow(/unrecognized/);
+    for (const path of [APP_PATH, LEGACY_APP_PATH]) {
+      f.processes(` 42 1 Wed Oct 7 16:00:00 2026 ${path}/Contents/MacOS/ashlr verse --port 7777`);
+      await expect(requireLocalQuiescence(f.io)).rejects.toThrow(/still running/);
+    }
+    f.processes(''); await expect(requireLocalQuiescence(f.io)).resolves.toBeUndefined();
+    expect(f.calls.some((c) => ['kill', 'osascript', 'launchctl'].includes(c[0]!))).toBe(false);
+  });
+  it.each([LEGACY_APP_PATH, APP_PATH])('stages and verifies before switching %s, retaining only a compressed rollback artifact', async (path) => {
+    const f = appIo([path]); const selected = selectLocalApp(HASH, f.io);
+    const result = await installLocalApp(nativeInput(selected), f.io);
+    expect(result).toEqual({ app: APP_PATH, rollbackArchive: '/Applications/.phantom-install-test/previous-app.zip' });
+    expect([...f.bundles.keys()].filter((p) => [APP_PATH, LEGACY_APP_PATH].includes(p))).toEqual([APP_PATH]);
+    const firstMove = f.calls.findIndex((c) => c[0] === 'exclusive-rename');
+    expect(f.calls.slice(0, firstMove).some((c) => c[0] === '/usr/bin/codesign' && c.includes('--strict'))).toBe(true);
+    expect(f.calls.slice(0, firstMove).some((c) => c[0] === '/usr/bin/ditto' && c.includes('-x'))).toBe(true);
+    expect(f.calls.some((c) => c[0] === '/usr/bin/open' && c[1] === APP_PATH)).toBe(true);
+    expect(f.calls.some((c) => c[0] === 'cleanup' && c[1]?.endsWith('retired-bundle'))).toBe(true);
+    expect(f.calls.some((c) => c[0] === 'cleanup' && c[1]?.endsWith('.zip'))).toBe(false);
+  });
+  it('refuses a mismatched archive before changing the active app', async () => {
+    const f = appIo(); const selected = selectLocalApp(HASH, f.io); f.badArchive();
+    await expect(installLocalApp(nativeInput(selected), f.io)).rejects.toThrow(/archive/);
+    expect(f.bundles.has(LEGACY_APP_PATH)).toBe(true); expect(f.calls.some((c) => c[0] === 'exclusive-rename')).toBe(false);
+  });
+  it('restores the original full app if the switch or settled launch acceptance fails', async () => {
+    for (const switchFailure of [true, false]) {
+      const f = appIo(); const selected = selectLocalApp(HASH, f.io); if (switchFailure) f.refuseSwitch();
+      await expect(installLocalApp({ ...nativeInput(selected), health: async () => false }, f.io)).rejects.toThrow();
+      expect(f.bundles.has(LEGACY_APP_PATH)).toBe(true); expect(f.bundles.has(APP_PATH)).toBe(false);
+      expect(f.bundles.get(LEGACY_APP_PATH)?.inventory).toBe(INVENTORY);
+    }
+  });
+  it('holds rollback rather than moving a replacement that has become active', async () => {
+    const f = appIo(); const selected = selectLocalApp(HASH, f.io);
+    await expect(installLocalApp({ ...nativeInput(selected), health: async () => { f.processes(` 42 1 Wed Oct 7 16:00:00 2026 ${APP_PATH}/Contents/MacOS/ashlr-desktop`); return false; } }, f.io)).rejects.toThrow(/health/);
+    expect(f.bundles.has(APP_PATH)).toBe(true); expect(f.bundles.has('/Applications/.phantom-install-test/retired-bundle')).toBe(true);
+  });
+});
+
+describe('native migration admission and rollback boundaries', () => {
+  it('does not query a signer for an absent CLI-only installation', () => {
+    const f = fakeIo({exists: () => false});
+    expect(gatherContext({dryRun: true, native: false, allowDirty: false}, f.io).signing).toBeNull();
+    expect(f.calls.some(c => c[0] === 'security')).toBe(false);
+  });
+  it('refuses active leases and unreadable or still-live ownership records without stopping anything', async () => {
+    const f = appIo();
+    await expect(requireLocalQuiescence({...f.io, executionLeaseCensus: async () => ({leases: [{}], unknown: 0})})).rejects.toThrow(/leases/);
+    const record = `${HOME}/.ashlr/.desktop-sidecar.json`;
+    const io = {...f.io, exists: (path: string) => path === record, lstat: (path: string) => path === record ? {isFile: true, size: 200, isSymbolicLink: false} : f.io.lstat(path), readBoundedFile: () => '{bad'};
+    await expect(requireLocalQuiescence(io)).rejects.toThrow(/record is invalid/);
+    io.readBoundedFile = () => JSON.stringify({desktopPid: 52, sidecarPid: 53, port: 7777, sidecarPath: `${APP_PATH}/Contents/MacOS/ashlr`});
+    f.processes('52 1 Wed Oct 7 16:00:00 2026 /unrelated/process');
+    await expect(requireLocalQuiescence(io)).rejects.toThrow(/live or uncertain/);
+  });
+  it('accepts health only for the exact parented native/sidecar processes and owned listener', () => {
+    const f = appIo(); const record = `${HOME}/.ashlr/.desktop-sidecar.json`;
+    const io = {...f.io, exists: (path: string) => path === record, lstat: () => ({isFile: true, size: 200, isSymbolicLink: false}), readBoundedFile: () => JSON.stringify({desktopPid: 52, sidecarPid: 53, port: 7777, sidecarPath: `${APP_PATH}/Contents/MacOS/ashlr`})};
+    expect(launchedAppIsOwned(io)).toBe(false);
+    f.processes(`52 1 Wed Oct 7 16:00:00 2026 ${APP_PATH}/Contents/MacOS/ashlr-desktop\n53 52 Wed Oct 7 16:00:00 2026 ${APP_PATH}/Contents/MacOS/ashlr verse --port 7777 --no-open --json`);
+    const exec = io.exec;
+    io.exec = (cmd: string, argv: string[]) => cmd === '/usr/sbin/lsof' ? {status: 0, stdout: 'p53\n'} : exec(cmd, argv);
+    expect(launchedAppIsOwned(io)).toBe(true);
+    io.exec = (cmd: string, argv: string[]) => cmd === '/usr/sbin/lsof' ? {status: 0, stdout: 'p99\n'} : exec(cmd, argv);
+    expect(launchedAppIsOwned(io)).toBe(false);
+    f.processes(`52 1 Wed Oct 7 16:00:00 2026 ${APP_PATH}/Contents/MacOS/ashlr-desktop\n53 99 Wed Oct 7 16:00:00 2026 ${APP_PATH}/Contents/MacOS/ashlr verse --port 7777 --no-open --json`);
+    expect(launchedAppIsOwned(io)).toBe(false);
+  });
+  it('installs from the verified native source when neither app exists', async () => {
+    const f = appIo([]); const source = `${REPO}/${APP_BUNDLE_BUILD}`;
+    f.bundles.set(source, {inventory: INVENTORY, ino: 2});
+    const proof = inspectLocalApp(source, HASH, f.io);
+    expect(await installLocalApp({...nativeInput(null), sourceProof: proof}, f.io)).toEqual({app: APP_PATH, rollbackArchive: null});
+    expect(f.bundles.has(APP_PATH)).toBe(true);
+  });
+  it('switches the CLI pointer before launch and rolls it back on a settled failure', async () => {
+    const f = appIo(); const selected = selectLocalApp(HASH, f.io); const events: string[] = [];
+    const exec = f.io.exec;
+    f.io.exec = (cmd: string, argv: string[]) => { if (cmd === '/usr/bin/open') events.push('open'); return exec(cmd, argv); };
+    await expect(installLocalApp({...nativeInput(selected), commitPointer: async () => {events.push('pointer');}, rollbackPointer: async () => {events.push('restore-pointer');}, health: async () => false}, f.io)).rejects.toThrow(/health/);
+    expect(events).toEqual(['pointer', 'open', 'restore-pointer']);
+    expect(f.bundles.has(LEGACY_APP_PATH)).toBe(true);
+  });
+});
+
+describe('local Workbench alias admission', () => {
+  function aliasIo() {
+    const entries = new Map<string, {target: string; dev: number; ino: number; isSymbolicLink: boolean}>();
+    const target = `${HOME}/.local/share/ashlr/current/bin/ashlr`;
+    let next = 10;
+    const io = {home: HOME, validateLocalPath: () => {}, lstat: (path: string) => entries.get(path) ?? null, readLink: (path: string) => entries.get(path)?.target, linkTargetExists: () => true,
+      createAlias: (path: string, dest: string) => {if (entries.has(path)) throw new Error('EEXIST'); entries.set(path, {target: dest, dev: 1, ino: next++, isSymbolicLink: true});},
+      removeAlias: (path: string) => {entries.delete(path);}};
+    return {entries, target, io};
+  }
+  it('creates only missing phm/ashlr links, preserves owned links and never selects phantom', () => {
+    const f = aliasIo(); const existing = {target: f.target, dev: 1, ino: 2, isSymbolicLink: true};
+    f.entries.set(`${HOME}/.local/bin/ashlr`, existing);
+    f.entries.set(`${HOME}/.local/bin/phantom`, {target: '/secrets/phantom', dev: 1, ino: 3, isSymbolicLink: true});
+    const created = createLocalAliases(inspectLocalAliases(f.io), f.io);
+    expect(created.map(a => a.path)).toEqual([`${HOME}/.local/bin/phm`]);
+    expect(f.entries.get(`${HOME}/.local/bin/ashlr`)).toBe(existing);
+    expect(f.entries.get(`${HOME}/.local/bin/phantom`)?.target).toBe('/secrets/phantom');
+    removeCreatedAliases(created, f.io);
+    expect(f.entries.has(`${HOME}/.local/bin/phm`)).toBe(false);
+    expect(f.entries.get(`${HOME}/.local/bin/ashlr`)).toBe(existing);
+  });
+  it('refuses foreign files, unrelated/dangling links and appearances after preflight', () => {
+    for (const [symbolic, target, reachable] of [[false, '', true], [true, '/foreign/tool', true], [true, `${HOME}/.local/share/ashlr/current/bin/ashlr`, false]] as const) {
+      const f = aliasIo(); f.entries.set(`${HOME}/.local/bin/phm`, {target, dev: 1, ino: 2, isSymbolicLink: symbolic});
+      expect(() => inspectLocalAliases({...f.io, linkTargetExists: () => reachable})).toThrow(/owned, reachable/);
+      expect(f.entries.has(`${HOME}/.local/bin/ashlr`)).toBe(false);
+    }
+    const f = aliasIo(); const plan = inspectLocalAliases(f.io);
+    f.entries.set(plan[1]!.path, {target: '/foreign/tool', dev: 1, ino: 2, isSymbolicLink: true});
+    expect(() => createLocalAliases(plan, f.io)).toThrow(/appeared/);
+    expect(f.entries.has(plan[0]!.path)).toBe(false); // exclusive first create is rolled back
+  });
+  it('never deletes a created alias whose inode changed before rollback', () => {
+    const f = aliasIo(); const created = createLocalAliases(inspectLocalAliases(f.io), f.io);
+    f.entries.get(created[0]!.path)!.ino = 99;
+    expect(() => removeCreatedAliases(created, f.io)).toThrow(/rollback held/);
+    expect(f.entries.has(created[0]!.path)).toBe(true);
+  });
+});
+
+
+describe('exact installer orchestration', () => {
+  it('holds the entire transaction when a renamed current pointer cannot be verified', async () => {
+    for (const failure of ['read', 'missing', 'cleanup'] as const) {
+      const f = appIo(); const selected = selectLocalApp(HASH, f.io);
+      const previous = {target: `${HOME}/.local/share/ashlr/releases/${SHA}`, dev: 1, ino: 85};
+      const dest = `${HOME}/.local/share/ashlr/releases/${'f'.repeat(40)}`;
+      const records: {phase: string; previousCurrent: unknown}[] = [];
+      let renamed = false; let restored = false; let temporary = false;
+      const io = {...f.io, readCurrentPointer: () => previous,
+        switchCurrentPointer: (path: string, before: unknown, target: string) => switchLocalCurrentPointer(path, before, target, `${path}.temporary`, {
+          readCurrentPointer: () => {if (!renamed) return previous; if (failure === 'missing') return null; if (failure === 'cleanup') return {...previous, target}; throw new Error('ownership read failed');},
+          createLink: () => {temporary = true;}, rename: () => {renamed = true; temporary = false;}, exists: () => {if (renamed && failure === 'cleanup') throw new Error('cleanup read failed'); return temporary;}, unlink: () => {temporary = false;}}),
+        restoreCurrentPointer: () => {restored = true;}, writeInstallJournal: (_dir: string, record: typeof records[number]) => {records.push(record);}};
+      expect(await runSteps([{id: 'native-transaction', title: 'guarded migration', app: {...nativeInput(selected), current: `${HOME}/.local/share/ashlr/current`, dest, steps: []}}], io, {dryRun: false})).toBe(1);
+      expect(renamed).toBe(true); expect(restored).toBe(false); expect(temporary).toBe(false);
+      expect(records.at(-1)).toEqual(expect.objectContaining({phase: 'rollback-held', previousCurrent: previous}));
+      expect(records.some(record => record.phase === 'rolled-back' || record.phase === 'accepted')).toBe(false);
+      expect(f.bundles.has(APP_PATH)).toBe(true);
+      expect(f.bundles.has('/Applications/.phantom-install-test/retired-bundle')).toBe(true);
+      expect(f.bundles.has(LEGACY_APP_PATH)).toBe(false);
+      expect(f.calls.some(call => call[0] === '/usr/bin/open')).toBe(false);
+    }
+  });
+  it('passes actual source strings and immutable proofs for both existing and first native installs', async () => {
+    for (const existing of [true, false]) {
+      const proof = {path: existing ? APP_PATH : `${REPO}/${APP_BUNDLE_BUILD}`, signer: HASH, inventory: INVENTORY, dev: 1, ino: 2};
+      const c = ctx(existing ? {} : {appExists: false, sourceApp: proof, native: true});
+      const planned = step(planShip(c), 'native-transaction')!;
+      expect(planned.app?.source).toBe(proof.path);
+      expect(planned.app?.sourceProof).toEqual(proof);
+      const f = fakeIo({exists: (path: string) => existing ? path === APP_PATH || path.endsWith('.desktop-sidecar.json') : path.endsWith('.desktop-sidecar.json')});
+      // Prelaunch record is absent; a real record appears only after the injected open.
+      f.io.exists = (path: string) => path === APP_PATH && existing || path.endsWith('.desktop-sidecar.json') && f.calls.some(call => call[0] === '/usr/bin/open');
+      expect(await runSteps(planShip(c), f.io, {dryRun: false}), f.logs.join('\n')).toBe(0);
+      const copied = f.calls.find(call => call[0] === '/usr/bin/ditto' && call.length === 3)!;
+      expect(copied).toEqual(['/usr/bin/ditto', proof.path, '/Applications/.phantom-install-fixture/Phantom.app']);
+      expect(f.calls.every(call => call.every(value => typeof value === 'string'))).toBe(true);
+    }
+  });
+  it('records the actual previous current target/identity in the held recovery journal', async () => {
+    const f = appIo(); const selected = selectLocalApp(HASH, f.io); const previous = {target: `${HOME}/.local/share/ashlr/releases/${SHA}`, dev: 1, ino: 85}; const records: unknown[] = [];
+    await installLocalApp({...nativeInput(selected), previousCurrent: previous}, {...f.io, writeInstallJournal: (_dir: string, record: unknown) => {records.push(record);}});
+    expect(records).toEqual(expect.arrayContaining([expect.objectContaining({phase: 'accepted', previousCurrent: previous})]));
+  });
+  it('preserves an unknown destination appearing immediately before the exclusive switch', async () => {
+    const f = appIo(); const selected = selectLocalApp(HASH, f.io);
+    const unknown = {inventory: 'b'.repeat(64), ino: 99};
+    const io = {...f.io, writeInstallJournal: (_dir: string, record: {phase: string}) => {if (record.phase === 'verified') f.bundles.set(APP_PATH, unknown);}};
+    await expect(installLocalApp(nativeInput(selected), io)).rejects.toThrow(/exclusive/);
+    expect(f.bundles.get(APP_PATH)).toBe(unknown);
+    expect(f.bundles.get(LEGACY_APP_PATH)?.inventory).toBe(INVENTORY);
+    expect(f.calls.some(call => call[0] === '/usr/bin/open')).toBe(false);
+  });
+  it('holds rollback if replacement identity changed instead of moving unrelated code', async () => {
+    const f = appIo(); const selected = selectLocalApp(HASH, f.io);
+    const phases: string[] = [];
+    await expect(installLocalApp({...nativeInput(selected), health: async () => {f.bundles.get(APP_PATH)!.ino = 99; return false;}}, {...f.io, writeInstallJournal: (_dir: string, record: {phase: string}) => {phases.push(record.phase);}})).rejects.toThrow(/identity changed/);
+    expect(f.bundles.get(APP_PATH)?.ino).toBe(99);
+    expect(f.bundles.has('/Applications/.phantom-install-test/retired-bundle')).toBe(true);
+    expect(phases.at(-1)).toBe('rollback-held');
+  });
+  it('accepts only supported owned current release names; never escaping or unrelated targets', () => {
+    const target = `${HOME}/.local/share/ashlr/releases/${SHA}`;
+    expect(ownedReleaseTarget(HOME, target)).toBe(target);
+    expect(ownedReleaseTarget(HOME, `${target}-dirty-20261007-180000`)).toBe(`${target}-dirty-20261007-180000`);
+    for (const value of ['/foreign/release', `${target}/../foreign`, `${HOME}/.local/share/ashlr/releases/latest`, `${target}/nested`]) expect(() => ownedReleaseTarget(HOME, value)).toThrow(/supported owned/);
+  });
+});
+
+describe.skipIf(process.platform !== 'darwin')('real macOS exclusive rename in private scratch only', () => {
+  it('never nests into or replaces an existing destination and refuses changed source identity', () => {
+    exclusiveRenameAvailable();
+    const root = mkdtempSync(join(tmpdir(), 'phantom-exclusive-rename-'));
+    try {
+      const source = join(root, 'source'); const target = join(root, 'target');
+      mkdirSync(source); mkdirSync(target); writeFileSync(join(source, 'owned'), 'original'); writeFileSync(join(target, 'foreign'), 'preserve');
+      const proof = lstatSync(source);
+      expect(() => renamePathExclusive(source, target, proof)).toThrow(/exclusive move refused/);
+      expect(existsSync(join(source, 'owned'))).toBe(true);
+      expect(existsSync(join(target, 'foreign'))).toBe(true);
+      expect(existsSync(join(target, 'source'))).toBe(false);
+      rmSync(target, {recursive: true});
+      expect(() => renamePathExclusive(source, target, {...proof, ino: proof.ino + 1})).toThrow(/exclusive move refused/);
+      expect(existsSync(source)).toBe(true);
+      renamePathExclusive(source, target, proof);
+      expect(existsSync(source)).toBe(false);
+      expect(lstatSync(target).ino).toBe(proof.ino);
+      renamePathExclusive(target, source, lstatSync(target));
+      expect(existsSync(join(source, 'owned'))).toBe(true);
+    } finally {rmSync(root, {recursive: true, force: true});}
+  });
+});
+
+
+describe('current release pointer observation', () => {
+  it('distinguishes initial absence from missing package/launcher or a disappearing present pointer', () => {
+    const path = `${HOME}/.local/share/ashlr/current`; const target = `${HOME}/.local/share/ashlr/releases/${SHA}`;
+    const stat = {dev: 1, ino: 80, ctimeMs: 10, birthtimeMs: 1, isSymbolicLink: true};
+    const io = {home: HOME, repoRoot: REPO, validateLocalPath: () => {}, lstat: () => stat as typeof stat | null,
+      readLink: () => target, readBoundedFile: (file: string) => file.endsWith('package.json') ? JSON.stringify({name: '@ashlr/hub', version: '3.25.0'}) : 'canonical launcher'};
+    expect(inspectCurrentPointer(path, {...io, lstat: () => null})).toBeNull();
+    expect(inspectCurrentPointer(path, io)).toEqual({target, dev: 1, ino: 80, ctimeMs: 10, birthtimeMs: 1});
+    for (const suffix of ['package.json', '/bin/ashlr']) {
+      expect(() => inspectCurrentPointer(path, {...io, readBoundedFile: (file: string) => {
+        if (file.startsWith(target) && file.endsWith(suffix)) throw Object.assign(new Error('missing'), {code: 'ENOENT'});
+        return io.readBoundedFile(file);
+      }})).toThrow(/present current release/);
+    }
+    let reads = 0;
+    expect(() => inspectCurrentPointer(path, {...io, lstat: () => ++reads === 1 ? stat : null})).toThrow(/present current release/);
+    expect(() => inspectCurrentPointer(path, {...io, readLink: () => {throw Object.assign(new Error('missing'), {code: 'ENOENT'});}})).toThrow(/present current release/);
+    expect(() => inspectCurrentPointer(path, {...io, readBoundedFile: (file: string) => file === `${target}/bin/ashlr` ? 'foreign launcher' : io.readBoundedFile(file)})).toThrow(/present current release/);
+    expect(() => inspectCurrentPointer(path, {...io, lstat: () => ({...stat, isSymbolicLink: false})})).toThrow(/present current release/);
   });
 });

@@ -209,7 +209,7 @@ describe('emergency authority release truth', () => {
     expect(normalizedDesktop).toMatch(/resident autonomy requires its separate local setup and grant/i);
     const currentVersion = (JSON.parse(read('package.json')) as { version: string }).version;
     expect(desktop).toContain(
-      `https://github.com/ashlrai/ashlr-hub/releases/download/v${currentVersion}/Ashlr_${currentVersion}_aarch64.dmg`,
+      `https://github.com/ashlrai/ashlr-hub/releases/download/v${currentVersion}/Phantom_${currentVersion}_aarch64.dmg`,
     );
     expect(normalizedDesktop).toMatch(/locally signed, not Apple Developer ID notarized/i);
     expect(normalizedDesktop).toMatch(/Windows[^\n]*draft only/i);

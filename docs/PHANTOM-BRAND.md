@@ -10,7 +10,7 @@ mirror and build-provenance bindings are qualified. A new npm identity,
 Existing package imports, CLI commands and saved data must remain compatible
 through either migration. Availability checks do not reserve either name.
 
-The native window, menus and About identify Phantom. The current compatible installation is still `Ashlr.app`; renaming it to `Phantom.app` requires the separately verified installer and updater migration. The bundle identifier, signing identity, custody keys and launch-agent names are retained.
+The native window, menus and About identify Phantom. Published 3.25.0 retains `Ashlr.app`; upcoming source builds `Phantom.app`. The guarded installer requires prior Stop/drain and a closed, identity-verified app, then coordinates the app/current CLI links with a full rollback archive. It refuses conflicting names or uncertain work. The bundle identifier, signing identity, custody keys, grants, data and launch-agent names are retained. This does not activate automatic updates.
 
 ## Mark provenance
 
