@@ -190,9 +190,7 @@ jobs:
       # The complete assigned qualification still runs below.
       - name: Check publication contracts (hermetic)
         if: matrix.os == 'macos-latest'
-        run: >-
-          npm run test:ci -- --maxWorkers=1 --fileParallelism=false test/m515.release-publish-authority-split.test.ts
-          test/documentation-navigation.test.ts test/authority-release-truth.test.ts
+        run: npm run check:release
 
       # Reject generated ownership drift before expensive builds and tests.
       # Every platform still runs all of its assigned checks afterward.
@@ -368,9 +366,7 @@ jobs:
       # Preserve every assigned whole-file check after this quick publication preflight.
       - name: Check publication contracts (hermetic)
         if: matrix.shard == 2
-        run: >-
-          npm run test:ci -- --maxWorkers=1 --fileParallelism=false test/m515.release-publish-authority-split.test.ts
-          test/documentation-navigation.test.ts test/authority-release-truth.test.ts
+        run: npm run check:release
       - name: Build
         run: npm run build
       - name: Test complete Mac general partition
