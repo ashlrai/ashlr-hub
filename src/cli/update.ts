@@ -31,7 +31,7 @@
  */
 
 import { spawnSync, execFileSync } from 'node:child_process';
-import { existsSync, readlinkSync, lstatSync } from 'node:fs';
+import { existsSync, readlinkSync, lstatSync, readFileSync } from 'node:fs';
 import { dirname, resolve, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -39,6 +39,7 @@ import { createRequire } from 'node:module';
 import { serviceStatus } from '../core/daemon/service.js';
 import { assertResidentServiceInstallAuthorized } from '../core/daemon/service-install-authority.js';
 import { queryServeService } from './dashboard.js';
+import { desktopUpdateProfileForPackage, type DesktopUpdateProfile } from '../core/desktop/update-manifest.js';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers (non-TTY safe)
@@ -358,19 +359,47 @@ export function detectChannel(moduleUrl: string = import.meta.url): 'git' | 'npm
   return here.includes(`${sep}node_modules${sep}`) ? 'npm' : 'git';
 }
 
+interface NpmUpdateIdentity { profile: DesktopUpdateProfile; version: string | null }
+
+/** The running package selects a closed profile; a caller cannot name a target. */
+export function resolveNpmUpdateIdentity(metadata: unknown, packageRoot: string): NpmUpdateIdentity {
+  if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) throw new Error('unsupported package identity');
+  const pkg = metadata as Record<string, unknown>;
+  if (!Object.hasOwn(pkg, 'name')) throw new Error('unsupported package identity');
+  const profile = desktopUpdateProfileForPackage(pkg.name);
+  const parts = resolve(packageRoot).split(sep);
+  const installed = parts.lastIndexOf('node_modules');
+  if (installed !== -1 && parts.slice(installed + 1).join('/') !== profile.packageName) throw new Error('inconsistent package identity');
+  return { profile, version: typeof pkg.version === 'string' ? pkg.version : null };
+}
+
+function readNpmUpdateIdentity(repoRoot: string): NpmUpdateIdentity {
+  // A fresh name/version sample avoids require's cached package metadata.
+  return resolveNpmUpdateIdentity(JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')), repoRoot);
+}
+
+function refuseNpmIdentity(jsonMode: boolean): number {
+  const message = 'update blocked: package identity is unsupported, inconsistent or changed';
+  out(message, jsonMode);
+  if (jsonMode) process.stdout.write(JSON.stringify({ channel: 'npm', updated: false, upToDate: null,
+    versionLocal: null, versionLatest: null, message, error: 'npm-package-identity-unavailable' }, null, 2) + '\n');
+  return 1;
+}
+
 /**
  * npm-channel update: check the registry for a newer version (bounded network
  * call, degrades offline to "unknown"); the actual install runs ONLY with
  * --yes — otherwise the command to run is printed.
  */
-async function runNpmChannel(parsed: ParsedUpdateArgs, repoRoot: string): Promise<number> {
+async function runNpmChannel(parsed: ParsedUpdateArgs, repoRoot: string, identity: NpmUpdateIdentity): Promise<number> {
   const jsonMode = parsed.json;
-  const localVersion = readPackageVersion(repoRoot);
+  const localVersion = identity.version;
+  const packageName = identity.profile.packageName;
 
   // `npm view` is a network call — explicit, bounded, read-only.
   let latest: string | null = null;
   try {
-    const res = spawnSync('npm', ['view', '@ashlr/hub', 'version'], {
+    const res = spawnSync('npm', ['view', packageName, 'version'], {
       encoding: 'utf8',
       timeout: 10_000,
     });
@@ -408,7 +437,7 @@ async function runNpmChannel(parsed: ParsedUpdateArgs, repoRoot: string): Promis
     );
   } else {
     out('', false);
-    out(bold('  ashlr update') + gray('  — npm channel'), false);
+    out(bold('  phm update') + gray('  — npm channel'), false);
     out(`  installed: ${cyan(localVersion ?? 'unknown')}`, false);
     out(`  latest:    ${latest === null ? yellow('unknown (registry unreachable)') : cyan(latest)}`, false);
     out('', false);
@@ -418,14 +447,18 @@ async function runNpmChannel(parsed: ParsedUpdateArgs, repoRoot: string): Promis
 
   if (!parsed.yes) {
     if (!jsonMode) {
-      out(`  Update available. Run: ${cyan('npm install -g @ashlr/hub@latest')}`, false);
-      out(dim('  (or re-run `ashlr update --yes` to install it now)'), false);
+      out(`  Update available. Run: ${cyan(`npm install -g ${packageName}@latest`)}`, false);
+      out(dim('  (or re-run `phm update --yes` to install it now)'), false);
       out('', false);
     }
     return 0;
   }
 
-  const install = spawnSync('npm', ['install', '-g', '@ashlr/hub@latest'], {
+  try {
+    const fresh = readNpmUpdateIdentity(repoRoot);
+    if (fresh.profile.name !== identity.profile.name || fresh.version !== identity.version) return refuseNpmIdentity(jsonMode);
+  } catch { return refuseNpmIdentity(jsonMode); }
+  const install = spawnSync('npm', ['install', '-g', `${packageName}@latest`], {
     encoding: 'utf8',
     stdio: jsonMode ? 'pipe' : 'inherit',
     timeout: 300_000,
@@ -455,11 +488,12 @@ function out(line: string, jsonMode: boolean): void {
 
 function printHelp(): void {
   console.log('');
-  console.log(bold('  ashlr update') + dim(' — safe self-update'));
+  console.log(bold('  phm update') + dim(' — safe self-update'));
   console.log('');
   console.log('  ' + bold('Usage:'));
   console.log('');
-  console.log(`    ashlr update ${cyan('[--check]')} ${cyan('[--json]')} ${cyan('[--channel git|npm]')} ${cyan('[--yes]')}`);
+  console.log(`    phm update ${cyan('[--check]')} ${cyan('[--json]')} ${cyan('[--channel git|npm]')} ${cyan('[--yes]')}`);
+  console.log('    Compatible alias: ashlr update');
   console.log('');
   console.log('  ' + bold('Flags:'));
   console.log('');
@@ -507,6 +541,11 @@ export async function cmdUpdate(args: string[]): Promise<number> {
 
   // ── M33: channel routing — npm installs update via the registry, not git ──
   const channel = parsed.channel ?? detectChannel();
+  let npmIdentity: NpmUpdateIdentity | undefined;
+  if (channel === 'npm') {
+    try { npmIdentity = readNpmUpdateIdentity(repoRoot); }
+    catch { return refuseNpmIdentity(jsonMode); }
+  }
   if (!parsed.check) {
     const residentService = serviceStatus();
     const dashboardService = queryServeService();
@@ -557,11 +596,11 @@ export async function cmdUpdate(args: string[]): Promise<number> {
     }
   }
   if (channel === 'npm') {
-    return runNpmChannel(parsed, repoRoot);
+    return runNpmChannel(parsed, repoRoot, npmIdentity!);
   }
 
   out('', jsonMode);
-  out(bold('  ashlr update') + gray(`  —  ${repoRoot}`), jsonMode);
+  out(bold('  phm update') + gray(`  —  ${repoRoot}`), jsonMode);
   out('', jsonMode);
 
   // ── Check git availability ─────────────────────────────────────────────────
@@ -715,7 +754,7 @@ export async function cmdUpdate(args: string[]): Promise<number> {
         `  ${dim(`on ${remoteRef}`)}`,
         jsonMode,
       );
-      out(`  ${dim('Run')}  ${cyan('ashlr update')}  ${dim('to apply.')}`, jsonMode);
+      out(`  ${dim('Run')}  ${cyan('phm update')}  ${dim('to apply.')}`, jsonMode);
     }
     out('', jsonMode);
 
