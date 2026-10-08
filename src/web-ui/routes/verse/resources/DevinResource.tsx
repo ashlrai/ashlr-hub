@@ -211,8 +211,8 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
         <>
           {accountingKnown ? <>
           <p className={styles.creditsHead}>
-            <span className={styles.creditsAmount}>Local budget · {formatAcu(available)} of {formatAcu(budget.acuBudgetTotal)} {usage ? 'available' : 'left'}</span>
-            <span className={styles.pill} data-tone="neutral" title="Your configured allowance minus recorded usage and unresolved exposure; not a provider-reported credit balance or subscription quota.">tracked budget</span>
+            <span className={styles.creditsAmount}>Local safety budget · {formatAcu(available)} of {formatAcu(budget.acuBudgetTotal)} {usage ? 'available' : 'left'}</span>
+            <span className={styles.pill} data-tone="neutral" title="Local defaults or limits set here, minus reported usage and unresolved exposure; not your provider credit balance or subscription allowance.">local limits</span>
             {budget.paused ? <span className={styles.pill} data-tone="warning">paused</span> : null}
           </p>
           <div className={styles.meter} data-level={level} data-single>
@@ -225,8 +225,14 @@ export function DevinResource({ facts = null, bases }: DevinResourceProps = {}) 
             </span>
             <span className={styles.meterValue} aria-hidden="true">{Math.round(leftPercent)}% left</span>
           </div>
+          <p className={styles.fine}>
+            {Number.isFinite(budget.budget.maxAcuPerDay) && budget.budget.maxAcuPerDay >= 0
+              && Number.isFinite(budget.budget.maxAcuPerSession) && budget.budget.maxAcuPerSession >= 0
+              ? `Local limits · ${formatAcu(budget.budget.maxAcuPerDay)}/day · ${formatAcu(budget.budget.maxAcuPerSession)}/session`
+              : 'Local session and daily limits not reported.'}
+          </p>
           <p className={styles.subtle}>
-            {formatMetric(budget.running)} running · {formatMetric(budget.sessionsToday)} today · {formatAcu(budget.acuToday)} today, used or held
+            {formatMetric(budget.running)} running · {formatMetric(budget.sessionsToday)} new sessions today · {formatAcu(budget.acuToday)} counted toward the daily limit
           </p>
           {usage ? <p className={styles.subtle}>
             {formatAcu(usage.reported)} reported usage + adjustment · {formatAcu(usage.held)} held exposure · about {formatMetricUsd(budget.estimatedUsdUsed)} for recorded usage
