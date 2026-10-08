@@ -9,7 +9,7 @@ import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {observeBuild} from '../.github/scripts/ci-pack-smoke.mjs';
 import {computeAuthoritySurface, canonicalJson} from './authority-surface.mjs';
-import {sourceBinding, verifyArtifact} from './hosted-build-artifact.mjs';
+import {sourceBinding, verifyArtifact, inspectCommissionedManualPublication, verifyPublishedManualArtifact} from './hosted-build-artifact.mjs';
 import {desktopPublisherGithub, verifyUpdateAudit} from './finalize-desktop-update.mjs';
 import {getDesktopReleaseToolchain} from './desktop-release-policy.mjs';
 import * as transaction from './local-app-transaction.mjs';
@@ -35,14 +35,15 @@ export function artifactInstallFailure(error) {
   return {state:['rolled-back','rollback-held'].includes(error?.installationState)?error.installationState:'held',
     phase:FAILURE_PHASES.has(error?.installerPhase)?error.installerPhase:'preflight',installationAccepted:false,authorityResumed:false};
 }
-const USAGE = 'node scripts/install-desktop-artifacts.mjs --candidate-source <qualified-checkout> --bundle <signed-hosted-bundle> --artifacts <private-finalizer-output> [--apply]';
+const USAGE = 'node scripts/install-desktop-artifacts.mjs --candidate-source <qualified-checkout> --bundle <signed-hosted-bundle> --artifacts <private-finalizer-output> [--published-release] [--apply]';
 
 export function parseArtifactInstallArguments(argv) {
   if (argv.length === 1 && ['--help','-h'].includes(argv[0])) return {help:true};
-  const flags = {}; let apply = false;
+  const flags = {}; let apply = false, publishedRelease = false;
   for (let i=0;i<argv.length;i++) {
     const flag = argv[i];
     if (flag === '--apply') {assert.equal(apply,false,'duplicate apply');apply=true;continue;}
+    if (flag === '--published-release') {assert.equal(publishedRelease,false,'duplicate published release');publishedRelease=true;continue;}
     assert.ok(['--candidate-source','--bundle','--artifacts'].includes(flag) && !Object.hasOwn(flags,flag),'unknown or duplicate argument');
     const value = argv[++i];
     assert.ok(typeof value === 'string' && value.length > 0 && resolve(value) === value && !value.startsWith('--'),'expected canonical absolute directory');
@@ -50,7 +51,7 @@ export function parseArtifactInstallArguments(argv) {
   }
   assert.equal(Object.keys(flags).length,3,'all three input directories are required');
   assert.ok(new Set(Object.values(flags)).size === 3,'input directories must be distinct');
-  return {candidateRoot:flags['--candidate-source'],bundle:flags['--bundle'],artifacts:flags['--artifacts'],apply};
+  return {candidateRoot:flags['--candidate-source'],bundle:flags['--bundle'],artifacts:flags['--artifacts'],apply,...(publishedRelease?{publishedRelease:true}:{})};
 }
 
 function directory(path, privateMode = true) {
@@ -135,10 +136,16 @@ export function assertPairedHostedProof(manifest,receipt,audit) {
 }
 
 /** Default transport calls the real verifier, not adopt/validate or a saved JSON receipt. */
-export function verifyManualDesktopSource(input,manifest,transport) {
-  const receipt=verifyArtifact(proofInput(input,manifest,transport));
-  const audit=verifyUpdateAudit({root:input.candidateRoot,repository:manifest.repository.nameWithOwner,revision:manifest.source.revision,
-    runId:manifest.qualification.audit.runId,runAttempt:manifest.qualification.audit.runAttempt,read:transport.githubRead});
+export async function verifyManualDesktopSource(input,manifest,transport,envelope) {
+  // Public observation follows Audit, and is coherently reread after original
+  // attestation verification. No prior mutable master anchor is reused.
+  const auditInput={root:input.candidateRoot,repository:manifest.repository.nameWithOwner,revision:manifest.source.revision,
+    runId:manifest.qualification.audit.runId,runAttempt:manifest.qualification.audit.runAttempt,read:transport.githubRead};
+  const historicalAudit=input.publishedRelease?verifyUpdateAudit(auditInput):null;
+  const receipt=input.publishedRelease?verifyPublishedManualArtifact(proofInput(input,manifest,transport),
+    await inspectCommissionedManualPublication({...envelope,githubRead:transport.githubRead,downloadRead:transport.downloadRead})):
+    verifyArtifact(proofInput(input,manifest,transport));
+  const audit=historicalAudit??verifyUpdateAudit(auditInput);
   assertPairedHostedProof(manifest,receipt,audit);
   return receipt;
 }
@@ -150,13 +157,14 @@ export async function inspectDesktopArtifactInstall(input,dependencies) {
   const observed=await boundary('finalized-artifacts',()=>readFinalizedDesktopArtifacts(input.artifacts,dependencies.primitives));
   const source=boundary('source',()=>sourceBinding(input.candidateRoot,observed.manifest.source.revision));
   boundary('source',()=>assert.equal(source.tree,observed.manifest.source.tree,'candidate source tree differs'));
-  const proof=boundary('hosted-proof',()=>verifyManualDesktopSource(input,observed.manifest,dependencies.transport));
+  const proof=await boundary('hosted-proof',()=>verifyManualDesktopSource(input,observed.manifest,dependencies.transport,
+    {manifestText:text(observed.files.get('manifest.json').data),signature:text(observed.files.get('manifest.json.sig').data)}));
   const hosted=ownedBytes(join(input.bundle,observed.manifest.cli.filename),observed.manifest.cli.bytes,false);
   assert.equal(hosted.sha256,observed.manifest.cli.sha256,'not the original hosted package');
   assert.ok(hosted.data.equals(observed.files.get(observed.manifest.cli.filename).data),'paired package differs from original hosted bytes');
   const implementation=await boundary('implementation',async()=>{const value=await dependencies.implementationSnapshot();assert.deepEqual(value,dependencies.initialImplementation,'installer changed since its compiled imports');return value;});
   unchangedArtifacts(observed);
-  const result=Object.freeze({state:'verified-artifacts',version:observed.manifest.version,installationPerformed:false,authorityResumed:false});
+  const result=Object.freeze({state:'verified-artifacts',version:observed.manifest.version,installationPerformed:false,authorityResumed:false,...(input.publishedRelease?{verificationMode:'published-release'}:{})});
   admissions.set(result,{input:{...input},dependencies,observed,source,proof,implementation,hosted,attempted:false});
   return result;
 }
@@ -216,7 +224,8 @@ export async function applyInspectedDesktopArtifacts(result) {
       assert.ok(same(hosted.identity,original.identity) && original.sha256===hosted.sha256,'original hosted package replaced');});
     boundary('late-source',()=>assert.deepEqual(sourceBinding(input.candidateRoot,m.source.revision),source,'qualified source changed'));
     await boundary('late-implementation',async()=>assert.deepEqual(await d.implementationSnapshot(),implementation,'installer implementation changed'));
-    boundary('late-hosted-proof',()=>assert.deepEqual(verifyManualDesktopSource(input,m,d.transport),proof,'fresh hosted proof changed'));
+    await boundary('late-hosted-proof',async()=>assert.deepEqual(await verifyManualDesktopSource(input,m,d.transport,
+      {manifestText:text(observed.files.get('manifest.json').data),signature:text(observed.files.get('manifest.json.sig').data)}),proof,'fresh hosted proof changed'));
     // Network/signature reads cannot leave bytes trusted from before the read.
     boundary('late-artifacts',()=>unchangedArtifacts(observed));
     boundary('late-artifacts',()=>{const after=ownedBytes(join(input.bundle,m.cli.filename),m.cli.bytes,false);

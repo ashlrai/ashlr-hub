@@ -11,14 +11,25 @@ import {authoritySurfaceDigest,verifyAuthoritySurfaceAt} from '../src/core/autho
 import {readPinnedRuntimeArchive,extractPinnedRuntimeArchive} from '../src/core/local-runtime/archive.js';
 import {verifyUpdateManifest,verifyCompatibleUpdateManifest,desktopUpdateProfileForPackage,getDesktopUpdateProfile,verifyMinisign,verifyUpdateBundleRecord} from '../src/core/desktop/update-manifest.js';
 import {inspectSignedAppArchive,extractSignedAppArchive,verifyInstalledRuntimeArchive} from '../src/core/desktop/qualified-update.js';
+import {qualifiedFixture} from '../.github/tests/helpers/hosted-artifact-fixture.mjs';
 import {artifactInstallFailure,applyInspectedDesktopArtifacts,assertPairedHostedProof,inspectDesktopArtifactInstall,parseArtifactInstallArguments,readFinalizedDesktopArtifacts,verifyManualDesktopSource} from '../scripts/install-desktop-artifacts.mjs';
 import type {CompatibleUpdateManifest,DesktopUpdateProfileName,UpdateTrust} from '../src/core/desktop/update-manifest.js';
 
-const ports=vi.hoisted(()=>({verify:vi.fn(),audit:vi.fn(),source:vi.fn(),createIo:vi.fn(),spawn:vi.fn()}));
-vi.mock('../scripts/hosted-build-artifact.mjs',async actual=>({...await actual<any>(),verifyArtifact:ports.verify,sourceBinding:ports.source}));
+const ownPorts=vi.hoisted(()=>({trust:null as any,dirty:false}));
+const ports=vi.hoisted(()=>({verify:vi.fn(),audit:vi.fn(),source:vi.fn(),createIo:vi.fn(),spawn:vi.fn(),publication:vi.fn(),historical:vi.fn()}));
+vi.mock('../scripts/hosted-build-artifact.mjs',async actual=>({...await actual<any>(),verifyArtifact:ports.verify,sourceBinding:ports.source,inspectCommissionedManualPublication:ports.publication,verifyPublishedManualArtifact:ports.historical}));
 vi.mock('../scripts/finalize-desktop-update.mjs',async actual=>({...await actual<any>(),verifyUpdateAudit:ports.audit}));
 vi.mock('../scripts/local-app-transaction.mjs',async actual=>({...await actual<any>(),createLocalAppTransactionIo:ports.createIo}));
-vi.mock('node:child_process',async actual=>({...await actual<any>(),spawnSync:ports.spawn}));
+vi.mock('node:child_process',async actual=>{const real=await actual<any>();return {...real,spawnSync:(bin:string,args:string[],options:any)=>bin==='git'?real.spawnSync(bin,args,options):ports.spawn(bin,args,options),execFileSync:(bin:string,args:string[],options:any)=>{
+  if(bin==='git' && options?.cwd===resolve(import.meta.dirname,'..') && args[0]==='status')return ownPorts.dirty?' M synthetic-implementation-drift':'';
+  return real.execFileSync(bin,args,options);
+}};});
+// Only the fixed implementation closure ports are inert. Candidate source,
+// all fifteen roles, bytes, attestations and signature crypto remain real.
+vi.mock('../.github/scripts/ci-pack-smoke.mjs',async actual=>{const real=await actual<any>();return {...real,observeBuild:(root:string,revision:string)=>root===resolve(import.meta.dirname,'..')?{fixture:'inert own compiled build port',revision}:real.observeBuild(root,revision)};});
+vi.mock('../dist/core/desktop/update-trust.js',()=>({getDesktopUpdateTrust:()=>ownPorts.trust}));
+const realHosted=await vi.importActual<any>('../scripts/hosted-build-artifact.mjs');
+const finalizers:Array<()=>void>=[];
 const originalTransaction=await vi.importActual<any>('../scripts/local-app-transaction.mjs');
 const roots:string[]=[];
 const hash=(b:Uint8Array)=>createHash('sha256').update(b).digest('hex');
@@ -40,8 +51,8 @@ function tar(rows:{path:string;data:Buffer|string;mode?:number;directory?:boolea
 }
 function write(path:string,data:Buffer|string,mode=0o600) {fs.mkdirSync(dirname(path),{recursive:true,mode:0o700});fs.writeFileSync(path,data,{mode});fs.chmodSync(path,mode);}
 function fileIdentity(path:string) {const s=fs.lstatSync(path);return {dev:s.dev,ino:s.ino,ctimeMs:s.ctimeMs,mode:s.mode};}
-beforeEach(()=>{for(const spy of Object.values(ports))spy.mockReset();});
-afterEach(()=>{for(const root of roots.splice(0))fs.rmSync(root,{recursive:true,force:true});});
+beforeEach(()=>{for(const spy of Object.values(ports))spy.mockReset();ownPorts.dirty=false;});
+afterEach(()=>{for(const fn of finalizers.splice(0).reverse())fn();for(const root of roots.splice(0))fs.rmSync(root,{recursive:true,force:true});});
 
 function fixture(profileName:DesktopUpdateProfileName='legacy-v1',currentPackageName='@ashlr/hub',archivePackageName?:string) {
   const profile=getDesktopUpdateProfile(profileName);
@@ -139,8 +150,34 @@ describe.skipIf(process.platform==='win32')('manual original paired artifact ins
     expect(parseArtifactInstallArguments(['--apply','--candidate-source','/a','--bundle','/b','--artifacts','/c']).apply).toBe(true);
     for(const args of [['--force'],['--proof','/fake'],['--candidate-source','relative'],['--candidate-source','/a','--bundle','/a','--artifacts','/c'],['--apply','--apply']])expect(()=>parseArtifactInstallArguments(args)).toThrow();
   });
-  it('uses direct normal verifier/Audit forwarding of signed run/source policy, not caller proof',()=> {
-    const f=fixture();verifyManualDesktopSource({...f.input,policy:{runId:999},receipt:f.proof},f.m,f.deps.transport);
+  it('published-release is an explicit duplicate-refusing manual flag, never a key/profile/proof override',()=> {
+    expect(parseArtifactInstallArguments(['--published-release','--candidate-source','/a','--bundle','/b','--artifacts','/c']).publishedRelease).toBe(true);
+    expect(()=>parseArtifactInstallArguments(['--published-release','--published-release'])).toThrow(/duplicate/);
+    for(const flag of ['--trust','--public-key','--historical-proof','--profile'])expect(()=>parseArtifactInstallArguments([flag,'/fake'])).toThrow();
+  });
+  it('forwards public admission at all four real transaction boundaries without hosted adoption, clears no Stop and resumes no authority',async()=> {
+    const f=fixture(),input={...f.input,publishedRelease:true},cap=Object.freeze({});
+    ports.publication.mockImplementation(async envelope=>{verifyCompatibleUpdateManifest({manifestText:envelope.manifestText,signature:envelope.signature},trust);return cap;});
+    ports.historical.mockImplementation((_input,token)=>{expect(token).toBe(cap);return structuredClone({...f.proof,publication:{digest:'stable original signed release'}});});
+    const inspected=await inspectDesktopArtifactInstall(input,f.deps);
+    expect(inspected).toMatchObject({verificationMode:'published-release',installationPerformed:false});
+    expect(await applyInspectedDesktopArtifacts(inspected)).toMatchObject({state:'installed',authorityResumed:false});
+    expect(ports.publication).toHaveBeenCalledTimes(4);expect(ports.historical).toHaveBeenCalledTimes(4);expect(ports.verify).not.toHaveBeenCalled();expect(ports.audit).toHaveBeenCalledTimes(4);
+    expect(fs.existsSync(join(f.home,'.ashlr/KILL'))).toBe(true);
+    expect(ports.publication.mock.calls.every(([envelope])=>Object.keys(envelope).sort().join(',')==='downloadRead,githubRead,manifestText,signature')).toBe(true);
+  });
+  it.each([3,4])('published fresh proof refusal at publication%d restores the original app and pointer with no resume',async contact=> {
+    const f=fixture(),input={...f.input,publishedRelease:true},originalApp=f.io.appInventory('/Applications/Phantom.app');
+    ports.publication.mockImplementation(async envelope=>{verifyCompatibleUpdateManifest({manifestText:envelope.manifestText,signature:envelope.signature},trust);return Object.freeze({});});
+    ports.historical.mockImplementation(()=>{if(ports.historical.mock.calls.length===contact)throw new Error('fresh public ancestry/protection refused');return structuredClone({...f.proof,publication:{digest:'stable original signed release'}});});
+    const inspected=await inspectDesktopArtifactInstall(input,f.deps);
+    await expect(applyInspectedDesktopArtifacts(inspected)).rejects.toThrow(/fresh public ancestry/);
+    expect(fs.readlinkSync(f.current)).toBe(f.old);expect(f.io.appInventory('/Applications/Phantom.app')).toBe(originalApp);
+    expect([...f.stages.keys()].map(owner=>JSON.parse(fs.readFileSync(join(f.applications,basename(owner),'transaction.json'),'utf8')).phase)).toEqual(['rolled-back']);
+    expect(fs.existsSync(join(f.home,'.ashlr/KILL'))).toBe(true);
+  });
+  it('uses direct normal verifier/Audit forwarding of signed run/source policy, not caller proof',async()=> {
+    const f=fixture();await verifyManualDesktopSource({...f.input,policy:{runId:999},receipt:f.proof},f.m,f.deps.transport);
     expect(ports.verify).toHaveBeenCalledWith({root:f.candidateRoot,revision:f.m.source.revision,bundle:f.bundle,policy:{runId:10,runAttempt:1,attestorSha:'a'.repeat(40),attestorRun:20,attestorAttempt:1},githubRead:f.deps.transport.githubRead,attestRun:f.deps.transport.attestRun});
     expect(ports.audit).toHaveBeenCalledWith({root:f.candidateRoot,repository:'ashlrai/ashlr-hub',revision:f.m.source.revision,runId:30,runAttempt:1,read:f.deps.transport.githubRead});
   });
@@ -363,5 +400,86 @@ describe.skipIf(process.platform==='win32')('manual closed identity bridge',()=>
     const f=fixture('canonical-v2','@ashlr/hub','@ashlr/hub');
     await expect(inspectDesktopArtifactInstall(f.input,f.deps)).rejects.toThrow(/local runtime archive: package name,/);
     expect(ports.verify).not.toHaveBeenCalled();expect(ports.createIo).not.toHaveBeenCalled();
+  });
+});
+
+/** Original full hosted validator + genuine test-key signature, with only
+ * official API/attestation and the fixed own implementation ports inert. */
+function publishedFixture() {
+  const f=fixture(), hosted=qualifiedFixture({after:(fn:()=>void)=>finalizers.push(fn)});
+  const receipt=realHosted.verifyArtifact(hosted.options), m=structuredClone(f.m);
+  const original=JSON.parse(fs.readFileSync(join(hosted.out,'manifest.json'),'utf8'));
+  m.version='3.24.3';m.source=receipt.source;
+  m.cli={...m.cli,filename:original.package.filename,url:`https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.3/${original.package.filename}`,bytes:original.package.bytes,sha256:original.package.sha256};
+  m.app.filename='Phantom_3.24.3_aarch64.app.tar.gz';m.app.url=`https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.3/${m.app.filename}`;
+  m.qualification={manifestSha256:receipt.manifestSha256,archiveSha256:receipt.archiveSha256,packageSha256:receipt.packageSha256,qualificationSha256:receipt.qualificationSha256,
+    producer:{runId:100,runAttempt:1,eventSha:receipt.official.eventSha},attestor:receipt.attestor,audit:{runId:400,runAttempt:1,revision:m.source.revision}};
+  let manifestText=canonicalJson(m), signed=signature(Buffer.from(manifestText)), master='d'.repeat(40);
+  ownPorts.trust=trust;
+  const rules=['pull_request','non_fast_forward','deletion'].map(type=>({type,ruleset_id:1,ruleset_source_type:'Repository',ruleset_source:'ashlrai/ashlr-hub',
+    ...(type==='pull_request'?{parameters:{required_approving_review_count:0,dismiss_stale_reviews_on_push:true,require_code_owner_review:true,require_last_push_approval:false,required_review_thread_resolution:false}}:{})}));
+  const assets=()=>['manifest.json','manifest.json.sig',m.app.filename,m.cli.filename].map((name,i)=>({id:i+1,name,state:'uploaded',
+    size:name==='manifest.json'?Buffer.byteLength(manifestText):name==='manifest.json.sig'?Buffer.byteLength(signed):name===m.app.filename?m.app.bytes:m.cli.bytes,
+    digest:`sha256:${name==='manifest.json'?hash(Buffer.from(manifestText)):name==='manifest.json.sig'?hash(Buffer.from(signed)):name===m.app.filename?m.app.sha256:m.cli.sha256}`,
+    browser_download_url:`https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.3/${name}`}));
+  const release={id:500,tag_name:'v3.24.3',draft:false,prerelease:false,published_at:'2026-10-08T00:00:00Z'};
+  const read=vi.fn((endpoint:string):any=> {
+    if(endpoint.endsWith('/branches/master'))return {name:'master',protected:true,commit:{sha:master}};
+    if(endpoint.includes('/rules/branches/master?'))return rules;
+    if(endpoint.includes('/compare/'))return {base_commit:{sha:receipt.attestor.revision},merge_base_commit:{sha:receipt.attestor.revision},status:'ahead',behind_by:0,ahead_by:1,total_commits:1};
+    if(endpoint.includes('/releases/tags/'))return release;
+    if(endpoint.includes('/releases/500/assets?'))return assets();
+    if(endpoint.includes('/git/ref/tags/'))return {ref:'refs/tags/v3.24.3',object:{type:'commit',sha:m.source.revision}};
+    return hosted.options.githubRead(endpoint);
+  });
+  const download=vi.fn(async(url:string)=> {if(url.endsWith('/manifest.json'))return Buffer.from(manifestText);if(url.endsWith('/manifest.json.sig'))return Buffer.from(signed);throw new Error('unexpected fixture download');});
+  const envelope=()=>({manifestText,signature:signed,githubRead:read,downloadRead:download});
+  return {f,hosted,m,receipt,rules,release,read,download,envelope,setMaster:(sha:string)=>{master=sha;},changeEnvelope:()=>{manifestText+='\n';signed=signature(Buffer.from(manifestText));}};
+}
+
+describe.skipIf(process.platform==='win32')('commissioned public historical manual proof',()=> {
+  it('runs genuine complete original evidence after master advances; historical success cannot authorize either hosted adopter or a replay',async()=> {
+    const p=publishedFixture();
+    const cap=await realHosted.inspectCommissionedManualPublication(p.envelope());
+    const proof=realHosted.verifyPublishedManualArtifact({...p.hosted.options,githubRead:p.read},cap);
+    expect(proof.publication.tag).toBe(p.m.source.revision);expect(proof.source).toEqual(p.receipt.source);
+    expect(()=>realHosted.adoptArtifact(proof)).toThrow(/live verified capability/);
+    expect(()=>realHosted.validateAdoptedArtifact(proof)).toThrow(/live verified capability/);
+    expect(()=>realHosted.verifyPublishedManualArtifact(p.hosted.options,cap)).toThrow(/fresh commissioned capability/);
+    expect(()=>realHosted.verifyArtifact({...p.hosted.options,githubRead:p.read})).toThrow(/not current trusted master/);
+    expect(p.hosted.calls).toHaveLength(6);
+    // A fresh descendant anchor changes diagnostics, not immutable public proof.
+    p.setMaster('e'.repeat(40));const fresh=await realHosted.inspectCommissionedManualPublication(p.envelope());
+    expect(realHosted.verifyPublishedManualArtifact({...p.hosted.options,githubRead:p.read},fresh)).toEqual(proof);
+  });
+  it.each(['tag','rules','compare','release','asset','signature','public-bytes','pagination','implementation'])('holds malformed/moved %s before issuing authority',async kind=> {
+    const p=publishedFixture(),read=p.read.getMockImplementation()!;
+    p.read.mockImplementation((endpoint:string)=>{
+      const value=read(endpoint);
+      if(kind==='tag' && endpoint.includes('/git/ref/'))return {...value,object:{type:'commit',sha:'f'.repeat(40)}};
+      if(kind==='rules' && endpoint.includes('/rules/'))return p.rules.slice(1);
+      if(kind==='compare' && endpoint.includes('/compare/'))return {...value,merge_base_commit:{sha:'f'.repeat(40)}};
+      if(kind==='release' && endpoint.includes('/releases/tags/'))return {...value,draft:true};
+      if(kind==='asset' && endpoint.includes('/assets?'))return value.slice(1);
+      if(kind==='pagination' && endpoint.includes('/rules/'))return Array.from({length:100},()=>p.rules[0]);
+      return value;
+    });
+    if(kind==='public-bytes')p.download.mockResolvedValue(Buffer.from('changed'));
+    if(kind==='implementation')p.download.mockImplementation(async()=>{ownPorts.dirty=true;return Buffer.from(p.envelope().manifestText);});
+    const envelope=p.envelope();if(kind==='signature')envelope.signature='invalid';
+    await expect(realHosted.inspectCommissionedManualPublication(envelope)).rejects.toThrow();
+  });
+  it('refuses current master movement within one public observation',async()=> {
+    const p=publishedFixture();p.download.mockImplementation(async(url:string)=>{p.setMaster('e'.repeat(40));return Buffer.from(url.endsWith('/manifest.json')?p.envelope().manifestText:p.envelope().signature);});
+    await expect(realHosted.inspectCommissionedManualPublication(p.envelope())).rejects.toThrow(/changed during observation/);
+  });
+  it('refuses expired original evidence even for a valid commissioned public release',async()=> {
+    const q=publishedFixture(),cap=await realHosted.inspectCommissionedManualPublication(q.envelope()),read=q.read.getMockImplementation()!;
+    q.read.mockImplementation((endpoint:string)=>endpoint.includes('/artifacts/')?{...read(endpoint),expired:true}:read(endpoint));
+    expect(()=>realHosted.verifyPublishedManualArtifact({...q.hosted.options,githubRead:q.read},cap)).toThrow();
+  });
+  it('refuses current master movement during original attestation verification',async()=> {
+    const r=publishedFixture(),fresh=await realHosted.inspectCommissionedManualPublication(r.envelope()),attest=r.hosted.options.attestRun;
+    expect(()=>realHosted.verifyPublishedManualArtifact({...r.hosted.options,githubRead:r.read,attestRun:(...args:any[])=>{const value=attest(...args);r.setMaster('e'.repeat(40));return value;}},fresh)).toThrow(/changed during original proof/);
   });
 });
