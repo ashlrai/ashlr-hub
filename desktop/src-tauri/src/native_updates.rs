@@ -235,6 +235,33 @@ impl VerifiedManifest {
     }
 }
 pub fn parse_manifest(raw: &str, repository: &str) -> Result<Value, String> {
+    parse_manifest_profile(raw, repository, 1, "@ashlr/hub", "ashlr-hub")
+}
+
+// Discovery redirects carry bytes, not trust. Only these inseparable signed
+// schema/repository/package profiles can cross the product identity migration.
+pub fn parse_compatible_manifest(raw: &str) -> Result<Value, String> {
+    need(
+        !raw.is_empty() && raw.len() <= MAX_MANIFEST && raw.is_ascii(),
+        "invalid-manifest",
+    )?;
+    let value: Value = serde_json::from_str(raw).map_err(|_| held("invalid-manifest"))?;
+    match value["schemaVersion"].as_u64() {
+        Some(1) => parse_manifest_profile(raw, "ashlrai/ashlr-hub", 1, "@ashlr/hub", "ashlr-hub"),
+        Some(2) => {
+            parse_manifest_profile(raw, "ashlrai/phantom", 2, "@ashlr/phantom", "ashlr-phantom")
+        }
+        _ => Err(held("invalid-manifest")),
+    }
+}
+
+fn parse_manifest_profile(
+    raw: &str,
+    repository: &str,
+    schema: u64,
+    package: &str,
+    archive_prefix: &str,
+) -> Result<Value, String> {
     need(
         !raw.is_empty() && raw.len() <= MAX_MANIFEST && raw.is_ascii(),
         "invalid-manifest",
@@ -261,7 +288,7 @@ pub fn parse_manifest(raw: &str, repository: &str) -> Result<Value, String> {
         ],
     )?;
     need(
-        m["schemaVersion"].as_u64() == Some(1)
+        m["schemaVersion"].as_u64() == Some(schema)
             && m["kind"] == "phantom-paired-release"
             && m["channel"] == "stable"
             && m["platform"] == "darwin-aarch64",
@@ -312,7 +339,7 @@ pub fn parse_manifest(raw: &str, repository: &str) -> Result<Value, String> {
         (
             "cli",
             vec!["packageName", "binName"],
-            format!("ashlr-hub-{version}.tgz"),
+            format!("{archive_prefix}-{version}.tgz"),
             64 * 1024 * 1024,
         ),
     ] {
@@ -346,7 +373,7 @@ pub fn parse_manifest(raw: &str, repository: &str) -> Result<Value, String> {
         "invalid-manifest",
     )?;
     need(
-        m["cli"]["packageName"] == "@ashlr/hub" && m["cli"]["binName"] == "ashlr",
+        m["cli"]["packageName"] == package && m["cli"]["binName"] == "ashlr",
         "invalid-manifest",
     )?;
     let q = &m["qualification"];
@@ -414,8 +441,32 @@ pub fn verify_manifest(
         value,
     })
 }
+pub fn verify_compatible_manifest(
+    envelope: Envelope,
+    key: &str,
+) -> Result<VerifiedManifest, String> {
+    need(
+        envelope.manifest_text.len() <= MAX_MANIFEST,
+        "invalid-manifest",
+    )?;
+    verify_minisign(envelope.manifest_text.as_bytes(), &envelope.signature, key)?;
+    let value = parse_compatible_manifest(&envelope.manifest_text)?;
+    Ok(VerifiedManifest {
+        digest: sha(envelope.manifest_text.as_bytes()),
+        envelope,
+        value,
+    })
+}
+
 pub fn sha(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+pub fn discovery_matches(latest: &Value, manifest: &VerifiedManifest) -> bool {
+    let platform = &latest["platforms"]["darwin-aarch64"];
+    latest["version"].as_str() == Some(manifest.version())
+        && platform["url"].as_str() == Some(manifest.app_url())
+        && platform["signature"].as_str() == Some(manifest.app_signature())
 }
 pub fn check_app(manifest: &VerifiedManifest, bytes: &[u8], key: &str) -> Result<(), String> {
     need(
@@ -563,6 +614,27 @@ pub fn reload_stage(
     key: &str,
     repository: &str,
 ) -> Result<VerifiedManifest, String> {
+    reload_stage_with_verifier(home, id, key, |envelope| {
+        verify_manifest(envelope, key, repository)
+    })
+}
+
+pub fn reload_compatible_stage(
+    home: &Path,
+    id: &str,
+    key: &str,
+) -> Result<VerifiedManifest, String> {
+    reload_stage_with_verifier(home, id, key, |envelope| {
+        verify_compatible_manifest(envelope, key)
+    })
+}
+
+fn reload_stage_with_verifier(
+    home: &Path,
+    id: &str,
+    key: &str,
+    verify: impl FnOnce(Envelope) -> Result<VerifiedManifest, String>,
+) -> Result<VerifiedManifest, String> {
     need(stage_id(id), "unsafe-stage")?;
     let mut parent = home.to_path_buf();
     for part in [".ashlr", "updates", "staged", id] {
@@ -576,14 +648,10 @@ pub fn reload_stage(
     .map_err(|_| held("invalid-manifest"))?;
     let sig = String::from_utf8(read_private(&parent.join("manifest.sig"), 8192)?)
         .map_err(|_| held("invalid-signature"))?;
-    let m = verify_manifest(
-        Envelope {
-            manifest_text: raw,
-            signature: sig,
-        },
-        key,
-        repository,
-    )?;
+    let m = verify(Envelope {
+        manifest_text: raw,
+        signature: sig,
+    })?;
     let bytes = read_private(&parent.join("app.tar.gz"), m.app_bytes())?;
     check_app(&m, &bytes, key)?;
     Ok(m)
@@ -669,6 +737,7 @@ const HOST_REASONS: &[&str] = &[
     "installed-app-unavailable",
     "installed-app-unverified",
     "installed-current-unverified",
+    "candidate-identity-regression",
     "invalid-stage",
     "native-parent-changed-or-unknown",
     "native-parent-proof-timeout",
@@ -794,6 +863,15 @@ mod tests {
         assert!(host_result(&good.replace("false", "true"), "3.25.2").is_err());
         assert!(host_result(good, "3.25.3").is_err());
         assert!(host_result(&good.replace("null", r#""private error""#), "3.25.2").is_err());
+        let regression = good
+            .replace("waiting-native-exit", "held")
+            .replace("null", r#""candidate-identity-regression""#);
+        let result = host_result(&regression, "3.25.2").unwrap();
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("candidate-identity-regression")
+        );
+        assert!(!ready_to_handoff(&result));
     }
     #[test]
     fn stage_ids_and_versions_are_closed() {
@@ -838,6 +916,76 @@ mod tests {
       "cli":{"filename":format!("ashlr-hub-{v}.tgz"),"url":format!("https://github.com/{repo}/releases/download/v{v}/ashlr-hub-{v}.tgz"),"bytes":42,"sha256":h,"signature":sig,"packageName":"@ashlr/hub","binName":"ashlr"},
       "qualification":{"manifestSha256":h,"archiveSha256":h,"packageSha256":h,"qualificationSha256":h,"producer":{"runId":1,"runAttempt":1,"eventSha":rev},"attestor":{"runId":2,"runAttempt":1,"revision":rev},"audit":{"runId":3,"runAttempt":1,"revision":rev}}})
     }
+    #[test]
+    fn compatible_profiles_reject_every_mixed_identity_tuple() {
+        for schema in [1, 2] {
+            for repository in ["ashlrai/ashlr-hub", "ashlrai/phantom"] {
+                for package in ["@ashlr/hub", "@ashlr/phantom"] {
+                    for prefix in ["ashlr-hub", "ashlr-phantom"] {
+                        let mut m = manifest_fixture();
+                        m["schemaVersion"] = serde_json::json!(schema);
+                        m["repository"]["nameWithOwner"] = serde_json::json!(repository);
+                        m["cli"]["packageName"] = serde_json::json!(package);
+                        m["cli"]["filename"] = serde_json::json!(format!("{prefix}-3.25.2.tgz"));
+                        for kind in ["app", "cli"] {
+                            m[kind]["url"] = serde_json::json!(format!(
+                                "https://github.com/{repository}/releases/download/v3.25.2/{}",
+                                m[kind]["filename"].as_str().unwrap()
+                            ));
+                        }
+                        let expected = (schema == 1
+                            && repository == "ashlrai/ashlr-hub"
+                            && package == "@ashlr/hub"
+                            && prefix == "ashlr-hub")
+                            || (schema == 2
+                                && repository == "ashlrai/phantom"
+                                && package == "@ashlr/phantom"
+                                && prefix == "ashlr-phantom");
+                        let raw = canonical(m);
+                        assert_eq!(parse_compatible_manifest(&raw).is_ok(), expected);
+                        if schema == 2 {
+                            assert!(parse_manifest(&raw, repository).is_err());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compatible_profiles_preserve_closed_fields_and_original_bytes() {
+        let m = manifest_fixture();
+        let raw = canonical(m.clone());
+        assert_eq!(
+            parse_compatible_manifest(&raw).unwrap(),
+            parse_manifest(&raw, "ashlrai/ashlr-hub").unwrap()
+        );
+        for (pointer, value) in [
+            ("/schemaVersion", serde_json::json!(3)),
+            (
+                "/repository/nameWithOwner",
+                serde_json::json!("attacker/phantom"),
+            ),
+            ("/repository/repositoryId", serde_json::json!(1)),
+            ("/repository/repositoryNodeId", serde_json::json!("R_other")),
+            ("/repository/ownerId", serde_json::json!(1)),
+            ("/repository/ownerLogin", serde_json::json!("attacker")),
+            ("/repository/defaultBranch", serde_json::json!("other")),
+            ("/cli/binName", serde_json::json!("phm")),
+            ("/channel", serde_json::json!("preview")),
+            ("/platform", serde_json::json!("darwin-x86_64")),
+        ] {
+            let mut changed = m.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert!(parse_compatible_manifest(&canonical(changed)).is_err());
+        }
+        let mut extra = m;
+        extra["profile"] = serde_json::json!("canonical");
+        assert!(parse_compatible_manifest(&canonical(extra)).is_err());
+        assert!(parse_compatible_manifest(&(raw.clone() + "\n")).is_err());
+        assert!(parse_compatible_manifest(&raw.replacen("{", "{\"schemaVersion\":1,", 1)).is_err());
+    }
+
     #[test]
     fn manifest_is_closed_canonical_exact_repository_and_source() {
         let m = manifest_fixture();
@@ -926,5 +1074,52 @@ mod tests {
         let mut e: Envelope = serde_json::from_value(f["envelope"].clone()).unwrap();
         e.manifest_text.push(' ');
         assert!(verify_manifest(e, f["publicKey"].as_str().unwrap(), "ashlrai/ashlr-hub").is_err());
+    }
+
+    #[test]
+    fn genuine_signed_profiles_reload_and_bind_discovery_without_endpoint_authority() {
+        for raw in [
+            include_str!("../../../test/fixtures/desktop-update-paired-tauri.json"),
+            include_str!("../../../test/fixtures/desktop-update-paired-phantom-tauri.json"),
+        ] {
+            let f: Value = serde_json::from_str(raw).unwrap();
+            let key = f["publicKey"].as_str().unwrap();
+            let envelope: Envelope = serde_json::from_value(f["envelope"].clone()).unwrap();
+            let manifest = verify_compatible_manifest(envelope.clone(), key).unwrap();
+            let app = STANDARD.decode(f["appBase64"].as_str().unwrap()).unwrap();
+            let home =
+                std::env::temp_dir().join(format!("phantom-compatible-stage-test-{}", random_id()));
+            fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+            let id = persist_stage(&home, &manifest, &app, key).unwrap();
+            let loaded = reload_compatible_stage(&home, &id, key).unwrap();
+            assert_eq!(loaded.digest, manifest.digest);
+            let discovery = serde_json::json!({"version":manifest.version(), "platforms":{"darwin-aarch64":{"url":manifest.app_url(), "signature":manifest.app_signature()}}});
+            assert!(discovery_matches(&discovery, &manifest));
+            for pointer in [
+                "/version",
+                "/platforms/darwin-aarch64/url",
+                "/platforms/darwin-aarch64/signature",
+            ] {
+                let mut changed = discovery.clone();
+                *changed.pointer_mut(pointer).unwrap() = serde_json::json!("different");
+                assert!(!discovery_matches(&changed, &manifest));
+            }
+            let mut changed = envelope;
+            changed.manifest_text.push(' ');
+            assert_eq!(
+                verify_compatible_manifest(changed, key).unwrap_err(),
+                held("invalid-signature")
+            );
+            if manifest.value["schemaVersion"] == 2 {
+                assert!(reload_stage(&home, &id, key, "ashlrai/phantom").is_err());
+            }
+            fs::write(
+                home.join(STAGE_RELATIVE).join(&id).join("app.tar.gz"),
+                b"corrupt",
+            )
+            .unwrap();
+            assert!(reload_compatible_stage(&home, &id, key).is_err());
+            fs::remove_dir_all(home).unwrap();
+        }
     }
 }

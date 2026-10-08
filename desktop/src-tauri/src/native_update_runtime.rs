@@ -345,7 +345,7 @@ mod platform {
     }
     async fn check(app: AppHandle, updates: Updates, epoch: u64) {
         let result = async {
-            let (key, endpoint, repository) = trusted_config()?;
+            let (key, endpoint, _repository) = trusted_config()?;
             if std::env::consts::ARCH != "aarch64" {
                 return Err("unsupported-platform");
             }
@@ -362,7 +362,7 @@ mod platform {
                 policy::stable_version(env!("CARGO_PKG_VERSION")).ok_or("invalid-manifest")?;
             let mut remembered = None;
             if let Some(id) = policy::remembered_stage(&home).map_err(|_| "unsafe-stage")? {
-                let m = policy::reload_stage(&home, &id, &key, &repository)
+                let m = policy::reload_compatible_stage(&home, &id, &key)
                     .map_err(|_| "unsafe-stage")?;
                 let version = policy::stable_version(m.version()).ok_or("invalid-manifest")?;
                 if version >= current {
@@ -412,13 +412,9 @@ mod platform {
             let latest: Value = serde_json::from_slice(&raw).map_err(|_| "invalid-manifest")?;
             let envelope: Envelope = serde_json::from_value(latest["phantom"].clone())
                 .map_err(|_| "invalid-manifest")?;
-            let manifest = policy::verify_manifest(envelope, &key, &repository)
+            let manifest = policy::verify_compatible_manifest(envelope, &key)
                 .map_err(|_| "invalid-manifest")?;
-            let platform = &latest["platforms"]["darwin-aarch64"];
-            if latest["version"].as_str() != Some(manifest.version())
-                || platform["url"].as_str() != Some(manifest.app_url())
-                || platform["signature"].as_str() != Some(manifest.app_signature())
-            {
+            if !policy::discovery_matches(&latest, &manifest) {
                 return Err("invalid-manifest");
             }
             let next = policy::stable_version(manifest.version()).ok_or("invalid-manifest")?;
