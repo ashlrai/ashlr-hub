@@ -410,7 +410,7 @@
           For individual engineers and engineering teams. Work with your agents in a chat,
           or give eligible fleet work a clear outcome. Bring your own accounts, local models and projects.
         </p>
-        <p class="lede-tail">Start with one project and a small, checkable task. Review the changes and results; add signed unattended work when you are ready. Both modes use your accounts and projects.</p>
+        <p class="lede-tail">Connect supported CLI accounts, API providers and local models. Guide a conversation or delegate an outcome; keep the work, changes and evidence together.</p>
         <div class="cta-row">
           <a class="btn btn-primary" href="#start-individual">Start on your own</a>
           <a class="btn btn-primary" href="#start-team">Start with your team</a>
@@ -429,7 +429,7 @@
           </div>
           <div class="journey-panel" id="journey-ask" role="tabpanel" aria-labelledby="journey-tab-ask" tabindex="0">
             <h3>Think, build and steer together.</h3>
-            <p>Choose a project and describe the work. Automatic selects a connected account and model; Advanced lets you choose an explicit override.</p>
+            <p>Choose a project and describe the work. Automatic selects an eligible account and model using task fit, capacity and preferences; Advanced lets you choose an explicit override. Manager adds planning, delegation and review under existing fleet authority.</p>
             <div class="journey-flow" role="group" aria-label="Inspect stages: Interactive chat to reviewed changes"><button type="button" aria-pressed="true" data-inspect="Choose a project and describe the work. Automatic selects a resource; Advanced holds account and model overrides. Your draft stays editable.">Your chat</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="Inspect the tools and context reported for the turn. Steer the conversation while the agent works.">Agent + tools</button><i aria-hidden="true">→</i><button type="button" aria-pressed="false" data-inspect="Read the changes, checkpoints and session evidence. You decide the next step.">Your review</button></div>
             <p class="journey-inspect" aria-live="polite">Choose a project and describe the work. Automatic selects a resource; Advanced holds account and model overrides. Your draft stays editable.</p>
             <p class="journey-end">Switch workspaces without losing your drafts or restarting a session.</p>
@@ -600,12 +600,12 @@
   </div>
   <div class="pw-toolkit" aria-label="Open-source engineering toolkit">
     <div><span class="pw-toolkit-label">The open-source toolkit</span><p>Tools with a job. One place to bring them together.</p></div>
-    <a href="https://github.com/ashlrai/phantom-secrets"><img src="/assets/phantom-mark.svg" width="24" height="24" alt="">Phantom Secrets<span>Keep secrets out of model context</span></a>
-    <a href="https://github.com/ashlrai/locus"><span class="pw-tool-icon" aria-hidden="true">◎</span>Locus<span>Bind tools to the right account</span></a>
+    <a href="https://github.com/ashlrai/phantom-secrets"><img src="/assets/phantom-mark.svg" width="24" height="24" alt="">Phantom Secrets<span>Manage credentials and configured proxy access</span></a>
+    <a href="https://github.com/ashlrai/locus"><span class="pw-tool-icon" aria-hidden="true">◎</span>Locus<span>Check configured account and session identity</span></a>
     <a href="https://github.com/ashlrai/lexicon"><span class="pw-tool-icon" aria-hidden="true">≈</span>Lexicon<span>Make technical voice input clearer</span></a>
     <a href="/ecosystem">Explore the ecosystem<span>Independent projects. Shared purpose.</span></a>
   </div>
-  <p class="pw-disclaimer">Provider logos identify resources. MCP servers and ecosystem tools need configuration.</p>
+  <p class="pw-disclaimer">Provider logos identify resources. MCP servers and ecosystem tools need configuration. Credential protection depends on the selected connection and tool path.</p>
   <noscript><p class="pw-disclaimer">The static scene shows the first stage. Enable JavaScript to explore the illustrative replay.</p></noscript>
 </section>
 
@@ -645,7 +645,7 @@
           <div class="guard"><dt>Approve or veto</dt><dd>Class-A actions apply at once, class-B after a veto window, class-C only go to you. Approving early runs the same checks as the window closing. Veto runs the recorded inverse.</dd></div>
           <div class="guard"><dt>Telegram</dt><dd>A real two-way line: replies thread into the conversation, memos arrive with Approve, Veto and Details buttons, and <code>/leader</code>, <code>/status</code>, <code>/directives</code>, <code>/settings</code>, <code>/help</code>. A morning brief and an evening recap, an instant brief when you text &ldquo;status&rdquo;, quiet hours, and one question at a time.</dd></div>
           <div class="guard"><dt>Founder mode</dt><dd>Text &ldquo;go build X&rdquo; and it becomes work in the cheapest lane that can do it, under your grant and each lane&rsquo;s budget. Its new powers, cloud and Devin launches, playbook and automation edits, carry a class and a veto window like every other action.</dd></div>
-          <div class="guard"><dt>Always answers</dt><dd>Grok first, then fast and large local models; Claude only for a weekly deep run or by opt-in, never Codex. Failed runs retry at 15&nbsp;min, 45&nbsp;min and 2&nbsp;h. When it cannot think, it says why.</dd></div>
+          <div class="guard"><dt>Leader resources</dt><dd>Grok first, then fast and large local models; Claude only for a weekly deep run or by opt-in, never Codex. Failed runs retry at 15&nbsp;min, 45&nbsp;min and 2&nbsp;h. When it cannot think, it says why.</dd></div>
           <div class="guard"><dt>Check-ins</dt><dd>Every 2 hours in working hours, but only when the evidence changed. A new directive or answer counts. Advisory, with editable daily-run preferences, and never retried.</dd></div>
         </dl>
       </div>
@@ -777,7 +777,7 @@
         </div>
         <div class="seat">
           <span class="tag">&#8984;.</span><h3>Resources, ready or not</h3>
-          <p>Every account with its live windows and reset times, local runtimes, cloud credits and Devin. Each card says &ldquo;Chat: ready&rdquo; and &ldquo;Fleet: ready &middot; reserve kept&rdquo;, or why not and the command that fixes it.</p>
+          <p>Configured accounts and local runtimes show separate chat and fleet readiness, dated usage and available reset readings. Signed out, unknown usage, exhausted quota, reserves or missing authority can hold work. Devin organization consumption is not a personal subscription balance.</p>
         </div>
         <div class="seat">
           <span class="tag">&#8984;J</span><h3>Needs you</h3>
@@ -797,7 +797,7 @@
         </div>
         <div class="seat">
           <span class="tag local">Live</span><h3>Reasoning as it happens</h3>
-          <p>Claude, Codex and Grok stream their reasoning, then collapse it to &ldquo;Thought 12s, ~1.8k tok&rdquo;. Every figure on the status line is measured from the CLI's own events.</p>
+          <p>Inspect reported actions, tools, context and sources, then changes and verification results. Provider events can report reasoning; they do not reveal every internal thought. Timing and usage remain measured, estimated or unknown, rather than turning missing readings into zero.</p>
         </div>
       </div>
     </div>

@@ -4,10 +4,12 @@
 
 # Phantom documentation
 
-Phantom by AshlrAI is the engineering workbench, formerly Ashlr Verse. Hub is
-its local kernel, and Universe names the existing experiment runtime and
-compatible command interfaces. Existing `ashlr` commands, `/verse/` routes and
-package names stay stable; see [the product naming guide](PHANTOM-BRAND.md).
+Phantom by AshlrAI is the engineering workbench, formerly Ashlr Verse. Its local
+kernel includes the Universe experiment runtime and compatible command interfaces.
+The published canonical package is `@ashlr/phantom`; existing `@ashlr/hub` SDK
+imports belong to the compatibility releases. `phm`, compatible `ashlr` commands,
+`/verse/` routes and stored identities retain their supported meanings; see
+[the product naming guide](PHANTOM-BRAND.md).
 Historical Ashlrverse research and build contracts keep their original names.
 Use one canonical guide for each task. The North Star is a target, not a claim
 that every integration, provider or autonomous effect is active.
@@ -21,30 +23,31 @@ that every integration, provider or autonomous effect is active.
 | Separate tested firm machinery from remaining activation and integration work | [Autonomy gap map](AUTONOMY-GAP.md) |
 | Exercise signed graph execution and a deliberately lying candidate | [Firm graph fixture](FIRM-DEMO.md) |
 | Connect autonomy research to engineering acceptance | [Autonomy engineering brief](UNIVERSE-AUTONOMY-RESEARCH.md) |
-| Compare Phantom with current agent platforms using measurable acceptance gates | [Competitive acceptance](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-COMPETITIVE-ACCEPTANCE.md) |
-| Run a first bounded experiment and inspect its results | [Quickstart](QUICKSTART.md) |
+| Compare Phantom with current agent platforms using measurable acceptance gates | [Competitive acceptance](https://github.com/ashlrai/phantom/blob/master/docs/VERSE-COMPETITIVE-ACCEPTANCE.md) |
+| Connect a resource and make a first useful turn | [Quickstart](QUICKSTART.md) |
+| Choose chat or fleet work, understand routing and inspect results | [Automatic work](AUTOMATIC-OUTCOMES.md) |
 | Understand the current components and their boundaries | [Architecture](ARCHITECTURE.md#current-runtime-map) |
 | Configure experiments, campaigns, portfolios and artifact delivery | [Universe operator guide](ASHLR-UNIVERSE.md) |
 | Configure native/local workers, quotas, the foreground queue and fleet map | [Resource Pools](RESOURCE-POOLS.md) |
 | Install or roll back an exact trusted local package | [Pinned runtime](ASHLR-UNIVERSE.md#install-a-pinned-local-runtime) |
-| Change code and verify it locally | [Contributing — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/CONTRIBUTING.md) |
-| Build release evidence and distinguish distribution from activation | [Releasing — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING.md) |
-| Run agents in Phantom against your accounts and a local model | [Local fleet](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LOCAL-FLEET.md) |
+| Change code and verify it locally | [Contributing — source guide](https://github.com/ashlrai/phantom/blob/master/CONTRIBUTING.md) |
+| Build release evidence and distinguish distribution from activation | [Releasing — source guide](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING.md) |
+| Run agents in Phantom against your accounts and a local model | [Local fleet](https://github.com/ashlrai/phantom/blob/master/docs/LOCAL-FLEET.md) |
 | Inspect managed OpenAI Agents sessions through the read-only CLI | [OpenAI Agents integration](OPENAI-AGENTS-INTEGRATION.md) |
 | Understand supported Dots companion workflows and the plugin-event integration path | [Dots companion](DOTS-COMPANION.md) |
 | Apply durable sessions, steering, tool discovery and context ideas to the existing harness | [Agent harness evolution](AGENT-HARNESS-EVOLUTION.md) |
 | Choose goal and Leader preferences, inspect review evidence, and run or compare local benchmarks | [Operator preferences and evidence](AGENT-HARNESS-EVOLUTION.md#operator-goal-and-leader-preferences) |
 | Inspect recorded producer outcomes and their deterministic learning path | [Execution feedback](EXECUTION-FEEDBACK.md) |
 | Read current and historical account usage, credit units, captured dollar balances and cloud estimates | [Resource evidence](RESOURCE-EVIDENCE.md) |
-| Decide whether to give one agent the whole context window or four a quarter each | [Plan deep, execute wide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LOCAL-CONTEXT-STRATEGY.md) |
-| Cut a release and publish without CI | [Releasing locally](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md) |
-| See what multi-folder workspaces, GitHub and MCP management still need | [Workspaces build contract](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-WORKSPACES.md) |
-| Read a Phantom chat's context meter, choose standard or expansive context, and continue a long session in a fresh chat | [Context windows — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-CONTEXT.md) |
-| Use the Phantom workbench: Command, Fleet, Growth and Lessons, Mind, Chat and its panel (terminal, browser, changes, sources, reasoning), the Needs-you and Resources drawers, the repo wiki, playbooks, automations, ⌘K, budget modes and account health | [Phantom user guide — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) |
-| Talk to the Leader from Phantom, Telegram or the CLI: directives, answers, approvals, briefs, founder mode | [The Leader — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/LEADER.md) |
-| Hand work to Claude Code cloud sessions or Devin, and triage what they deliver | [Cloud lane — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/CLOUD.md) · [Devin — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEVIN.md) |
-| Understand the standing authority design, and turn autonomy on under a grant that starts in shadow | [Standing authority — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md) · [Current activation state](AUTONOMY-GAP.md#current-activation-state-315) |
-| Find a Verse route family, its gates and wire shapes | [Verse build contract — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-CONTRACT-V1.md#v310-additive-contract--the-workbench-and-the-autonomy-console) |
+| Decide whether to give one agent the whole context window or four a quarter each | [Plan deep, execute wide](https://github.com/ashlrai/phantom/blob/master/docs/LOCAL-CONTEXT-STRATEGY.md) |
+| Finalize and publish original qualified release artifacts locally | [Releasing locally](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md) |
+| See what multi-folder workspaces, GitHub and MCP management still need | [Workspaces build contract](https://github.com/ashlrai/phantom/blob/master/docs/VERSE-WORKSPACES.md) |
+| Read a Phantom chat's context meter, choose standard or expansive context, and continue a long session in a fresh chat | [Context windows — source guide](https://github.com/ashlrai/phantom/blob/master/docs/VERSE-CONTEXT.md) |
+| Use the Phantom workbench: Command, Fleet, Growth and Lessons, Mind, Chat and its panel (terminal, browser, changes, sources, reasoning), the Needs-you and Resources drawers, the repo wiki, playbooks, automations, ⌘K, budget modes and account health | [Phantom user guide — source guide](https://github.com/ashlrai/phantom/blob/master/docs/VERSE.md) |
+| Talk to the Leader from Phantom, Telegram or the CLI: directives, answers, approvals, briefs, founder mode | [The Leader — source guide](https://github.com/ashlrai/phantom/blob/master/docs/LEADER.md) |
+| Hand work to Claude Code cloud sessions or Devin, and triage what they deliver | [Cloud lane — source guide](https://github.com/ashlrai/phantom/blob/master/docs/CLOUD.md) · [Devin — source guide](https://github.com/ashlrai/phantom/blob/master/docs/DEVIN.md) |
+| Understand the standing authority design, and turn autonomy on under a grant that starts in shadow | [Standing authority — source guide](https://github.com/ashlrai/phantom/blob/master/docs/STANDING-AUTHORITY.md) · [Current activation state](AUTONOMY-GAP.md#current-activation-state-315) |
+| Find a Verse route family, its gates and wire shapes | [Verse build contract — source guide](https://github.com/ashlrai/phantom/blob/master/docs/VERSE-CONTRACT-V1.md#v310-additive-contract--the-workbench-and-the-autonomy-console) |
 
 The CLI's `universe help`, `resources pool --help` and `runtime help` describe
 the command surface in the exact binary you are running. A source guide may
@@ -108,12 +111,12 @@ roots, budgets and acceptance evidence explicit.
 
 ## Deeper design and history
 
-The [ecosystem design](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AGENT-NATIVE-ECOSYSTEM.md)
+The [ecosystem design](https://github.com/ashlrai/phantom/blob/master/docs/AGENT-NATIVE-ECOSYSTEM.md)
 describes federation across independent products. [Mission OS](MISSION-OS.md)
 documents mission contracts, and [runtime activation authority](RUNTIME_ACTIVATION_AUTHORITY.md)
 records the separate resident-runtime boundary. The
-[milestone index](https://github.com/ashlrai/ashlr-hub/blob/master/docs/MILESTONE-INDEX.md)
-and [historical contracts](https://github.com/ashlrai/ashlr-hub/blob/master/docs/contracts/README.md)
+[milestone index](https://github.com/ashlrai/phantom/blob/master/docs/MILESTONE-INDEX.md)
+and [historical contracts](https://github.com/ashlrai/phantom/blob/master/docs/contracts/README.md)
 are source references, not setup instructions or current release receipts.
 
 Update the owning guide when behavior changes. Keep exact test counts, source
