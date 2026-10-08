@@ -210,10 +210,35 @@ describe('emergency authority release truth', () => {
     expect(normalizedDesktop).toMatch(/resident autonomy requires its separate local setup and grant/i);
     const currentPackage = JSON.parse(read('package.json')) as { name: string; version: string };
     const profile = desktopUpdateProfileForPackage(currentPackage.name);
+    // Source metadata identifies a candidate, not a public download. Keep the
+    // documented published version separate until its public bytes are verified.
     const currentVersion = currentPackage.version;
+    const canonicalVersion = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+    expect(currentVersion).toMatch(canonicalVersion);
+    const publishedDeclarations = [...desktop.matchAll(
+      /^The published canonical ((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)) release includes `Phantom\.app`, with$/gm,
+    )];
+    expect(desktop.match(/^The published canonical [^\n]*$/gm)).toHaveLength(1);
+    expect(publishedDeclarations).toHaveLength(1);
+    const publishedVersion = publishedDeclarations[0]![1]!;
     expect(desktop).toContain(
-      `https://github.com/${profile.repository}/releases/download/v${currentVersion}/Phantom_${currentVersion}_aarch64.dmg`,
+      `https://github.com/${profile.repository}/releases/download/v${publishedVersion}/Phantom_${publishedVersion}_aarch64.dmg`,
     );
+    expect(desktop).toContain(`\`Phantom_${publishedVersion}_aarch64.dmg\` downloads`);
+    expect(desktop).toContain(`| macOS arm64 | Published canonical v${publishedVersion} \`.dmg\` |`);
+    expect(normalizedDesktop).toContain('is the verified published canonical download.');
+    expect(releaseBlock(publishedVersion).trim().length).toBeGreaterThan(50);
+    const sourceParts = currentVersion.split('.').map(BigInt);
+    const publishedParts = publishedVersion.split('.').map(BigInt);
+    const differingPart = publishedParts.findIndex((part, index) => part !== sourceParts[index]);
+    if (differingPart !== -1) {
+      expect(publishedParts[differingPart]! < sourceParts[differingPart]!).toBe(true);
+      const pending = `The source candidate is ${currentVersion}; publication and installation are pending qualification and public byte verification.`;
+      expect(desktop.split(pending)).toHaveLength(2);
+      expect(desktop).not.toContain(`/releases/download/v${currentVersion}/Phantom_${currentVersion}_aarch64.dmg`);
+    } else {
+      expect(desktop).not.toMatch(/The source candidate is [^\n]+; publication and installation are pending/);
+    }
     expect(normalizedDesktop).toMatch(/locally signed, not Apple Developer ID notarized/i);
     expect(normalizedDesktop).toMatch(/Windows[^\n]*draft only/i);
     expect(normalizedDesktop).toMatch(/Linux[^\n]*Not produced while quarantined/i);
