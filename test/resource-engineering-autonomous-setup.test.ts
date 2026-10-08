@@ -3,9 +3,10 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { canonical } from '../src/core/universe/artifacts.js';
 import type { ResourceEngineeringRecipe } from '../src/core/resources/engineering-preparation-types.js';
+import * as fixedEvaluator from '../src/core/universe/fixed-evaluator.js';
 import { checkResourceEngineeringAutonomousSetup as check, prepareResourceEngineeringAutonomousSetup as prepare,
   type ResourceEngineeringAutonomousSetupPolicy } from '../src/core/resources/engineering-autonomous-setup.js';
 import { validateResourceEngineeringAutonomousSetupPolicy } from '../src/core/resources/engineering-autonomous-setup.js';
@@ -47,9 +48,12 @@ function fixture() {
   const resourceRuntime = join(base, 'runtime.json'); save(resourceRuntime, { schemaVersion: 1, root: ledger, workspace: transport,
     poolPath, bindingsPath, observationsPath });
   const projectsFile = join(base, 'projects.json'); save(projectsFile, { schemaVersion: 1, projects: [] });
+  // Preparation pins this executable but must never run it. Keep real Node on Windows.
+  const evaluator = process.platform === 'win32' ? process.execPath : join(base, 'never-executed-evaluator');
+  if (process.platform !== 'win32') writeFileSync(evaluator, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
   const recipe: ResourceEngineeringRecipe = { schemaVersion: 1, id: 'repair', name: 'Bounded repair', objective: 'Improve a measured value', projectId: 'default',
     seedRevision: git(workspace, 'rev-parse', 'HEAD'), metric: { name: 'value', direction: 'maximize', minImprovement: 0 },
-    evaluation: { command: [process.execPath, 'evaluate.mjs'], timeoutMs: 1000 },
+    evaluation: { command: [evaluator, 'evaluate.mjs'], timeoutMs: 1000 },
     trialBudget: { maxTrials: 2, maxParallel: 1, maxDurationMs: 10_000, trialTimeoutMs: 5000 },
     campaignBudget: { maxGenerations: 1, maxDurationMs: 20_000, maxModelRequests: 2, maxStagnantGenerations: 1, maxReportedTokens: null },
     generation: { files: ['value.json'], contextFiles: ['evaluate.mjs'], allowedWorkerIds: ['worker'], maxOutputTokens: 128,
@@ -72,6 +76,12 @@ function evidence(directory: string): string {
   visit(directory); return JSON.stringify(rows);
 }
 describe('offline autonomous setup', () => {
+  let evaluations: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => { evaluations = vi.spyOn(fixedEvaluator, 'runFixedUniverseEvaluator'); });
+  afterEach(() => {
+    try { expect(evaluations).not.toHaveBeenCalled(); }
+    finally { evaluations.mockRestore(); }
+  });
   it('withholds new publication on a host veto without touching the setup or accounting', () => {
     const f = fixture(); const expectedPlanDigest = check(f.options).planDigest; const before = evidence(f.base);
     expect(() => prepare({ ...f.options, expectedPlanDigest }, { isExecutionStopped: () => true })).toThrow('Host setup publication stopped');

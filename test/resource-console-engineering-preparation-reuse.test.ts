@@ -4,11 +4,12 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { createResourceConsoleEngineeringPreparation } from '../src/core/resources/console-engineering-preparation.js';
 import type { ResourceConsoleEngineeringPreparationConfig } from '../src/core/resources/console-engineering-preparation-types.js';
 import type { ResourceEngineeringRecipe } from '../src/core/resources/engineering-preparation-types.js';
+import * as fixedEvaluator from '../src/core/universe/fixed-evaluator.js';
 import { createResourcePoolSupervisor, type ResourcePoolSupervisor } from '../src/core/resources/pool-supervisor.js';
 import { createResourceConsoleEngineeringOwner, type ResourceConsoleEngineeringOwner } from '../src/core/resources/console-engineering.js';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
@@ -56,9 +57,12 @@ async function fixture(registrationScope?: string) {
   const resourceRuntime = join(base, 'runtime.json'); const runtime = { schemaVersion: 1, root, workspace: transport,
     poolPath: poolFile, bindingsPath: bindingsFile, observationsPath: observationsFile }; save(resourceRuntime, runtime);
   const projectsFile = join(base, 'projects.json'); save(projectsFile, { schemaVersion: 1, projects: [] });
+  // Preparation pins this executable but must never run it. Keep real Node on Windows.
+  const evaluator = process.platform === 'win32' ? process.execPath : join(base, 'never-executed-evaluator');
+  if (process.platform !== 'win32') writeFileSync(evaluator, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
   const recipe: ResourceEngineeringRecipe = { schemaVersion: 1, id: 'template', name: 'Pinned template', objective: 'Fixed template objective', projectId: 'default',
     seedRevision: git(workspace, 'rev-parse', 'HEAD'), metric: { name: 'value', direction: 'maximize', minImprovement: 0 },
-    evaluation: { command: [process.execPath, 'evaluate.mjs'], timeoutMs: 1000 },
+    evaluation: { command: [evaluator, 'evaluate.mjs'], timeoutMs: 1000 },
     trialBudget: { maxTrials: 1, maxParallel: 1, maxDurationMs: 10_000, trialTimeoutMs: 5000 },
     campaignBudget: { maxGenerations: 1, maxDurationMs: 20_000, maxModelRequests: 1, maxStagnantGenerations: 1, maxReportedTokens: null },
     generation: { files: ['value.json'], contextFiles: ['evaluate.mjs'], allowedWorkerIds: ['worker'], maxOutputTokens: 128,
@@ -81,6 +85,12 @@ async function fixture(registrationScope?: string) {
 }
 
 describe('call-local console preparation validation reuse', () => {
+  let evaluations: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => { evaluations = vi.spyOn(fixedEvaluator, 'runFixedUniverseEvaluator'); });
+  afterEach(() => {
+    try { expect(evaluations).not.toHaveBeenCalled(); }
+    finally { evaluations.mockRestore(); }
+  });
   it.each([undefined, 'window-one'])('preserves exact owner-free successor evidence and fresh refusal for scope %s', async registrationScope => {
     // Real registration and fresh bundle validation; controlled delivery/run witnesses isolate
     // evidence formatting here. This does not assert evaluator or delivery-proof correctness.
