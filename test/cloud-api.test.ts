@@ -424,7 +424,7 @@ describe('POST /api/verse/cloud/tasks/<id>/dismiss', () => {
     expect(status).toBe(200);
     expect(body.ok).toBe(true);
     expect(body.task.state).toBe('closed');
-    expect(body.task.stateReason).toBe('Dismissed in Verse.');
+    expect(body.task.stateReason).toBe('Dismissed in Phantom.');
     expect(core.writes).toHaveLength(1);
     expect((core.writes[0] as CloudTaskV1).pr?.state).toBe('open');
     expect(core.refreshCloudTasks).not.toHaveBeenCalled();
