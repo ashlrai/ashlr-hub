@@ -4,6 +4,7 @@
 //! | Preference      | Default | Why the default |
 //! |-----------------|---------|-----------------|
 //! | `globalHotkey`  | off     | A system-wide key steals that chord from every other app; the operator opts in. |
+//! | `automaticUpdates` | on | Signed staging and guarded idle adoption; no Stop clear or resident restart. |
 //! | `automaticAwake` | on | Process-owned idle-sleep requests follow observed local work; system settings remain unchanged. |
 //! | `notifications` | on      | The point of a tray app is hearing about work while the window is hidden. |
 //!
@@ -38,6 +39,8 @@ pub struct DesktopPrefs {
     pub notifications: bool,
     #[serde(default = "yes")]
     pub automatic_awake: bool,
+    #[serde(default = "yes")]
+    pub automatic_updates: bool,
 }
 
 impl Default for DesktopPrefs {
@@ -46,6 +49,7 @@ impl Default for DesktopPrefs {
             global_hotkey: false,
             notifications: true,
             automatic_awake: true,
+            automatic_updates: true,
         }
     }
 }
@@ -60,6 +64,8 @@ pub struct PrefsPatch {
     pub notifications: Option<bool>,
     #[serde(default)]
     pub automatic_awake: Option<bool>,
+    #[serde(default)]
+    pub automatic_updates: Option<bool>,
 }
 
 /// Parse a `shell-prefs` payload. `None` for anything but an object carrying at
@@ -73,7 +79,8 @@ pub fn parse_patch(payload: &str) -> Option<PrefsPatch> {
     let patch: PrefsPatch = serde_json::from_value(value).ok()?;
     (patch.global_hotkey.is_some()
         || patch.notifications.is_some()
-        || patch.automatic_awake.is_some())
+        || patch.automatic_awake.is_some()
+        || patch.automatic_updates.is_some())
     .then_some(patch)
 }
 
@@ -83,10 +90,28 @@ impl DesktopPrefs {
             global_hotkey: patch.global_hotkey.unwrap_or(self.global_hotkey),
             notifications: patch.notifications.unwrap_or(self.notifications),
             automatic_awake: patch.automatic_awake.unwrap_or(self.automatic_awake),
+            automatic_updates: patch.automatic_updates.unwrap_or(self.automatic_updates),
         }
     }
 }
 
+/// Other existing preferences may remain in-memory after a write failure, but
+/// automatic installation must never acknowledge a setting that will reset on launch.
+pub fn retained_preferences(
+    previous: DesktopPrefs,
+    candidate: DesktopPrefs,
+    patch: PrefsPatch,
+    saved: bool,
+) -> DesktopPrefs {
+    if !saved && patch.automatic_updates.is_some() {
+        DesktopPrefs {
+            automatic_updates: previous.automatic_updates,
+            ..candidate
+        }
+    } else {
+        candidate
+    }
+}
 /// `~/.ashlr/desktop/prefs.json`.
 pub fn prefs_path() -> PathBuf {
     let home = std::env::var("HOME")
@@ -138,12 +163,14 @@ pub fn load() -> DesktopPrefs {
     load_from(&prefs_path())
 }
 
-pub fn store(prefs: &DesktopPrefs) {
-    if !store_to(&prefs_path(), prefs) {
+pub fn store(prefs: &DesktopPrefs) -> bool {
+    let saved = store_to(&prefs_path(), prefs);
+    if !saved {
         eprintln!(
             "[ashlr-desktop] could not save desktop preferences — the change lasts until quit"
         );
     }
+    saved
 }
 
 // ── what the page sees ───────────────────────────────────────────────────────
@@ -208,6 +235,7 @@ mod tests {
         let prefs = DesktopPrefs::default();
         assert!(!prefs.global_hotkey);
         assert!(prefs.notifications);
+        assert!(prefs.automatic_updates);
         // A file from before a key existed gets that key's default.
         assert_eq!(serde_json::from_str::<DesktopPrefs>("{}").unwrap(), prefs);
     }
@@ -219,7 +247,8 @@ mod tests {
             Some(PrefsPatch {
                 global_hotkey: Some(true),
                 notifications: None,
-                automatic_awake: None
+                automatic_awake: None,
+                automatic_updates: None
             })
         );
         assert_eq!(
@@ -227,7 +256,8 @@ mod tests {
             Some(PrefsPatch {
                 global_hotkey: Some(false),
                 notifications: Some(false),
-                automatic_awake: None
+                automatic_awake: None,
+                automatic_updates: None
             })
         );
         for bad in [
@@ -256,8 +286,32 @@ mod tests {
         assert_eq!(disabled.global_hotkey, prefs.global_hotkey);
         assert_eq!(disabled.notifications, prefs.notifications);
         let raw = serde_json::to_string(&disabled).unwrap();
-        assert_eq!(serde_json::from_str::<DesktopPrefs>(&raw).unwrap(), disabled);
+        assert_eq!(
+            serde_json::from_str::<DesktopPrefs>(&raw).unwrap(),
+            disabled
+        );
         assert!(parse_patch(r#"{"automaticAwake":"yes"}"#).is_none());
+    }
+
+    #[test]
+    fn automatic_updates_is_default_on_and_explicit_false_round_trips() {
+        let prefs = DesktopPrefs::default();
+        let disabled = prefs.apply(parse_patch(r#"{"automaticUpdates":false}"#).unwrap());
+        assert!(!disabled.automatic_updates);
+        assert_eq!(disabled.automatic_awake, prefs.automatic_awake);
+        assert_eq!(disabled.notifications, prefs.notifications);
+        assert_eq!(
+            serde_json::from_str::<DesktopPrefs>(&serde_json::to_string(&disabled).unwrap())
+                .unwrap(),
+            disabled
+        );
+        assert!(parse_patch(r#"{"automaticUpdates":"yes"}"#).is_none());
+        assert_eq!(
+            serde_json::from_str::<DesktopPrefs>(r#"{"automaticAwake":false}"#)
+                .unwrap()
+                .automatic_updates,
+            true
+        );
     }
 
     #[test]
@@ -266,13 +320,15 @@ mod tests {
             global_hotkey: Some(true),
             notifications: None,
             automatic_awake: None,
+            automatic_updates: None,
         });
         assert_eq!(
             prefs,
             DesktopPrefs {
                 global_hotkey: true,
                 notifications: true,
-                automatic_awake: true
+                automatic_awake: true,
+                automatic_updates: true
             }
         );
     }
@@ -291,6 +347,7 @@ mod tests {
             global_hotkey: true,
             notifications: false,
             automatic_awake: true,
+            automatic_updates: true,
         };
         assert!(store_to(&path, &wanted));
         assert_eq!(load_from(&path), wanted);
@@ -339,5 +396,14 @@ mod tests {
         );
         assert!(script.contains(r#""delivery":"script""#));
         assert!(script.contains(r#""accelerator":"⌃⌥Space""#));
+    }
+    #[test]
+    fn failed_persistence_retains_update_choice_without_changing_other_preferences() {
+        let old = DesktopPrefs::default();
+        let patch = parse_patch(r#"{"automaticUpdates":false,"notifications":false}"#).unwrap();
+        let actual = retained_preferences(old, old.apply(patch), patch, false);
+        assert!(actual.automatic_updates);
+        assert!(!actual.notifications);
+        assert!(!retained_preferences(old, old.apply(patch), patch, true).automatic_updates);
     }
 }

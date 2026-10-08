@@ -130,6 +130,10 @@
 # tier1-authority-code: Tier-1 authority code: the fleet may never change the code that decides what the fleet may do
 /src/core/vision/leader-display-text.ts @masonwyatt23
 /src/core/authority/** @masonwyatt23
+/src/core/desktop/** @masonwyatt23
+/src/cli/desktop-update.ts @masonwyatt23
+/scripts/desktop-release-policy.mjs @masonwyatt23
+/scripts/finalize-desktop-update.mjs @masonwyatt23
 /src/core/daemon/activation-permit.ts @masonwyatt23
 /src/core/daemon/tick-hooks.ts @masonwyatt23
 /src/core/daemon/loop.ts @masonwyatt23
@@ -254,6 +258,9 @@
 /test/decide-critics-315.test.ts @masonwyatt23
 /test/decide-judge-manager-315.test.ts @masonwyatt23
 /test/decide-resource-choice.test.ts @masonwyatt23
+/test/desktop-qualified-update.test.ts @masonwyatt23
+/test/desktop-update-cli.test.ts @masonwyatt23
+/test/desktop-update-manifest.test.ts @masonwyatt23
 /test/devin-cli-admission.test.ts @masonwyatt23
 /test/devin-cli-engine-315.test.ts @masonwyatt23
 /test/devin-cli-engine-realio-315.test.ts @masonwyatt23

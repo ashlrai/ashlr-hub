@@ -566,6 +566,8 @@ describe('M454 pinned upstream routing challenge', () => {
       'dist',
       'bin',
       'scripts/run-verify-command.mjs',
+      // Reviewed host-only install helper; the script-wide canary scan covers it.
+      'scripts/local-app-transaction.mjs',
       'scripts/scorecard-history-worker.mjs',
       'scripts/evaluators/preparation-verification-activity.mjs',
       'scripts/evaluators/preparation-verification-activity.d.mts',

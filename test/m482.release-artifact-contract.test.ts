@@ -876,6 +876,51 @@ describe('release artifact contract v1', () => {
     expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toMatchObject({ ok: true });
   });
 
+  it('binds the declared desktop transaction helper from the actual npm report and detects byte and membership drift', () => {
+    const release = fixture();
+    const helper = 'scripts/local-app-transaction.mjs';
+    const helperPath = join(release.packageRoot, helper);
+    const packagePath = join(release.packageRoot, 'package.json');
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+    const helperBytes = 'export const transaction = true;\n';
+    write(helperPath, helperBytes);
+    write(join(release.packageRoot, 'scripts/local-app-private.mjs'), 'export const privateOnly = true;\n');
+    writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, files: [...packageJson.files as string[], helper] })}\n`);
+    const packed = runNpm(['pack', '--dry-run', '--ignore-scripts', '--json'], release.packageRoot);
+    expect(packed.status, packed.stderr).toBe(0);
+    const report = JSON.parse(packed.stdout) as Array<{ files: RuntimeReleasePackFileRecord[] }>;
+    expect(report[0]!.files.map(file => file.path)).toContain(helper);
+    expect(report[0]!.files.map(file => file.path)).not.toContain('scripts/local-app-private.mjs');
+    const inventory = buildRuntimeReleaseDependencyInventory(release.packageRoot, { packagedFiles: report[0]!.files });
+    expect(inventory).toMatchObject({ ok: true });
+    if (!inventory.ok) return;
+    writeFileSync(release.inventoryPath, inventory.canonicalJson);
+    const options = {
+      packageRoot: release.packageRoot,
+      dependencyRoot: release.dependencyRoot,
+      declaredInterpreterPath: release.interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedRevision: REVISION,
+      expectedPackageName: '@fixture/release',
+    };
+    const built = buildUnsignedRuntimeReleaseManifest(options);
+    expect(built).toMatchObject({ ok: true });
+    if (!built.ok) return;
+    expect(built.manifest.artifacts.find(artifact => artifact.path === helper)).toMatchObject({
+      sha256: createHash('sha256').update(helperBytes).digest('hex'),
+      size: Buffer.byteLength(helperBytes),
+    });
+    expect(verifyUnsignedRuntimeReleaseManifest({ ...options, manifest: built.canonicalJson, expectedManifestDigest: built.manifest.manifestDigest })).toMatchObject({ ok: true });
+    writeFileSync(helperPath, 'export const transaction = false;\n');
+    expect(verifyUnsignedRuntimeReleaseManifest({ ...options, manifest: built.canonicalJson, expectedManifestDigest: built.manifest.manifestDigest })).toEqual({
+      ok: false, reason: 'runtime release contents do not match manifest',
+    });
+    rmSync(helperPath);
+    expect(buildUnsignedRuntimeReleaseManifest(options)).toEqual({
+      ok: false, reason: `required release artifact is missing: ${helper}`,
+    });
+  });
+
   it('admits only the explicit builtin custody helpers in the actual npm file report', () => {
     const release = fixture();
     const packagePath = join(release.packageRoot, 'package.json');
@@ -904,6 +949,9 @@ describe('release artifact contract v1', () => {
 
   it.each([
     'scripts',
+    'scripts/local-app-*.mjs',
+    'scripts/local-app-private.mjs',
+    'scripts/../scripts/local-app-transaction.mjs',
     'scripts/evaluators',
     'scripts/evaluators/**',
     'scripts/evaluators/preparation-verification-*.mjs',

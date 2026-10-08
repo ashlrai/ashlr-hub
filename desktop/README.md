@@ -4,13 +4,14 @@ A Tauri v2 desktop app that wraps **Phantom** (the operator console at
 `/verse/`, see `../docs/VERSE.md`) in a native macOS window. Opening it starts
 the console; resident autonomy requires its separate local setup and grant.
 
-The current compatible installation remains `/Applications/Ashlr.app`, with
-`Ashlr_<version>_aarch64.dmg` downloads and the stable `Ashlr Local` signing
-identity. Workbench windows and menus identify Phantom. Updated custody
-prompt wording requires the upcoming qualified helper release; it does not
-change the currently installed helper. The upcoming 3.25.1 source builds `Phantom.app` and uses the guarded installer below to migrate a single verified legacy installation. The published 3.25.0 app remains `Ashlr.app`. Automatic updating is not activated by this filename change.
+Published 3.25.1 installs `/Applications/Phantom.app`, with
+`Phantom_3.25.1_aarch64.dmg` downloads and the stable `Ashlr Local` signing
+identity. The guarded installer migrates a single verified legacy installation;
+3.25.0 retains its historical `Ashlr.app` filename. Updated custody prompt
+wording requires its separately qualified helper release; installing the app
+does not replace the helper. Automatic updating is not activated by this filename change.
 
-The versioned [v3.25.0 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.0/Ashlr_3.25.0_aarch64.dmg)
+The versioned [v3.25.1 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.1/Phantom_3.25.1_aarch64.dmg)
 is the versioned installer link. Check the release artifacts before installing.
 It is locally signed, not Apple Developer ID notarized. macOS may require **Open
 Anyway** on first launch. The desktop CI workflow remains disabled during the
@@ -19,21 +20,21 @@ macOS release. The Linux CLI and web dashboard remain supported.
 Installed size: ~141 MiB, including the bundled Bun `ashlr`
 sidecar (~100 MiB), Rust executable and web assets.
 
-The 3.25.1 release candidate targets this [macOS arm64 installer](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.1/Phantom_3.25.1_aarch64.dmg).
+The 3.25.2 release candidate targets this [macOS arm64 installer](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.2/Phantom_3.25.2_aarch64.dmg).
 That candidate link is available only after its release artifacts are published;
-use the published 3.25.0 installer above until then.
+use the published 3.25.1 installer above until then.
 
 ---
 
 ## Install
 
-After release publication, download the [macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.0/Ashlr_3.25.0_aarch64.dmg)
+Download the published [3.25.1 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.1/Phantom_3.25.1_aarch64.dmg)
 or use the [npm/CLI quickstart](../docs/QUICKSTART.md) on macOS, Linux and Windows.
 Other desktop formats remain subject to the draft artifact policy below.
 
 | Platform | Availability |
 |----------|-----------------------|
-| macOS arm64 | Locally signed v3.25.0 `.dmg` linked above |
+| macOS arm64 | Locally signed v3.25.1 `.dmg` linked above |
 | Windows | `.msi` / `.exe` draft only |
 | Linux | Not produced while quarantined |
 
@@ -59,6 +60,43 @@ it in the Dock is supported and is what the rest of this document describes:
 To update later, repeat steps 1–3 from the new clean release checkout.
 `ship:local` stages and verifies the complete bundle, retains a full compressed rollback archive, and coordinates `Phantom.app` with the current CLI release and missing `phm`/`ashlr` links. It uses the existing stable `Ashlr Local` signer. A live replacement is never killed or moved on a failed launch: recovery remains held until it is safely closed. Stop remains engaged and the resident is not restarted by installation.
 Nothing in `~/.ashlr` is removed; config, seats and window state survive.
+
+The original 3.25.1 source-based install retained `rollback-held` after two
+health-check false negatives, despite independent installed-byte and process
+checks passing. The 3.25.2 candidate fixes those predicates; see the
+[recorded limitation and recovery boundary](../docs/RELEASING-LOCALLY.md#3251-source-install-observation-october-7-2026).
+
+### Signed idle updates (implementation candidate)
+
+The 3.25.2 candidate update implementation uses a separately signed release manifest binding
+one macOS arm64 app archive to its original qualified npm archive. It is not
+activated in the published 3.25.1 app or by the filename migration alone. No
+qualified public update feed or automatic adoption is claimed for this candidate.
+
+In the updated desktop, the top bar shows native update status. Expand it to
+turn **Automatic updates** on or off, see verified download progress, or refresh
+status. Preparing a download is separate from installing it. Installation requires
+local work to be idle, the fleet stopped, and a normal **Quit**. Closing a window
+only hides the app and does not install an update. Unknown activity holds the
+update; the updater never stops work or clears Stop on your behalf.
+
+Automatic installation requires a current, active grant with the same authority
+surface. Changed authority, missing or expired grants hold installation for the
+existing manual approval workflow. Settings and accounts stay in their existing
+locations. Installation does not restart the resident fleet. On the next launch,
+Phantom independently checks installed app and CLI bytes before reporting an
+update as installed; a saved success receipt alone is insufficient.
+
+The desktop bridge exposes only `updates.getState()` and `updates.refresh()`
+(status observation), plus the boolean `automaticUpdates` preference. Native
+reports `ashlr:update-state` through its fixed callback. Page code cannot supply
+a download URL, signing key, stage path or installation command.
+
+Maintainers prepare paired releases with `scripts/finalize-desktop-update.mjs`.
+It requires fresh source, hosted qualification and independent Audit evidence,
+the pinned publisher toolchain, the existing Apple signing identity, and the
+private local release-signing key. The key is never packaged. This command
+prepares verified artifacts; publishing them remains a separate release step.
 
 ---
 
@@ -835,7 +873,7 @@ cd desktop && npm run icons                 # = cargo tauri icon src-tauri/icons
 cd desktop && cargo tauri build
 ```
 
-The native app icon is generated from the tracked Phantom ghost SVG on the existing rounded-square canvas. The five bundle icon outputs are generated locally, not checked in; the monochrome `tray.png` remains a separate tracked template icon. See [icon generation and provenance](src-tauri/icons/PLACEHOLDER.md). This artwork change preserves the compatible `Ashlr.app` bundle identity and signing.
+The native app icon is generated from the tracked Phantom ghost SVG on the existing rounded-square canvas. The five bundle icon outputs are generated locally, not checked in; the monochrome `tray.png` remains a separate tracked template icon. See [icon generation and provenance](src-tauri/icons/PLACEHOLDER.md). This artwork change preserves the stable `ai.ashlr.desktop` bundle identifier and signing identity.
 
 Timing on this Mac: about 6 minutes cold (the release profile is `lto = true`,
 `codegen-units = 1`, `panic = "abort"`), about 90 seconds when only the bundling
@@ -852,8 +890,8 @@ needs to be redone. Nothing in step 4 needs the network.
 
 Output under `desktop/src-tauri/target/release/bundle/`:
 
-- `macos/Phantom.app` — the upcoming source's installable app
-- `dmg/Phantom_<version>_aarch64.dmg` — the upcoming source's disk image; `<version>` matches the root package version
+- `macos/Phantom.app` — the installable app
+- `dmg/Phantom_<version>_aarch64.dmg` — the disk image; `<version>` matches the root package version
 
 A debug bundle (unoptimized, faster to build, under `target/debug/bundle/`):
 
@@ -996,29 +1034,19 @@ download claim.
 
 ---
 
-## Auto-update (Tauri updater plugin)
+## Release feed and update trust
 
-The app checks for updates on every launch via `tauri-plugin-updater`. It is
-**inert by default** — the build succeeds without any signing key and the check
-fails silently (no crash, no blocking).
+The source updater uses the reviewed [signed idle update flow](#signed-idle-updates-implementation-candidate).
+The fixed GitHub `releases/latest/download/latest.json` endpoint is discovery;
+its paired manifest and payloads must pass the commissioned publisher signature.
+The legacy immediate `download_and_install` path is removed. The disabled
+`release-desktop.yml` workflow stays disabled; adding secrets or pushing a
+`desktop-v*` tag does not commission this release path.
 
-To activate it:
-
-1. `cargo tauri signer generate` — save both keys.
-2. Replace the `plugins.updater.pubkey` placeholder in
-   `desktop/src-tauri/tauri.conf.json` with the public key (a long base64 string
-   starting `dW50cnVzdGVkIGNvbW1lbnQ6`).
-3. Add repository secrets `TAURI_SIGNING_PRIVATE_KEY` and
-   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-4. After quarantine clearance, push a `desktop-v*` tag. Do **not** do this while
-   workflow 301689703 is disabled.
-
-At runtime the check hits
-`https://github.com/ashlrai/ashlr-hub/releases/latest/download/latest.json`; an
-available, signature-verified update downloads in the background and emits
-`ashlr-update-installed`. The user restarts to apply it. Signature verification
-happens at runtime, not at build time, so the placeholder key never breaks a
-build.
+The published 3.25.1 desktop still has its earlier inert updater. Public keys are
+installed through the normal qualified app release, never accepted from a feed
+or staged archive. This phase does not change Developer ID/notarization or the
+Windows and Linux desktop publication policy.
 
 ---
 

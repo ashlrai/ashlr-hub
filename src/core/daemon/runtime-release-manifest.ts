@@ -57,6 +57,7 @@ const LAUNCHER_PATH = 'bin/ashlr';
 const RUNTIME_ENTRY_PATH = 'dist/cli/index.js';
 const VERIFIER_RUNNER_PATH = 'scripts/run-verify-command.mjs';
 const SCORECARD_HISTORY_WORKER_PATH = 'scripts/scorecard-history-worker.mjs';
+const LOCAL_APP_TRANSACTION_PATH = 'scripts/local-app-transaction.mjs';
 const PREPARATION_HELPER_PATHS = [
   'scripts/evaluators/preparation-verification-activity.mjs',
   'scripts/evaluators/preparation-verification-activity.d.mts',
@@ -70,6 +71,7 @@ const FIXED_ARTIFACT_PATHS = new Set([
   LAUNCHER_PATH,
   VERIFIER_RUNNER_PATH,
   SCORECARD_HISTORY_WORKER_PATH,
+  LOCAL_APP_TRANSACTION_PATH,
   ...PREPARATION_HELPER_PATHS,
 ]);
 
@@ -539,6 +541,9 @@ function discoverReleaseLayout(
   if (schemaVersion >= 3 || pathEntryExists(join(packageRoot, ...SCORECARD_HISTORY_WORKER_PATH.split('/')))) {
     admitArtifact(packageRoot, SCORECARD_HISTORY_WORKER_PATH, budget, paths, undefined, observation);
   }
+  if (pathEntryExists(join(packageRoot, ...LOCAL_APP_TRANSACTION_PATH.split('/')))) {
+    admitArtifact(packageRoot, LOCAL_APP_TRANSACTION_PATH, budget, paths, undefined, observation);
+  }
   // Older packages have none. Observe only the explicit shipped helper set, never arbitrary scripts.
   const helpers = PREPARATION_HELPER_PATHS.filter((path) =>
     pathEntryExists(join(packageRoot, ...path.split('/'))));
@@ -835,6 +840,9 @@ function completeReleaseScan(
   }
   if (declaredFiles.includes(SCORECARD_HISTORY_WORKER_PATH)) {
     artifactByPath(artifacts, SCORECARD_HISTORY_WORKER_PATH);
+  }
+  if (declaredFiles.includes(LOCAL_APP_TRANSACTION_PATH)) {
+    artifactByPath(artifacts, LOCAL_APP_TRANSACTION_PATH);
   }
   if (hasPreparationHelpers(declaredFiles)) {
     for (const path of PREPARATION_HELPER_PATHS.filter(path => declaredFiles.includes(path))) artifactByPath(artifacts, path);

@@ -531,6 +531,7 @@ function rootPackageIsPortable(
     'schema',
     'scripts/run-verify-command.mjs',
     'scripts/scorecard-history-worker.mjs',
+    'scripts/local-app-transaction.mjs',
     // Fixed host imports for builtin custody; never admit the scripts directory
     // or candidate/controller entrypoints through a wildcard declaration.
     'scripts/evaluators/preparation-verification-activity.mjs',

@@ -325,6 +325,11 @@ const loadGenomeCmd = lazyCmd(
 
 // ─── M9 command loader ───────────────────────────────────────────
 
+const loadDesktopUpdateCmd = lazyCmd(
+  () => import('./desktop-update.js'), (m) => m.cmdDesktopUpdate as Cmd,
+  'desktop-update command requires the installed compiled update consumer.',
+);
+
 const loadUpdateCmd = lazyCmd(
   () => import('./update.js' as unknown as string),
   (m) => m.cmdUpdate as Cmd,
@@ -1950,6 +1955,10 @@ async function main(): Promise<void> {
         break;
       }
 
+      case 'desktop-update': {
+        process.exitCode = await (await loadDesktopUpdateCmd())(rest);
+        break;
+      }
       case 'update': {
         const cmdUpdate = await loadUpdateCmd();
         process.exitCode = await cmdUpdate(rest);

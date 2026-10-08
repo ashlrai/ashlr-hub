@@ -44,6 +44,10 @@
   // Desktop state (Settings ▸ Desktop): the global hotkey and notifications.
   // Native owns it; the page reads a copy and asks for changes.
   var desktopState = cfg.desktop || null
+  var updateState = null
+  function copyUpdateState() {
+    try { return updateState ? JSON.parse(JSON.stringify(updateState)) : null } catch (_) { return null }
+  }
 
   function copyState() {
     if (!desktopState) return null
@@ -200,7 +204,7 @@
     // event carrying what actually happened (a hotkey another app holds comes
     // back enabled-but-unregistered, with a reason).
     setPreference: function (name, value) {
-      if (name !== 'globalHotkey' && name !== 'notifications' && name !== 'automaticAwake') return false
+      if (name !== 'globalHotkey' && name !== 'notifications' && name !== 'automaticAwake' && name !== 'automaticUpdates') return false
       if (typeof value !== 'boolean') return false
       var patch = {}
       patch[name] = value
@@ -211,6 +215,13 @@
     // feature test (the web UI then falls back to an <iframe>). `act` (the
     // pane can click and type — macOS) is feature-detected; the protocol
     // version does not change.
+    updates: Object.freeze({
+      getState: copyUpdateState,
+      refresh: function () {
+        invoke('plugin:event|emit', { event: 'shell-update', payload: { op: 'status' } })
+        return true
+      }
+    }),
     browser: Object.freeze({
       version: 1,
       capabilities: Object.freeze({
@@ -321,6 +332,20 @@
       window.dispatchEvent(new CustomEvent('ashlr:desktop-state', { detail: copyState() }))
     } catch (_) {}
   }
+
+  // Observation only. Installation is owned by native Quit and the verified host consumer.
+  try {
+    Object.defineProperty(window, '__ASHLR_UPDATE_STATE__', {
+      value: function (next) {
+        if (!next || typeof next !== 'object' || Array.isArray(next)) return
+        try {
+          updateState = JSON.parse(JSON.stringify(next))
+          window.dispatchEvent(new CustomEvent('ashlr:update-state', { detail: copyUpdateState() }))
+        } catch (_) {}
+      },
+      enumerable: false, writable: false, configurable: false
+    })
+  } catch (_) {}
 
   // 3. Drag regions ---------------------------------------------------------
   // The web UI marks its own top strip with data-app-region="drag" (and opts

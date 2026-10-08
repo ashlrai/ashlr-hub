@@ -1,6 +1,6 @@
 {
   "name": "@ashlr/hub",
-  "version": "3.25.1",
+  "version": "3.25.2",
   "description": "Phantom by AshlrAI: the open-source engineering agent workbench for CLI accounts, local models and autonomous fleets.",
   "publishConfig": {
     "access": "public"
@@ -36,6 +36,7 @@
     "dist",
     "bin",
     "scripts/run-verify-command.mjs",
+    "scripts/local-app-transaction.mjs",
     "scripts/scorecard-history-worker.mjs",
     "scripts/evaluators/preparation-verification-activity.mjs",
     "scripts/evaluators/preparation-verification-activity.d.mts",
@@ -143,7 +144,7 @@
     "check:first-paint": "node scripts/check-first-paint-budget.mjs --budget-kb 353 --mobile-budget-kb 250",
     "check:first-paint:built": "node scripts/check-first-paint-budget.mjs --no-build --out-dir dist/core/web/public/next --budget-kb 353 --mobile-budget-kb 250",
     "check:docs": "node scripts/check-documentation.mjs",
-    "check:release": "npm run test:ci -- --maxWorkers=1 --fileParallelism=false test/m515.release-publish-authority-split.test.ts test/documentation-navigation.test.ts test/authority-release-truth.test.ts test/m33.release-meta.test.ts test/cli-registry-drift.test.ts",
+    "check:release": "npm run test:ci -- --maxWorkers=1 --fileParallelism=false test/m515.release-publish-authority-split.test.ts test/documentation-navigation.test.ts test/authority-release-truth.test.ts test/m33.release-meta.test.ts test/cli-registry-drift.test.ts test/authority-tier1-closure-310b.test.ts test/sidecar-literal-imports-315.test.ts",
     "gate": "node scripts/gate.mjs",
     "gate:full": "node scripts/gate.mjs --full",
     "ship:local": "node scripts/ship-local.mjs",

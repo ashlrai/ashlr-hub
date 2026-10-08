@@ -96,6 +96,18 @@ async function build(): Promise<AuthoritySurfaceManifestV1> {
 }
 
 describe('the build script', () => {
+  it('detects changes in the signed updater and installation helper before adoption', async () => {
+    const roots = ['dist/core/desktop/update-trust.js', 'dist/core/desktop/qualified-update.js', 'dist/cli/desktop-update.js', 'scripts/local-app-transaction.mjs'];
+    for (const path of roots) put(path, 'export const trust = 1;\n');
+    const manifest = await script.computeAuthoritySurface({ packageRoot: root, roots, ts });
+    writeFileSync(join(root, 'dist/authority-surface.json'), JSON.stringify(manifest));
+    for (const path of roots) {
+      put(path, 'export const trust = 2;\n');
+      expect(verifyAuthoritySurfaceAt(root, 'running', { fresh: true })).toMatchObject({ ok: false, code: 'file-changed' });
+      put(path, 'export const trust = 1;\n');
+    }
+  });
+
   it('binds every maintainer intake/runner/check module to the signed surface', async () => {
     const roots = ['dist/cli/maintainer-verify.js', 'dist/core/fleet/maintainer-pr-verification.js', 'dist/core/fleet/maintainer-pr-runner.js'];
     for (const path of roots) {

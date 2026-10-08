@@ -4,7 +4,7 @@
  * Every machine fact comes from an injected io, so nothing here reads or writes the real
  * ~/.local, /Applications or launchd, and no command is executed: the fake io records calls.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -313,7 +313,7 @@ function fakeIo(overrides: Record<string, unknown> = {}) {
       if (cmd === 'git' && argv[0] === 'status') return { status: 0, stdout: '' };
       if (cmd === 'launchctl' && argv[0] === 'print') return { status: argv[1].endsWith('ai.ashlr.serve') ? 0 : 113, stdout: '' };
       if (cmd === '/bin/ps') return { status: 0, stdout: calls.some((call) => call[0] === '/usr/bin/open') ? `42 1 Wed Oct 7 16:00:00 2026 ${APP_PATH}/Contents/MacOS/ashlr-desktop\n43 42 Wed Oct 7 16:00:00 2026 ${APP_PATH}/Contents/MacOS/ashlr verse --port 7777 --no-open --json` : '' };
-      if (cmd === '/usr/sbin/lsof') return {status: 0, stdout: 'p43\n'};
+      if (cmd === '/usr/sbin/lsof') return {status: 0, stdout: 'p43\nf8\n'};
       if (cmd === '/usr/bin/plutil') return { status: 0, stdout: argv[1] === 'CFBundleIdentifier' ? 'ai.ashlr.desktop' : argv[1] === 'CFBundleExecutable' ? 'ashlr-desktop' : '3.11.1' };
       if (cmd === 'pgrep') return { status: 1, stdout: '' };
       if (cmd === 'security') return { status: 0, stdout: `  1) ${HASH} "Ashlr Local"\n` };
@@ -652,6 +652,36 @@ describe('identity-bound Phantom native migration', () => {
     expect(f.calls.some((c) => c[0] === 'cleanup' && c[1]?.endsWith('retired-bundle'))).toBe(true);
     expect(f.calls.some((c) => c[0] === 'cleanup' && c[1]?.endsWith('.zip'))).toBe(false);
   });
+  it('keeps authenticated update bytes unchanged and never prepares, rewrites or signs them', async () => {
+    const f = appIo(); const selected = selectLocalApp(HASH, f.io); const original = f.io.exec;
+    const exec = (cmd: string, argv: string[]) => cmd === '/usr/bin/plutil' && argv[0] === '-extract' && ['CFBundleName', 'CFBundleDisplayName'].includes(argv[1]!)
+      ? {status: 0, stdout: 'Phantom'} : original(cmd, argv);
+    const prepare = vi.fn(); const beforeSwitch = vi.fn();
+    await installLocalApp({...nativeInput(selected), preserveSigned: true, prepare, beforeSwitch}, {...f.io, exec});
+    expect(prepare).not.toHaveBeenCalled(); expect(beforeSwitch).toHaveBeenCalledOnce();
+    expect(f.calls.some(call => call[0] === '/usr/bin/codesign' && call.includes('--force'))).toBe(false);
+    expect(f.calls.some(call => call[0] === '/usr/bin/plutil' && call.includes('-replace'))).toBe(false);
+    expect(f.bundles.get(APP_PATH)?.inventory).toBe(INVENTORY);
+  });
+  it('refuses signed display identity and fresh admission failures before changing the active app', async () => {
+    for (const display of ['Unrelated', 'Phantom']) {
+      const f = appIo(); const selected = selectLocalApp(HASH, f.io); const original = f.io.exec;
+      const exec = (cmd: string, argv: string[]) => cmd === '/usr/bin/plutil' && argv[0] === '-extract' && ['CFBundleName', 'CFBundleDisplayName'].includes(argv[1]!)
+        ? {status: 0, stdout: display} : original(cmd, argv);
+      await expect(installLocalApp({...nativeInput(selected), preserveSigned: true,
+        beforeSwitch: async () => {throw new Error('grant revoked');}}, {...f.io, exec})).rejects.toThrow();
+      expect(f.calls.some(call => call[0] === 'exclusive-rename')).toBe(false);
+      expect(f.bundles.has(LEGACY_APP_PATH)).toBe(true);
+    }
+  });
+  it('restores the original app when the final pointer guard refuses before pointer publication', async () => {
+    const f=appIo(),selected=selectLocalApp(HASH,f.io);const phases:string[]=[];const previous={target:'/owned/previous',ino:17};const current=previous;
+    const rollback=vi.fn(async()=>{if(JSON.stringify(current)!==JSON.stringify(previous))throw new Error('pointer recovery unknown');});
+    await expect(installLocalApp({...nativeInput(selected),beforeSwitch:async()=>{},commitPointer:async()=>{throw new Error('candidate changed during app checks');},rollbackPointer:rollback},
+      {...f.io,writeInstallJournal:(_owner:string,value:{phase:string})=>phases.push(value.phase)})).rejects.toThrow('candidate changed');
+    expect(rollback).toHaveBeenCalledOnce();expect(current).toEqual(previous);expect(phases.at(-1)).toBe('rolled-back');
+    expect(f.bundles.has(LEGACY_APP_PATH)).toBe(true);expect(f.bundles.has(APP_PATH)).toBe(false);
+  });
   it('refuses a mismatched archive before changing the active app', async () => {
     const f = appIo(); const selected = selectLocalApp(HASH, f.io); f.badArchive();
     await expect(installLocalApp(nativeInput(selected), f.io)).rejects.toThrow(/archive/);
@@ -694,11 +724,49 @@ describe('native migration admission and rollback boundaries', () => {
     expect(launchedAppIsOwned(io)).toBe(false);
     f.processes(`52 1 Wed Oct 7 16:00:00 2026 ${APP_PATH}/Contents/MacOS/ashlr-desktop\n53 52 Wed Oct 7 16:00:00 2026 ${APP_PATH}/Contents/MacOS/ashlr verse --port 7777 --no-open --json`);
     const exec = io.exec;
-    io.exec = (cmd: string, argv: string[]) => cmd === '/usr/sbin/lsof' ? {status: 0, stdout: 'p53\n'} : exec(cmd, argv);
+    io.exec = (cmd: string, argv: string[]) => cmd === '/usr/sbin/lsof' ? {status: 0, stdout: 'p53\nf8\n'} : exec(cmd, argv);
     expect(launchedAppIsOwned(io)).toBe(true);
     io.exec = (cmd: string, argv: string[]) => cmd === '/usr/sbin/lsof' ? {status: 0, stdout: 'p99\n'} : exec(cmd, argv);
     expect(launchedAppIsOwned(io)).toBe(false);
     f.processes(`52 1 Wed Oct 7 16:00:00 2026 ${APP_PATH}/Contents/MacOS/ashlr-desktop\n53 99 Wed Oct 7 16:00:00 2026 ${APP_PATH}/Contents/MacOS/ashlr verse --port 7777 --no-open --json`);
+    expect(launchedAppIsOwned(io)).toBe(false);
+  });
+  it('accepts only the native fixed remote config with required private token handoff', () => {
+    const f = appIo(); const record = `${HOME}/.ashlr/.desktop-sidecar.json`;
+    const sidecar = `${APP_PATH}/Contents/MacOS/ashlr`, base = `${sidecar} verse --port 7777 --no-open --json`;
+    const remote = `--remote-config ${HOME}/.ashlr/verse-remote.json --desktop-token-handoff`;
+    const io = {...f.io, exists: (path: string) => path === record, lstat: () => ({isFile: true, size: 200, isSymbolicLink: false}), readBoundedFile: () => JSON.stringify({desktopPid: 52, sidecarPid: 53, port: 7777, sidecarPath: sidecar})};
+    const exec = io.exec;
+    io.exec = (cmd: string, argv: string[]) => cmd === '/usr/sbin/lsof' ? {status: 0, stdout: 'p53\nf8\n'} : exec(cmd, argv);
+    const processes = (args: string, parent = 52) => f.processes(`52 1 Wed Oct 7 16:00:00 2026 ${APP_PATH}/Contents/MacOS/ashlr-desktop\n53 ${parent} Wed Oct 7 16:00:00 2026 ${args}`);
+    processes(`${base} ${remote}`); expect(launchedAppIsOwned(io)).toBe(true);
+    for (const args of [
+      `${base} --remote-config /unrelated/verse-remote.json --desktop-token-handoff`,
+      `${base} --remote-config ${HOME}/.ashlr/verse-remote.json`,
+      `${base} --desktop-token-handoff`,
+      `${base} --desktop-token-handoff --remote-config ${HOME}/.ashlr/verse-remote.json`,
+      `${base} ${remote} extra`, `${base} ${remote} --desktop-token-handoff`,
+    ]) {processes(args); expect(launchedAppIsOwned(io)).toBe(false);}
+    processes(`${base} ${remote}`, 99); expect(launchedAppIsOwned(io)).toBe(false);
+    processes(`${base} ${remote}`);
+    io.exec = (cmd: string, argv: string[]) => cmd === '/usr/sbin/lsof' ? {status: 0, stdout: 'p99\n'} : exec(cmd, argv);
+    expect(launchedAppIsOwned(io)).toBe(false);
+  });
+  it('requires actual lsof process/file records belonging only to the selected sidecar', () => {
+    const f = appIo(); const record = `${HOME}/.ashlr/.desktop-sidecar.json`;
+    const sidecar = `${APP_PATH}/Contents/MacOS/ashlr`;
+    const io = {...f.io, exists: (path: string) => path === record, lstat: () => ({isFile: true, size: 200, isSymbolicLink: false}), readBoundedFile: () => JSON.stringify({desktopPid: 52, sidecarPid: 53, port: 7777, sidecarPath: sidecar})};
+    f.processes(`52 1 Wed Oct 7 16:00:00 2026 ${APP_PATH}/Contents/MacOS/ashlr-desktop\n53 52 Wed Oct 7 16:00:00 2026 ${sidecar} verse --port 7777 --no-open --json`);
+    const exec = io.exec;
+    for (const stdout of ['p53\nf8\n', 'p53\nf8\nf9', 'p53\nf0\n']) {
+      io.exec = (cmd: string, argv: string[]) => cmd === '/usr/sbin/lsof' ? {status: 0, stdout} : exec(cmd, argv);
+      expect(launchedAppIsOwned(io)).toBe(true);
+    }
+    for (const stdout of ['', 'p53\n', 'p99\nf8\n', 'f8\np53\n', 'p53\nf8\np99\nf9\n', 'p53\nf8\np53\nf9\n', 'p53\nf8\nxunknown\n', 'p53\nf8\n\n', 'p53\n\nf8\n', 'p53\nfcwd\n', 'p53\nf8junk\n']) {
+      io.exec = (cmd: string, argv: string[]) => cmd === '/usr/sbin/lsof' ? {status: 0, stdout} : exec(cmd, argv);
+      expect(launchedAppIsOwned(io)).toBe(false);
+    }
+    io.exec = (cmd: string, argv: string[]) => cmd === '/usr/sbin/lsof' ? {status: 1, stdout: 'p53\nf8\n'} : exec(cmd, argv);
     expect(launchedAppIsOwned(io)).toBe(false);
   });
   it('installs from the verified native source when neither app exists', async () => {

@@ -15,6 +15,7 @@
 import { apiGet, apiPost } from '../../../data/client.js';
 import { getMutationToken, touchMutationHold } from '../../../data/auth-store.js';
 import { getQuerySnapshot, invalidate, refetchQuery } from '../../../data/cache.js';
+import { fleetStatusQuery, fleetActivityQuery } from '../../../data/queries.js';
 import { verseControlQuery, VerseControlLockedError } from '../autonomy/control-queries.js';
 import { fleetQuery } from '../autonomy/fleet-queries.js';
 import { refreshActivity } from '../shell/useActivity.js';
@@ -66,7 +67,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 
 /** Native operations change disk state outside the HTTP mutation/SSE path. */
 export function refreshFleetControlReads(): void {
-  for (const query of [fleetControlQuery, fleetQueueQuery, fleetLiveQuery, authorityQuery, verseControlQuery, fleetQuery]) {
+  for (const query of [fleetControlQuery, fleetQueueQuery, fleetLiveQuery, authorityQuery, verseControlQuery, fleetQuery, fleetStatusQuery, fleetActivityQuery]) {
     // Preserve lazy panels: don't fetch a projection nobody has read yet.
     // Force a new read so an outstanding pre-operation answer cannot win.
     if (getQuerySnapshot(query.key).status !== 'idle') {

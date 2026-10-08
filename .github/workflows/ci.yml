@@ -190,9 +190,7 @@ jobs:
       # The complete assigned qualification still runs below.
       - name: Check publication contracts (hermetic)
         if: matrix.os == 'macos-latest'
-        run: >-
-          npm run test:ci -- --maxWorkers=1 --fileParallelism=false test/m515.release-publish-authority-split.test.ts
-          test/documentation-navigation.test.ts test/authority-release-truth.test.ts
+        run: npm run check:release
 
       # Reject generated ownership drift before expensive builds and tests.
       # Every platform still runs all of its assigned checks afterward.
@@ -225,7 +223,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node --test .github/tests/ci-pack-smoke.test.mjs .github/tests/first-paint-built.test.mjs .github/tests/ci-qualification-lane.test.mjs .github/tests/ci-attestation-inputs.test.mjs .github/tests/hosted-build-artifact.test.mjs .github/tests/hosted-native-build.test.mjs
+          node --test .github/tests/ci-pack-smoke.test.mjs .github/tests/desktop-update-finalizer.test.mjs .github/tests/first-paint-built.test.mjs .github/tests/ci-qualification-lane.test.mjs .github/tests/ci-attestation-inputs.test.mjs .github/tests/hosted-build-artifact.test.mjs .github/tests/hosted-native-build.test.mjs
           snapshot="$(node .github/scripts/ci-pack-smoke.mjs capture "$RUNNER_TEMP")"
           printf 'ASHLR_PACK_SMOKE_SNAPSHOT=%s\n' "$snapshot" >> "$GITHUB_ENV"
           npm run check:first-paint:built
@@ -368,9 +366,7 @@ jobs:
       # Preserve every assigned whole-file check after this quick publication preflight.
       - name: Check publication contracts (hermetic)
         if: matrix.shard == 2
-        run: >-
-          npm run test:ci -- --maxWorkers=1 --fileParallelism=false test/m515.release-publish-authority-split.test.ts
-          test/documentation-navigation.test.ts test/authority-release-truth.test.ts
+        run: npm run check:release
       - name: Build
         run: npm run build
       - name: Test complete Mac general partition

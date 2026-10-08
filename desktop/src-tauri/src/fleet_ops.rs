@@ -354,7 +354,7 @@ fn login_shell() -> String {
 /// The scrubbed environment every child gets: identity, locale, a temp dir and
 /// the PATH given — nothing the app itself was started with (no agent marker,
 /// no `ASHLR_*`, no provider credential).
-fn base_env(home: &Path, path_env: &str) -> Vec<(String, String)> {
+pub(crate) fn base_env(home: &Path, path_env: &str) -> Vec<(String, String)> {
     let mut env = vec![
         ("HOME".to_string(), home.to_string_lossy().into_owned()),
         ("USER".to_string(), user_name()),

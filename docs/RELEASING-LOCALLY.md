@@ -122,8 +122,9 @@ and remove an entry when its cause is fixed.
 5. switch the one active app to `Phantom.app` together with the exact current CLI symlink and missing `phm`/`ashlr` aliases; bare `phantom` remains Secrets;
 6. launch and accept only the exact native PID, parented sidecar, owned listener and healthy console. Never restart the resident or release Stop during maintenance.
 
-The published 3.25.0 DMG retains `Ashlr.app`; upcoming source artifacts use
-`Phantom.app` and `Phantom_<version>_aarch64.dmg`. Both names present refuse rather
+The published 3.25.1 DMG contains `Phantom.app` and is named
+`Phantom_3.25.1_aarch64.dmg`; the historical 3.25.0 DMG retains `Ashlr.app`.
+Source 3.25.2 remains a candidate, including its signed idle updater. Both names present refuse rather
 than choosing one. A first native install requires a verified signed prebuilt
 `desktop/src-tauri/target/release/bundle/macos/Phantom.app`.
 
@@ -136,6 +137,17 @@ normally and inspect the recorded app/pointer state before explicit recovery.
 Temporary owned staging/retired trees are removed only after acceptance; user
 state, grants and credentials are retained. No automatic updater is activated.
 CLI-only installs with no native app keep their existing service behavior.
+
+<a id="3251-source-install-observation-october-7-2026"></a>
+
+**3.25.1 source-install observation (October 7, 2026).** The original
+`ship:local --native` run exited 1 and retained `rollback-held`: its health
+matcher rejected the supported remote sidecar arguments and macOS `lsof`
+PID-plus-file-descriptor output. Independent installed app/CLI byte, signature
+and process checks passed; this does not turn that transaction into an accepted
+install. The 3.25.2 candidate corrects both predicates. The original rollback
+archive and journal remain preserved; no automatic recovery or journal rewrite
+is implied.
 
 ### Stable local signing ("Ashlr Local")
 

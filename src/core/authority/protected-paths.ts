@@ -82,6 +82,10 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/vision/leader-display-text.ts',
   // Authority and daemon
   'src/core/authority/**',
+  'src/core/desktop/**',
+  'src/cli/desktop-update.ts',
+  'scripts/desktop-release-policy.mjs',
+  'scripts/finalize-desktop-update.mjs',
   'src/core/daemon/activation-permit.ts',
   'src/core/daemon/tick-hooks.ts',
   'src/core/daemon/loop.ts',

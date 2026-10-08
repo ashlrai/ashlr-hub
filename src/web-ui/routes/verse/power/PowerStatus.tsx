@@ -3,6 +3,7 @@ import { refreshDesktopState, setDesktopPreference, useDesktopState } from '../.
 import { useActivity } from '../shell/useActivity.js';
 import { isPowerState } from './power-state.js';
 import styles from './PowerStatus.module.css';
+import { UpdateStatus } from './UpdateStatus.js';
 
 function checked(at: number | null): string {
   return at === null ? 'Not checked yet' : new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
@@ -19,6 +20,8 @@ export function PowerStatus() {
   const [error, setError] = useState<string | null>(null);
   const label = !power ? 'Host power unavailable' : !power.automatic ? 'System sleep settings' : power.error ? 'Awake request failed' : power.requested ? 'Awake request active' : power.localRuns === null ? 'Automatic · checking activity' : 'Automatic awake';
   return (
+    <>
+    <UpdateStatus />
     <details className={styles.status}>
       <summary aria-label={`Computer power: ${label}`}>{label}</summary>
       <div className={styles.panel}>
@@ -44,5 +47,6 @@ export function PowerStatus() {
         </details>
       </div>
     </details>
+    </>
   );
 }
