@@ -35,9 +35,10 @@ source for versioned installers. Use the explicit package version above and insp
 
 ### Desktop app on Apple silicon Mac
 
-Download the [v3.25.2 Phantom macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.2/Phantom_3.25.2_aarch64.dmg)
-from the published [versioned release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.2).
-It includes the CLI and the same console. This DMG is locally signed, not
+The 3.25.2 desktop app has a reproduced startup issue. Keep an existing 3.25.1
+app until the fixed [v3.25.3 Phantom macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.3/Phantom_3.25.3_aarch64.dmg)
+is published in its [versioned release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.3).
+The desktop includes the CLI and the same console. This DMG is locally signed, not
 Apple Developer ID notarized; macOS may require **Open Anyway** on first launch.
 For a source build and local signing, follow [Releasing locally](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
 There is no Linux or Windows desktop package in this release; use the CLI above.
