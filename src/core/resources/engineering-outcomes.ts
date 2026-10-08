@@ -4,7 +4,7 @@ import { isAbsolute, resolve } from 'node:path';
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
 import { canonical, digest } from '../universe/artifacts.js';
 import { campaignDirectory, foldCampaignEvents, projectCampaign, readCampaignEvents } from '../universe/campaign-store.js';
-import { readCompletedCampaignDelivery } from '../universe/campaign-delivery-recovery.js';
+import { readCompletedCampaignDeliveryObservation } from '../universe/campaign-delivery-recovery.js';
 import { validateUniverseCampaignDeliveryPlan } from '../universe/campaign-delivery.js';
 import { readUniverseDeliveries } from '../universe/delivery.js';
 import type { FirmEngineeringControlHost } from '../universe/firm-engineering-control-handler.js';
@@ -221,10 +221,13 @@ function sample(options: ResourceEngineeringOutcomesOptions): { report: Resource
         }
         row.niches = [...retained.values()].sort((a, b) => a.niche.localeCompare(b.niche));
         row.workers = [...workers.values()].sort((a, b) => a.workerId.localeCompare(b.workerId));
-        const deliveries = readUniverseDeliveries(universe.manifest.id, { root: host.root }); pin(deliveries);
+        // Reuse only this fresh successful recovery's actual report. Refusal
+        // still reads the branch evidence independently so unknown stays unknown.
+        const observation = readCompletedCampaignDeliveryObservation(campaign, target, { root: host.root });
+        const deliveries = observation?.deliveries ?? readUniverseDeliveries(universe.manifest.id, { root: host.root }); pin(deliveries);
         if (deliveries.sourceState === 'degraded') row.reasons.push('delivery-evidence-unavailable');
         else {
-          const receipt = readCompletedCampaignDelivery(campaign, target, { root: host.root }); pin(receipt);
+          const receipt = observation?.receipt ?? null; pin(receipt);
           row.stages.verifiedLocalDeliveries = receipt ? 1 : 0;
           if (!receipt && deliveries.deliveries.some(value => value.branch === target.branch && value.status === 'delivered')) {
             row.stages.verifiedLocalDeliveries = null; row.reasons.push('delivery-evidence-unverified');
