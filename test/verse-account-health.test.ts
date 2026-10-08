@@ -685,7 +685,7 @@ describe('reconnect', () => {
     expect(script).toContain('rm -f -- "$0"');
     expect(script).toContain(`exec '/usr/bin/node' '/Users/o'\\''neil/launcher.mjs' 'auth' 'login' '--claudeai'`);
     // The label is quoted: $(…) is printed, never executed; control chars are dropped.
-    expect(script).toContain("'Ashlr Verse: signing in Mason'\\''s $(Claude). Follow the prompts; Verse never sees your credentials.'");
+    expect(script).toContain("'Phantom: signing in Mason'\\''s $(Claude). Follow the prompts; Phantom never sees your credentials.'");
     expect(script).not.toContain('\u0007');
   });
 

@@ -541,11 +541,12 @@ describe('createAppsService — desktop switches (SPEC-310C §0.5: shown off, wi
     expect(result).toEqual({ ok: true, status: 202, body: { ok: true, opened: 'terminal-app', command: ['ollama', 'launch', 'hermes-desktop'] } });
     expect(w.scripts).toHaveLength(1);
     expect(w.scripts[0]!.script).toContain(`exec '/usr/local/bin/ollama' 'launch' 'hermes-desktop'`);
+    expect(w.scripts[0]!.script).toContain('Phantom: ');
     // Never answers the other tool's prompts for the operator.
     expect(w.scripts[0]!.script).not.toMatch(/'-y'|--yes/);
     expect(JSON.parse(w.state.text!)).toMatchObject({ v: 1, desktop: { 'hermes-desktop': { enabled: true } } });
     const res = await svc.get();
-    expect(row(res, 'hermes-desktop').health).toEqual({ state: 'warn', label: 'on (as last set from Verse)' });
+    expect(row(res, 'hermes-desktop').health).toEqual({ state: 'warn', label: 'on (as last set from Phantom)' });
 
     const restore = await svc.toggle('hermes-desktop', false);
     expect(restore.ok && restore.body.command).toEqual(['ollama', 'launch', 'hermes-desktop', '--restore']);

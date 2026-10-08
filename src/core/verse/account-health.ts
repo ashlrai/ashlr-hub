@@ -826,7 +826,7 @@ export function probeReasonText(reason: string | null): string {
     case 'status-process-failed':
     case 'probe-native-unavailable': return 'the CLI could not be started';
     case 'status-output-invalid':
-    case 'probe-protocol-invalid': return 'the CLI answered in a shape Verse does not recognise';
+    case 'probe-protocol-invalid': return 'the CLI answered in a shape Phantom does not recognise';
     case 'status-termination-uncertain': return 'the status command did not exit cleanly';
     case 'probe-account-hint-mismatch':
     case 'probe-account-changed': return 'the CLI is signed in to a different account than expected';
@@ -875,7 +875,7 @@ function nativeReport(seat: VerseSeat, facts: SeatAccountFacts | null, checkedAt
 
   if (connection === 'signed-out') {
     reasons.push(`${PROVIDER_CLI[engine]} reports this account is not signed in.`);
-    reasons.push("Reconnect opens the account's own sign-in in Terminal; Verse never sees the credentials.");
+    reasons.push("Reconnect opens the account's own sign-in in Terminal; Phantom never sees the credentials.");
     fix = { kind: 'reauth' };
   } else if (connection === 'exhausted') {
     // When the seat actually REOPENS — the latest spent-window reset — not the
@@ -985,7 +985,7 @@ export function buildReconnectScript(login: readonly string[], label: string): s
   return [
     '#!/bin/sh',
     'rm -f -- "$0"',
-    `printf '%s\\n' ${shellQuote(`Ashlr Verse: signing in ${bannerLabel(label)}. Follow the prompts; Verse never sees your credentials.`)}`,
+    `printf '%s\\n' ${shellQuote(`Phantom: signing in ${bannerLabel(label)}. Follow the prompts; Phantom never sees your credentials.`)}`,
     `exec ${login.map(shellQuote).join(' ')}`,
     '',
   ].join('\n');

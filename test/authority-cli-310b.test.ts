@@ -7,7 +7,7 @@
  * create an App, apply a ruleset, open a PR or sign anything for real.
  * HOME-isolated.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -110,10 +110,44 @@ function harness(opts: { confirm?: boolean; gh?: (args: readonly string[]) => Gh
 }
 
 describe('basic commands', () => {
+  it.each([
+    ['stop', '--help'], ['stop', '-h'], ['revoke', '--help'],
+    ['switch', 'autonomous', '--help'], ['grant', '--yes', '--help'],
+    ['setup', '--yes', '--help'], ['resident', 'stop', '--help'],
+    ['protect', '--apply', '--help'], ['github-app', '--yes', '--help'],
+    ['rotate-provenance', '--yes', '--help'],
+  ])('help on %j prints usage without state or dependency effects', async (...args) => {
+    const h = harness();
+    const confirm = vi.fn(async () => true);
+    const never = vi.fn(async () => { throw new Error('help must not contact resident dependencies'); });
+    h.deps.confirm = confirm;
+    h.deps.resident = {admission: never, observe: never, operatorRefusal: never, start: never, stop: never};
+    const before = readdirSync(home, {recursive: true}).sort();
+    expect(killSwitchOn()).toBe(false);
+    expect(await runAuthorityCli(args, h.deps)).toBe(0);
+    expect(h.out.join('\n')).toMatch(/^Usage: phm authority <command>/);
+    expect(h.out.join('\n')).toContain('Compatible alias: ashlr authority <command>');
+    expect(h.err).toEqual([]); expect(h.calls).toEqual([]);
+    expect(confirm).not.toHaveBeenCalled(); expect(never).not.toHaveBeenCalled();
+    expect(h.deps.custody!.signGrant).not.toHaveBeenCalled();
+    expect(merges.calls).toEqual([]); expect(killSwitchOn()).toBe(false);
+    expect(readdirSync(home, {recursive: true}).sort()).toEqual(before);
+  });
+
+  it('clear-stop help preserves an already engaged Stop', async () => {
+    mkdirSync(join(home, '.ashlr'), {recursive: true});
+    writeFileSync(join(home, '.ashlr', 'KILL'), 'retained Stop evidence');
+    const h = harness();
+    expect(await runAuthorityCli(['clear-stop', '--help'], h.deps)).toBe(0);
+    expect(killSwitchOn()).toBe(true);
+    expect(readFileSync(join(home, '.ashlr', 'KILL'), 'utf8')).toBe('retained Stop evidence');
+    expect(h.calls).toEqual([]); expect(merges.calls).toEqual([]);
+  });
+
   it('prints usage and exits 2 without a command', async () => {
     const h = harness();
     expect(await runAuthorityCli([], h.deps)).toBe(2);
-    expect(h.out.join('\n')).toMatch(/ashlr authority <command>/);
+    expect(h.out.join('\n')).toMatch(/^Usage: phm authority <command>/);
     expect(await runAuthorityCli(['help'], h.deps)).toBe(0);
     expect(await runAuthorityCli(['bogus'], h.deps)).toBe(2);
   });

@@ -365,7 +365,9 @@ function one(parsed: Parsed, flag: string): string | null {
   return values && values.length > 0 ? values[values.length - 1]! : null;
 }
 
-const USAGE = `Usage: ashlr authority <command>
+const USAGE = `Usage: phm authority <command>
+
+Compatible alias: ashlr authority <command>
 
   status [--json]                        Standing authority: grant, switch, Stop, rollout, ledger, custody
   switch <off|propose|autonomous>        Lower instantly; raise up to what the grant allows
@@ -401,6 +403,11 @@ Lowering authority never asks. Anything that raises it asks first (or takes --ye
 
 /** `ashlr authority …` (the CLI's `(args) => exit code` shape). */
 export async function runAuthorityCli(args: string[], injected?: Partial<AuthorityCliDeps>): Promise<number> {
+  // Help is observational even after a mutating subcommand; do not load its dependencies.
+  if (args.includes('--help') || args.includes('-h')) {
+    (injected?.out ?? console.log)(USAGE);
+    return 0;
+  }
   const deps: AuthorityCliDeps = { ...(await defaultDeps()), ...(injected ?? {}) };
   const parsed = parseArgs(args);
   if (typeof parsed === 'string') {
