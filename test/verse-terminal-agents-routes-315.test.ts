@@ -241,10 +241,9 @@ describe('terminal 3.15 agents, fixes and launch configurations through the real
     // The exemption is exactly that path shape: its neighbours still need the mutation token.
     expect((await request(port, 'POST', `/api/verse/terminal/${tab.id}/kill`, { 'x-ashlr-agent-token': token, 'content-type': 'application/json' }, '{}')).status).toBe(401);
 
-    // Closing the tab removes its hooks.
+    // Closing schedules asynchronous hook removal; observe its completion.
     expect((await request(port, 'POST', `/api/verse/terminal/${tab.id}/kill`, mutate, '{}')).status).toBe(200);
-    await tick(50);
-    expect(fs.existsSync(path.dirname(settings!))).toBe(false);
+    await expect.poll(() => fs.existsSync(path.dirname(settings!))).toBe(false);
   });
 
   it('a Codex tab gets -c notify; a launch through Ollama gets no hooks (status read from its output)', async () => {
