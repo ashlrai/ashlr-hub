@@ -2,13 +2,15 @@ import { readUniverseCampaignProjection } from './campaign-store.js';
 import { canonical } from './artifacts.js';
 import { hasVerifiedCampaignPassedSeedImprovement, hasVerifiedInitialCampaignRepair, hasVerifiedInitialCampaignSeedImprovement,
   type UniverseCampaignDeliveryTarget } from './campaign-delivery.js';
-import { readUniverseDeliveries, type UniverseDeliveryReceipt } from './delivery.js';
+import { readUniverseDeliveries, type UniverseDeliveryReceipt, type UniverseDeliveryReport } from './delivery.js';
 import { manifestRecord, universePath } from './store.js';
 import type { UniverseCampaignSummary, UniverseSummary } from './types.js';
 
 /** Read an already delivered improvement under the pinned target policy; never create or repair a branch. */
-export function readCompletedCampaignDeliveryProjection(campaign: UniverseCampaignSummary,
-  target: UniverseCampaignDeliveryTarget, options: { root: string }): { receipt: UniverseDeliveryReceipt; universe: UniverseSummary } | null {
+export function readCompletedCampaignDeliveryObservation(campaign: UniverseCampaignSummary,
+  target: UniverseCampaignDeliveryTarget, options: { root: string }): {
+    receipt: UniverseDeliveryReceipt; universe: UniverseSummary; deliveries: UniverseDeliveryReport;
+  } | null {
   try {
     const repairOption = Object.getOwnPropertyDescriptor(target, 'allowInitialRepair');
     if ('allowInitialRepair' in target && (!repairOption || !Object.hasOwn(repairOption, 'value') || repairOption.value !== true)) return null;
@@ -40,8 +42,15 @@ export function readCompletedCampaignDeliveryProjection(campaign: UniverseCampai
     const strictImprovement = trial.delta !== null && trial.delta > 0 && parent?.artifact && parent.artifact.digest !== trial.artifact.digest;
     if (!strictImprovement && !hasVerifiedInitialCampaignSeedImprovement(universe, campaign, trial, seedDigest, options) &&
         !(repairOption?.value === true && hasVerifiedInitialCampaignRepair(universe, campaign, trial, seedDigest, options))) return null;
-    return { receipt, universe };
+    return { receipt, universe, deliveries };
   } catch { return null; }
+}
+
+/** Preserve the exact projection shape without a second delivery observation. */
+export function readCompletedCampaignDeliveryProjection(campaign: UniverseCampaignSummary,
+  target: UniverseCampaignDeliveryTarget, options: { root: string }): { receipt: UniverseDeliveryReceipt; universe: UniverseSummary } | null {
+  const observation = readCompletedCampaignDeliveryObservation(campaign, target, options);
+  return observation ? { receipt: observation.receipt, universe: observation.universe } : null;
 }
 
 /** Preserve receipt-only recovery semantics for existing historical callers. */
