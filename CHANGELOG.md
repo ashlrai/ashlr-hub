@@ -41,6 +41,11 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   test suites, then reuse those exact bytes for the late consumer smoke check.
 - Reuse a verified delivery report within a completed campaign observation,
   retaining independent freshness samples and existing refusal behavior.
+- Clarify chat routing with Manual, Automatic, Local first and Delegate,
+  accessible descriptions and unchanged saved routing preferences. Remove
+  duplicated wording from resource freshness tooltips.
+- Run publication preflight once before the producer build and avoid a repeated
+  core typecheck. Retain web typechecking and all platform builds and tests.
 
 ## [3.25.1] — 2026-10-07
 
