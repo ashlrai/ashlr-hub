@@ -12,6 +12,7 @@
  * Auto-fix CI and Auto-merge when green.
  */
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 import type { WorkspaceConfigRead } from '../../../../core/verse/agents/types.js';
 import type { VerseProject, VerseSeat } from '../../../../core/verse/types.js';
 import { Button } from '../../../components/primitives/Button.js';
@@ -215,7 +216,7 @@ export function NewAgentDialog({ open, multi, projects, seats, initialRoot, busy
         </details>
         {autoMerge ? (
           <p className={styles.hint}>
-            Auto-merge squash-merges only a green, mergeable PR that touches no protected path (CI, manifests, lockfiles); ashlr-hub itself only when the grant’s self-land policy allows. GitHub’s branch rules still apply.
+            Auto-merge squash-merges only a green, mergeable PR that touches no protected path (CI, manifests, lockfiles); {PRODUCT_NAME} itself only when the grant’s self-land policy allows. GitHub’s branch rules still apply.
           </p>
         ) : null}
 

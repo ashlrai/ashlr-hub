@@ -22,6 +22,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Direct new Leader, Telegram and cloud self-improvement tasks and adoption
   metrics to the canonical repository and package. Explicit saved targets and
   historical tasks keep their existing identity and authority.
+- Default new release-article configurations to the canonical repository while
+  preserving saved configurations and historical publication records.
+- Finish Phantom labels in agent setup, Fleet and Telegram replies; correct the
+  native CLI recovery command and current installation guides.
 
 ## [3.25.3] — 2026-10-08
 

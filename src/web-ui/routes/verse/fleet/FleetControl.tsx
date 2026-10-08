@@ -17,6 +17,7 @@
  * ⌘K and the keys (command-keys.ts fleet.*) run the same handlers.
  */
 import { formatMetricUsd } from '../../../components/charts/format-metric.js';
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 import { useRef, useState, type ReactNode } from 'react';
 import type { FleetControlActionResultV1, FleetControlStateV1, FleetNextAction } from '../../../../core/fleet/fleet-control-types.js';
 import { Button } from '../../../components/primitives/Button.js';
@@ -378,7 +379,7 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
                     value={checkoutOverride ?? state.custody.hubCheckout ?? ''}
                     onChange={(event) => setCheckoutOverride(event.target.value)}
                     disabled={busy} autoComplete="off" spellCheck={false}
-                    placeholder="/absolute/path/to/ashlr-hub"
+                    placeholder="/absolute/path/to/phantom"
                     hint="Choose the trusted Phantom source to build. Native checks the checkout and confirms its installer hash and command; administrator approval is required."
                     error={checkoutOverride !== null && !checkoutValid ? 'Enter an absolute path or ~/path within the native 1024-character limit.' : undefined} />
                   <span className={styles.inlineButtons}>
@@ -479,7 +480,7 @@ function BlockerRow({
         </span>
       ) : null}
       {action.kind === 'install-custody' && nativeCapable && !hubCheckout ? (
-        <span className={styles.muted}>Enroll your ashlr-hub checkout first — the helper is built from its tools/custody sources.</span>
+        <span className={styles.muted}>Enroll your {PRODUCT_NAME} checkout first — the helper is built from its tools/custody sources.</span>
       ) : null}
     </div>
   );

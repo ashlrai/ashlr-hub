@@ -59,7 +59,7 @@ export function releaseArticlePaths(): { home: string; directory: string; file: 
   const home = realpathSync(homedir()); const directory = join(home, '.ashlr', 'release-articles');
   return { home, directory, file: join(directory, 'manifest.json') };
 }
-function empty(): ReleaseArticleManifest { return { v: 1, enabled: false, repository: 'ashlrai/ashlr-hub', records: [], observation: null }; }
+function empty(): ReleaseArticleManifest { return { v: 1, enabled: false, repository: HUB_REPOSITORY_IDENTITY.renamedName, records: [], observation: null }; }
 function safeStoragePath(stat: BigIntStats, kind: 'directory' | 'file'): boolean {
   return !stat.isSymbolicLink() && (kind === 'directory' ? stat.isDirectory() : stat.isFile() && stat.nlink === 1n)
     && (typeof process.getuid !== 'function' || stat.uid === BigInt(process.getuid()))
@@ -170,7 +170,7 @@ function newRecord(proposed: ProposedRelease): ArticleRecord {
   return { proposed, digest: null, state: 'pending-public-verification', taskId: null, attempted: false, observedAt: null, publishedAt: null, reason: null,
     teaser: { digest: null, state: 'pending-public-verification', taskId: null, attempted: false } };
 }
-export function configureReleaseArticles(enabled: boolean, repository: ProposedRelease['repository'] = 'ashlrai/ashlr-hub'): ReleaseArticleManifest {
+export function configureReleaseArticles(enabled: boolean, repository: ProposedRelease['repository'] = HUB_REPOSITORY_IDENTITY.renamedName): ReleaseArticleManifest {
   parseProposedRelease({ v: 1, repository, version: '0.0.0' });
   return locked((manifest) => { manifest.enabled = enabled; if (enabled) manifest.repository = repository; return manifest; });
 }

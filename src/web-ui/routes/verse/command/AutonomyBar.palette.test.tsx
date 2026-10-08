@@ -553,6 +553,7 @@ describe('grant review shows starting-stage Leader permission', () => {
     d.payload.leader.classes = ['A', 'B'];
     d.payload.rollout.stages = [{ ...d.payload.rollout.stages[0]!, id: 'elite-direct', leaderClasses: [] }];
     render(<DraftScope draft={d} />);
+    expect(screen.getByRole('region', { name: 'Repositories' })).toHaveTextContent(`Phantom itself: ${d.payload.merge.selfRepo === 'propose-only' ? 'propose only' : 'merge outside authority code'}`);
     const leader = within(screen.getByRole('region', { name: 'Engines and Leader' }));
     expect(leader.getByText(/Signed Leader ceiling: A \+ B/)).toBeInTheDocument();
     expect(leader.getByText('Leader remains advisory in the starting stage.')).toBeInTheDocument();

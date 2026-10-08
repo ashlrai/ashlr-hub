@@ -13,11 +13,14 @@ this guide documents the implemented interfaces and their operational boundaries
 
 The useful unit of progress is an improvement demonstrated in a working environment. A universe should be able to propose alternatives, build them, evaluate their effects, retain useful variants, and use the result to choose its next experiment. As models improve, the same loop can explore more ambitious work.
 
-The rebrand does not change compatibility identifiers. The repository remains
-`ashlr-hub`, the npm package is `@ashlr/hub`, commands use `ashlr universe`, and
-the SDK export remains `@ashlr/hub/universe`. Existing `Universe` types, schemas,
-manifest fields, store paths and this guide's filename are unchanged. No account
-enrollment, store migration or runtime activation follows from the name change.
+The current repository is `ashlrai/phantom`. Canonical source candidate 3.26.0
+uses `@ashlr/phantom` and `@ashlr/phantom/universe`; it is not yet published.
+The available 3.25.3 compatibility release uses `@ashlr/hub`. This guide's
+`@ashlr/hub/universe` SDK examples explicitly target that published compatibility
+package. Use `phm universe` or the compatible `ashlr universe` command.
+Existing `Universe` types, schemas, manifest fields, store paths and this guide's
+filename are unchanged. No account enrollment, store migration or runtime
+activation follows from the name change.
 
 ## Start with the local experiment kernel
 
@@ -35,7 +38,7 @@ node bin/ashlr universe archive --json
 
 The demo creates a private seed repository and two generations under `~/.ashlr/universe`. It compares stable-deduplication implementations using fixed correctness cases and measured source size. Expect passing variants in separate niches, a rejected order-breaking variant, and second-generation parent references. `--root <absolute private directory>` chooses a separate experiment store.
 
-Use `ashlr universe init --manifest <file.json>` to register an experiment and `ashlr universe run <id>` for one generation. `status [id]` and `archive [id]` inspect persisted results. These commands also accept `--root` and `--json`; see the [source manifest type](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/universe/types.ts) and `ashlr universe help`. The CLI and JSON results serve engineers and other agents.
+Use `ashlr universe init --manifest <file.json>` to register an experiment and `ashlr universe run <id>` for one generation. `status [id]` and `archive [id]` inspect persisted results. These commands also accept `--root` and `--json`; see the [source manifest type](https://github.com/ashlrai/phantom/blob/master/src/core/universe/types.ts) and `ashlr universe help`. The CLI and JSON results serve engineers and other agents.
 
 Applications can use the same typed interface via `@ashlr/hub/universe`:
 

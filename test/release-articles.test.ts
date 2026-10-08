@@ -276,23 +276,51 @@ describe('source-bound release package identity', () => {
 });
 
 describe('durable article maintenance uses the normal task lane', () => {
+  it('fresh core defaults are canonical without changing saved legacy settings or history', async () => {
+    const ports = deps();
+    expect(readReleaseArticles()).toEqual({ v: 1, enabled: false, repository: 'ashlrai/phantom', records: [], observation: null });
+    expect(existsSync(releaseArticlePaths().directory)).toBe(false);
+    expect(configureReleaseArticles(true).repository).toBe('ashlrai/phantom');
+    expect(ports.reader.github).not.toHaveBeenCalled(); expect(ports.reader.npm).not.toHaveBeenCalled(); expect(ports.enqueue).not.toHaveBeenCalled();
+    configureReleaseArticles(true, REPO);
+    await syncReleaseArticles(ports);
+    const saved = readReleaseArticles(); const bytes = readFileSync(releaseArticlePaths().file);
+    expect(saved.repository).toBe(REPO); expect(saved.records[0]!.proposed).toEqual(proposed);
+    expect(saved.records[0]!.digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(readReleaseArticles()).toEqual(saved); expect(readFileSync(releaseArticlePaths().file)).toEqual(bytes);
+    const disabled = configureReleaseArticles(false);
+    expect(disabled.repository).toBe(REPO); expect(disabled.records).toEqual(saved.records); expect(disabled.observation).toEqual(saved.observation);
+  });
+  it('CLI omitted enable uses the canonical default and verifies that exact release on sync', async () => {
+    const ports = deps(fixtureReader(undefined, { repository: 'ashlrai/phantom', packageName: '@ashlr/phantom' }));
+    const out: string[] = []; const print = (text: string): void => { out.push(text); };
+    expect(await runReleaseArticlesCli(['status', '--json'], ports, print)).toBe(0);
+    expect(JSON.parse(out.at(-1)!).repository).toBe('ashlrai/phantom'); expect(existsSync(releaseArticlePaths().directory)).toBe(false);
+    expect(await runReleaseArticlesCli(['enable'], ports, print)).toBe(0);
+    expect(readReleaseArticles()).toMatchObject({ enabled: true, repository: 'ashlrai/phantom', records: [] });
+    expect(ports.reader.github).not.toHaveBeenCalled(); expect(ports.reader.npm).not.toHaveBeenCalled(); expect(ports.enqueue).not.toHaveBeenCalled();
+    expect(await runReleaseArticlesCli(['sync', proposed.version, '--json'], ports, print)).toBe(0);
+    expect(JSON.parse(out.at(-1)!).records[0]).toMatchObject({ state: 'queued', proposed: { ...proposed, repository: 'ashlrai/phantom' } });
+    expect(ports.reader.npm).toHaveBeenCalledWith(proposed.version, undefined, '@ashlr/phantom');
+    expect(ports.reader.github).toHaveBeenCalledWith('repos/ashlrai/phantom', undefined);
+  });
   it('missing/disabled state is read-only and probes nothing', async () => {
     const ports = deps(); expect(readReleaseArticles().enabled).toBe(false);
     await syncReleaseArticles(ports); expect(ports.reader.github).not.toHaveBeenCalled(); expect(existsSync(releaseArticlePaths().directory)).toBe(false);
   });
   it('enable is not a grant; missing company scope yields a visible draft', async () => {
-    configureReleaseArticles(true); const ports = deps(); ports.policy = () => null;
+    configureReleaseArticles(true, REPO); const ports = deps(); ports.policy = () => null;
     const state = await syncReleaseArticles(ports); expect(state.records[0]!.state).toBe('blocked-repository-authority'); expect(ports.enqueue).not.toHaveBeenCalled();
   });
   it('queues a bounded public-data brief using the actual existing private queue', async () => {
-    configureReleaseArticles(true); const ports = deps(); const state = await syncReleaseArticles(ports);
+    configureReleaseArticles(true, REPO); const ports = deps(); const state = await syncReleaseArticles(ports);
     expect(state.records[0]!.state).toBe('queued'); const queue = readTaskQueue(); expect(queue.ok).toBe(true);
     if (!queue.ok) throw new Error('queue'); expect(queue.tasks).toHaveLength(1); expect(queue.tasks[0]!.repo).toBe(RELEASE_ARTICLE_REPO);
     expect(queue.tasks[0]!.detail.length).toBeLessThan(4000); expect(queue.tasks[0]!.detail).toContain('Task completion is not proof');
     expect(queue.tasks[0]!.detail).not.toContain('/private'); expect(state.records[0]!.taskId).toBe(queue.tasks[0]!.id);
   });
   it('freshly observes again without duplicating active, done or pruned tasks', async () => {
-    configureReleaseArticles(true); const ports = deps(); const first = await syncReleaseArticles(ports);
+    configureReleaseArticles(true, REPO); const ports = deps(); const first = await syncReleaseArticles(ports);
     await syncReleaseArticles(ports); expect(ports.enqueue).toHaveBeenCalledTimes(1);
     recordTaskDispatch(first.records[0]!.taskId!, { kind: 'produced', proposalId: 'article-proposal' }, { nowMs: NOW });
     const completedQueue = readTaskQueue(); expect(completedQueue.ok && completedQueue.tasks[0]!.status).toBe('done');
@@ -302,7 +330,7 @@ describe('durable article maintenance uses the normal task lane', () => {
     expect((ports.reader.github as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(40);
   });
   it('never treats producer completion as a deployed article and requires separate live observation', async () => {
-    configureReleaseArticles(true); const ports = deps(); await syncReleaseArticles(ports);
+    configureReleaseArticles(true, REPO); const ports = deps(); await syncReleaseArticles(ports);
     ports.production = async () => true;
     const live = await syncReleaseArticles(ports); expect(live.records[0]!.state).toBe('published'); expect(live.records[0]!.publishedAt).not.toBeNull();
   });
@@ -318,7 +346,7 @@ describe('durable article maintenance uses the normal task lane', () => {
     await expect(ports.production({ ...draft, canonical: 'https://evil.example/' })).rejects.toThrow();
   });
   it('canonical publication queues a distinct authorized teaser, and pruned teaser tasks do not replay', async () => {
-    configureReleaseArticles(true); const ports = deps(); ports.production = async () => true;
+    configureReleaseArticles(true, REPO); const ports = deps(); ports.production = async () => true;
     ports.enrolled = () => [RELEASE_ARTICLE_REPO, RELEASE_TEASER_REPO];
     ports.policy = () => makePolicy({ repos: [RELEASE_ARTICLE_REPO, RELEASE_TEASER_REPO].map((nameWithOwner) => ({ ...makePolicy().repos[0]!, nameWithOwner })) });
     const state = await syncReleaseArticles(ports); expect(state.records[0]!.state).toBe('published'); expect(state.records[0]!.teaser.state).toBe('queued');
@@ -327,26 +355,26 @@ describe('durable article maintenance uses the normal task lane', () => {
     const later = await syncReleaseArticles(ports); expect(later.records[0]!.teaser.state).toBe('awaiting-production'); expect(ports.enqueue).toHaveBeenCalledTimes(1);
   });
   it('without teaser repo authority a published company article stays published while teaser is explicitly blocked', async () => {
-    configureReleaseArticles(true); const ports = deps(); ports.production = async () => true;
+    configureReleaseArticles(true, REPO); const ports = deps(); ports.production = async () => true;
     const state = await syncReleaseArticles(ports); expect(state.records[0]!.state).toBe('published');
     expect(state.records[0]!.teaser.state).toBe('blocked-repository-authority'); expect(ports.enqueue).not.toHaveBeenCalled();
   });
   it('previous canonical publication becomes awaiting-production when current live proof and queue are unavailable', async () => {
-    configureReleaseArticles(true); const ports = deps(); ports.production = async () => true;
+    configureReleaseArticles(true, REPO); const ports = deps(); ports.production = async () => true;
     const prior = await syncReleaseArticles(ports); expect(prior.records[0]!.state).toBe('published');
     ports.production = async () => false; ports.queue = () => ({ ok: false, reason: 'unreadable' });
     const current = await syncReleaseArticles(ports); expect(current.records[0]!.state).toBe('awaiting-production');
     expect(current.records[0]!.publishedAt).toBe(prior.records[0]!.publishedAt); expect(ports.enqueue).not.toHaveBeenCalled();
   });
   it('previous teaser publication becomes awaiting-production on an unreadable queue while canonical article stays live', async () => {
-    configureReleaseArticles(true); const ports = deps(); ports.production = async () => true; ports.teaserProduction = async () => true;
+    configureReleaseArticles(true, REPO); const ports = deps(); ports.production = async () => true; ports.teaserProduction = async () => true;
     const prior = await syncReleaseArticles(ports); expect(prior.records[0]!.teaser.state).toBe('published');
     ports.teaserProduction = async () => false; ports.queue = () => ({ ok: false, reason: 'unreadable' });
     const current = await syncReleaseArticles(ports); expect(current.records[0]!.state).toBe('published');
     expect(current.records[0]!.teaser.state).toBe('awaiting-production'); expect(ports.enqueue).not.toHaveBeenCalled();
   });
   it.each(['canonical-unavailable', 'facts-unavailable'] as const)('prior article and teaser publication lose current publication labels when %s without replay', async (failure) => {
-    configureReleaseArticles(true); const ports = deps(); ports.production = async () => true; ports.teaserProduction = vi.fn(async () => true);
+    configureReleaseArticles(true, REPO); const ports = deps(); ports.production = async () => true; ports.teaserProduction = vi.fn(async () => true);
     ports.enrolled = () => [RELEASE_ARTICLE_REPO, RELEASE_TEASER_REPO];
     ports.policy = () => makePolicy({ repos: [RELEASE_ARTICLE_REPO, RELEASE_TEASER_REPO].map((nameWithOwner) => ({ ...makePolicy().repos[0]!, nameWithOwner })) });
     const prior = await syncReleaseArticles(ports); expect(prior.records[0]!.state).toBe('published');
@@ -363,7 +391,7 @@ describe('durable article maintenance uses the normal task lane', () => {
     }
   });
   it('a previously published teaser without a task retains its no-replay fence through repeated failed link observations', async () => {
-    configureReleaseArticles(true); const ports = deps(); ports.production = async () => true; ports.teaserProduction = async () => true;
+    configureReleaseArticles(true, REPO); const ports = deps(); ports.production = async () => true; ports.teaserProduction = async () => true;
     ports.enrolled = () => [RELEASE_ARTICLE_REPO, RELEASE_TEASER_REPO];
     ports.policy = () => makePolicy({ repos: [RELEASE_ARTICLE_REPO, RELEASE_TEASER_REPO].map((nameWithOwner) => ({ ...makePolicy().repos[0]!, nameWithOwner })) });
     const prior = await syncReleaseArticles(ports); expect(prior.records[0]!.teaser.taskId).toBeNull();
@@ -374,7 +402,7 @@ describe('durable article maintenance uses the normal task lane', () => {
     }
   });
   it.each(['failed', 'cancelled'] as const)('retained %s article and teaser tasks are terminal holds, not active queue or automatic replay', async (status) => {
-    configureReleaseArticles(true); const ports = deps(); const article = await syncReleaseArticles(ports);
+    configureReleaseArticles(true, REPO); const ports = deps(); const article = await syncReleaseArticles(ports);
     const queue = readTaskQueue(); if (!queue.ok) throw new Error('queue');
     queue.tasks[0]!.status = status;
     writeFileSync(taskQueuePath(), JSON.stringify({ v: 1, tasks: queue.tasks, updatedAt: new Date(NOW).toISOString() }));
@@ -392,7 +420,7 @@ describe('durable article maintenance uses the normal task lane', () => {
     expect(heldTeaser.records[0]!.reason).toContain(`teaser task ${status}`); expect(ports.enqueue).toHaveBeenCalledTimes(2);
   });
   it('changed release facts cannot retain a prior published label while the original correction producer is active', async () => {
-    configureReleaseArticles(true); const ports = deps(); const first = await syncReleaseArticles(ports);
+    configureReleaseArticles(true, REPO); const ports = deps(); const first = await syncReleaseArticles(ports);
     ports.production = async () => true; await syncReleaseArticles(ports);
     ports.production = async () => false;
     ports.reader = fixtureReader((endpoint, raw) => endpoint.endsWith('/releases/tags/v3.24.3') ? { ...(raw as object), assets: [{ ...release.assets[0]!, digest: `sha256:${'e'.repeat(64)}` }] } : raw);
@@ -401,7 +429,7 @@ describe('durable article maintenance uses the normal task lane', () => {
     expect(ports.enqueue).toHaveBeenCalledTimes(1);
   });
   it('a correction waits for the original active task then preserves the canonical URL and creates one correction', async () => {
-    configureReleaseArticles(true); const ports = deps(); const first = await syncReleaseArticles(ports);
+    configureReleaseArticles(true, REPO); const ports = deps(); const first = await syncReleaseArticles(ports);
     ports.reader = fixtureReader((endpoint, raw) => endpoint.endsWith('/releases/tags/v3.24.3') ? { ...(raw as object), assets: [{ ...release.assets[0]!, digest: `sha256:${'e'.repeat(64)}` }] } : raw);
     const waiting = await syncReleaseArticles(ports); expect(waiting.records[0]!.reason).toContain('still active'); expect(ports.enqueue).toHaveBeenCalledTimes(1);
     recordTaskDispatch(first.records[0]!.taskId!, { kind: 'produced', proposalId: 'original' }, { nowMs: NOW });
@@ -410,17 +438,17 @@ describe('durable article maintenance uses the normal task lane', () => {
     await syncReleaseArticles(ports); expect(ports.enqueue).toHaveBeenCalledTimes(2);
   });
   it('a crash after actual enqueue is recovered from the normal queue without creating another task', async () => {
-    configureReleaseArticles(true); const ports = deps(); const insert = ports.enqueue;
+    configureReleaseArticles(true, REPO); const ports = deps(); const insert = ports.enqueue;
     ports.enqueue = (input) => { insert(input); throw new Error('crash after queue insertion'); };
     await expect(syncReleaseArticles(ports)).rejects.toThrow('crash'); expect(readReleaseArticles().records[0]!.state).toBe('enqueueing');
     ports.enqueue = vi.fn((input) => insert(input)); const recovered = await syncReleaseArticles(ports);
     expect(recovered.records[0]!.state).toBe('queued'); expect(ports.enqueue).not.toHaveBeenCalled();
   });
   it('Stop before work performs no probes; grant/Stop epoch changes across awaits withhold enqueue', async () => {
-    configureReleaseArticles(true); const stopped = deps(); stopped.stopped = () => true;
+    configureReleaseArticles(true, REPO); const stopped = deps(); stopped.stopped = () => true;
     await syncReleaseArticles(stopped); expect(stopped.reader.github).not.toHaveBeenCalled();
     for (const kind of ['grant', 'epoch', 'enrollment', 'disable'] as const) {
-      configureReleaseArticles(true); const ports = deps();
+      configureReleaseArticles(true, REPO); const ports = deps();
       ports.production = async () => {
         if (kind === 'grant') ports.policy = () => null;
         if (kind === 'epoch') ports.stopEpoch = () => 'changed';
@@ -433,18 +461,18 @@ describe('durable article maintenance uses the normal task lane', () => {
     }
   });
   it('unavailable latest or invalid qualification becomes pending, never published', async () => {
-    configureReleaseArticles(true); const ports = deps(); ports.reader.github = async () => { throw new Error('private token should never escape'); };
+    configureReleaseArticles(true, REPO); const ports = deps(); ports.reader.github = async () => { throw new Error('private token should never escape'); };
     const state = await syncReleaseArticles(ports); expect(state.observation!.state).toBe('pending-public-verification');
     expect(JSON.stringify(state)).not.toContain('private token'); expect(ports.enqueue).not.toHaveBeenCalled();
   });
   it('a prior ambiguous crash is held instead of replaying a potentially completed enqueue', async () => {
-    configureReleaseArticles(true); const ports = deps(); const facts = await verifyPublishedRelease(proposed, ports.reader, NOW);
+    configureReleaseArticles(true, REPO); const ports = deps(); const facts = await verifyPublishedRelease(proposed, ports.reader, NOW);
     importProposedRelease(proposed); const manifest = readReleaseArticles(); manifest.records[0]!.digest = publicArticleDraft(facts).factsDigest; manifest.records[0]!.state = 'enqueueing'; manifest.records[0]!.attempted = true;
     writeFileSync(releaseArticlePaths().file, JSON.stringify(manifest));
     const state = await syncReleaseArticles(ports); expect(state.records[0]!.state).toBe('awaiting-production'); expect(ports.enqueue).not.toHaveBeenCalled();
   });
   it('legacy V1 enqueueing records migrate their uncertain fence on read without status writes or duplicate replay', async () => {
-    configureReleaseArticles(true); const ports = deps(); const facts = await verifyPublishedRelease(proposed, ports.reader, NOW);
+    configureReleaseArticles(true, REPO); const ports = deps(); const facts = await verifyPublishedRelease(proposed, ports.reader, NOW);
     importProposedRelease(proposed); const manifest = readReleaseArticles();
     manifest.records[0]!.digest = publicArticleDraft(facts).factsDigest; manifest.records[0]!.state = 'enqueueing';
     manifest.records[0]!.teaser = { digest: publicArticleDraft(facts).factsDigest, state: 'enqueueing', taskId: null, attempted: true };
@@ -459,7 +487,7 @@ describe('durable article maintenance uses the normal task lane', () => {
     const teaserHeld = await syncReleaseArticles(ports); expect(teaserHeld.records[0]!.teaser.state).toBe('awaiting-production'); expect(ports.enqueue).not.toHaveBeenCalled();
   });
   it('failed fresh verification does not erase an uncertain reservation before a later healthy observation', async () => {
-    configureReleaseArticles(true); const ports = deps(); const facts = await verifyPublishedRelease(proposed, ports.reader, NOW);
+    configureReleaseArticles(true, REPO); const ports = deps(); const facts = await verifyPublishedRelease(proposed, ports.reader, NOW);
     importProposedRelease(proposed); const manifest = readReleaseArticles(); manifest.records[0]!.digest = publicArticleDraft(facts).factsDigest;
     manifest.records[0]!.state = 'enqueueing'; manifest.records[0]!.attempted = true;
     writeFileSync(releaseArticlePaths().file, JSON.stringify(manifest));
@@ -469,11 +497,11 @@ describe('durable article maintenance uses the normal task lane', () => {
     expect(recovered.records[0]!.state).toBe('awaiting-production'); expect(ports.enqueue).not.toHaveBeenCalled();
   });
   it('unreadable task queue does not enqueue duplicates or reinterpret an error as zero work', async () => {
-    configureReleaseArticles(true); const ports = deps(); ports.queue = () => ({ ok: false, reason: 'fixture broken queue' });
+    configureReleaseArticles(true, REPO); const ports = deps(); ports.queue = () => ({ ok: false, reason: 'fixture broken queue' });
     const state = await syncReleaseArticles(ports); expect(state.records[0]!.reason).toContain('unreadable'); expect(ports.enqueue).not.toHaveBeenCalled();
   });
   it('corrupt/symlink manifests refuse reads rather than returning empty', () => {
-    configureReleaseArticles(true); const path = releaseArticlePaths().file; writeFileSync(path, '{broken'); expect(() => readReleaseArticles()).toThrow();
+    configureReleaseArticles(true, REPO); const path = releaseArticlePaths().file; writeFileSync(path, '{broken'); expect(() => readReleaseArticles()).toThrow();
   });
   it('an unsafe storage ancestor cannot be followed to enable maintenance', () => {
     const elsewhere = join(home.home(), 'elsewhere'); mkdirSync(elsewhere); symlinkSync(elsewhere, join(home.home(), '.ashlr'), 'dir');
@@ -496,7 +524,7 @@ describe('durable article maintenance uses the normal task lane', () => {
     expect(existsSync(join(elsewhere, 'release-articles'))).toBe(false);
   });
   it('rejects an existing enabled manifest reached through an ancestor symlink on the caller-checked path', () => {
-    configureReleaseArticles(true); const elsewhere = join(home.home(), 'elsewhere');
+    configureReleaseArticles(true, REPO); const elsewhere = join(home.home(), 'elsewhere');
     renameSync(join(home.home(), '.ashlr'), elsewhere); symlinkSync(elsewhere, join(home.home(), '.ashlr'), 'dir');
     callerCheckedAssurance(); expect(() => readReleaseArticles()).toThrow(/unsafe/);
     expect(() => configureReleaseArticles(false)).toThrow(/unsafe/);
@@ -519,12 +547,12 @@ describe('durable article maintenance uses the normal task lane', () => {
     expect(after.ino).toBe(before.ino); expect(after.mode).toBe(before.mode); expect(after.ctimeNs).toBe(before.ctimeNs);
   });
   it('refuses hard-linked manifest authority on the caller-checked path', () => {
-    configureReleaseArticles(true); callerCheckedAssurance();
+    configureReleaseArticles(true, REPO); callerCheckedAssurance();
     linkSync(releaseArticlePaths().file, join(home.home(), 'second-manifest.json'));
     expect(() => readReleaseArticles()).toThrow(/unsafe/);
   });
   it('refuses a manifest replaced during platform assurance without applying the replacement', () => {
-    configureReleaseArticles(true); const { file } = releaseArticlePaths(); const old = readFileSync(file, 'utf8');
+    configureReleaseArticles(true, REPO); const { file } = releaseArticlePaths(); const old = readFileSync(file, 'utf8');
     const actual = privateStorage.assurePrivateStoragePath;
     vi.spyOn(privateStorage, 'assurePrivateStoragePath').mockImplementation((path, kind, mode, options) => {
       const proof = actual(path, kind, mode, { ...options, platform: 'linux' });
@@ -534,7 +562,7 @@ describe('durable article maintenance uses the normal task lane', () => {
     expect(() => readReleaseArticles()).toThrow(/unsafe/);
   });
   it('refuses a manifest replaced during capped reading instead of accepting old authority', () => {
-    configureReleaseArticles(true); callerCheckedAssurance(); const { file } = releaseArticlePaths();
+    configureReleaseArticles(true, REPO); callerCheckedAssurance(); const { file } = releaseArticlePaths();
     const actual = preferences.readPrivateFileCapped;
     vi.spyOn(preferences, 'readPrivateFileCapped').mockImplementation((path, bound) => {
       const bytes = actual(path, bound);
@@ -545,7 +573,7 @@ describe('durable article maintenance uses the normal task lane', () => {
     expect(JSON.parse(readFileSync(file, 'utf8')).enabled).toBe(false);
   });
   it('keeps existing unsafe POSIX modes unchanged during a refused observational read', () => {
-    configureReleaseArticles(true); const directory = releaseArticlePaths().directory;
+    configureReleaseArticles(true, REPO); const directory = releaseArticlePaths().directory;
     if (process.platform === 'win32') {
       // Windows modes are not its authority boundary; its existing ACL helper
       // must refuse this same read rather than substituting Unix chmod rules.
@@ -579,7 +607,7 @@ describe('durable article maintenance uses the normal task lane', () => {
     expect(existsSync(join(elsewhere, 'release-articles', 'manifest.json'))).toBe(false);
   });
   it('rechecks parent inodes after reading even when the leaf inode remains unchanged', () => {
-    configureReleaseArticles(true); callerCheckedAssurance(); const { file } = releaseArticlePaths();
+    configureReleaseArticles(true, REPO); callerCheckedAssurance(); const { file } = releaseArticlePaths();
     const before = lstatSync(file, { bigint: true }); const actual = preferences.readPrivateFileCapped;
     vi.spyOn(preferences, 'readPrivateFileCapped').mockImplementation((path, bound) => {
       const bytes = actual(path, bound); const parent = join(home.home(), '.ashlr'); const elsewhere = join(home.home(), 'elsewhere');
@@ -589,11 +617,12 @@ describe('durable article maintenance uses the normal task lane', () => {
     expect(lstatSync(file, { bigint: true }).ino).toBe(before.ino);
   });
   it('unknown private manifest fields are refused rather than exported into CLI output', () => {
-    configureReleaseArticles(true); const manifest = readReleaseArticles();
+    configureReleaseArticles(true, REPO); const manifest = readReleaseArticles();
     writeFileSync(releaseArticlePaths().file, JSON.stringify({ ...manifest, token: 'SECRET' }));
     expect(() => readReleaseArticles()).toThrow();
   });
   it('the reviewed repository rename keeps one content identity without granting the renamed label', () => {
+    configureReleaseArticles(true, REPO); configureReleaseArticles(false);
     const original = importProposedRelease(proposed);
     expect(importProposedRelease({ ...proposed, repository: 'ashlrai/phantom' })).toEqual(original);
     expect(readReleaseArticles().records).toHaveLength(1);
@@ -603,7 +632,7 @@ describe('durable article maintenance uses the normal task lane', () => {
   it('CLI status/enable/import/sync/disable use the same real lifecycle and reject unknown imports', async () => {
     const ports = deps(); const out: string[] = []; const print = (text: string): void => { out.push(text); };
     expect(await runReleaseArticlesCli(['status', '--json'], ports, print)).toBe(0); expect(existsSync(releaseArticlePaths().directory)).toBe(false);
-    expect(await runReleaseArticlesCli(['enable'], ports, print)).toBe(0);
+    expect(await runReleaseArticlesCli(['enable', REPO], ports, print)).toBe(0);
     const file = join(home.home(), 'proposed.json'); writeFileSync(file, JSON.stringify(proposed));
     expect(await runReleaseArticlesCli(['import', file], ports, print)).toBe(0);
     expect(await runReleaseArticlesCli(['sync', '3.24.3', '--json'], ports, print)).toBe(0);
