@@ -355,11 +355,11 @@ describe('M468 desktop release workflow supply-chain policy', () => {
     expect(desktopReadme).toContain('historical commit whose workflow predates');
     expect(desktopReadme).not.toContain('Download the latest installer');
 
-    // #580 rewrote the quickstart around the published, locally signed
-    // v3.16.1 macOS DMG. It must stay honest that it is macOS-only and not
-    // notarized, and point Linux and Windows users to the CLI.
+    // #580 rewrote the quickstart around the published v3.16.1 macOS
+    // desktop download; the app is signed, not the DMG container. Keep its
+    // macOS-only and non-notarized status honest; point other users to the CLI.
     expect(quickstart).toContain('### CLI on macOS, Linux or Windows');
-    expect(quickstart).toContain('This DMG is locally signed, not\nApple Developer ID notarized');
+    expect(quickstart).toContain('The app inside the DMG is\nlocally signed; the DMG is unsigned. Neither is Apple Developer ID notarized');
     expect(quickstart).toContain('There is no Linux or Windows desktop package in this release; use the CLI above.');
     expect(quickstart).not.toMatch(/\.AppImage|\.deb\b|\.msi\b/);
     expect(desktopPointer).toContain('The root Linux CLI, Bun sidecar,\nand web dashboard remain supported');
@@ -367,7 +367,7 @@ describe('M468 desktop release workflow supply-chain policy', () => {
     expect(desktopPointer).toContain('glib >=0.20');
     expect(desktopPointer).toContain('hostile `--config`');
     expect(desktopPointer).toContain('fresh source builds');
-    expect(desktopPointer).toContain('public macOS arm64 DMG is locally signed, not Apple Developer ID notarized');
+    expect(desktopPointer).toContain('public macOS arm64 DMG contains a locally signed app. The DMG is unsigned;\nneither the app nor the DMG is Apple Developer ID notarized');
     expect(desktopPointer).not.toContain('No public desktop release or installer is currently available');
     expect(desktopPointer).toContain('workflow 301689703 must remain\nexternally `disabled_manually`');
     expect(desktopPointer).toContain('configured output is draft-only');

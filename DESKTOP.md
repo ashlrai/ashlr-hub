@@ -62,7 +62,8 @@ macOS build (from the repo root): `npm run build:binary` →
 (once) → `npm run build:debug` or `npm run build`. The `.app` lands in
 `desktop/src-tauri/target/{debug,release}/bundle/macos/Ashlr.app`.
 
-The public macOS arm64 DMG is locally signed, not Apple Developer ID notarized.
+The public macOS arm64 DMG contains a locally signed app. The DMG is unsigned;
+neither the app nor the DMG is Apple Developer ID notarized.
 See [desktop installation](desktop/README.md#install) for the release download.
 The npm/CLI quickstart also serves the web dashboard on macOS, Linux and Windows.
 Fresh Linux Tauri source builds are quarantined and fail closed in
