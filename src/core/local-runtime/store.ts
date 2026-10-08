@@ -15,7 +15,8 @@ import {
   verifyUnsignedRuntimeReleaseManifest,
 } from '../daemon/runtime-release-manifest.js';
 import { requireBeforeRuntimeReleaseObservationDeadline, type RuntimeReleaseObservationDeadline } from '../daemon/runtime-release-observation-deadline.js';
-import { extractPinnedRuntimeArchive, readPinnedRuntimeArchive } from './archive.js';
+import { extractPinnedRuntimeArchive, readCompatiblePinnedRuntimeArchive } from './archive.js';
+import { desktopUpdateProfileForPackage, type DesktopUpdateProfile } from '../desktop/update-manifest.js';
 import type { InstallLocalRuntimeOptions, LocalRuntimeInstallation, LocalRuntimeStatus } from './types.js';
 export type { InstallLocalRuntimeOptions, LocalRuntimeInstallation, LocalRuntimeResolution, LocalRuntimeStatus } from './types.js';
 
@@ -148,9 +149,9 @@ function verifyBuildIdentity(packageRoot: string, revision: string, version: str
     value.dirty !== false || value.provenance !== 'git') fail('package build identity is not the pinned clean source');
 }
 function manifestOptions(packageRoot: string, receipt: Pick<Receipt, 'nodePath' | 'nodeVersion' | 'revision'>,
-  rollback: string | null = null) {
+  profile: DesktopUpdateProfile, rollback: string | null = null) {
   return { packageRoot, dependencyRoot: join(packageRoot, 'node_modules'), declaredInterpreterPath: receipt.nodePath,
-    declaredInterpreterVersion: receipt.nodeVersion, expectedRevision: receipt.revision, expectedPackageName: '@ashlr/hub',
+    declaredInterpreterVersion: receipt.nodeVersion, expectedRevision: receipt.revision, expectedPackageName: profile.packageName,
     declaredRollbackTargetDigest: rollback };
 }
 function inspectInstallation(store: string, id: string, deadline: RuntimeReleaseObservationDeadline): LocalRuntimeInstallation {
@@ -162,13 +163,14 @@ function inspectInstallation(store: string, id: string, deadline: RuntimeRelease
   const parsed = parseUnsignedRuntimeReleaseManifest(bytes);
   if (!parsed.ok) fail('stored runtime manifest is invalid');
   const manifest = parsed.manifest;
+  const profile = desktopUpdateProfileForPackage(manifest.package.name);
   if (manifest.manifestDigest !== receipt.manifestDigest || manifest.package.version !== receipt.version ||
     manifest.expectedRevision !== receipt.revision || manifest.interpreterDeclaration.observedResolvedPath !== receipt.nodePath ||
     manifest.interpreterDeclaration.observedArtifactSha256 !== receipt.nodeSha256 ||
     manifest.interpreterDeclaration.claimedVersion !== receipt.nodeVersion) fail('receipt and runtime manifest disagree');
   verifyBuildIdentity(packageRoot, receipt.revision, receipt.version);
   const verified = verifyUnsignedRuntimeReleaseManifest({
-    ...manifestOptions(packageRoot, receipt, manifest.rollbackDeclaration.targetManifestDigest), manifest: bytes,
+    ...manifestOptions(packageRoot, receipt, profile, manifest.rollbackDeclaration.targetManifestDigest), manifest: bytes,
     expectedManifestDigest: receipt.manifestDigest,
   }, deadline);
   if (!verified.ok) fail('installed runtime bytes or interpreter no longer verify');
@@ -275,7 +277,7 @@ function withStoreLock<T>(store: string, operation: (assertOwned: () => void) =>
   };
   try { assertOwned(); return operation(assertOwned); } finally { releaseLocalStoreLock(acquired.lock); }
 }
-function smoke(packageRoot: string, scratch: string, nodePath: string, deadline: RuntimeReleaseObservationDeadline): void {
+function smoke(packageRoot: string, scratch: string, nodePath: string, profile: DesktopUpdateProfile, deadline: RuntimeReleaseObservationDeadline): void {
   const env = { PATH: '/usr/bin:/bin', TMPDIR: scratch, LANG: 'C', LC_ALL: 'C', NO_COLOR: '1' };
   const run = (args: string[]): string => {
     check(deadline);
@@ -287,7 +289,7 @@ function smoke(packageRoot: string, scratch: string, nodePath: string, deadline:
     return result.stdout;
   };
   if (!run([join(packageRoot, 'bin', 'ashlr'), 'universe', 'help']).trim()) fail('installed help smoke returned no output');
-  const script = "const sdk = await import('@ashlr/hub/universe'); for (const key of " +
+  const script = "const sdk = await import(" + JSON.stringify(`${profile.packageName}/universe`) + "); for (const key of " +
     "['runUniverse','readUniverseOverview','runUniverseCampaign','runUniversePortfolio','buildUniverseFileOperationsContext']) " +
     "{ if (typeof sdk[key] !== 'function') throw new Error('missing SDK function'); } process.stdout.write('local-runtime-sdk-ok');";
   if (run(['--input-type=module', '-e', script]) !== 'local-runtime-sdk-ok') fail('installed SDK smoke returned invalid evidence');
@@ -298,7 +300,7 @@ export async function installLocalRuntime(options: InstallLocalRuntimeOptions): 
   const store = storePath(options.store);
   const deadline = observation(INSTALL_MS);
   // The archive is fully validated before even creating an installation store.
-  const archive = await readPinnedRuntimeArchive({ artifactPath: options.artifactPath, sha256: options.sha256,
+  const {archive, profile} = await readCompatiblePinnedRuntimeArchive({ artifactPath: options.artifactPath, sha256: options.sha256,
     revision: options.revision, version: options.version });
   check(deadline);
   initializeStore(store);
@@ -316,13 +318,13 @@ export async function installLocalRuntime(options: InstallLocalRuntimeOptions): 
     if (!exists(join(packageRoot, 'node_modules'))) createDirectory(join(packageRoot, 'node_modules'), store);
     verifyBuildIdentity(packageRoot, archive.pins.revision, archive.pins.version);
     const runtime = { nodePath: realpathSync(process.execPath), nodeVersion: process.version, revision: archive.pins.revision };
-    const built = buildUnsignedRuntimeReleaseManifest(manifestOptions(packageRoot, runtime,
+    const built = buildUnsignedRuntimeReleaseManifest(manifestOptions(packageRoot, runtime, profile,
       prior.current?.manifestDigest ?? null), deadline);
     if (!built.ok || built.manifest.package.version !== archive.pins.version) fail('staged runtime manifest did not verify');
     const scratch = join(stage, 'smoke');
     createDirectory(scratch, store);
-    smoke(packageRoot, scratch, runtime.nodePath, deadline);
-    const verified = verifyUnsignedRuntimeReleaseManifest({ ...manifestOptions(packageRoot, runtime,
+    smoke(packageRoot, scratch, runtime.nodePath, profile, deadline);
+    const verified = verifyUnsignedRuntimeReleaseManifest({ ...manifestOptions(packageRoot, runtime, profile,
       prior.current?.manifestDigest ?? null), manifest: built.canonicalJson,
       expectedManifestDigest: built.manifest.manifestDigest }, deadline);
     if (!verified.ok) fail('staged runtime changed during smoke');

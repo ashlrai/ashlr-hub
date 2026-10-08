@@ -26,10 +26,10 @@ function files(root: string): string[] {
     ? files(join(root, entry.name)) : [join(root, entry.name)]).sort();
 }
 /** Real packaged bytes, but no dependencies, models, daemons, or evaluator calls. */
-async function candidate(revision = 'a'.repeat(40)) {
+async function candidate(revision = 'a'.repeat(40), name: '@ashlr/hub' | '@ashlr/phantom' = '@ashlr/hub') {
   const root = temporary();
   const source = join(root, 'package');
-  const pkg = { name: '@ashlr/hub', version: VERSION, type: 'module', bin: { ashlr: 'bin/ashlr' },
+  const pkg = { name, version: VERSION, type: 'module', bin: { ashlr: 'bin/ashlr' },
     dependencies: {}, bundledDependencies: [],
     exports: { './universe': './dist/core/universe/index.js' },
     files: ['bin', 'dist', 'schema', 'scripts/run-verify-command.mjs', 'scripts/scorecard-history-worker.mjs'] };
@@ -52,7 +52,7 @@ async function candidate(revision = 'a'.repeat(40)) {
   write(join(source, RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH), inventory.canonicalJson);
   const checked = buildUnsignedRuntimeReleaseManifest({ packageRoot: source, dependencyRoot: join(source, 'node_modules'),
     declaredInterpreterPath: realpathSync(process.execPath), declaredInterpreterVersion: process.version,
-    expectedRevision: revision });
+    expectedRevision: revision, expectedPackageName: name });
   if (!checked.ok) throw new Error(`Invalid store fixture: ${checked.reason}`);
   const artifactPath = join(root, 'candidate.tgz');
   await createTar({ cwd: root, file: artifactPath, gzip: true, portable: true, noPax: true, noDirRecurse: true },
@@ -92,6 +92,50 @@ describe('local managed runtime store', () => {
     expect(readdirSync(join(store, 'releases'))).toEqual(releases);
     repeated.current!.revision = 'f'.repeat(40);
     expect(readLocalRuntimeStatus(store).current!.revision).toBe(value.revision);
+  });
+
+  it.each(['@ashlr/hub', '@ashlr/phantom'] as const)('reopens %s with the original strict schema1 receipt', async (name) => {
+    const value = await candidate('a'.repeat(40), name); const store = join(value.root, 'managed');
+    const installed = (await installLocalRuntime({ ...value, store })).current!;
+    expect(readLocalRuntimeStatus(store)).toMatchObject({ sourceState: 'healthy', current: installed });
+    expect(resolveLocalRuntime(store)).toEqual(installed);
+    const receipt = readFileSync(join(dirname(installed.packageRoot), 'receipt.json'));
+    expect(Object.keys(JSON.parse(receipt.toString())).sort()).toEqual([
+      'schemaVersion', 'id', 'sha256', 'integrity', 'size', 'revision', 'version',
+      'installedAt', 'manifestDigest', 'nodePath', 'nodeVersion', 'nodeSha256',
+    ].sort());
+    expect(JSON.parse(receipt.toString()).schemaVersion).toBe(1);
+    expect(JSON.parse(readFileSync(join(installed.packageRoot, 'package.json'), 'utf8')).name).toBe(name);
+    expect((await installLocalRuntime({ ...value, store })).current).toEqual(installed);
+    expect(readFileSync(join(dirname(installed.packageRoot), 'receipt.json'))).toEqual(receipt);
+  });
+
+  it.each([['@ashlr/hub', '@ashlr/phantom'], ['@ashlr/phantom', '@ashlr/hub']] as const)(
+    'selects %s then %s and rolls back without rewriting either receipt', async (firstName, nextName) => {
+      const first = await candidate('a'.repeat(40), firstName);
+      const second = await candidate('b'.repeat(40), nextName); const store = join(first.root, 'managed');
+      const initial = (await installLocalRuntime({ ...first, store })).current!;
+      const initialReceipt = readFileSync(join(dirname(initial.packageRoot), 'receipt.json'));
+      const next = await installLocalRuntime({ ...second, store });
+      expect(next.previous).toEqual(initial);
+      const nextReceipt = readFileSync(join(dirname(next.current!.packageRoot), 'receipt.json'));
+      expect(rollbackLocalRuntime(store)).toMatchObject({ sourceState: 'healthy', current: initial, previous: next.current });
+      expect(resolveLocalRuntime(store)).toEqual(initial);
+      expect(readFileSync(join(dirname(initial.packageRoot), 'receipt.json'))).toEqual(initialReceipt);
+      expect(readFileSync(join(dirname(next.current!.packageRoot), 'receipt.json'))).toEqual(nextReceipt);
+    },
+  );
+
+  it.each(['@ashlr/hub', '@ashlr/phantom'] as const)('refuses changed installed namespace for %s', async (name) => {
+    const value = await candidate('a'.repeat(40), name); const store = join(value.root, 'managed');
+    const installed = (await installLocalRuntime({ ...value, store })).current!;
+    const pointer = readFileSync(join(store, 'current.json'));
+    const path = join(installed.packageRoot, 'package.json');
+    const pkg = JSON.parse(readFileSync(path, 'utf8')); pkg.name = name === '@ashlr/hub' ? '@ashlr/phantom' : '@ashlr/hub';
+    chmodSync(path, 0o600); writeFileSync(path, JSON.stringify(pkg));
+    expect(readLocalRuntimeStatus(store)).toMatchObject({ sourceState: 'degraded', current: null });
+    expect(() => resolveLocalRuntime(store)).toThrow();
+    expect(readFileSync(join(store, 'current.json'))).toEqual(pointer);
   });
 
   it('keeps a verified current executable usable when only the previous package is damaged', async () => {

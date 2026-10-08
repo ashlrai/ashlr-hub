@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   extractPinnedRuntimeArchive,
   readPinnedRuntimeArchive,
+  readCompatiblePinnedRuntimeArchive,
 } from '../src/core/local-runtime/archive.js';
 import {
   installLocalRuntime,
@@ -128,6 +129,31 @@ describe('independent pinned local runtime archive acceptance', () => {
     await expect(readPinnedRuntimeArchive({...legacy.pins, identityProfile: 'canonical-v2'})).rejects.toThrow('package name');
     await expect(readPinnedRuntimeArchive({...value.pins, identityProfile: 'foreign' as 'canonical-v2'})).rejects.toThrow('identity profile');
   });
+  it.each(['@ashlr/hub', '@ashlr/phantom'])('selects only the pinned %s namespace in one archive read', async (name) => {
+    const value = await fixture({name});
+    const opened = vi.spyOn(fs, 'openSync'); syncBuiltinESMExports();
+    const {archive, profile} = await readCompatiblePinnedRuntimeArchive(value.pins);
+    expect(opened.mock.calls.filter(([path]) => path === value.pins.artifactPath)).toHaveLength(1);
+    opened.mockRestore(); syncBuiltinESMExports();
+    expect(profile.packageName).toBe(name); expect(Object.isFrozen(profile)).toBe(true);
+    expect(Object.keys(archive.pins).sort()).toEqual(['sha256', 'revision', 'version', 'integrity', 'size'].sort());
+    const destination = join(value.base, 'compatible-extracted'); fs.mkdirSync(destination, {mode: 0o700});
+    expect(() => extractPinnedRuntimeArchive({...archive}, destination)).toThrow('not admitted');
+    expect(fs.readdirSync(destination)).toEqual([]);
+    extractPinnedRuntimeArchive(archive, destination);
+    expect(snapshot(destination)).toEqual(Object.fromEntries(value.archiveFiles.map(path => [relative(value.source, path), hash(fs.readFileSync(path))])));
+    expect(fs.existsSync(value.marker)).toBe(false);
+    await expect(readCompatiblePinnedRuntimeArchive({...value.pins, identityProfile: 'canonical-v2'} as Parameters<typeof readCompatiblePinnedRuntimeArchive>[0]))
+      .rejects.toThrow('profile override');
+  });
+
+  it.each(['@ashlr/other', 'foreign-runtime'])('rejects unknown pinned namespace %s without initialization or execution', async (name) => {
+    const value = await fixture({name}); const store = join(value.base, 'never-created');
+    await expect(readCompatiblePinnedRuntimeArchive(value.pins)).rejects.toThrow('package identity');
+    await expect(installLocalRuntime({...value.pins, store})).rejects.toThrow('package identity');
+    expect(fs.existsSync(store)).toBe(false); expect(fs.existsSync(value.marker)).toBe(false);
+  });
+
   it('verifies exact pins and copies exact package bytes without executing the package', async () => {
     const value = await fixture();
     const archive = await readPinnedRuntimeArchive(value.pins);
@@ -272,8 +298,8 @@ describe('independent managed local runtime transaction acceptance', () => {
     expect(fs.existsSync(store)).toBe(false);
   });
 
-  it('installs independently of the bootstrap directory and runs with its recorded Node from an unrelated cwd', async () => {
-    const value = await fixture(); const store = join(value.base, 'managed');
+  it.each(['@ashlr/hub', '@ashlr/phantom'])('installs %s independently and runs with its recorded Node from an unrelated cwd', async (name) => {
+    const value = await fixture({name}); const store = join(value.base, 'managed');
     const status = await installLocalRuntime({ store, ...value.pins });
     expect(status).toMatchObject({ sourceState: 'healthy', authority: 'local-candidate', previous: null });
     const installed = resolveLocalRuntime(store);
@@ -330,6 +356,18 @@ describe('independent managed local runtime transaction acceptance', () => {
     const changed = join(installed.packageRoot, 'dist/cli/index.js'); fs.chmodSync(changed, 0o600);
     fs.appendFileSync(changed, '\n// Test-owned installed bytes changed after admission.\n');
     expect(readLocalRuntimeStatus(store)).toMatchObject({ sourceState: 'degraded' });
+    expect(() => resolveLocalRuntime(store)).toThrow();
+    expect(fs.readFileSync(value.marker)).toEqual(beforeMarker);
+  });
+
+  it.each(['packageName', 'identityProfile'])('retains strict schema1 receipt refusal for an extra %s field', async (field) => {
+    const value = await fixture({name: '@ashlr/phantom'}); const store = join(value.base, 'managed');
+    const installed = (await installLocalRuntime({...value.pins, store})).current!;
+    const beforeMarker = fs.readFileSync(value.marker);
+    const path = join(dirname(installed.packageRoot), 'receipt.json');
+    const receipt = JSON.parse(fs.readFileSync(path, 'utf8')); receipt[field] = field === 'packageName' ? '@ashlr/phantom' : 'canonical-v2';
+    fs.chmodSync(path, 0o600); fs.writeFileSync(path, JSON.stringify(receipt));
+    expect(readLocalRuntimeStatus(store)).toMatchObject({sourceState: 'degraded', current: null});
     expect(() => resolveLocalRuntime(store)).toThrow();
     expect(fs.readFileSync(value.marker)).toEqual(beforeMarker);
   });
