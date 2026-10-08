@@ -162,7 +162,19 @@ describe.runIf(process.platform === 'darwin')('real Hub marker-path engineering 
         try { return trial && universe ? hasVerifiedInitialCampaignRepair(universe, campaign, trial, seed.digest, { root: f.root }) : null; }
         catch (cause) { return { error: cause instanceof Error ? cause.message : 'Unknown custody failure' }; }
       };
-      console.log(JSON.stringify({ requests: f.requests, errors: f.errors,
+      // Retained worker receipt facts only: never prompt/output, account or environment data.
+      const resourceReceipts = (): unknown => {
+        try {
+          const fixedReasons = new Set(['task-reserved', 'worker-dispatch-precondition-failed',
+            'worker-invalid-configuration', 'worker-kill-active', 'worker-kill-unavailable',
+            'worker-cancelled', 'worker-timed-out', 'worker-transport-failed',
+            'worker-tool-calls-not-allowed', 'worker-output-token-limit', 'worker-output-missing', 'worker-completed']);
+          return resourcePoolStatus(f.ledgerRoot, f.pool, f.bindings, f.observations).attempts
+            .filter(row => row.status !== 'completed')
+            .map(row => ({ status: row.status, reason: fixedReasons.has(row.reason) ? row.reason : null }));
+        } catch { return null; }
+      };
+      console.log(JSON.stringify({ requests: f.requests, errors: f.errors, resourceReceipts: resourceReceipts(),
         controller: readUniversePortfolioController('hub-marker-controller', { root: f.root }),
         campaign: { state: campaign.state, sourceState: campaign.sourceState, reason: campaign.reason, reasons: campaign.reasons,
           startedAt: campaign.startedAt, deadlineAt: campaign.deadlineAt, finishedAt: campaign.finishedAt, seedEvaluation: campaign.seedEvaluation },
