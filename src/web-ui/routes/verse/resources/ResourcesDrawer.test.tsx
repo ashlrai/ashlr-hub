@@ -751,7 +751,7 @@ describe('ResourcesDrawer — equal partners (3.15)', () => {
     // Cloud spends ACU credits; the CLI rides the Devin plan.
     expect(card.getByText('credits + subscription')).toBeInTheDocument();
     expect(card.getByText('10 ACUs kept for you')).toBeInTheDocument();
-    expect(card.getByText('tracked budget')).toBeInTheDocument();
+    expect(card.getByText('local limits')).toBeInTheDocument();
     expect(heading.closest('li')!.querySelector('svg[data-provider="devin"]')).toHaveAttribute('viewBox', '0 0 425 425');
     expect(card.getByTitle('Devin, Devin default, SWE (latest)')).toBeInTheDocument();
     // The Devin chat seats are not ALSO drawn as generic account cards.
