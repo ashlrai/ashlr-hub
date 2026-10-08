@@ -438,8 +438,13 @@ function publishedFixture() {
 }
 
 describe.skipIf(process.platform==='win32')('commissioned public historical manual proof',()=> {
+  let publicationFixture: ReturnType<typeof publishedFixture>;
+  beforeEach(() => { publicationFixture=publishedFixture(); },5_000);
+  // These filesystem/Git protocol integrations perform multiple complete verifications.
+  // Observed runs exceeded the unit default (CI 5.362s; local 14.106s); only
+  // these two cases get 20s. Setup and all other cases retain their 5s limits.
   it('runs genuine complete original evidence after master advances; historical success cannot authorize either hosted adopter or a replay',async()=> {
-    const p=publishedFixture();
+    const p=publicationFixture;
     const cap=await realHosted.inspectCommissionedManualPublication(p.envelope());
     const proof=realHosted.verifyPublishedManualArtifact({...p.hosted.options,githubRead:p.read},cap);
     expect(proof.publication.tag).toBe(p.m.source.revision);expect(proof.source).toEqual(p.receipt.source);
@@ -448,17 +453,17 @@ describe.skipIf(process.platform==='win32')('commissioned public historical manu
     expect(()=>realHosted.verifyPublishedManualArtifact(p.hosted.options,cap)).toThrow(/fresh commissioned capability/);
     expect(()=>realHosted.verifyArtifact({...p.hosted.options,githubRead:p.read})).toThrow(/not current trusted master/);
     expect(p.hosted.calls).toHaveLength(6);
-  });
+  },20_000);
   it('retains the same immutable public proof after a fresh descendant anchor',async()=> {
-    const p=publishedFixture();
+    const p=publicationFixture;
     const cap=await realHosted.inspectCommissionedManualPublication(p.envelope());
     const proof=realHosted.verifyPublishedManualArtifact({...p.hosted.options,githubRead:p.read},cap);
     // A fresh descendant anchor changes diagnostics, not immutable public proof.
     p.setMaster('e'.repeat(40));const fresh=await realHosted.inspectCommissionedManualPublication(p.envelope());
     expect(realHosted.verifyPublishedManualArtifact({...p.hosted.options,githubRead:p.read},fresh)).toEqual(proof);
-  });
+  },20_000);
   it.each(['tag','rules','compare','release','asset','signature','public-bytes','pagination','implementation'])('holds malformed/moved %s before issuing authority',async kind=> {
-    const p=publishedFixture(),read=p.read.getMockImplementation()!;
+    const p=publicationFixture,read=p.read.getMockImplementation()!;
     p.read.mockImplementation((endpoint:string)=>{
       const value=read(endpoint);
       if(kind==='tag' && endpoint.includes('/git/ref/'))return {...value,object:{type:'commit',sha:'f'.repeat(40)}};
@@ -475,16 +480,16 @@ describe.skipIf(process.platform==='win32')('commissioned public historical manu
     await expect(realHosted.inspectCommissionedManualPublication(envelope)).rejects.toThrow();
   });
   it('refuses current master movement within one public observation',async()=> {
-    const p=publishedFixture();p.download.mockImplementation(async(url:string)=>{p.setMaster('e'.repeat(40));return Buffer.from(url.endsWith('/manifest.json')?p.envelope().manifestText:p.envelope().signature);});
+    const p=publicationFixture;p.download.mockImplementation(async(url:string)=>{p.setMaster('e'.repeat(40));return Buffer.from(url.endsWith('/manifest.json')?p.envelope().manifestText:p.envelope().signature);});
     await expect(realHosted.inspectCommissionedManualPublication(p.envelope())).rejects.toThrow(/changed during observation/);
   });
   it('refuses expired original evidence even for a valid commissioned public release',async()=> {
-    const q=publishedFixture(),cap=await realHosted.inspectCommissionedManualPublication(q.envelope()),read=q.read.getMockImplementation()!;
+    const q=publicationFixture,cap=await realHosted.inspectCommissionedManualPublication(q.envelope()),read=q.read.getMockImplementation()!;
     q.read.mockImplementation((endpoint:string)=>endpoint.includes('/artifacts/')?{...read(endpoint),expired:true}:read(endpoint));
     expect(()=>realHosted.verifyPublishedManualArtifact({...q.hosted.options,githubRead:q.read},cap)).toThrow();
   });
   it('refuses current master movement during original attestation verification',async()=> {
-    const r=publishedFixture(),fresh=await realHosted.inspectCommissionedManualPublication(r.envelope()),attest=r.hosted.options.attestRun;
+    const r=publicationFixture,fresh=await realHosted.inspectCommissionedManualPublication(r.envelope()),attest=r.hosted.options.attestRun;
     expect(()=>realHosted.verifyPublishedManualArtifact({...r.hosted.options,githubRead:r.read,attestRun:(...args:any[])=>{const value=attest(...args);r.setMaster('e'.repeat(40));return value;}},fresh)).toThrow(/changed during original proof/);
   });
 });
