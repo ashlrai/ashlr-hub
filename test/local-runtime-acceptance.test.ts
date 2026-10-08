@@ -115,6 +115,19 @@ afterEach(() => {
 });
 
 describe('independent pinned local runtime archive acceptance', () => {
+  it('requires an explicit canonical profile for actual canonical original archive bytes', async () => {
+    const value = await fixture({name: '@ashlr/phantom'});
+    await expect(readPinnedRuntimeArchive(value.pins)).rejects.toThrow('package name');
+    const archive = await readPinnedRuntimeArchive({...value.pins, identityProfile: 'canonical-v2'});
+    const destination = join(value.base, 'canonical-extracted');fs.mkdirSync(destination, {mode: 0o700});
+    extractPinnedRuntimeArchive(archive, destination);
+    expect(JSON.parse(fs.readFileSync(join(destination, 'package.json'),'utf8')).name).toBe('@ashlr/phantom');
+    expect(snapshot(destination)).toEqual(Object.fromEntries(value.archiveFiles.map(path => [relative(value.source,path),hash(fs.readFileSync(path))])));
+    expect(fs.existsSync(value.marker)).toBe(false);
+    const legacy = await fixture();
+    await expect(readPinnedRuntimeArchive({...legacy.pins, identityProfile: 'canonical-v2'})).rejects.toThrow('package name');
+    await expect(readPinnedRuntimeArchive({...value.pins, identityProfile: 'foreign' as 'canonical-v2'})).rejects.toThrow('identity profile');
+  });
   it('verifies exact pins and copies exact package bytes without executing the package', async () => {
     const value = await fixture();
     const archive = await readPinnedRuntimeArchive(value.pins);
