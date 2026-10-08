@@ -11,7 +11,7 @@ import {authoritySurfaceDigest,verifyAuthoritySurfaceAt} from '../src/core/autho
 import {readPinnedRuntimeArchive,extractPinnedRuntimeArchive} from '../src/core/local-runtime/archive.js';
 import {verifyUpdateManifest,verifyMinisign,verifyUpdateBundleRecord} from '../src/core/desktop/update-manifest.js';
 import {inspectSignedAppArchive,extractSignedAppArchive,verifyInstalledRuntimeArchive} from '../src/core/desktop/qualified-update.js';
-import {applyInspectedDesktopArtifacts,assertPairedHostedProof,inspectDesktopArtifactInstall,parseArtifactInstallArguments,readFinalizedDesktopArtifacts,verifyManualDesktopSource} from '../scripts/install-desktop-artifacts.mjs';
+import {artifactInstallFailure,applyInspectedDesktopArtifacts,assertPairedHostedProof,inspectDesktopArtifactInstall,parseArtifactInstallArguments,readFinalizedDesktopArtifacts,verifyManualDesktopSource} from '../scripts/install-desktop-artifacts.mjs';
 import type {UpdateManifest,UpdateTrust} from '../src/core/desktop/update-manifest.js';
 
 const ports=vi.hoisted(()=>({verify:vi.fn(),audit:vi.fn(),source:vi.fn(),createIo:vi.fn(),spawn:vi.fn()}));
@@ -203,9 +203,50 @@ describe.skipIf(process.platform==='win32')('manual original paired artifact ins
     expect([...f.stages.keys()].map(owner=>JSON.parse(fs.readFileSync(join(f.applications,basename(owner),'transaction.json'),'utf8')).phase)).toEqual(['rolled-back']);
     expect(fs.readFileSync(join(f.retained,'transaction.json'),'utf8')).toBe('old HELD evidence');
   });
+  it.each(['hosted-proof','aliases','quiescence'])('reports the actual late %s boundary after the app move, preserving rollback and private errors',async kind=> {
+    const f=fixture(),r=await inspectDesktopArtifactInstall(f.input,f.deps),oldApp=f.io.appInventory('/Applications/Phantom.app');
+    const original=ports.verify.getMockImplementation()!;let refuseCensus=false;
+    ports.verify.mockImplementation((...args)=>{
+      if(ports.verify.mock.calls.length===4) {
+        if(kind==='hosted-proof')throw new Error('private /account/credential/path and secret command output');
+        if(kind==='aliases')write(join(f.home,'.local/bin/phm'),'unrelated appeared file');
+        if(kind==='quiescence')refuseCensus=true;
+      }
+      return original(...args);
+    });
+    if(kind==='quiescence')f.io.executionLeaseCensus.mockImplementation(async()=>{
+      if(refuseCensus){refuseCensus=false;return {leases:[],unknown:1,reaped:0};}return f.census;
+    });
+    const error=await applyInspectedDesktopArtifacts(r).catch(error=>error);
+    expect(error).toBeInstanceOf(Error);
+    expect(artifactInstallFailure(error)).toEqual({state:'rolled-back',phase:`late-${kind}`,installationAccepted:false,authorityResumed:false});
+    expect(JSON.stringify(artifactInstallFailure(error))).not.toMatch(/private|credential|secret|\/account/);
+    expect(f.io.appInventory('/Applications/Phantom.app')).toBe(oldApp);expect(fs.readlinkSync(f.current)).toBe(f.old);
+    expect(fs.readFileSync(join(f.retained,'transaction.json'),'utf8')).toBe('old HELD evidence');
+    const journal=join(f.applications,basename([...f.stages.keys()][0]!),'transaction.json');
+    expect(JSON.parse(fs.readFileSync(journal,'utf8')).phase).toBe('rolled-back');
+    expect(fs.existsSync(join(dirname(journal),'failed-bundle'))).toBe(true);
+    expect(ports.spawn.mock.calls.some(([bin])=>bin==='/usr/bin/open')).toBe(false);
+    await expect(applyInspectedDesktopArtifacts(r)).rejects.toThrow(/replayed/);
+  });
+  it('reports a refused launch without serializing child output and restores the unopened replacement',async()=> {
+    const f=fixture(),r=await inspectDesktopArtifactInstall(f.input,f.deps),oldApp=f.io.appInventory('/Applications/Phantom.app');
+    const original=ports.spawn.getMockImplementation()!;
+    ports.spawn.mockImplementation((...args)=>args[0]==='/usr/bin/open'?{status:1,stdout:'private credential command output'}:original(...args));
+    const error=await applyInspectedDesktopArtifacts(r).catch(error=>error);expect(error).toBeInstanceOf(Error);
+    expect(artifactInstallFailure(error)).toEqual({state:'rolled-back',phase:'app-launch',installationAccepted:false,authorityResumed:false});
+    expect(f.io.appInventory('/Applications/Phantom.app')).toBe(oldApp);expect(fs.readlinkSync(f.current)).toBe(f.old);
+    expect(JSON.stringify(artifactInstallFailure(error))).not.toMatch(/private|credential|command output/);
+  });
+  it('does not serialize arbitrary errors, state or phase values into the CLI failure result',()=> {
+    expect(artifactInstallFailure(Object.assign(new Error('/private/credential'),{installationState:'installed',installerPhase:'/private/credential',stdout:'secret'})))
+      .toEqual({state:'held',phase:'preflight',installationAccepted:false,authorityResumed:false});
+    expect(artifactInstallFailure(null)).toEqual({state:'held',phase:'preflight',installationAccepted:false,authorityResumed:false});
+  });
   it('holds a failed live replacement without falsely restoring current/app or changing older HELD history',async()=> {
     const f=fixture(),r=await inspectDesktopArtifactInstall(f.input,f.deps);f.setHealth(false);
-    await expect(applyInspectedDesktopArtifacts(r)).rejects.toThrow();
+    const error=await applyInspectedDesktopArtifacts(r).catch(error=>error);expect(error).toBeInstanceOf(Error);
+    expect(artifactInstallFailure(error)).toEqual({state:'rollback-held',phase:'owned-health',installationAccepted:false,authorityResumed:false});
     expect([...f.stages.keys()].map(owner=>JSON.parse(fs.readFileSync(join(f.applications,basename(owner),'transaction.json'),'utf8')).phase)).toEqual(['rollback-held']);
     expect(fs.readFileSync(join(f.retained,'transaction.json'),'utf8')).toBe('old HELD evidence');
   });

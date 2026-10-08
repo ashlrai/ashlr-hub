@@ -18,6 +18,23 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const admissions = new WeakMap();
 const digest = data => createHash('sha256').update(data).digest('hex');
 const same = (a, b) => ['dev','ino','uid','mode','nlink','size','mtimeMs','ctimeMs'].every(k => a[k] === b[k]);
+// These labels identify the failed boundary, never the error's private details.
+const FAILURE_PHASES = new Set(['preflight','implementation','finalized-artifacts','manifest-signature','artifact-bytes','artifact-signature','app-record','package-archive','source','hosted-proof','current','app-identity','aliases','quiescence','staging','package','late-artifacts','late-source','late-implementation','late-hosted-proof','late-package','late-current','late-aliases','late-quiescence','app-transaction','app-move','app-signature','app-launch','owned-health','pointer-switch','alias-create','pointer-recovery']);
+function phaseError(phase,error) {
+  const failure=error instanceof Error?error:new Error('Installer boundary refused');
+  if (!FAILURE_PHASES.has(failure.installerPhase)) failure.installerPhase=phase;
+  return failure;
+}
+function boundary(phase,operation) {
+  try {
+    const result=operation();
+    return result && typeof result.then==='function'?result.catch(error=>{throw phaseError(phase,error);}):result;
+  } catch(error) {throw phaseError(phase,error);}
+}
+export function artifactInstallFailure(error) {
+  return {state:['rolled-back','rollback-held'].includes(error?.installationState)?error.installationState:'held',
+    phase:FAILURE_PHASES.has(error?.installerPhase)?error.installerPhase:'preflight',installationAccepted:false,authorityResumed:false};
+}
 const USAGE = 'node scripts/install-desktop-artifacts.mjs --candidate-source <qualified-checkout> --bundle <signed-hosted-bundle> --artifacts <private-finalizer-output> [--apply]';
 
 export function parseArtifactInstallArguments(argv) {
@@ -70,13 +87,13 @@ export async function readFinalizedDesktopArtifacts(path, primitives) {
   const identity=directory(path), ancestors=parents(path), files=new Map();
   const read=(name,max)=>{const privateMode=!name.endsWith('.sig');const row=ownedBytes(join(path,name),max,privateMode);files.set(name,{...row,privateMode});return row.data;};
   const manifestText=text(read('manifest.json',64*1024)), signature=text(read('manifest.json.sig',8192));
-  const verified=primitives.verifyUpdateManifest({manifestText,signature},primitives.trust), m=verified.manifest;
-  assert.equal(m.app.signer,primitives.appleSigner,'uncommissioned Apple signer');
+  const verified=boundary('manifest-signature',()=>primitives.verifyUpdateManifest({manifestText,signature},primitives.trust)), m=verified.manifest;
+  boundary('app-signature',()=>assert.equal(m.app.signer,primitives.appleSigner,'uncommissioned Apple signer'));
   for (const a of [m.app,m.cli]) {
     const data=read(a.filename,a.bytes);
-    assert.equal(data.length,a.bytes,'artifact size differs');assert.equal(digest(data),a.sha256,'artifact digest differs');
+    boundary('artifact-bytes',()=>{assert.equal(data.length,a.bytes,'artifact size differs');assert.equal(digest(data),a.sha256,'artifact digest differs');});
     assert.equal(text(read(`${a.filename}.sig`,8192)),a.signature,'signature sidecar differs');
-    primitives.verifyMinisign(data,a.signature,primitives.trust.publicKey);
+    boundary('artifact-signature',()=>primitives.verifyMinisign(data,a.signature,primitives.trust.publicKey));
   }
   const expected={version:m.version,platforms:{'darwin-aarch64':{url:m.app.url,signature:m.app.signature}},phantom:{manifestText,signature}};
   assert.equal(text(read('latest.json',128*1024)),canonicalJson(expected),'discovery metadata differs from signed envelope');
@@ -88,8 +105,8 @@ export async function readFinalizedDesktopArtifacts(path, primitives) {
   assert.deepEqual(actual,names.sort(),'unexpected finalizer output');
   const entries=primitives.inspectSignedAppArchive(files.get(m.app.filename).data);
   const marker=entries.find(e=>e.path==='Phantom.app/Contents/Resources/phantom-release.json' && !e.directory);
-  assert.ok(marker,'app source record missing');primitives.verifyUpdateBundleRecord(text(marker.data),m);
-  const archive=await primitives.readPinnedRuntimeArchive({artifactPath:join(path,m.cli.filename),sha256:m.cli.sha256,revision:m.source.revision,version:m.version});
+  boundary('app-record',()=>{assert.ok(marker,'app source record missing');primitives.verifyUpdateBundleRecord(text(marker.data),m);});
+  const archive=await boundary('package-archive',()=>primitives.readPinnedRuntimeArchive({artifactPath:join(path,m.cli.filename),sha256:m.cli.sha256,revision:m.source.revision,version:m.version}));
   assert.equal(archive.pins.size,m.cli.bytes,'original archive size differs');
   assert.ok(same(identity,directory(path)),'finalizer directory changed');assert.deepEqual(parents(path),ancestors,'artifact ancestor changed');
   return {path,identity,ancestors,files,manifest:m,digest:verified.digest};
@@ -130,15 +147,14 @@ export function verifyManualDesktopSource(input,manifest,transport) {
 export async function inspectDesktopArtifactInstall(input,dependencies) {
   assert.notEqual(input.candidateRoot,ROOT,'candidate checkout must be distinct from implementation');
   directory(input.candidateRoot,false);directory(input.bundle);directory(input.artifacts);
-  const observed=await readFinalizedDesktopArtifacts(input.artifacts,dependencies.primitives);
-  const source=sourceBinding(input.candidateRoot,observed.manifest.source.revision);
-  assert.equal(source.tree,observed.manifest.source.tree,'candidate source tree differs');
-  const proof=verifyManualDesktopSource(input,observed.manifest,dependencies.transport);
+  const observed=await boundary('finalized-artifacts',()=>readFinalizedDesktopArtifacts(input.artifacts,dependencies.primitives));
+  const source=boundary('source',()=>sourceBinding(input.candidateRoot,observed.manifest.source.revision));
+  boundary('source',()=>assert.equal(source.tree,observed.manifest.source.tree,'candidate source tree differs'));
+  const proof=boundary('hosted-proof',()=>verifyManualDesktopSource(input,observed.manifest,dependencies.transport));
   const hosted=ownedBytes(join(input.bundle,observed.manifest.cli.filename),observed.manifest.cli.bytes,false);
   assert.equal(hosted.sha256,observed.manifest.cli.sha256,'not the original hosted package');
   assert.ok(hosted.data.equals(observed.files.get(observed.manifest.cli.filename).data),'paired package differs from original hosted bytes');
-  const implementation=await dependencies.implementationSnapshot();
-  assert.deepEqual(implementation,dependencies.initialImplementation,'installer changed since its compiled imports');
+  const implementation=await boundary('implementation',async()=>{const value=await dependencies.implementationSnapshot();assert.deepEqual(value,dependencies.initialImplementation,'installer changed since its compiled imports');return value;});
   unchangedArtifacts(observed);
   const result=Object.freeze({state:'verified-artifacts',version:observed.manifest.version,installationPerformed:false,authorityResumed:false});
   admissions.set(result,{input:{...input},dependencies,observed,source,proof,implementation,hosted,attempted:false});
@@ -179,35 +195,37 @@ export async function applyInspectedDesktopArtifacts(result) {
     if (bin==='/usr/bin/codesign') assert.ok(argv[0]==='--verify','signing is not an installer operation');
     if (bin==='/usr/bin/plutil') assert.ok(argv[0]==='-extract','plist modification is not an installer operation');
     const child=spawnSync(bin,argv,{cwd:ROOT,encoding:'utf8',timeout:120_000,maxBuffer:1024*1024,env:d.environment});
-    return {status:child.error?1:child.status??1,stdout:child.stdout??''};
+    const status=child.error?1:child.status??1;
+    if (status!==0 && !['/bin/ps','/usr/sbin/lsof'].includes(bin)) throw phaseError(bin==='/usr/bin/open'?'app-launch':bin==='/usr/bin/codesign'?'app-signature':bin==='/usr/bin/plutil'?'app-identity':'app-transaction',new Error('Installer command refused'));
+    return {status,stdout:child.stdout??''};
   };
   // Fresh hosted proof may be slow. Reprove each exact app immediately at the
   // existing exclusive-move boundary, including rollback; never move a merely
   // inode-matching bundle whose contents changed during that earlier proof.
   const rename=io.renameExclusive.bind(io);
-  io.renameExclusive=(from,to,expected)=>{sameApp(transaction.inspectLocalApp(from,m.app.signer,io),{...expected,path:from});rename(from,to,expected);};
-  const current=join(d.home,'.local/share/ashlr/current'),previous=io.readCurrentPointer(current);
-  newerCurrent(previous,m,io);
-  const selected=transaction.selectLocalApp(m.app.signer,io);assert.ok(selected,'existing app unavailable');
-  const aliases=transaction.inspectLocalAliases(io);
-  await transaction.requireLocalQuiescence(io);
+  io.renameExclusive=(from,to,expected)=>boundary('app-move',()=>{sameApp(transaction.inspectLocalApp(from,m.app.signer,io),{...expected,path:from});rename(from,to,expected);});
+  const current=join(d.home,'.local/share/ashlr/current'),previous=boundary('current',()=>io.readCurrentPointer(current));
+  boundary('current',()=>newerCurrent(previous,m,io));
+  const selected=boundary('app-identity',()=>{const value=transaction.selectLocalApp(m.app.signer,io);assert.ok(value,'existing app unavailable');return value;});
+  const aliases=boundary('aliases',()=>transaction.inspectLocalAliases(io));
+  await boundary('quiescence',()=>transaction.requireLocalQuiescence(io));
   const freshInputs=async()=> {
-    unchangedArtifacts(observed);
-    const original=ownedBytes(join(input.bundle,m.cli.filename),m.cli.bytes,false);
-    assert.ok(same(hosted.identity,original.identity) && original.sha256===hosted.sha256,'original hosted package replaced');
-    assert.deepEqual(sourceBinding(input.candidateRoot,m.source.revision),source,'qualified source changed');
-    assert.deepEqual(await d.implementationSnapshot(),implementation,'installer implementation changed');
-    assert.deepEqual(verifyManualDesktopSource(input,m,d.transport),proof,'fresh hosted proof changed');
+    boundary('late-artifacts',()=>unchangedArtifacts(observed));
+    boundary('late-artifacts',()=>{const original=ownedBytes(join(input.bundle,m.cli.filename),m.cli.bytes,false);
+      assert.ok(same(hosted.identity,original.identity) && original.sha256===hosted.sha256,'original hosted package replaced');});
+    boundary('late-source',()=>assert.deepEqual(sourceBinding(input.candidateRoot,m.source.revision),source,'qualified source changed'));
+    await boundary('late-implementation',async()=>assert.deepEqual(await d.implementationSnapshot(),implementation,'installer implementation changed'));
+    boundary('late-hosted-proof',()=>assert.deepEqual(verifyManualDesktopSource(input,m,d.transport),proof,'fresh hosted proof changed'));
     // Network/signature reads cannot leave bytes trusted from before the read.
-    unchangedArtifacts(observed);
-    const after=ownedBytes(join(input.bundle,m.cli.filename),m.cli.bytes,false);
-    assert.ok(same(hosted.identity,after.identity) && after.sha256===hosted.sha256,'original hosted package changed after proof');
-    assert.deepEqual(sourceBinding(input.candidateRoot,m.source.revision),source,'qualified source changed after proof');
-    assert.deepEqual(await d.implementationSnapshot(),implementation,'implementation changed after proof');
+    boundary('late-artifacts',()=>unchangedArtifacts(observed));
+    boundary('late-artifacts',()=>{const after=ownedBytes(join(input.bundle,m.cli.filename),m.cli.bytes,false);
+      assert.ok(same(hosted.identity,after.identity) && after.sha256===hosted.sha256,'original hosted package changed after proof');});
+    boundary('late-source',()=>assert.deepEqual(sourceBinding(input.candidateRoot,m.source.revision),source,'qualified source changed after proof'));
+    await boundary('late-implementation',async()=>assert.deepEqual(await d.implementationSnapshot(),implementation,'implementation changed after proof'));
   };
   await freshInputs();
   const releases=join(d.home,'.local/share/ashlr/releases');safeInstallParents(d.home,releases);
-  const destination=join(releases,m.source.revision);fs.mkdirSync(destination,{mode:0o700});
+  const destination=join(releases,m.source.revision);boundary('staging',()=>fs.mkdirSync(destination,{mode:0o700}));
   const stageParent=join(d.home,'.ashlr/updates/manual-staging');safeInstallParents(d.home,stageParent);
   const stage=fs.mkdtempSync(join(stageParent,'paired-'));fs.chmodSync(stage,0o700);
   const archivePins={artifactPath:join(input.artifacts,m.cli.filename),sha256:m.cli.sha256,revision:m.source.revision,version:m.version};
@@ -223,18 +241,18 @@ export async function applyInspectedDesktopArtifacts(result) {
   const journal=io.writeInstallJournal.bind(io);
   io.writeInstallJournal=(owner,value)=>{journal(owner,value);phase=value.phase;};
   const beforePublication=async()=> {
-    await freshInputs();await packageReady();
-    assert.deepEqual(io.readCurrentPointer(current),previous,'current pointer changed');newerCurrent(previous,m,io);
-    assert.deepEqual(transaction.inspectLocalAliases(io),aliases,'CLI aliases changed');
-    await transaction.requireLocalQuiescence(io);
+    await freshInputs();await boundary('late-package',packageReady);
+    boundary('late-current',()=>{assert.deepEqual(io.readCurrentPointer(current),previous,'current pointer changed');newerCurrent(previous,m,io);});
+    boundary('late-aliases',()=>assert.deepEqual(transaction.inspectLocalAliases(io),aliases,'CLI aliases changed'));
+    await boundary('late-quiescence',()=>transaction.requireLocalQuiescence(io));
   };
   try {
-    await packageReady();
-    await transaction.installLocalApp({selected,source:appRoot,sourceProof:app,signer:m.app.signer,version:m.version,native:true,preserveSigned:true,previousCurrent:previous.target,
+    await boundary('package',packageReady);
+    await boundary('app-transaction',()=>transaction.installLocalApp({selected,source:appRoot,sourceProof:app,signer:m.app.signer,version:m.version,native:true,preserveSigned:true,previousCurrent:previous.target,
       beforeSwitch:async()=>{await beforePublication();sameApp(transaction.selectLocalApp(m.app.signer,io),selected);},
-      commitPointer:async()=>{await beforePublication();switched=io.switchCurrentPointer(current,previous,destination);created=transaction.createLocalAliases(aliases,io);},
-      rollbackPointer:async()=>{transaction.removeCreatedAliases(created,io);if(switched) io.restoreCurrentPointer(current,previous,switched);else assert.deepEqual(io.readCurrentPointer(current),previous,'unchanged pointer recovery unknown');},
-      health:async()=>{
+      commitPointer:async()=>{await beforePublication();switched=boundary('pointer-switch',()=>io.switchCurrentPointer(current,previous,destination));created=boundary('alias-create',()=>transaction.createLocalAliases(aliases,io));},
+      rollbackPointer:async()=>boundary('pointer-recovery',()=>{transaction.removeCreatedAliases(created,io);if(switched) io.restoreCurrentPointer(current,previous,switched);else assert.deepEqual(io.readCurrentPointer(current),previous,'unchanged pointer recovery unknown');}),
+      health:async()=>boundary('owned-health',async()=>{
         const deadline=io.clock()+30_000;
         while(io.clock()<deadline) {
           if(transaction.launchedAppIsOwned(io) && await io.fetchStatus('http://127.0.0.1:7777/verse/')===200) {
@@ -242,8 +260,8 @@ export async function applyInspectedDesktopArtifacts(result) {
           }
           await io.sleep(1000);
         }
-        return false;
-      }},io);
+        throw new Error('Owned launch health refused');
+      })},io));
     return Object.freeze({state:'installed',version:m.version,installationPerformed:true,authorityResumed:false,requiresOperatorAuthorityReview:true});
   } catch(error) {
     error.installationState=phase==='rolled-back'?'rolled-back':'rollback-held';throw error;
@@ -276,16 +294,16 @@ export async function productionInstallerDependencies() {
 
 async function main() {
   try {
-    const input=parseArtifactInstallArguments(process.argv.slice(2));
+    const input=boundary('preflight',()=>parseArtifactInstallArguments(process.argv.slice(2)));
     if(input.help){console.log(USAGE);console.log('Inspect by default. Apply requires prior Stop, drained leases and normal Quit. No build/sign/pack, grants or resume.');return;}
     // The existing census uses homedir(); bind it and Git to the OS account,
     // while the gh child uses its separately closed normal-profile environment.
     const home=userInfo().homedir;for(const key of Object.keys(process.env)) delete process.env[key];
     Object.assign(process.env,{HOME:home,PATH:'/usr/bin:/bin:/usr/sbin:/sbin',LANG:'C',LC_ALL:'C'});
-    const deps=await productionInstallerDependencies(), inspected=await inspectDesktopArtifactInstall(input,deps);
+    const deps=await boundary('implementation',productionInstallerDependencies), inspected=await boundary('preflight',()=>inspectDesktopArtifactInstall(input,deps));
     console.log(JSON.stringify(input.apply?await applyInspectedDesktopArtifacts(inspected):inspected));
   } catch(error) {
-    console.error(JSON.stringify({state:error.installationState??'held',installationAccepted:false,authorityResumed:false}));process.exitCode=1;
+    console.error(JSON.stringify(artifactInstallFailure(error)));process.exitCode=1;
   }
 }
 if(process.argv[1] && resolve(process.argv[1])===fileURLToPath(import.meta.url)) await main();
