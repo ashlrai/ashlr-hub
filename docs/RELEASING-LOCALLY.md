@@ -40,6 +40,8 @@ Run the whole test modules affected by a change first. Use `npm run check:releas
 for publication, CLI and documentation contracts; use `node --test` with the
 affected `.github/tests` modules for workflow and packaging changes. Import-based
 related selection cannot discover every test that reads a workflow as text.
+The preflight includes the whole resident-service documentation and release-workflow
+modules so their display and activation contracts fail before the producer build.
 
 Use `npm run gate -- --base <ref>` for broader feedback while coding. Before
 shipping, consolidate changes into one clean candidate and run its complete

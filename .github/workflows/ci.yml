@@ -630,6 +630,7 @@ jobs:
           desktop/src-tauri/src/lib.rs
           desktop/src-tauri/src/native_launchd_broker.rs
           desktop/src-tauri/src/native_updates.rs
+          desktop/src-tauri/src/native_update_client.rs
 
       - name: Check native broker library
         run: >-

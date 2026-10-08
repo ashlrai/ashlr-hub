@@ -176,6 +176,7 @@ describe('M481 CI workflow action trust chain', () => {
     expect(serialized).toContain('cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib --locked -- --nocapture');
     expect(serialized).not.toContain('--lib --locked native_launchd_broker');
     expect(serialized).toContain('desktop/src-tauri/src/native_updates.rs');
+    expect(serialized).toContain('desktop/src-tauri/src/native_update_client.rs');
   });
 
   it('restores only exact debug compilation keys and saves only successful master pushes after cleanup', () => {
