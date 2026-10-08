@@ -325,7 +325,7 @@ describe('queue: informational messages never wait for an unanswered question', 
 
     const result = await runCommsCycle(cfg(), fastCycle);
 
-    expect(texts()).toEqual(['Fleet update: 2 merged', 'Leader update:\nSeat grok reset — resuming lanes.']);
+    expect(texts()).toEqual(['Fleet update: 2 merged', 'Phantom update:\nSeat grok reset — resuming lanes.']);
     expect(result.sent).toBe(2);
     expect(thread.delivered).toEqual([{ id: 't-1', channel: 'telegram', ok: true }]);
     // The second question still waits for the slot.
@@ -800,6 +800,26 @@ function control(draft: ReturnType<typeof draftFor>, suffix: string) {
 }
 
 describe('typed Leader question controls with strict offline drafts', () => {
+  it.each(['single', 'multiple', 'short-answer'] as const)('shows concise %s instructions with exact saved labels and callback targets', async (mode) => {
+    const f = typedQuestionFixture(mode);
+    const before = structuredClone(f.message);
+    expect(await sendThreadMessage(f.message, cfg())).toBe(true);
+    const sent = sends()[0]!;
+    expect(sent.body['text']).toContain('Your call:');
+    expect(sent.body['text']).toContain(f.message.text);
+    expect(sent.body['text']).toContain(mode === 'multiple' ? 'Select any options, then tap Submit.'
+      : mode === 'single' ? 'Choose an option' : 'Reply to this message to answer.');
+    expect(f.message).toEqual(before);
+    const draft = draftFor(keyboardData(sent)[0]!, f.namespace);
+    expect(draft.questionId).toBe(f.questionId);
+    expect(draft.form).toEqual(f.form);
+    if (f.form.options) {
+      const labels = (sent.body['reply_markup'] as { inline_keyboard: Array<Array<{ text: string }>> }).inline_keyboard.flat().map(button => button.text).join('\n');
+      for (const option of f.form.options) expect(labels).toContain(option);
+    }
+    expect(thread.submitLeaderQuestion).not.toHaveBeenCalled();
+    expect(thread.approveLeaderAction).not.toHaveBeenCalled();
+  });
   it('keeps draft toggles/all/clear and empty Submit separate from model or approval work', async () => {
     const f = typedQuestionFixture(); expect(await sendThreadMessage(f.message, cfg())).toBe(true);
     const first = keyboardData(sends()[0]!)[0]!, token = first.split(':')[2]!;

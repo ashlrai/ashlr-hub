@@ -232,8 +232,14 @@ export function formatThreadMessage(msg: LeaderThreadMessage): string {
   // Leader's reply on Telegram has its context.
   if (msg.from === 'mason') return `You (in ${msg.channel === 'verse' ? 'Phantom' : String(msg.channel)}):\n${body}`;
   switch (msg.kind) {
-    case 'question':
-      return `Leader asks:\n${body}\n\n(Reply to this message to answer.)`;
+    case 'question': {
+      const instruction = msg.questionForm?.mode === 'multiple'
+        ? 'Select any options, then tap Submit. Or reply in your own words.'
+        : msg.questionForm?.mode === 'single'
+          ? 'Choose an option, or reply in your own words.'
+          : 'Reply to this message to answer.';
+      return `Your call:\n${body}\n\n${instruction}`;
+    }
     case 'memo': {
       // Only the display loses IDs; the exact memo/action targets remain in
       // the thread map and buttons. Phone-sized:
@@ -243,11 +249,11 @@ export function formatThreadMessage(msg: LeaderThreadMessage): string {
       return fitTelegram(text, LEADER_TELEGRAM_MAX_LINES + 2).text.replace('… (say "more" for the rest)', '… (tap Details for the full memo)');
     }
     case 'action':
-      return `Leader action:\n${body}`;
+      return `Action:\n${body}`;
     case 'directive':
       return `Directive:\n${body}`;
     case 'update':
-      return `Leader update:\n${body}`;
+      return `Phantom update:\n${body}`;
     default:
       return `Leader:\n${body}`;
   }
