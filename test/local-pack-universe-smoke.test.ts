@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { build } from 'esbuild';
 
 // Keep the child program's native import() syntax out of Vite's SSR transform.
-const { installedUniverseSmokeArgs } = createRequire(import.meta.url)('../scripts/run-local-pack-smoke.mjs');
+const { installedUniverseSmokeArgs, runLocalPackSmoke } = createRequire(import.meta.url)('../scripts/run-local-pack-smoke.mjs');
 
 // Transpile the current reachable graph once, preserving its file layout rather
 // than bundling it: import.meta-relative paths and external ESM dependencies
@@ -64,13 +64,14 @@ afterEach(() => {
 
 /** Source-backed package wrappers test the exact smoke program without npm install. */
 function fixture(options: { sdkOverride?: string; ignoreInvalidFlags?: boolean; ignorePortfolioInvalidFlags?: boolean; brokenRuntimeRead?: boolean;
-  ignoreComparisonInvalidFlags?: boolean; sourceBacked?: boolean } = {}) {
+  ignoreComparisonInvalidFlags?: boolean; sourceBacked?: boolean; packageName?: '@ashlr/hub' | '@ashlr/phantom' } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'pack-universe-')));
   scratch.push(root);
   const installed = join(root, 'install');
-  const packageRoot = join(installed, 'node_modules', '@ashlr', 'hub');
+  const packageName = options.packageName ?? '@ashlr/hub';
+  const packageRoot = join(installed, 'node_modules', ...packageName.split('/'));
   mkdirSync(packageRoot, { recursive: true, mode: 0o700 });
-  writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: '@ashlr/hub', type: 'module',
+  writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ name: packageName, type: 'module',
     exports: { './universe': './universe.mjs' } }));
   const sdk = sdkModuleUrl(options.sourceBacked);
   writeFileSync(join(packageRoot, 'universe.mjs'),
@@ -95,7 +96,7 @@ function fixture(options: { sdkOverride?: string; ignoreInvalidFlags?: boolean; 
   const childEnv = { ...process.env, HOME: root, USERPROFILE: root, ASHLR_HOME: join(root, '.ashlr'),
     NODE_OPTIONS: options.sourceBacked ? `${process.env['NODE_OPTIONS'] ?? ''} --import=${loader}`
       : process.env['NODE_OPTIONS'], GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
-  const run = () => spawnSync(process.execPath, installedUniverseSmokeArgs(smokeRoot, bin), {
+  const run = () => spawnSync(process.execPath, installedUniverseSmokeArgs(smokeRoot, bin, packageName), {
     cwd: installed, encoding: 'utf8', timeout: 45_000, maxBuffer: 1024 * 1024,
     env: childEnv,
   });
@@ -150,6 +151,29 @@ describe('installed Universe package smoke', () => {
     expect(existsSync(join(smokeRoot, 'missing-store'))).toBe(false);
     expect(existsSync(join(smokeRoot, 'missing-runtime-store'))).toBe(false);
   });
+
+  it('runs the canonical-only installed SDK and CLI without a legacy package or executing work', () => {
+    const { installed, smokeRoot, run } = fixture({ packageName: '@ashlr/phantom' });
+    expect(existsSync(join(installed, 'node_modules', '@ashlr', 'hub'))).toBe(false);
+    const result = run();
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('passed (no work executed)');
+    expect(JSON.parse(readFileSync(join(smokeRoot, 'campaign.json'), 'utf8')).budget.maxModelRequests).toBe(0);
+    expect(existsSync(join(smokeRoot, 'missing-runtime-store'))).toBe(false);
+  });
+
+  it.each([null, {}, 'constructor', '@other/phantom', '@ashlr/phantom-beta', "@ashlr/phantom'); throw new Error('injected"])(
+    'rejects an unreviewed namespace before generating a child or packing: %s', (packageName) => {
+      expect(() => installedUniverseSmokeArgs('/private/unused', '/private/unused-bin', packageName)).toThrow();
+      const repo = realpathSync(mkdtempSync(join(tmpdir(), 'pack-unreviewed-')));
+      scratch.push(repo);
+      writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: packageName, version: '1.0.0' }));
+      const workDir = join(repo, 'never-created');
+      expect(() => runLocalPackSmoke({ repo, workDir, output: join(repo, 'never-written.json') })).toThrow();
+      expect(existsSync(workDir)).toBe(false);
+      expect(existsSync(join(repo, 'never-written.json'))).toBe(false);
+    });
 
   it('rejects an installed runtime CLI that omits missing-store evidence', () => {
     const { run } = fixture({ brokenRuntimeRead: true });
@@ -288,5 +312,8 @@ describe('installed Universe package smoke', () => {
     expect(args.slice(0, 2)).toEqual(['--input-type=module', '-e']);
     expect(args[2]).toContain(JSON.stringify('/private/smoke "quoted"'));
     expect(args[2]).toContain(JSON.stringify('/private/bin with spaces'));
+    expect(args[2]).toContain(JSON.stringify('@ashlr/hub'));
+    expect(installedUniverseSmokeArgs('/private/smoke', '/private/bin', '@ashlr/phantom')[2])
+      .toContain(JSON.stringify('@ashlr/phantom'));
   });
 });

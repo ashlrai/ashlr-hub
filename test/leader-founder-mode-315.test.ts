@@ -151,7 +151,7 @@ describe('persona — a founder-operator that never claims to be a real person',
     }
     expect(LEADER_SYSTEM_PROMPT).toMatch(/Visionary/);
     expect(LEADER_SYSTEM_PROMPT).toMatch(/best part is no part/i);
-    expect(LEADER_SYSTEM_PROMPT).toContain('Phantom (repo ashlrai/ashlr-hub)');
+    expect(LEADER_SYSTEM_PROMPT).toContain('Phantom (repo ashlrai/phantom)');
     for (const prompt of [LEADER_SYSTEM_PROMPT, LEADER_CONVERSATION_SYSTEM, LEADER_FOUNDER_VOICE]) {
       expect(prompt).toContain('Phantom');
       expect(prompt).not.toContain('Ashlr Verse');
@@ -606,7 +606,11 @@ describe('self-improvement drive — highest leverage, cheapest lane, bounded by
     // Sorted by leverage: the recurring failure (3×) and the Leader's own failures lead.
     expect(cands[0]!.leverage).toBeGreaterThanOrEqual(cands[cands.length - 1]!.leverage);
     expect(competitiveGaps(DOC)).toHaveLength(2);
-    for (const c of cands) expect(draftForSelection({ candidate: c, lane: 'cloud', why: 'x' })).not.toBeNull();
+    for (const c of cands) {
+      const selection = { candidate: c, lane: 'cloud' as const, why: 'x' };
+      expect(draftForSelection(selection)).toMatchObject({ params: { repo: 'ashlrai/phantom' } });
+      expect(draftForSelection(selection, VERSE)).toMatchObject({ params: { repo: VERSE } });
+    }
   });
 
   const cand = (id: string, leverage: number, size: 'small' | 'pr' = 'pr'): ImprovementCandidate => ({
@@ -651,7 +655,9 @@ describe('self-improvement drive — highest leverage, cheapest lane, bounded by
   });
 
   it('a daily run enacts its picks under the grant, records a report once a day, and stays within budget', async () => {
-    const made = makeApplyDeps({ ledger, now: () => NOW, policy: () => policyWithHub() });
+    const made = makeApplyDeps({ ledger, now: () => NOW, policy: () => makePolicy({
+      repos: [...policyWithHub().repos, { ...HUB_REPO, nameWithOwner: 'ashlrai/phantom' }] as never,
+    }) });
     const powers = fakePowers();
     made.deps.powers = powers.ports;
     const runDeps = { cfg: {}, now: () => NOW, apply: made.deps } as unknown as LeaderRunDeps;

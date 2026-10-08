@@ -104,7 +104,7 @@ async function handleLeaderMemoReply(idx: number, memoId: string, cfg: AshlrConf
   if (idx === 2) {
     const { readLeaderMemo } = await import('../vision/leader-memo.js');
     const memo = readLeaderMemo(memoId);
-    await sendReply(memo ? scrubSecrets(leaderMemoText(memo)) : '[ashlr] That Leader memo is no longer on file.', cfg);
+    await sendReply(memo ? scrubSecrets(leaderMemoText(memo)) : '[Phantom] That Leader memo is no longer on file.', cfg);
   }
 }
 
@@ -123,7 +123,7 @@ async function handleVisionaryBriefing(req: CommsRequest, cfg: AshlrConfig): Pro
   // Legacy Strategist briefing: retired (3.14). Never adopt a stale briefing.
   if (idx === 1) return; // Hold — recorded via resolution.
   await sendReply(
-    '[ashlr] That Strategist briefing is retired; nothing was adopted. The Leader is the one brain now: reply here to talk to it, or see its latest memo with `ashlr leader show`.',
+    '[Phantom] That Strategist briefing is retired; nothing was adopted. The Leader is the one brain now: reply here to talk to it, or see its latest memo with `ashlr leader show`.',
     cfg,
   );
 }

@@ -8,7 +8,7 @@ import { gunzipSync } from 'node:zlib';
 import { Header } from 'tar';
 import { parseBuildIdentity } from '../build-identity.js';
 import { fsyncDirectory } from '../util/durability.js';
-import {getDesktopUpdateProfile, type DesktopUpdateProfileName} from '../desktop/update-manifest.js';
+import {desktopUpdateProfileForPackage, getDesktopUpdateProfile, type DesktopUpdateProfile, type DesktopUpdateProfileName} from '../desktop/update-manifest.js';
 
 const MAX_COMPRESSED = 64 * 1024 * 1024;
 const MAX_EXPANDED = 128 * 1024 * 1024;
@@ -142,8 +142,8 @@ function parseEntries(bytes: Buffer): RuntimeArchiveEntry[] {
   return fail('tar terminator is missing');
 }
 
-function verifyPackage(entries: readonly RuntimeArchiveEntry[], pins: PinnedRuntimeArchiveOptions): void {
-  const profile = getDesktopUpdateProfile(pins.identityProfile ?? 'legacy-v1');
+function verifyPackage(entries: readonly RuntimeArchiveEntry[], pins: PinnedRuntimeArchiveOptions,
+  profileForPackage: (name: unknown) => DesktopUpdateProfile): DesktopUpdateProfile {
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
   const required = ['package.json', 'dist/build-identity.json', 'bin/ashlr',
     'dist/cli/index.js', 'dist/core/universe/index.js'];
@@ -154,6 +154,7 @@ function verifyPackage(entries: readonly RuntimeArchiveEntry[], pins: PinnedRunt
   let pkg: { name?: unknown; version?: unknown; type?: unknown; bin?: { ashlr?: unknown } };
   try { pkg = JSON.parse(packageBytes.toString('utf8')) as typeof pkg; }
   catch { return fail('invalid package.json'); }
+  const profile = profileForPackage(pkg?.name);
   if (!pkg || pkg.name !== profile.packageName || pkg.version !== pins.version ||
       pkg.type !== 'module' || pkg.bin?.ashlr !== 'bin/ashlr' || !byPath.get('bin/ashlr')!.executable) {
     fail('package name, version, module type or launcher does not match');
@@ -163,23 +164,37 @@ function verifyPackage(entries: readonly RuntimeArchiveEntry[], pins: PinnedRunt
       identity.revision !== pins.revision || identity.packageVersion !== pins.version) {
     fail('clean Git build identity does not match pins');
   }
+  return profile;
 }
 
 /** Admit an explicitly trusted, hash-pinned package without executing its code. */
-export async function readPinnedRuntimeArchive(options: PinnedRuntimeArchiveOptions): Promise<VerifiedRuntimeArchive> {
+async function readArchive(options: PinnedRuntimeArchiveOptions,
+  profileForPackage: (name: unknown) => DesktopUpdateProfile): Promise<{archive: VerifiedRuntimeArchive; profile: DesktopUpdateProfile}> {
   if (!SHA256.test(options.sha256) || !REVISION.test(options.revision) ||
       options.version.length > 128 || !VERSION.test(options.version)) fail('invalid artifact pins');
   const bytes = readArtifact(options.artifactPath);
   if (digest(bytes) !== options.sha256) fail('artifact SHA256 does not match pin');
   const entries = parseEntries(bytes);
-  verifyPackage(entries, options);
+  const profile = verifyPackage(entries, options, profileForPackage);
   const archive: VerifiedRuntimeArchive = Object.freeze({
     pins: Object.freeze({ sha256: options.sha256, revision: options.revision, version: options.version,
       integrity: `sha512-${createHash('sha512').update(bytes).digest('base64')}`, size: bytes.length }),
     entries: Object.freeze(entries),
   });
   admitted.set(archive, entries.map((entry) => digest(entry.bytes)));
-  return archive;
+  return Object.freeze({archive, profile});
+}
+
+/** Omission retains the original legacy identity; signed callers select an exact profile. */
+export async function readPinnedRuntimeArchive(options: PinnedRuntimeArchiveOptions): Promise<VerifiedRuntimeArchive> {
+  return (await readArchive(options, () => getDesktopUpdateProfile(options.identityProfile ?? 'legacy-v1'))).archive;
+}
+
+/** Select only the two known namespaces from original pinned bytes, never a caller override. */
+export async function readCompatiblePinnedRuntimeArchive(options: Omit<PinnedRuntimeArchiveOptions, 'identityProfile'>):
+Promise<{readonly archive: VerifiedRuntimeArchive; readonly profile: DesktopUpdateProfile}> {
+  if (Object.hasOwn(options, 'identityProfile')) fail('compatible reader does not accept a profile override');
+  return readArchive(options, desktopUpdateProfileForPackage);
 }
 
 function privateDirectory(path: string): void {

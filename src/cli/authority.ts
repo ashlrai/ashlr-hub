@@ -33,6 +33,7 @@ import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { CUSTODY_HELPER_PATH } from '../core/authority/custody-client.js';
+import { HUB_REPOSITORY_IDENTITY, isHubRepositoryLabel } from '../core/authority/repository-binding.js';
 import { STANDING_GRANT_PATTERNS } from '../core/authority/types.js';
 import type { ResidentAdmission, ResidentPlistState } from '../core/authority/resident.js';
 import type { RepoEnforcement } from '../core/fleet/fleet-types.js';
@@ -1444,8 +1445,8 @@ export const FLEET_APP_NAME = 'ashlr-fleet';
 export function buildGithubAppManifest(redirectUrl: string): Record<string, unknown> {
   return {
     name: FLEET_APP_NAME,
-    url: 'https://github.com/ashlrai/ashlr-hub',
-    hook_attributes: { url: 'https://github.com/ashlrai/ashlr-hub', active: false },
+    url: `https://github.com/${HUB_REPO}`,
+    hook_attributes: { url: `https://github.com/${HUB_REPO}`, active: false },
     redirect_url: redirectUrl,
     public: false,
     default_permissions: { contents: 'write', pull_requests: 'write', checks: 'write', statuses: 'read', metadata: 'read' },
@@ -2579,7 +2580,7 @@ function finish(report: readonly SetupRow[], deps: AuthorityCliDeps, dryRun = fa
 
 type TrustRootPrResult = { status: StepStatus; detail: string; link?: string; command?: string | null };
 
-const HUB_REPO = 'ashlrai/ashlr-hub';
+const HUB_REPO = HUB_REPOSITORY_IDENTITY.renamedName;
 
 /**
  * The dry run's look at the trust-root PR, through `gh api <path>` GETs only
@@ -2636,10 +2637,10 @@ async function openTrustRootPr(
   probe: boolean,
 ): Promise<{ status: StepStatus; detail: string; link?: string }> {
   const source = one(parsed, '--source') ?? (await findSelfCheckout());
-  if (!source) return { status: 'waiting-on-you', detail: 'pass --source <your ashlr-hub checkout> so setup can open the trust-root PR' };
+  if (!source) return { status: 'waiting-on-you', detail: 'pass --source <your Phantom checkout> so setup can open the trust-root PR' };
   const branch = `authority/trust-root-${root.keyId}`;
   const base = async (): Promise<string> => {
-    const result = await deps.run('gh', ['repo', 'view', 'ashlrai/ashlr-hub', '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']);
+    const result = await deps.run('gh', ['repo', 'view', HUB_REPO, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']);
     return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : 'master';
   };
   const prLink = (text: string): string | undefined => /https:\/\/github\.com\/\S+\/pull\/\d+/u.exec(text)?.[0];
@@ -2647,7 +2648,7 @@ async function openTrustRootPr(
   let pushedAlready = false;
   if (probe) {
     // Read-only probes (a dry run never makes them).
-    const open = await deps.run('gh', ['pr', 'list', '--repo', 'ashlrai/ashlr-hub', '--head', branch, '--state', 'open', '--json', 'url', '--jq', '.[0].url // ""']);
+    const open = await deps.run('gh', ['pr', 'list', '--repo', HUB_REPO, '--head', branch, '--state', 'open', '--json', 'url', '--jq', '.[0].url // ""']);
     if (open.status === 0 && open.stdout.trim()) {
       const url = open.stdout.trim();
       return { status: 'waiting-on-you', detail: `${url} is already open — review and merge it yourself`, ...(prLink(url) ? { link: prLink(url)! } : {}) };
@@ -2669,7 +2670,7 @@ async function openTrustRootPr(
   }
   baseBranch ??= await base();
   const createPr = async (cwd?: string): Promise<{ status: StepStatus; detail: string; link?: string }> => {
-    const pr = await deps.run('gh', ['pr', 'create', '--repo', 'ashlrai/ashlr-hub', '--base', baseBranch!, '--head', branch,
+    const pr = await deps.run('gh', ['pr', 'create', '--repo', HUB_REPO, '--base', baseBranch!, '--head', branch,
       '--title', `authority: trust custody key ${root.keyId}`,
       '--body', `Adds the Secure Enclave custody key \`${root.keyId}\` to STANDING_GRANT_TRUST_ROOTS (opened by \`ashlr authority setup\`). Tier-1 path: review it yourself.`], cwd ? { cwd } : {});
     if (pr.status !== 0) return { status: 'failed', detail: `pushed ${branch}, but the PR could not be opened: ${pr.stderr.trim().slice(0, 200)}` };
@@ -2705,14 +2706,17 @@ async function openTrustRootPr(
   }
 }
 
-/** The enrolled checkout of ashlr-hub itself, if any. */
+/** The enrolled self checkout, under either reviewed repository label (a hint, not authority). */
 async function findSelfCheckout(): Promise<string | null> {
   try {
     const { readEnrollmentRegistry } = await import('../core/sandbox/policy.js');
     const { repoIdentityOfPath } = await import('../core/fleet/repo-identity.js');
     const registry = readEnrollmentRegistry();
     if (registry.state !== 'ready') return null;
-    return registry.repos.find((path) => repoIdentityOfPath(path)?.toLowerCase() === 'ashlrai/ashlr-hub') ?? null;
+    return registry.repos.find((path) => {
+      const name = repoIdentityOfPath(path);
+      return name !== null && isHubRepositoryLabel(name);
+    }) ?? null;
   } catch {
     return null;
   }

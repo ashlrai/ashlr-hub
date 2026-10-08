@@ -47,7 +47,7 @@ describe('validateLaunch', () => {
     for (const repo of ['ashlr-hub', 'https://github.com/ashlrai/ashlr-hub', 'a/b/c', 'own er/x', 'a/b;rm']) {
       const r = validateLaunch({ repo, baseBranch: '', prompt: 'x' });
       expect(r.ok, repo).toBe(false);
-      if (!r.ok) expect(r.errors.repo).toBe('Use the GitHub owner/name form, like ashlrai/ashlr-hub.');
+      if (!r.ok) expect(r.errors.repo).toBe('Use the GitHub owner/name form, like ashlrai/phantom.');
     }
     const branch = validateLaunch({ repo: 'a/b', baseBranch: 'feature..x', prompt: 'x' });
     expect(branch).toEqual({ ok: false, errors: { baseBranch: "That isn't a branch name git accepts." } });
@@ -102,7 +102,8 @@ describe('the counting lines', () => {
   });
 
   it('describes self-improvement on and off', () => {
-    expect(selfImproveLine(budgetView())).toBe('1 of 4 self-improvement launches today, on ashlrai/ashlr-hub. Stops under a $40 estimated balance.');
+    expect(selfImproveLine(budgetView())).toBe('1 of 4 self-improvement launches today, on ashlrai/phantom. Stops under a $40 estimated balance.');
+    expect(selfImproveLine(budgetView({ budget: budget({}, { repo: 'ashlrai/ashlr-hub' }) }))).toBe('1 of 4 self-improvement launches today, on ashlrai/ashlr-hub. Stops under a $40 estimated balance.');
     expect(selfImproveLine(budgetView({ budget: budget({}, { enabled: false }) }))).toBe('Self-improvement is off. Phantom launches cloud tasks only when you ask.');
   });
 

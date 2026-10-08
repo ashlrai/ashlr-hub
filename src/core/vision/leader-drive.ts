@@ -58,7 +58,7 @@ export const DRIVE_LIMITS = Object.freeze({
   historyKeep: 200,
 });
 
-export const VERSE_REPO = 'ashlrai/ashlr-hub';
+export const VERSE_REPO = 'ashlrai/phantom';
 
 // ---------------------------------------------------------------------------
 // Candidates (pure)

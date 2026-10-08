@@ -188,7 +188,7 @@ describe('CloudCard actions', () => {
     render(<Host />);
     await user.click(await within(card()).findByRole('button', { name: 'Improve Phantom' }));
     const dialog = screen.getByRole('dialog', { name: 'Improve Phantom now?' });
-    expect(dialog).toHaveTextContent('Launches “Tighten the tracker tests” as a cloud session on ashlrai/ashlr-hub, estimated at $3.');
+    expect(dialog).toHaveTextContent('Launches “Tighten the tracker tests” as a cloud session on ashlrai/phantom, estimated at $3.');
     expect(posted).toEqual([]);
     await user.click(within(dialog).getByRole('button', { name: 'Launch' }));
     await waitFor(() => expect(posted).toEqual([{ url: '/api/verse/cloud/improve', body: { count: 1 } }]));

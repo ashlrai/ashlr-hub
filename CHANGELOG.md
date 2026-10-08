@@ -9,6 +9,24 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.26.0] — Unreleased
+
+### Changed
+
+- Prepare `ashlrai/phantom` and `@ashlr/phantom` as the canonical workbench
+  identities, with `phm.dev` as the product website. Retain the `phm` and
+  `ashlr` launchers, existing accounts and saved data.
+- Bind package installation, release articles and SDK smoke checks to the
+  actual closed release profile, preserving original legacy receipts and
+  rejecting mixed package identities.
+- Direct new Leader, Telegram and cloud self-improvement tasks and adoption
+  metrics to the canonical repository and package. Explicit saved targets and
+  historical tasks keep their existing identity and authority.
+- Default new release-article configurations to the canonical repository while
+  preserving saved configurations and historical publication records.
+- Finish Phantom labels in agent setup, Fleet and Telegram replies; correct the
+  native CLI recovery command and current installation guides.
+
 ## [3.25.3] — 2026-10-08
 
 ### Fixed

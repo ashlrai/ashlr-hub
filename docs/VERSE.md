@@ -7,9 +7,11 @@ One window: chat with an agent that can edit your repos, delegate work to
 the autonomous fleet, review what it produced while you were away, and see what
 every account and local model is costing you.
 
-The primary CLI is `phm`; `ashlr` and `ashlr verse` remain compatible. The
-package remains `@ashlr/hub`, and routes remain `/verse/`. Published 3.25.2
-installs `Phantom.app`. The historical 3.25.0 release used `Ashlr.app`; older
+The primary CLI is `phm`; `ashlr` and `ashlr verse` remain compatible, as do
+`/verse/` routes. The current repository is `ashlrai/phantom` and the source
+package is `@ashlr/phantom` at candidate 3.26.0, which is not yet published.
+The available compatibility release is 3.25.3, distributed as `@ashlr/hub`
+and `Phantom.app`. The historical 3.25.0 release used `Ashlr.app`; older
 screenshots and references retain their captured names. See
 [the product naming guide](PHANTOM-BRAND.md).
 
@@ -954,8 +956,12 @@ automatically if a 48-hour canary falls below baseline.
 
 ### Adoption: fixed public project metadata (3.24)
 
-Growth's Adoption panel reads only `ashlrai/ashlr-hub` and `@ashlr/hub`, including
-when the Fleet is off. Stars and forks are current repository stocks. npm
+Growth's Adoption panel reads the source's fixed `ADOPTION_TARGET`:
+`ashlrai/phantom` and `@ashlr/phantom`, including when the Fleet is off.
+Canonical package metadata can remain unavailable before publication; this is
+unknown, not zero adoption. Published `@ashlr/hub` compatibility downloads are a
+separate package namespace and are not relabeled as canonical downloads.
+Stars and forks are current repository stocks. npm
 package retrievals cover the source's last 30 available UTC days, which can lag
 today; missing bins remain unknown. GitHub views and clones are separate rolling
 14-day aggregates. Traffic permission failures do not prevent public repository
@@ -1258,7 +1264,7 @@ picker and the Resources drawer all read it.
 - **Provider marks.** Engine tiles, the seat chip, the chat header, ⌘K, the tasks pane and chart lane labels show
   the provider's own mark: Anthropic's Claude, OpenAI, xAI's Grok or Ollama (path data from @lobehub/icons, MIT).
   The account's name is always written beside the mark.
-- The rail head and public site use the first-party Phantom ghost. Published 3.25.2 installs
+- The rail head and public site use the first-party Phantom ghost. Published 3.25.3 installs
   `Phantom.app`; the existing native bundle identity and saved data stay compatible. See [the naming guide](PHANTOM-BRAND.md).
 
 ## Cloud lane (3.11)
@@ -1591,7 +1597,7 @@ The Tauri app in `desktop/` is a native window around Phantom plus a menu-bar
 item. It is locally buildable and installable; there is no notarized public
 installer (see
 `DESKTOP.md`). Full detail, including the native↔web shell contract, is in
-[`desktop/README.md`](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md).
+[`desktop/README.md`](https://github.com/ashlrai/phantom/blob/master/desktop/README.md).
 
 What it does on launch:
 
@@ -1633,23 +1639,24 @@ chats, new Needs-you items and seat-health changes (notifications are on by
 default; Settings ▸ Desktop). The Dock badge counts Needs-you items. Unsigned
 builds deliver banners through `osascript`, so they appear as Script Editor. The
 tray and the Dock badge are the reliable signals there. Details:
-[`desktop/README.md`](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md).
+[`desktop/README.md`](https://github.com/ashlrai/phantom/blob/master/desktop/README.md).
 
 ### Install it on this Mac
 
-Published 3.25.2 provides the [Phantom macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.2/Phantom_3.25.2_aarch64.dmg).
-It is locally signed, not Apple Developer ID notarized; macOS may require
-**Open Anyway** on first launch. Follow the [desktop installation guide](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md#install)
+The available 3.25.3 compatibility release provides the [Phantom macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.25.3/Phantom_3.25.3_aarch64.dmg).
+Canonical 3.26.0 remains an unpublished source candidate.
+The 3.25.3 app is locally signed, not Apple Developer ID notarized; macOS may require
+**Open Anyway** on first launch. Follow the [desktop installation guide](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install)
 for the supported path. Do not copy an app over an existing installation.
 
-For a source build, follow [the guarded installation procedure](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md#installing-the-build-you-make-yourself).
+For a source build, follow [the guarded installation procedure](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#installing-the-build-you-make-yourself).
 It requires prior supported Stop/drain and a normally closed, identity-verified
 app. The installer retains rollback evidence and preserves `~/.ashlr`, the
 stable `Ashlr Local` signing identity and current CLI aliases. It does not
 clear Stop, grant new authority or restart the resident fleet.
 
 Maintainers adopting original release bytes use the separately qualified clean
-implementation's [artifact-only installer](https://github.com/ashlrai/ashlr-hub/blob/master/scripts/install-desktop-artifacts.mjs),
+implementation's [artifact-only installer](https://github.com/ashlrai/phantom/blob/master/scripts/install-desktop-artifacts.mjs),
 with the exact candidate source, attested hosted bundle and signed finalizer
 outputs. Inspection does not install; applying is an explicit maintenance
 operation and can remain held or roll back. This is distinct from an ordinary
@@ -1659,22 +1666,22 @@ With Phantom running, right-click its Dock icon → **Options → Keep in Dock**
 
 ### Build it
 
-Use the [desktop build guide](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md#the-exact-steps-on-this-mac)
+Use the [desktop build guide](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#the-exact-steps-on-this-mac)
 for prerequisites and the exact sidecar, web-assets and native build order.
-For release qualification and pinned tools, use [Releasing locally](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
+For release qualification and pinned tools, use [Releasing locally](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md).
 A compiled shell alone does not prove its bundled CLI or web assets are current.
 
 #### Build failures
 
 Keep failed build and verification results. Resolve the reported cause before
 rerunning the affected complete gate; do not omit dependency, source or
-artifact checks. The [desktop troubleshooting guide](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md#troubleshooting)
-and [DMG diagnostics](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md#is-the-dmg-step-broken)
+artifact checks. The [desktop troubleshooting guide](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#troubleshooting)
+and [DMG diagnostics](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#is-the-dmg-step-broken)
 cover the existing build failure paths.
 
 #### Verify the bundle actually carries the new assets
 
-Follow the canonical [desktop verification steps](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md#the-exact-steps-on-this-mac)
+Follow the canonical [desktop verification steps](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#the-exact-steps-on-this-mac)
 and the selected installer's actual byte, signature, process and listener
 checks. A successful build, matching filenames or a visible window alone is
 not installation acceptance. Keep a held rollback journal intact; do not

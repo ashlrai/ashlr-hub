@@ -1,7 +1,7 @@
 /**
  * self.ts — M54 (v5 Open Fleet): the self-improving fleet's safety harness.
  *
- * The fleet may modify ashlr-hub's OWN source, but it may NEVER weaken its own
+ * The fleet may modify Phantom's OWN source, but it may NEVER weaken its own
  * safety guarantees. Two pure mechanisms enforce that:
  *
  *   1. `guardSafetyTests(diff)` — the never-weaken guard. Refuses, BY CONSTRUCTION
@@ -14,7 +14,7 @@
  *      flag OFF *and* ON. Higher-order + pure so it is unit-testable with a stub
  *      runner; the gated auto-merge pass supplies the real suite runner.
  *
- * Plus `isSelfTargetProposal` — detect when a proposal targets ashlr-hub itself
+ * Plus `isSelfTargetProposal` — detect when a proposal targets Phantom itself
  * (by package name, not a brittle absolute path).
  *
  * All functions are PURE (except the bounded fs read in isSelfTargetProposal) and
@@ -29,12 +29,12 @@ import type { AshlrConfig, Proposal } from '../types.js';
 // Self-target detection
 // ---------------------------------------------------------------------------
 
-/** The package name that identifies ashlr-hub's own repo. */
-const SELF_PACKAGE_NAME = '@ashlr/hub';
+/** Closed legacy/canonical identities of the workbench's own repo. */
+const SELF_PACKAGE_NAMES = new Set(['@ashlr/hub', '@ashlr/phantom']);
 
 /**
- * True when `proposal` targets ashlr-hub's own source tree — detected by reading
- * the repo's package.json `name` (=== '@ashlr/hub'), never a hardcoded path.
+ * True when `proposal` targets Phantom's own source tree — detected by reading
+ * the repo's package.json `name` (legacy or canonical), never a hardcoded path.
  * Bounded read; never throws; false on any doubt.
  */
 export function isSelfTargetProposal(proposal: Proposal, _cfg?: AshlrConfig): boolean {
@@ -46,7 +46,7 @@ export function isSelfTargetProposal(proposal: Proposal, _cfg?: AshlrConfig): bo
     const raw = readFileSync(pkgPath, 'utf8');
     if (raw.length > 256 * 1024) return false; // bounded
     const pkg = JSON.parse(raw) as { name?: unknown };
-    return pkg.name === SELF_PACKAGE_NAME;
+    return typeof pkg.name === 'string' && SELF_PACKAGE_NAMES.has(pkg.name);
   } catch {
     return false;
   }

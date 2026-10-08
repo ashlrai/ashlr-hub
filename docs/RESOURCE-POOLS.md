@@ -73,7 +73,7 @@ Do not move the prepared bundle: experiment evidence contains absolute paths.
 `projectId` selects the target from its project catalog.
 
 The exact recipe is defined by
-[`ResourceEngineeringRecipe`](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/resources/engineering-preparation-types.ts).
+[`ResourceEngineeringRecipe`](https://github.com/ashlrai/phantom/blob/master/src/core/resources/engineering-preparation-types.ts).
 It includes identity/objective/project/seed, metric and fixed evaluator,
 trial/campaign budgets, generation scope, delivery, execution metadata and
 supervision limits. `generation.hypotheses` contains each variant's `id`, `niche`
@@ -311,7 +311,7 @@ action. The evaluator, permitted files, workers, account reserves and per-scope
 budgets remain fixed; model output supplies only a name/objective or a stop request.
 
 Create a private JSON configuration matching
-[`ResourceEngineeringMissionConfig`](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/resources/engineering-mission-store.ts).
+[`ResourceEngineeringMissionConfig`](https://github.com/ashlrai/phantom/blob/master/src/core/resources/engineering-mission-store.ts).
 `initial.setup` contains the **recipe and policy objects**, plus the absolute
 `output`, `resourceRuntime`, `workspace` and `projectsFile` paths used for an
 already prepared setup. Pin its retained `expectedPlanDigest`. Select an existing
@@ -439,7 +439,7 @@ console. By default, preparation does not launch engineering work. The optional
 host policy below can automatically admit prepared objectives to supervision.
 
 The private `0600` configuration follows
-[`ResourceConsoleEngineeringPreparationConfig`](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/resources/console-engineering-preparation-types.ts):
+[`ResourceConsoleEngineeringPreparationConfig`](https://github.com/ashlrai/phantom/blob/master/src/core/resources/console-engineering-preparation-types.ts):
 
 - `schemaVersion: 1`;
 - `outputRoot`: an existing private `0700` directory for new bundles, outside
@@ -603,7 +603,7 @@ For a source-built local console:
    enrolled model allowance and create local Git branches; it does not publish
    them remotely. Preserve the seed checkout and record the intended branch names.
 2. Create a private `0600` catalog outside writable projects. The exact
-   [`ResourceConsoleEngineeringCatalog`](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/resources/console-engineering.ts)
+   [`ResourceConsoleEngineeringCatalog`](https://github.com/ashlrai/phantom/blob/master/src/core/resources/console-engineering.ts)
    has `schemaVersion: 1` and `enrollments` (1–32 entries). Each entry contains
    `id`, `projectId`, `graphId`, `graphRoot`, and the same `host` object documented
    for the engineering CLI. Use registered lowercase project/enrollment IDs,
@@ -1174,7 +1174,7 @@ to keep its exact submitted prompt (including attachment text), copied conversat
 context when following up, and captured response
 in the private local supervisor store. This is opt-in per task; legacy requests
 with no `retainHistory` flag, or `false`, retain their existing ephemeral behavior.
-Text is not encrypted by Ashlrverse. Only retain information appropriate for this
+Text is not encrypted by Phantom. Only retain information appropriate for this
 computer and its backups.
 
 Select the task and choose **Read transcript** to inspect retained text after a
@@ -2629,7 +2629,7 @@ Research checked September 7, 2026; provider rules and models can change.
   exact entitlement have not been established. Do not infer either from a Grok
   subscription. [Grok Bot plan announcement](https://x.ai/news/grok-bot-more-plans),
   [Grok Bot FAQ](https://docs.x.ai/grok-bot/faq). For an evidence-gated companion
-  workflow using its documented plugins, see [Grok Bot beside Ashlr Verse](https://github.com/ashlrai/ashlr-hub/blob/master/docs/GROK-BOT-COMPANION.md).
+  workflow using its documented plugins, see [Grok Bot beside Phantom](https://github.com/ashlrai/phantom/blob/master/docs/GROK-BOT-COMPANION.md).
 - Consumer access, native Build access, and an xAI API-key billing account are
   distinct integration choices. The documented API route uses API credentials
   and metered billing; confirm any account-specific included credits, overage,

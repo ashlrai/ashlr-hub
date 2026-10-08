@@ -45,12 +45,17 @@ describe('operator documentation navigation', () => {
     expect(result.errors[1]).toMatchObject({ href: 'guide.md#missing', reason: expect.stringContaining('#missing') });
   });
 
-  it('checks explicit GitHub source links locally only in source mode and never fetches URLs', () => {
-    const root = fixture({ 'README.md': '[Source](https://github.com/ashlrai/ashlr-hub/blob/master/docs/source.md#overview) [Web](https://example.invalid/path)' });
+  it.each(['ashlr-hub', 'phantom'])('checks %s source links locally only in source mode and never fetches URLs', (repository) => {
+    const root = fixture({ 'README.md': `[Source](https://github.com/ashlrai/${repository}/blob/master/docs/source.md#overview) [Web](https://example.invalid/path) [Other repo](https://github.com/ashlrai/phantom-extra/blob/master/missing.md)` });
     expect(checkDocumentation({ root, entrypoints: ['README.md'] }).ok).toBe(false);
     expect(checkDocumentation({ root, mode: 'package', entrypoints: ['README.md'] })).toMatchObject({
-      ok: true, sourceLinks: 1, externalLinks: 1, externalRequests: 0,
+      ok: true, sourceLinks: 1, externalLinks: 2, externalRequests: 0,
     });
+    mkdirSync(join(root, 'docs'));
+    writeFileSync(join(root, 'docs/source.md'), '# Overview');
+    expect(checkDocumentation({ root, entrypoints: ['README.md'] })).toMatchObject({ ok: true, sourceLinks: 1, externalRequests: 0 });
+    writeFileSync(join(root, 'docs/source.md'), '# Changed heading');
+    expect(checkDocumentation({ root, entrypoints: ['README.md'] }).errors[0].reason).toContain('#overview');
   });
 
   it('still rejects missing relative targets in package mode', () => {

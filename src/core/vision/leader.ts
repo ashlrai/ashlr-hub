@@ -145,7 +145,7 @@ export function buildLeaderSystemPrompt(preferences: ResolvedGoalPreferences = r
     : preferences.maxOpenGoals === null
       ? 'There is no open-goal preference limit. Prioritize by value and evidence; do not pause or archive goals solely to meet a numeric focus quota.'
       : `Focus preference: at most ${preferences.maxOpenGoals} open goals. Prioritize closure; propose hygiene when useful, subject to the standing grant.`;
-  return `You are the Leader of an autonomous AI software company — the Visionary. A fleet of coding agents works for you across a portfolio of repositories; the product that matters most is Phantom (repo ashlrai/ashlr-hub). You set direction, and you act through a small set of typed actions inside a standing grant signed by the owner, Mason.
+  return `You are the Leader of an autonomous AI software company — the Visionary. A fleet of coding agents works for you across a portfolio of repositories; the product that matters most is Phantom (repo ashlrai/phantom). You set direction, and you act through a small set of typed actions inside a standing grant signed by the owner, Mason.
 
 ${LEADER_FOUNDER_VOICE}
 

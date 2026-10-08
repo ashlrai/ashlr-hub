@@ -40,11 +40,18 @@ describe('package.json publish shape', () => {
     const lock = JSON.parse(readFileSync(join(REPO_ROOT, 'package-lock.json'), 'utf8'));
     expect(pkg['bin']).toEqual({ ashlr: 'bin/ashlr', phm: 'bin/ashlr' });
     expect(lock.packages[''].bin).toEqual(pkg['bin']);
+    expect(lock.name).toBe(pkg['name']);
+    expect(lock.version).toBe(pkg['version']);
+    expect(lock.packages[''].name).toBe(pkg['name']);
+    expect(lock.packages[''].version).toBe(pkg['version']);
     expect((pkg['bin'] as Record<string, string>)['phantom']).toBeUndefined();
   });
 
   it('is the public scoped package; provenance is never baked into publishConfig', () => {
-    expect(pkg['name']).toBe('@ashlr/hub');
+    expect(pkg['name']).toBe('@ashlr/phantom');
+    expect(pkg['homepage']).toBe('https://phm.dev');
+    expect(pkg['repository']).toEqual({ type: 'git', url: 'git+https://github.com/ashlrai/phantom.git' });
+    expect(pkg['bugs']).toEqual({ url: 'https://github.com/ashlrai/phantom/issues' });
     expect(pkg['private']).toBeUndefined();
     // e24a7dae removed `publishConfig.provenance: true` on purpose.
     // npm can only mint provenance from a supported CI provider. The baked-in
@@ -284,13 +291,19 @@ describe('release workflow', () => {
     expect(packSmoke?.run).not.toContain('ashlr-hub-*.tgz');
     expect(packSmoke?.run).toContain('npm install "$TARBALL" > /dev/null');
     expect(packSmoke?.run).toContain('./node_modules/.bin/ashlr help > /dev/null');
-    expect(packSmoke?.run).toContain("import('@ashlr/hub/types')");
-    expect(packSmoke?.run).toContain("import('@ashlr/hub/core')");
-    expect(packSmoke?.run).toContain("typeof m.loadConfig !== 'function'");
+    expect(packSmoke?.run).toContain('ci-pack-smoke.mjs reuse-details "$ASHLR_PACK_SMOKE_SNAPSHOT"');
+    expect(packSmoke?.run).toContain('JSON.parse(process.argv[1]).path');
+    expect(packSmoke?.run).toContain('JSON.parse(process.argv[1]).packageName');
+    expect(packSmoke?.run).toContain('import(process.argv[1] + "/types")');
+    expect(packSmoke?.run).toContain('import(process.argv[1] + "/core")');
+    expect(packSmoke?.run).toContain('"$SDK_PACKAGE"');
+    expect(packSmoke?.run).toContain('typeof m.loadConfig !== "function"');
+    expect(packSmoke?.run?.indexOf('reuse-details "$ASHLR_PACK_SMOKE_SNAPSHOT"'))
+      .toBeLessThan(packSmoke?.run?.indexOf('npm install "$TARBALL"') ?? -1);
     expect(packSmoke?.run).toContain('trap cleanup EXIT');
     expect(packSmoke?.run).toContain('node .github/scripts/ci-pack-smoke.mjs verify "$ASHLR_PACK_SMOKE_SNAPSHOT"');
     expect(packSmoke?.run?.indexOf('verify "$ASHLR_PACK_SMOKE_SNAPSHOT"'))
-      .toBeGreaterThan(packSmoke?.run?.indexOf("import('@ashlr/hub/core')") ?? -1);
+      .toBeGreaterThan(packSmoke?.run?.indexOf('import(process.argv[1] + "/core")') ?? -1);
     expect(ciSteps.find((step) => step.name === 'Test (hermetic)')?.run)
       .toBe('npm run test:ci -- ${{ matrix.test_args }}');
     expect(ciSteps.find((step) => step.name === 'Test (hermetic)')?.if).toBeUndefined();

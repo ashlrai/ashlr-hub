@@ -35,7 +35,10 @@ function inventory(path: string): unknown {
 describe('seed batch materialization', () => {
   it.each(['sha1', 'sha256'])('materializes 128 %s files with two Git calls, exact bytes/modes and unchanged dirty source', (format) => {
     const base = root(); const repo = join(base, 'repo'); mkdirSync(repo);
-    const git = (args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', repo, ...args], {
+    // Fixture writes must finish before the byte-for-byte source snapshot;
+    // automatic Git maintenance can otherwise keep repacking after commit returns.
+    const git = (args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
+      '-c', 'maintenance.auto=false', '-c', 'gc.auto=0', '-C', repo, ...args], {
       encoding: 'utf8', env: { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
     }).trim();
     git(['init', '-q', `--object-format=${format}`]);

@@ -8,8 +8,8 @@ export async function runReleaseArticlesCli(args: string[], deps: ReleaseArticle
     let result;
     if (argv.length === 1 && argv[0] === 'status') result = readReleaseArticles();
     else if (argv.length <= 2 && argv[0] === 'enable') {
-      const repository = argv[1] ?? 'ashlrai/ashlr-hub';
-      if (repository !== 'ashlrai/ashlr-hub' && repository !== 'ashlrai/phantom') throw new Error('Invalid release repository');
+      const repository = argv[1];
+      if (repository !== undefined && repository !== 'ashlrai/ashlr-hub' && repository !== 'ashlrai/phantom') throw new Error('Invalid release repository');
       result = configureReleaseArticles(true, repository);
     } else if (argv.length === 1 && argv[0] === 'disable') result = configureReleaseArticles(false);
     else if (argv.length === 2 && argv[0] === 'import') {

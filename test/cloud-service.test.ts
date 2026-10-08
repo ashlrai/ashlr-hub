@@ -274,11 +274,14 @@ describe('launchCloudTask — each launch failure is persisted as failed with a 
 });
 
 describe('runSelfImprove', () => {
+  const selfHarness = (opts: Parameters<typeof harness>[0] = {}): Harness =>
+    harness({ ...opts, allowedRepos: ['ashlrai/phantom'] });
+
   const firstBuiltin = [...BUILTIN_IMPROVEMENT_BACKLOG].map((it, i) => ({ it, i })).sort((a, b) => a.it.priority - b.it.priority || a.i - b.i).map(({ it }) => it);
 
   it('auto: does nothing when self-improvement is off', async () => {
     updateCloudBudget({ selfImprove: { enabled: false } });
-    const h = harness();
+    const h = selfHarness();
     const res = await runSelfImprove({ auto: true }, h.deps);
     expect(res.launched).toEqual([]);
     expect(res.skipped).toEqual([{ itemId: firstBuiltin[0]!.id, reason: 'Self-improvement is turned off.' }]);
@@ -287,36 +290,36 @@ describe('runSelfImprove', () => {
 
   it('manual: the Improve button launches even when auto self-improvement is off', async () => {
     updateCloudBudget({ selfImprove: { enabled: false } });
-    const res = await runSelfImprove({ auto: false }, harness().deps);
+    const res = await runSelfImprove({ auto: false }, selfHarness().deps);
     expect(res.launched).toHaveLength(1);
     expect(res.launched[0]).toMatchObject({
       origin: 'self-improve', requestedBy: 'self-improve', backlogItemId: firstBuiltin[0]!.id, title: firstBuiltin[0]!.title,
-      repo: 'ashlrai/ashlr-hub', baseBranch: 'master', prompt: firstBuiltin[0]!.prompt,
+      repo: 'ashlrai/phantom', baseBranch: 'master', prompt: firstBuiltin[0]!.prompt,
     });
   });
 
   it('launches the next items in order, each claiming its item, capped at 5', async () => {
     updateCloudBudget({ maxConcurrent: 10 });
-    const res = await runSelfImprove({ auto: false, count: 99 }, harness().deps);
+    const res = await runSelfImprove({ auto: false, count: 99 }, selfHarness().deps);
     expect(res.launched.map((t) => t.backlogItemId)).toEqual(firstBuiltin.slice(0, 5).map((i) => i.id));
     expect(res.skipped).toEqual([]);
   });
 
   it('the operator path still stops at the concurrency cap', async () => {
-    const res = await runSelfImprove({ auto: false, count: 5 }, harness().deps);
+    const res = await runSelfImprove({ auto: false, count: 5 }, selfHarness().deps);
     expect(res.launched).toHaveLength(4);
     expect(res.skipped).toEqual([{ itemId: firstBuiltin[4]!.id, reason: '4 of 4 cloud sessions are already running.' }]);
   });
 
   it('auto: stops at the daily self-improvement cap', async () => {
     updateCloudBudget({ selfImprove: { maxPerDay: 2 } });
-    const res = await runSelfImprove({ auto: true, count: 4 }, harness().deps);
+    const res = await runSelfImprove({ auto: true, count: 4 }, selfHarness().deps);
     expect(res.launched).toHaveLength(2);
     expect(res.skipped).toEqual([{ itemId: firstBuiltin[2]!.id, reason: '2 of 2 self-improvement launches used today.' }]);
   });
 
   it('stops the batch at the first failed launch instead of burning through the backlog', async () => {
-    const res = await runSelfImprove({ auto: false, count: 3 }, harness({ output: AUTH }).deps);
+    const res = await runSelfImprove({ auto: false, count: 3 }, selfHarness({ output: AUTH }).deps);
     expect(res.launched).toEqual([]);
     expect(res.skipped).toHaveLength(1);
     expect(res.skipped[0]!.itemId).toBe(firstBuiltin[0]!.id);
@@ -326,8 +329,8 @@ describe('runSelfImprove', () => {
   it('targets budget.selfImprove.repo and honours repo-scoped user items', async () => {
     updateCloudBudget({ selfImprove: { repo: 'ashlrai/other' } });
     appendUserBacklogItems([{ id: 'other-1', title: 'Other repo item', prompt: 'Do it.', area: 'x', priority: 1, repo: 'ashlrai/other' }]);
-    const h = harness();
-    // Launches from the other repo's checkout; the harness asserts the ashlr-hub folder, so relax it here.
+    const h = selfHarness();
+    // Launches from the other repo's checkout; the self-improvement harness asserts the canonical folder, so relax it here.
     h.deps.launcher!.run = async () => ({ output: SUCCESS('session_o'), code: 0, timedOut: false });
     const res = await runSelfImprove({ auto: false }, h.deps);
     expect(res.launched[0]).toMatchObject({ repo: 'ashlrai/other', backlogItemId: firstBuiltin[0]!.id });
@@ -347,7 +350,7 @@ describe('runSelfImprove', () => {
       };
       writeCloudTask(t);
     }
-    expect(await runSelfImprove({ auto: true, count: 3 }, harness().deps)).toEqual({ launched: [], skipped: [] });
+    expect(await runSelfImprove({ auto: true, count: 3 }, selfHarness().deps)).toEqual({ launched: [], skipped: [] });
   });
 });
 

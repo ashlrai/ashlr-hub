@@ -1,5 +1,13 @@
 # Releasing locally
 
+Current source prepares the unpublished 3.26.0 canonical candidate:
+`ashlrai/phantom`, `@ashlr/phantom` and `phm`. The published 3.25.3
+compatibility artifacts retain their original legacy identity. Canonical release
+admission requires complete exact-source hosted CI, independent Audit and
+trusted attestation, followed by the normal finalizer and artifact installer.
+The legacy local-production policy runners and their receipts do not admit the
+canonical package; their historical procedures remain evidence, not a fallback.
+
 Every release requires complete source qualification. Use the
 [qualified CI build handoff](RELEASING.md#qualified-ci-build-handoff) to reuse
 the exact tested JavaScript build and original npm archive. If that evidence is
@@ -51,6 +59,9 @@ sequence. If source changes or a required check fails, qualify the new candidate
 the previous candidate's results cannot qualify changed source.
 
 ## Local qualification fallback
+
+For the canonical candidate, these commands provide local feedback only. They
+do not replace mandatory exact-source hosted CI, Audit and attestor admission.
 
 Run these commands in order from the final clean release commit. Each stops on
 its own failure. A tarball publish does **not** run `prepublishOnly` on npm 11,
@@ -268,6 +279,17 @@ Two defects made `npm run build` fail for everyone, both fixed:
   `devDependencies`.
 
 ## Publishing
+
+For the canonical candidate, publish only the original `ashlr-phantom-<version>.tgz`
+from the freshly verified CI handoff, with the pinned release tools and exact
+recorded digest. Do not run `npm pack` again on the adopted or installed tree.
+Public exact-version byte/SRI readback and an isolated consumer installation
+are separate acceptance gates; a publish exit code alone is insufficient.
+
+### Historical local packaging and npm observations
+
+The legacy packaging examples below describe the earlier `@ashlr/hub` lane.
+They do not replace canonical hosted admission or authorize replaying a publish.
 
 `auth-type` is `web` and 2FA is `auth-and-writes`, so npm opens a browser and
 **you** approve there. No credential passes through any tooling.

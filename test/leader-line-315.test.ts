@@ -235,8 +235,9 @@ describe('pacing — quiet hours, caps, one question at a time', () => {
   const empty = (): LineStateV1 => readLineState();
 
   it('config defaults: 08:00 / 19:00 New York, quiet 23–07, 6 pings a day', () => {
-    expect(lc).toMatchObject({ enabled: true, morning: { h: 8, m: 0 }, evening: { h: 19, m: 0 }, timeZone: 'America/New_York', quiet: { start: 23, end: 7 }, maxPingsPerDay: 6, repo: VERSE });
+    expect(lc).toMatchObject({ enabled: true, morning: { h: 8, m: 0 }, evening: { h: 19, m: 0 }, timeZone: 'America/New_York', quiet: { start: 23, end: 7 }, maxPingsPerDay: 6, repo: 'ashlrai/phantom' });
     expect(resolveLineConfig(cfg({ briefTimes: ['06:45', '18:30'], timeZone: 'Nope/Zone' }))).toMatchObject({ morning: { h: 6, m: 45 }, evening: { h: 18, m: 30 }, timeZone: 'America/New_York' });
+    expect(resolveLineConfig(cfg({ leaderRepo: VERSE })).repo).toBe(VERSE); // saved target is not migrated
     // Under the test runner the line is off unless switched on explicitly.
     expect(resolveLineConfig({ comms: { enabled: true } } as AshlrConfig).enabled).toBe(false);
   });
@@ -448,11 +449,11 @@ describe('routing Mason\'s texts', () => {
 
   it('"go build X" becomes a real launch at once, acknowledged in one line, with a result ping later', async () => {
     const ledger = fakeLedger();
-    const policy = makePolicy({ repos: [...makePolicy().repos, { nameWithOwner: VERSE, stage: 'merge', enforcement: 'server', maxRisk: 'low', maxFiles: 4, maxLines: 150, maxMergesPerDay: 6, selfRepo: null }] as never });
+    const policy = makePolicy({ repos: [...makePolicy().repos, { nameWithOwner: 'ashlrai/phantom', stage: 'merge', enforcement: 'server', maxRisk: 'low', maxFiles: 4, maxLines: 150, maxMergesPerDay: 6, selfRepo: null }] as never });
     const { deps } = makeApplyDeps({ ledger, now: () => ET('10:00'), policy: () => policy });
     const launched: string[] = [];
     const powers: LeaderPowersPorts = {
-      cloud: { launch: async (req) => { launched.push(req.title); return { ok: true, taskId: 'ct_20260927T1400_zz9', url: 'https://claude.ai/code/session_9', detail: 'Cloud task ct_20260927T1400_zz9 — https://claude.ai/code/session_9.' }; } },
+      cloud: { launch: async (req) => { expect(req.repo).toBe('ashlrai/phantom'); launched.push(req.title); return { ok: true, taskId: 'ct_20260927T1400_zz9', url: 'https://claude.ai/code/session_9', detail: 'Cloud task ct_20260927T1400_zz9 — https://claude.ai/code/session_9.' }; } },
     };
     deps.powers = powers;
     let taskState = 'running';
@@ -466,8 +467,8 @@ describe('routing Mason\'s texts', () => {
     await converseWithLeader(textEvent('go build an instant brief for status requests with links and tests', 92), 'go build an instant brief for status requests with links and tests', cfg());
     expect(launched).toEqual(['Build an instant brief for status requests with links and tests']);
     // A paid launch is acknowledged at once, then reported.
-    expect(texts()[0]).toBe('Launching a cloud session for "Build an instant brief for status requests with links and tests" on ashlrai/ashlr-hub…');
-    expect(texts()[1]).toMatch(/^On it\. Cloud session launched on ashlrai\/ashlr-hub: "Build an instant brief/);
+    expect(texts()[0]).toBe('Launching a cloud session for "Build an instant brief for status requests with links and tests" on ashlrai/phantom…');
+    expect(texts()[1]).toMatch(/^On it\. Cloud session launched on ashlrai\/phantom: "Build an instant brief/);
     expect(texts()[1]).toContain('https://claude.ai/code/session_9');
     expect(texts()[1]!.split('\n').length).toBeLessThanOrEqual(2);
     expect(thread.posted[0]!['text']).toMatch(/^You asked: "build an instant brief/);
@@ -486,12 +487,12 @@ describe('routing Mason\'s texts', () => {
 
   it('falls back to the fleet when the paid lane says no, and says so', async () => {
     const ledger = fakeLedger();
-    const policy = makePolicy({ repos: [...makePolicy().repos, { nameWithOwner: VERSE, stage: 'merge', enforcement: 'server', maxRisk: 'low', maxFiles: 4, maxLines: 150, maxMergesPerDay: 6, selfRepo: null }] as never });
+    const policy = makePolicy({ repos: [...makePolicy().repos, { nameWithOwner: 'ashlrai/phantom', stage: 'merge', enforcement: 'server', maxRisk: 'low', maxFiles: 4, maxLines: 150, maxMergesPerDay: 6, selfRepo: null }] as never });
     const { deps, units } = makeApplyDeps({ ledger, now: () => ET('10:00'), policy: () => policy });
     deps.powers = { cloud: { launch: async () => ({ ok: false, reason: '20 of 20 sessions used today.' }) } };
     setLeaderLineDepsForTest(lineDeps({ apply: async () => deps, laneBudget: async () => ({ mode: 'balanced', cloud: { ok: true, reason: null }, devin: null }) }));
     await handleTaskRequest(textEvent('x'), { text: 'build the weekly retro digest page with charts', repo: null, size: 'pr', lane: null }, cfg());
-    expect(texts()[1]).toMatch(/^Cloud said no \(20 of 20 sessions used today\) — On it\. "Build the weekly retro digest page with charts" is queued for the fleet on ashlrai\/ashlr-hub/);
+    expect(texts()[1]).toMatch(/^Cloud said no \(20 of 20 sessions used today\) — On it\. "Build the weekly retro digest page with charts" is queued for the fleet on ashlrai\/phantom/);
     expect(units.tasks.size).toBe(1);
   });
 

@@ -1,7 +1,7 @@
 /** Browser-safe fixed-project adoption metadata. These are distinct measurements, never a user total. */
 export const VERSE_ADOPTION_PATH = '/api/verse/adoption';
 export const VERSE_ADOPTION_REFRESH_PATH = `${VERSE_ADOPTION_PATH}/refresh`;
-export const ADOPTION_TARGET = Object.freeze({ repo: 'ashlrai/ashlr-hub', packageName: '@ashlr/hub' });
+export const ADOPTION_TARGET = Object.freeze({ repo: 'ashlrai/phantom', packageName: '@ashlr/phantom' });
 export type AdoptionSourceId = 'repository' | 'npm' | 'views' | 'clones' | 'release';
 export type AdoptionReason = 'permission' | 'authentication' | 'not-found' | 'rate-limited' | 'unavailable' | 'invalid-response' | 'cancelled';
 export interface AdoptionReading<T> {

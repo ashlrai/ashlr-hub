@@ -12,7 +12,7 @@ observations, not independent byte verification or build-adoption authority.
 
 ```sh
 ashlr release-articles status --json
-ashlr release-articles enable ashlrai/ashlr-hub
+ashlr release-articles enable ashlrai/phantom
 ashlr release-articles sync --json
 ashlr release-articles disable
 ```
@@ -26,7 +26,8 @@ state. Disable stops future maintenance; already queued work remains under the
 normal fleet task and Stop controls. No new daemon, cron, credentials, paid
 artwork, newsletter or social messaging is installed.
 
-A proposed import contains only public identity/version data:
+A proposed import contains only public identity/version data. This historical
+3.24.3 example retains its original legacy repository identity:
 
 ```json
 {"v":1,"repository":"ashlrai/ashlr-hub","version":"3.24.3"}
@@ -35,8 +36,11 @@ A proposed import contains only public identity/version data:
 Use `ashlr release-articles import proposed.json`, then
 `ashlr release-articles sync 3.24.3 --json` to observe that explicit version.
 Private operational indexes, saved PASS flags and extra keys are refused.
-After a repository rename, explicitly select its current exact name; redirects
-do not transfer a grant or activate the renamed label.
+Fresh configuration in the canonical source defaults to `ashlrai/phantom`;
+saved configurations and imported historical records keep their recorded
+repository. After a repository rename, explicitly select its current exact
+name when updating an existing configuration; redirects do not transfer a
+grant or activate the renamed label.
 
 The public article draft contains only validated public facts and citations.
 The content task reuses the company's authored-story, cover, RSS and SEO
@@ -222,7 +226,7 @@ Configuration: `comms.enabled: true`, `comms.channel: "telegram"`,
 `comms.telegram.botToken` (or `TELEGRAM_BOT_TOKEN` in the environment) and
 `comms.telegram.chatId`. Messages from any other chat are dropped. The poller
 runs as the launchd job `ai.ashlr.comms-poll` every 3 minutes (see the
-[Comms channel](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md#comms-channel) in the Phantom reference for the config
+[Comms channel](https://github.com/ashlrai/phantom/blob/master/docs/HUB-REFERENCE.md#comms-channel) in the Phantom reference for the config
 example).
 
 **Talking.** Send plain text and it joins the thread; the Leader's reply comes
@@ -306,7 +310,7 @@ detail ("more"), approve, veto, answer, directive, task or chat. Rules decide,
 and Jev may classify first when it is set up; approve and veto always need an
 action id (`la-…`) or a reply to a message that carries actions, and are
 never taken from a model's guess. "Go build X" or "fix Y in owner/repo"
-becomes work at once, in `comms.leaderRepo` (default `ashlrai/ashlr-hub`)
+becomes work at once, in `comms.leaderRepo` (fresh default `ashlrai/phantom`; saved overrides remain unchanged)
 when you name no repo: small work goes to the fleet; larger work to a cloud
 session, then Devin, when the budget allows and the mode is not reserve; and
 back to the fleet if a paid lane refuses, which the reply says. Your request

@@ -334,13 +334,15 @@ jobs:
             exit "$status"
           }
           trap cleanup EXIT
-          TARBALL="$(node .github/scripts/ci-pack-smoke.mjs reuse "$ASHLR_PACK_SMOKE_SNAPSHOT")"
+          PACK_DETAILS="$(node .github/scripts/ci-pack-smoke.mjs reuse-details "$ASHLR_PACK_SMOKE_SNAPSHOT")"
+          TARBALL="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).path)' "$PACK_DETAILS")"
+          SDK_PACKAGE="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).packageName)' "$PACK_DETAILS")"
           cd "$SMOKE_DIR"
           npm init -y > /dev/null
           npm install "$TARBALL" > /dev/null
           ./node_modules/.bin/ashlr help > /dev/null
-          node -e "import('@ashlr/hub/types').then(() => console.log('exports map ok'))"
-          node -e "import('@ashlr/hub/core').then((m) => { if (typeof m.loadConfig !== 'function') throw new Error('core surface broken'); console.log('core surface ok'); })"
+          node -e 'import(process.argv[1] + "/types").then(() => console.log("exports map ok"))' "$SDK_PACKAGE"
+          node -e 'import(process.argv[1] + "/core").then((m) => { if (typeof m.loadConfig !== "function") throw new Error("core surface broken"); console.log("core surface ok"); })' "$SDK_PACKAGE"
           cd "$SOURCE_DIR"
           node .github/scripts/ci-pack-smoke.mjs verify "$ASHLR_PACK_SMOKE_SNAPSHOT"
           test "$(node .github/scripts/ci-pack-smoke.mjs reuse "$ASHLR_PACK_SMOKE_SNAPSHOT")" = "$TARBALL"

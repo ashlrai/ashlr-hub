@@ -10,7 +10,7 @@ import { basename, delimiter, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL, URL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { Header } from 'tar';
-import { captureBuild, cleanupSnapshot, observeBuild, packBuild, preparePack, reusePack, validateBuild, validatePackReport, sourceDesktopUpdateProfile } from '../scripts/ci-pack-smoke.mjs';
+import { captureBuild, cleanupSnapshot, observeBuild, packBuild, preparePack, reusePack, reusePackDetails, validateBuild, validatePackReport, sourceDesktopUpdateProfile } from '../scripts/ci-pack-smoke.mjs';
 
 const hash = (bytes, algorithm, encoding = 'hex') => createHash(algorithm).update(bytes).digest(encoding);
 const VERSION = '3.24.2';
@@ -326,6 +326,7 @@ for (const kind of ['changed', 'truncated', 'missing', 'new inode', 'symlink', '
       renameSync(join(old, f.record.filename), f.path); assert.equal(lstatSync(f.path).ino, before);
     }
     await assert.rejects(reusePack(f), kind === 'directory swap' ? /pack directory changed/ : undefined);
+    await assert.rejects(reusePackDetails(f), kind === 'directory swap' ? /pack directory changed/ : undefined);
     assert.equal(f.npmCalls, 1);
     assert.equal(readFileSync(f.calls, 'utf8'), 'read\n');
   });
@@ -353,6 +354,7 @@ for (const kind of ['record digest', 'record path', 'record root', 'extra field'
       for (const name of readdirSync(old)) renameSync(join(old, name), join(directory, name));
     }
     await assert.rejects(reusePack(f));
+    await assert.rejects(reusePackDetails(f));
     assert.equal(f.npmCalls, 1);
     assert.deepEqual(readFileSync(f.path), realTar(f.rows));
   });
@@ -362,7 +364,8 @@ for (const when of ['early', 'late']) for (const behavior of ['source', 'archive
   test(`${when} preflight refuses ${behavior} drift across the actual reader await`, async (t) => {
     if (when === 'late') {
       const f = await prepared(t, behavior); writeFileSync(f.trigger, 'drift');
-      await assert.rejects(reusePack(f)); assert.equal(f.npmCalls, 1);
+      await assert.rejects(reusePack(f));
+      await assert.rejects(reusePackDetails(f)); assert.equal(f.npmCalls, 1);
     } else {
       const f = runtimeFixture(t, behavior); writeFileSync(f.trigger, 'drift'); let calls = 0;
       await assert.rejects(preparePack({ ...f, runNpm: (_bin, args) => { calls++; return realReport(args[4], f.rows); } }));
@@ -405,9 +408,11 @@ test('workflow packs once before complete suites and retains exact late consumer
   assert.ok(workflow.indexOf('ci-pack-smoke.mjs prepare') < workflow.indexOf('- name: Test web operator console'));
   assert.ok(workflow.indexOf('ci-pack-smoke.mjs prepare') < workflow.indexOf('- name: Test (hermetic)'));
   assert.ok(!/ci-pack-smoke\.mjs pack\b|npm pack/.test(late.replace(/#.*/g, '')));
-  assert.equal((late.match(/ci-pack-smoke\.mjs reuse/g) ?? []).length, 2);
-  for (const contract of ['npm install "$TARBALL"', './node_modules/.bin/ashlr help', "import('@ashlr/hub/types')",
-    "import('@ashlr/hub/core')", 'ci-pack-smoke.mjs verify "$ASHLR_PACK_SMOKE_SNAPSHOT"',
+  assert.equal((late.match(/ci-pack-smoke\.mjs reuse-details/g) ?? []).length, 1);
+  assert.equal((late.match(/ci-pack-smoke\.mjs reuse "/g) ?? []).length, 1);
+  for (const contract of ['npm install "$TARBALL"', './node_modules/.bin/ashlr help', 'JSON.parse(process.argv[1]).path',
+    'JSON.parse(process.argv[1]).packageName', 'import(process.argv[1] + "/types")',
+    'import(process.argv[1] + "/core")', '"$SDK_PACKAGE"', 'ci-pack-smoke.mjs verify "$ASHLR_PACK_SMOKE_SNAPSHOT"',
     '--package-tarball "$TARBALL"', '--reports "${{ steps.web.outputs.lane_dir }}"']) assert.ok(late.includes(contract));
 });
 
@@ -437,4 +442,26 @@ for (const packageName of ['@ashlr/hub', '@ashlr/phantom']) test(`pack refuses t
   const other = packageName === '@ashlr/hub' ? '@ashlr/phantom' : '@ashlr/hub';
   await assert.rejects(preparePack({...f, runNpm: (_bin, args) => {calls++; return realReport(args[4], f.rows, other);}}));
   assert.equal(calls, 1); assert.equal(existsSync(f.recordPath), false); assert.equal(existsSync(f.calls), false);
+});
+
+for (const packageName of ['@ashlr/hub', '@ashlr/phantom']) test(`late details bind the same original archive and SDK namespace for ${packageName}`, async t => {
+  const f = runtimeFixture(t, '', packageName); let calls = 0;
+  const recordSha256 = await preparePack({ ...f, runNpm: (_bin, args) => { calls++; return realReport(args[4], f.rows, packageName); } });
+  const record = JSON.parse(readFileSync(f.recordPath));
+  const path = join(dirname(f.snapshotPath), record.directory, record.filename);
+  const bytes = readFileSync(path), inode = lstatSync(path).ino;
+  const details = await reusePackDetails({ ...f, recordSha256 });
+  assert.deepEqual(details, { path, packageName });
+  assert.equal(Object.isFrozen(details), true);
+  assert.equal(readFileSync(f.calls, 'utf8'), 'read\nread\n', 'details must not add another archive read');
+  assert.equal(await reusePack({ ...f, recordSha256 }), path);
+  assert.equal(readFileSync(f.calls, 'utf8'), 'read\nread\nread\n');
+  assert.deepEqual(readFileSync(path), bytes); assert.equal(lstatSync(path).ino, inode); assert.equal(calls, 1);
+  const output = execFileSync(process.execPath,
+    [fileURLToPath(new URL('../scripts/ci-pack-smoke.mjs', import.meta.url)), 'reuse-details', f.snapshotPath], {
+      cwd: f.root, encoding: 'utf8', env: { ...process.env, ASHLR_CI_SOURCE_SHA: f.eventSha,
+        ASHLR_PACK_SMOKE_RECORD_SHA256: recordSha256 },
+    });
+  assert.deepEqual(JSON.parse(output), details);
+  assert.equal(readFileSync(f.calls, 'utf8'), 'read\nread\nread\nread\n');
 });

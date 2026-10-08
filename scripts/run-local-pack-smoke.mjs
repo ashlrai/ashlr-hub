@@ -7,6 +7,7 @@ import {
 import { isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import { sourceDesktopUpdateProfile } from '../.github/scripts/ci-pack-smoke.mjs';
 
 function fail(message) {
   throw new Error(`local pack smoke: ${message}`);
@@ -64,12 +65,12 @@ export function tarballEvidence(bytes) {
 
 // This self-contained function runs in the clean install directory, so package
 // exports and CLI imports resolve from the tarball, never the source checkout.
-async function verifyInstalledUniverse(fixtureRoot, bin) {
+async function verifyInstalledUniverse(fixtureRoot, bin, packageName) {
   const { default: assert } = await import('node:assert/strict');
   const { chmodSync, existsSync, lstatSync, mkdirSync, writeFileSync } = await import('node:fs');
   const { join } = await import('node:path');
   const { spawnSync } = await import('node:child_process');
-  const sdk = await import('@ashlr/hub/universe');
+  const sdk = await import(`${packageName}/universe`);
   for (const name of ['defaultUniverseRoot', 'ensureUniverseRoot', 'validateUniverseManifest',
     'initUniverse', 'readUniverseOverview', 'runUniverse', 'validateUniverseCampaignDefinition',
     'initUniverseCampaign', 'readUniverseCampaign', 'readUniverseCampaigns',
@@ -325,9 +326,10 @@ async function verifyInstalledUniverse(fixtureRoot, bin) {
   process.stdout.write('Installed Universe SDK, campaign, and portfolio smoke: passed (no work executed)\n');
 }
 
-export function installedUniverseSmokeArgs(fixtureRoot, bin) {
+export function installedUniverseSmokeArgs(fixtureRoot, bin, packageName = '@ashlr/hub') {
+  const profile = sourceDesktopUpdateProfile(packageName);
   return ['--input-type=module', '-e',
-    `await (${verifyInstalledUniverse.toString()})(${JSON.stringify(fixtureRoot)}, ${JSON.stringify(bin)});`];
+    `await (${verifyInstalledUniverse.toString()})(${JSON.stringify(fixtureRoot)}, ${JSON.stringify(bin)}, ${JSON.stringify(profile.packageName)});`];
 }
 
 // An ambient npm cache can hide an omitted bundle member. Each installation
@@ -348,8 +350,9 @@ export function installPackedTarballOffline({ tarballPath, installDir, workDir }
 
 export function runLocalPackSmoke({ repo, workDir, output }) {
   const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
-  if (pkg.name !== '@ashlr/hub' || typeof pkg.version !== 'string') fail('unexpected package identity');
-  const tarballName = `ashlr-hub-${pkg.version}.tgz`;
+  const profile = sourceDesktopUpdateProfile(pkg.name);
+  if (typeof pkg.version !== 'string') fail('unexpected package version');
+  const tarballName = `${profile.archivePrefix}-${pkg.version}.tgz`;
   const packDir = join(workDir, 'pack');
   const installDir = join(workDir, 'install');
   mkdirSync(packDir, { recursive: true, mode: 0o700 });
@@ -378,12 +381,12 @@ export function runLocalPackSmoke({ repo, workDir, output }) {
     }
   }
   run(process.execPath, ['--input-type=module', '-e',
-    "const types = await import('@ashlr/hub/types'); if (!types) throw new Error('types surface broken');"],
+    `const types = await import(${JSON.stringify(`${profile.packageName}/types`)}); if (!types) throw new Error('types surface broken');`],
   { cwd: installDir });
   run(process.execPath, ['--input-type=module', '-e',
-    "const core = await import('@ashlr/hub/core'); if (typeof core.loadConfig !== 'function') throw new Error('core surface broken');"],
+    `const core = await import(${JSON.stringify(`${profile.packageName}/core`)}); if (typeof core.loadConfig !== 'function') throw new Error('core surface broken');`],
   { cwd: installDir });
-  run(process.execPath, installedUniverseSmokeArgs(join(workDir, 'universe-smoke'), bin), { cwd: installDir });
+  run(process.execPath, installedUniverseSmokeArgs(join(workDir, 'universe-smoke'), bin, profile.packageName), { cwd: installDir });
 
   const evidence = Object.freeze({
     schemaVersion: 1,

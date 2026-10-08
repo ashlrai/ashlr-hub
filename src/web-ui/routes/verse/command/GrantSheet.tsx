@@ -15,6 +15,7 @@
  * All copy is plain text; the draft is server data but rendered as text only.
  */
 import { useId, useRef, useState } from 'react';
+import { PRODUCT_NAME } from '../../../app/product-brand.js';
 import { volumeLimitLabel } from '../../../../core/authority/types.js';
 import type { AuthorityGrantDraft, RolloutStage, StandingGrantV1 } from '../../../../core/authority/types.js';
 import { Button } from '../../../components/primitives/Button.js';
@@ -134,7 +135,7 @@ export function DraftScope({ draft }: { draft: AuthorityGrantDraft }) {
           </tbody>
         </table>
         <p className={styles.scopeMeta}>
-          Every merge ≤ {volumeLimitLabel(g.merge.maxFiles)} files / {volumeLimitLabel(g.merge.maxLines)} lines · ashlr-hub itself: {g.merge.selfRepo === 'propose-only' ? 'propose only' : 'merge outside authority code'}
+          Every merge ≤ {volumeLimitLabel(g.merge.maxFiles)} files / {volumeLimitLabel(g.merge.maxLines)} lines · {PRODUCT_NAME} itself: {g.merge.selfRepo === 'propose-only' ? 'propose only' : 'merge outside authority code'}
         </p>
       </section>
 

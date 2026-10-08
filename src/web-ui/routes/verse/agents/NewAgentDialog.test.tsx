@@ -40,12 +40,15 @@ describe('focused agent creation', () => {
     const disclosure = container.querySelector('summary')!;
     await user.click(disclosure);
     const options = container.querySelector('details')!;
+    await user.click(within(options).getByRole('switch', { name: 'Auto-merge when green' }));
+    expect(container).toHaveTextContent('Phantom itself only when the grant’s self-land policy allows');
+    expect(container).toHaveTextContent('GitHub’s branch rules still apply');
     await user.click(within(options).getByRole('switch', { name: 'Auto-fix CI' }));
     fireEvent.change(screen.getByLabelText('Spend cap (USD, at API list price)'), { target: { value: '7.50' } });
     await user.click(disclosure);
     fireEvent.change(screen.getByLabelText('What should it do?'), { target: { value: 'Fix login.' } });
     fireEvent.submit(container.querySelector('form')!);
-    expect(onSpawn).toHaveBeenCalledWith([expect.objectContaining({ autoFix: true, spendCapUsd: 7.5, isolate: true })]);
+    expect(onSpawn).toHaveBeenCalledWith([expect.objectContaining({ autoFix: true, autoMerge: true, spendCapUsd: 7.5, isolate: true })]);
   });
 
   it('lets every selected available seat run in its own workspace beyond the former six-seat limit', async () => {

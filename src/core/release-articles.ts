@@ -18,6 +18,7 @@ import { writePrivateFileAtomically } from './util/private-file-write.js';
 import { readPrivateFileCapped } from './verse/preferences.js';
 import { defaultReleasePublicReader, discoverLatestRelease, parseProposedRelease, verifyPublishedRelease,
   type ProposedRelease, type PublishedReleaseFacts, type ReleasePublicReader } from './release-public-facts.js';
+import { desktopUpdateProfileForPackage } from './desktop/update-manifest.js';
 
 export const RELEASE_ARTICLE_REPO = 'ashlrai/ashlar-landing';
 export const RELEASE_TEASER_REPO = 'ashlrai/phantom-secrets';
@@ -58,7 +59,7 @@ export function releaseArticlePaths(): { home: string; directory: string; file: 
   const home = realpathSync(homedir()); const directory = join(home, '.ashlr', 'release-articles');
   return { home, directory, file: join(directory, 'manifest.json') };
 }
-function empty(): ReleaseArticleManifest { return { v: 1, enabled: false, repository: 'ashlrai/ashlr-hub', records: [], observation: null }; }
+function empty(): ReleaseArticleManifest { return { v: 1, enabled: false, repository: HUB_REPOSITORY_IDENTITY.renamedName, records: [], observation: null }; }
 function safeStoragePath(stat: BigIntStats, kind: 'directory' | 'file'): boolean {
   return !stat.isSymbolicLink() && (kind === 'directory' ? stat.isDirectory() : stat.isFile() && stat.nlink === 1n)
     && (typeof process.getuid !== 'function' || stat.uid === BigInt(process.getuid()))
@@ -169,7 +170,7 @@ function newRecord(proposed: ProposedRelease): ArticleRecord {
   return { proposed, digest: null, state: 'pending-public-verification', taskId: null, attempted: false, observedAt: null, publishedAt: null, reason: null,
     teaser: { digest: null, state: 'pending-public-verification', taskId: null, attempted: false } };
 }
-export function configureReleaseArticles(enabled: boolean, repository: ProposedRelease['repository'] = 'ashlrai/ashlr-hub'): ReleaseArticleManifest {
+export function configureReleaseArticles(enabled: boolean, repository: ProposedRelease['repository'] = HUB_REPOSITORY_IDENTITY.renamedName): ReleaseArticleManifest {
   parseProposedRelease({ v: 1, repository, version: '0.0.0' });
   return locked((manifest) => { manifest.enabled = enabled; if (enabled) manifest.repository = repository; return manifest; });
 }
@@ -182,6 +183,9 @@ export function importProposedRelease(input: unknown): ArticleRecord {
   });
 }
 export function publicArticleDraft(facts: PublishedReleaseFacts): PublicArticleDraft {
+  if (facts.packageName !== undefined && facts.packageName !== '@ashlr/phantom') throw new Error('Invalid release package facts');
+  const profile = desktopUpdateProfileForPackage(facts.packageName ?? '@ashlr/hub');
+  if (facts.packageName !== undefined && facts.repository !== profile.repository) throw new Error('Invalid canonical release facts');
   const { observedAt: _observedAt, ...stable } = facts;
   const releaseKey = recordKey(facts); const factsDigest = digest(stable);
   const slug = `phantom-release-${facts.version.replaceAll('.', '-')}`;
@@ -189,7 +193,7 @@ export function publicArticleDraft(facts: PublishedReleaseFacts): PublicArticleD
     evidenceUrl: `https://ashlr.ai/research/phantom-releases/${facts.version}/evidence.json`,
     title: `Phantom ${facts.version}: a verified engineering release`,
     summary: `Phantom ${facts.version} is published on GitHub and npm. Its exact source tree passed the complete platform CI and dependency audit.`,
-    sources: [`https://github.com/${facts.repository}/releases/tag/v${facts.version}`, `https://www.npmjs.com/package/@ashlr/hub/v/${facts.version}`,
+    sources: [`https://github.com/${facts.repository}/releases/tag/v${facts.version}`, `https://www.npmjs.com/package/${profile.packageName}/v/${facts.version}`,
       `https://github.com/${facts.repository}/commit/${facts.sourceSha}`, `https://github.com/${facts.repository}/actions/runs/${facts.ci.id}/attempts/${facts.ci.attempt}`,
       `https://github.com/${facts.repository}/actions/runs/${facts.audit.id}/attempts/${facts.audit.attempt}`],
     facts: stable, image: { kind: 'conceptual', automaticPaidGeneration: false } };

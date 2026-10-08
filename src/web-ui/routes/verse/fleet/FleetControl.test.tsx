@@ -582,6 +582,7 @@ describe('custody source checkout', () => {
     const region = await custodyControl();
     const button = within(region).getByRole('button', { name: 'Reinstall / upgrade' });
     expect(button).toBeDisabled();
+    expect(within(region).getByRole('textbox', { name: 'Custody source checkout' })).toHaveAttribute('placeholder', '/absolute/path/to/phantom');
     fireEvent.change(within(region).getByRole('textbox', { name: 'Custody source checkout' }), { target: { value: '~/reviewed-hub' } });
     await userEvent.setup().click(button);
     await waitFor(() => expect(sent).toHaveLength(1));

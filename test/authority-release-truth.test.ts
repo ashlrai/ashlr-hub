@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { desktopUpdateProfileForPackage } from '../src/core/desktop/update-manifest.js';
 
 const ROOT = join(import.meta.dirname, '..');
 
@@ -108,7 +109,7 @@ describe('emergency authority release truth', () => {
     // #580 rewrote the quickstart for the workbench: the legacy `/next/` console and
     // its token lifecycle now live only in the Hub reference, and the
     // quickstart must steer new users away from that path.
-    expect(quickstart).toContain('[Phantom reference](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md)');
+    expect(quickstart).toContain('[Phantom reference](https://github.com/ashlrai/phantom/blob/master/docs/HUB-REFERENCE.md)');
     expect(quickstart).toMatch(/Resident autonomy is macOS-only and starts dormant/);
     expect(quickstart).toMatch(/older `\/` and `\/next\/` dashboard guidance should not\s+be used as a \S+ onboarding path/);
     for (const doc of [hubReference]) {
@@ -207,9 +208,11 @@ describe('emergency authority release truth', () => {
     // desktop download does not grant or start resident authority.
     expect(desktop).toMatch(/A Tauri v2 desktop app/i);
     expect(normalizedDesktop).toMatch(/resident autonomy requires its separate local setup and grant/i);
-    const currentVersion = (JSON.parse(read('package.json')) as { version: string }).version;
+    const currentPackage = JSON.parse(read('package.json')) as { name: string; version: string };
+    const profile = desktopUpdateProfileForPackage(currentPackage.name);
+    const currentVersion = currentPackage.version;
     expect(desktop).toContain(
-      `https://github.com/ashlrai/ashlr-hub/releases/download/v${currentVersion}/Phantom_${currentVersion}_aarch64.dmg`,
+      `https://github.com/${profile.repository}/releases/download/v${currentVersion}/Phantom_${currentVersion}_aarch64.dmg`,
     );
     expect(normalizedDesktop).toMatch(/locally signed, not Apple Developer ID notarized/i);
     expect(normalizedDesktop).toMatch(/Windows[^\n]*draft only/i);
@@ -271,7 +274,7 @@ describe('emergency authority release truth', () => {
     // `ashlr init` to the Hub reference. If a step table comes back, it must
     // list exactly the seven steps again.
     if (start === -1) {
-      expect(quickstart).toMatch(/`ashlr init`[^.]*remain compatibility\s+surfaces[\s\S]{0,200}\[Phantom reference\]\(https:\/\/github\.com\/ashlrai\/ashlr-hub\/blob\/master\/docs\/HUB-REFERENCE\.md\)/);
+      expect(quickstart).toMatch(/`ashlr init`[^.]*remain compatibility\s+surfaces[\s\S]{0,200}\[Phantom reference\]\(https:\/\/github\.com\/ashlrai\/phantom\/blob\/master\/docs\/HUB-REFERENCE\.md\)/);
       expect(quickstart).not.toContain('| `engines` |');
       expect(quickstart).not.toContain('| `enroll` |');
       return;

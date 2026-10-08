@@ -1041,6 +1041,7 @@ describe('M456 candidate-bound shadow-router calibration', () => {
     }]);
 
     const packageJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
+      name: string;
       exports: Record<string, unknown>;
     };
     expect(Object.keys(packageJson.exports).sort()).toEqual([
@@ -1071,7 +1072,7 @@ describe('M456 candidate-bound shadow-router calibration', () => {
       [
         '--input-type=module',
         '--eval',
-        "import('@ashlr/hub/core/fleet/skill-retrieval-calibration.js')",
+        `import(${JSON.stringify(`${packageJson.name}/core/fleet/skill-retrieval-calibration.js`)})`,
       ],
       { cwd: root, encoding: 'utf8' },
     );

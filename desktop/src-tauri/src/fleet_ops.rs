@@ -418,7 +418,7 @@ pub fn resolve_cli(home: &Path) -> Result<Cli, String> {
             });
         }
     }
-    Err("The ashlr command-line tool was not found on your login PATH. Install it (npm i -g ashlr-hub) and try again.".to_string())
+    Err("The Phantom CLI (ashlr) was not found on your login PATH. Install a qualified release (npm i -g @ashlr/phantom) and try again.".to_string())
 }
 
 // ── child processes ───────────────────────────────────────────────────────────

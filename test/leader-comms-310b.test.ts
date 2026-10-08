@@ -127,4 +127,23 @@ describe('Leader memo replies (the \'elon-vision\' wire kind, meta.source leader
     await handler(memoRequest(1, 'lm-1'));
     expect(sent).toEqual([]);
   });
+
+  it('reports a missing memo without reconstructing it, while Keep it remains a no-op', async () => {
+    const handler = captureHandler('elon-vision');
+    await handler(memoRequest(0, MEMO));
+    expect(sent).toEqual([]);
+    await handler(memoRequest(2, MEMO));
+    expect(sent).toEqual(['[Phantom] That Leader memo is no longer on file.']);
+  });
+
+  it.each([0, 2])('retains legacy retirement without adoption for reply %s', async (index) => {
+    const handler = captureHandler('elon-vision');
+    const legacy = { ...memoRequest(index, MEMO), meta: {} };
+    await handler({ ...legacy, answerIndex: 1 });
+    expect(sent).toEqual([]);
+    await handler(legacy);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatch(/^\[Phantom\] That Strategist briefing is retired; nothing was adopted\./);
+    expect(sent[0]).toContain('`ashlr leader show`');
+  });
 });

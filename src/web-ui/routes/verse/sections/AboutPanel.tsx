@@ -25,7 +25,7 @@ export function AboutPanel() {
           <p className={styles.aboutLine}>
             <a
               className={styles.link}
-              href="https://github.com/ashlrai/ashlr-hub"
+              href="https://github.com/ashlrai/phantom"
               target="_blank"
               rel="noreferrer noopener"
             >

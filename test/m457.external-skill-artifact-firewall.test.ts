@@ -613,6 +613,7 @@ describe('M457 external-skill artifact firewall', () => {
     }]);
 
     const packageJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
+      name: string;
       exports: Record<string, unknown>;
     };
     expect(JSON.stringify(packageJson.exports))
@@ -630,7 +631,7 @@ describe('M457 external-skill artifact firewall', () => {
       [
         '--input-type=module',
         '--eval',
-        "import('@ashlr/hub/core/fleet/external-skill-artifact-firewall.js')",
+        `import(${JSON.stringify(`${packageJson.name}/core/fleet/external-skill-artifact-firewall.js`)})`,
       ],
       { cwd: root, encoding: 'utf8' },
     );

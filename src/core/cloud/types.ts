@@ -201,7 +201,7 @@ export interface CloudBudgetV1 {
   selfImprove: {
     /** Verse may launch its own self-improvement tasks without a click. */
     enabled: boolean;
-    /** Repo self-improvement targets (default ashlrai/ashlr-hub). */
+    /** Repo self-improvement targets (default ashlrai/phantom). */
     repo: string;
     /** Max self-improvement launches per local day. */
     maxPerDay: number;
@@ -223,7 +223,7 @@ export const DEFAULT_CLOUD_BUDGET: Omit<CloudBudgetV1, 'updatedAt'> = Object.fre
   estimatedCostPerSessionUsd: 3,
   maxConcurrent: 4,
   maxSessionsPerDay: 20,
-  selfImprove: Object.freeze({ enabled: true, repo: 'ashlrai/ashlr-hub', maxPerDay: 4, reserveUsd: 40, maxOpenPrs: 3 }),
+  selfImprove: Object.freeze({ enabled: true, repo: 'ashlrai/phantom', maxPerDay: 4, reserveUsd: 40, maxOpenPrs: 3 }),
 }) as Omit<CloudBudgetV1, 'updatedAt'>;
 
 export interface CloudGate {

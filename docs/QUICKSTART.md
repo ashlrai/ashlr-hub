@@ -7,9 +7,10 @@ The Universe experiment kernel is a separate, bounded source-checkout path below
 Installing Phantom, enrolling a repo, starting a resident fleet and publishing
 its work are distinct steps.
 
-The primary CLI is `phm`; `ashlr` remains compatible. The package remains
-`@ashlr/hub`, local routes remain `/verse/`, and the published macOS app is
-`Phantom.app`. See
+The primary CLI is `phm`; `ashlr` remains compatible. Current source uses
+`@ashlr/phantom` in `ashlrai/phantom`; the 3.26.0 canonical candidate is not
+published yet. The verified 3.25.3 compatibility release remains `@ashlr/hub`.
+Local routes remain `/verse/`, and the published macOS app is `Phantom.app`. See
 [the product naming guide](PHANTOM-BRAND.md).
 
 <a id="open-verse"></a>
@@ -18,29 +19,30 @@ The primary CLI is `phm`; `ashlr` remains compatible. The package remains
 
 ### CLI on macOS, Linux or Windows
 
-Install Node.js 22.15+ and Git, then install published Phantom 3.25.2:
+Install Node.js 22.15+ and Git, then install published compatibility release Phantom 3.25.3:
 
 ```sh
-npm install -g @ashlr/hub@3.25.2
-phm --version   # should print 3.25.2
+npm install -g @ashlr/hub@3.25.3
+phm --version   # should print 3.25.3
 phm verse
 ```
 
 Phantom opens at `http://127.0.0.1:7777/verse/` and binds to loopback. The CLI
 prints a read token for the browser and asks for a separate mutation token
 before your first chat or other change. Keep both tokens private. Confirm
-`phm --version` reports `3.25.2`; the
-[versioned GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.2) is the
+`phm --version` reports `3.25.3`; the
+[versioned GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.3) is the
 source for versioned installers. Use the explicit package version above and inspect the selected release artifacts before installing.
 
 ### Desktop app on Apple silicon Mac
 
-The 3.25.2 desktop app has a reproduced startup issue. Keep an existing 3.25.1
-app until the fixed [v3.25.3 Phantom macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.3/Phantom_3.25.3_aarch64.dmg)
-is published in its [versioned release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.3).
+Use the published [v3.25.3 Phantom macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.3/Phantom_3.25.3_aarch64.dmg)
+from its [versioned release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.3).
+It fixes the reproduced 3.25.2 updater-client startup issue. Publication and
+installed startup acceptance remain separate; do not install the old 3.25.2 DMG.
 The desktop includes the CLI and the same console. This DMG is locally signed, not
 Apple Developer ID notarized; macOS may require **Open Anyway** on first launch.
-For a source build and local signing, follow [Releasing locally](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
+For a source build and local signing, follow [Releasing locally](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md).
 There is no Linux or Windows desktop package in this release; use the CLI above.
 
 ### Read the workbench before starting work
@@ -69,7 +71,7 @@ There is no Linux or Windows desktop package in this release; use the CLI above.
    Each vendor signs in through its own CLI; Phantom does not take its password.
 3. Ask for a small, checkable change. Review its diff and results in the
    workbench before accepting it. Use **⌘K** to find actions and **⌘J** for
-   **Needs you**. The full interface is in the [Phantom guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
+   **Needs you**. The full interface is in the [Phantom guide](https://github.com/ashlrai/phantom/blob/master/docs/VERSE.md).
 
 Choose **Work for me**, open Fleet and select **New outcome**. Describe the
 result, select enrolled repositories and add observable acceptance criteria.
@@ -92,7 +94,7 @@ surface; [set it up](REMOTE-PHONE.md) rather than exposing the main loopback
 console. Resident autonomy is macOS-only and starts dormant. Inspect the
 **installed** release with `ashlr authority status` and
 `ashlr authority setup --dry-run --json`, then use the
-[autonomy setup guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTONOMY-SETUP.md) if you want to sign a standing grant.
+[autonomy setup guide](https://github.com/ashlrai/phantom/blob/master/docs/AUTONOMY-SETUP.md) if you want to sign a standing grant.
 A source checkout or a static guide cannot establish the current service state
 on your Mac.
 
@@ -100,7 +102,7 @@ on your Mac.
 
 This path is for evaluating the local experiment kernel from a trusted source
 checkout. Source commands may differ from the published npm package; confirm
-with the [release record](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING.md) and your selected binary's help.
+with the [release record](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING.md) and your selected binary's help.
 
 | What you want to do | Supported path |
 |--------------------|----------------|
@@ -171,7 +173,7 @@ commissioning guide above before authorizing generation.
 
 `ashlr init`, `ashlr serve`, `ashlr enroll` and `ashlr daemon` remain compatibility
 surfaces beneath the workbench. For their command and safety contracts, use the
-[Phantom reference](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md). The current first-run console is
+[Phantom reference](https://github.com/ashlrai/phantom/blob/master/docs/HUB-REFERENCE.md). The current first-run console is
 `ashlr verse` at `/verse/`; older `/` and `/next/` dashboard guidance should not
 be used as a Phantom onboarding path.
 
@@ -185,7 +187,7 @@ ashlr authority resident status --json
 ```
 
 A grant, service installation and live resident process each require their own
-verification. The [autonomy setup guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AUTONOMY-SETUP.md) covers signing,
+verification. The [autonomy setup guide](https://github.com/ashlrai/phantom/blob/master/docs/AUTONOMY-SETUP.md) covers signing,
 starting, stopping and scope. The [phone guide](REMOTE-PHONE.md) covers the
 separate protected gateway. Neither path makes the main loopback server public.
 

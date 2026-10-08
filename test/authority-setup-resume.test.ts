@@ -297,10 +297,10 @@ describe('setup is resumable', () => {
   it('finds the trust-root PR an earlier run opened instead of opening another', async () => {
     const h = harness({
       confirm: true,
-      run: (_bin, args) => (args[0] === 'pr' && args[1] === 'list' ? ok('https://github.com/ashlrai/ashlr-hub/pull/999\n') : no()),
+      run: (_bin, args) => (args[0] === 'pr' && args[1] === 'list' ? ok('https://github.com/ashlrai/phantom/pull/999\n') : no()),
     });
     expect(await runAuthorityCli(['setup', '--source', '/nonexistent/checkout'], h.deps)).toBe(0);
-    expect(h.out.join('\n')).toMatch(/… trust root: https:\/\/github\.com\/ashlrai\/ashlr-hub\/pull\/999 is already open/);
+    expect(h.out.join('\n')).toMatch(/… trust root: https:\/\/github\.com\/ashlrai\/phantom\/pull\/999 is already open/);
     expect(h.calls.some((c) => c.args.includes('worktree'))).toBe(false);
   });
 
@@ -327,7 +327,7 @@ describe('setup is resumable', () => {
       confirm: true,
       run: (_bin, args) => {
         if (args[0] === 'pr' && args[1] === 'list') return ok('');
-        if (args[0] === 'pr' && args[1] === 'create') return ok('https://github.com/ashlrai/ashlr-hub/pull/1000\n');
+        if (args[0] === 'pr' && args[1] === 'create') return ok('https://github.com/ashlrai/phantom/pull/1000\n');
         if (args[0] === 'repo') return ok('master\n');
         if (args.includes('fetch')) return ok();
         if (args.includes('show')) return ok("Object.freeze([]);");
@@ -336,7 +336,7 @@ describe('setup is resumable', () => {
       },
     });
     await runAuthorityCli(['setup', '--source', '/nonexistent/checkout'], h.deps);
-    expect(h.out.join('\n')).toMatch(/… trust root: opened https:\/\/github\.com\/ashlrai\/ashlr-hub\/pull\/1000/);
+    expect(h.out.join('\n')).toMatch(/… trust root: opened https:\/\/github\.com\/ashlrai\/phantom\/pull\/1000/);
     expect(h.calls.some((c) => c.args.includes('worktree'))).toBe(false);
   });
 
@@ -761,24 +761,24 @@ describe('the read-only checklist (Verse GET /api/verse/authority/setup)', () =>
 
 describe('the dry run finds the trust-root PR through gh api reads (and so does Verse)', () => {
   const BRANCH = `authority/trust-root-${TEST_ROOT.keyId}`;
-  const PR = 'https://github.com/ashlrai/ashlr-hub/pull/512';
+  const PR = 'https://github.com/ashlrai/phantom/pull/512';
 
   /** GitHub as seen through `gh api <path>` GETs only; anything else fails the test. */
   function hub(state: { open?: boolean; merged?: boolean; pushed?: boolean }) {
     return (bin: string, args: readonly string[]): GhResult => {
       expect(isReadOnlyGhApiCall(bin as 'gh', args), `${bin} ${args.join(' ')}`).toBe(true);
       const path = args[1]!;
-      if (path.startsWith('repos/ashlrai/ashlr-hub/pulls?')) {
+      if (path.startsWith('repos/ashlrai/phantom/pulls?')) {
         expect(path).toContain(`head=ashlrai%3A${encodeURIComponent(BRANCH)}`);
         expect(path).toContain('state=open');
         return ok(JSON.stringify(state.open ? [{ html_url: PR }] : []));
       }
-      if (path === 'repos/ashlrai/ashlr-hub') return ok(JSON.stringify({ default_branch: 'master' }));
-      if (path === 'repos/ashlrai/ashlr-hub/contents/src/core/authority/trust-roots.ts?ref=master') {
+      if (path === 'repos/ashlrai/phantom') return ok(JSON.stringify({ default_branch: 'master' }));
+      if (path === 'repos/ashlrai/phantom/contents/src/core/authority/trust-roots.ts?ref=master') {
         const source = state.merged ? `Object.freeze([Object.freeze({ keyId: '${TEST_ROOT.keyId}' })]);` : 'Object.freeze([]);';
         return ok(JSON.stringify({ encoding: 'base64', content: Buffer.from(source).toString('base64') }));
       }
-      if (path === `repos/ashlrai/ashlr-hub/git/ref/heads/${BRANCH}`) {
+      if (path === `repos/ashlrai/phantom/git/ref/heads/${BRANCH}`) {
         return state.pushed ? ok(JSON.stringify({ ref: `refs/heads/${BRANCH}`, object: { sha: 'abc' } })) : no('HTTP 404');
       }
       return no('HTTP 404');
