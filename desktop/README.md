@@ -4,15 +4,15 @@ A Tauri v2 desktop app that wraps **Phantom** (the operator console at
 `/verse/`, see `../docs/VERSE.md`) in a native macOS window. Opening it starts
 the console; resident autonomy requires its separate local setup and grant.
 
-Published 3.25.2 installs `/Applications/Phantom.app`, with
-`Phantom_3.25.2_aarch64.dmg` downloads and the stable `Ashlr Local` signing
+The 3.25.3 compatibility release installs `/Applications/Phantom.app`, with
+`Phantom_3.25.3_aarch64.dmg` downloads and the stable `Ashlr Local` signing
 identity. The guarded installer migrates a single verified legacy installation;
 3.25.0 retains its historical `Ashlr.app` filename. Updated custody prompt
 wording requires its separately qualified helper release; installing the app
 does not replace the helper. Automatic updating is not activated by this filename change.
 
-The versioned [v3.25.2 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.2/Phantom_3.25.2_aarch64.dmg)
-is the versioned installer link. Check the release artifacts before installing.
+The versioned [v3.25.3 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.3/Phantom_3.25.3_aarch64.dmg)
+is the candidate installer link; it becomes available only after publication. Check the release artifacts before installing.
 It is locally signed, not Apple Developer ID notarized. macOS may require **Open
 Anyway** on first launch. The desktop CI workflow remains disabled during the
 Linux quarantine; its retained draft-only policy is separate from this local
@@ -20,19 +20,19 @@ macOS release. The Linux CLI and web dashboard remain supported.
 Installed size: ~141 MiB, including the bundled Bun `ashlr`
 sidecar (~100 MiB), Rust executable and web assets.
 
-The public 3.25.2 desktop image and signed app/CLI feed match the qualified original artifacts. npm `@ashlr/hub@3.25.2` is also verified through an offline consumer install. Publishing these artifacts does not update an existing app or activate its fleet.
+The 3.25.2 archives were published and verified, but its macOS updater client reproduced a startup abort; installation rolled back to 3.25.1. Version 3.25.3 fixes that constructor and adds the compatibility bridge. Verify the selected release artifacts and installed health separately. Publication does not update an existing app or activate its fleet.
 
 ---
 
 ## Install
 
-Download the published [3.25.2 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.2/Phantom_3.25.2_aarch64.dmg)
+Download the versioned [3.25.3 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.3/Phantom_3.25.3_aarch64.dmg)
 or use the [npm/CLI quickstart](../docs/QUICKSTART.md) on macOS, Linux and Windows.
 Other desktop formats remain subject to the draft artifact policy below.
 
 | Platform | Availability |
 |----------|-----------------------|
-| macOS arm64 | Locally signed v3.25.2 `.dmg` linked above |
+| macOS arm64 | Candidate v3.25.3 `.dmg`; available after publication |
 | Windows | `.msi` / `.exe` draft only |
 | Linux | Not produced while quarantined |
 
@@ -66,7 +66,7 @@ checks passing. The 3.25.2 release fixes those predicates; see the
 
 ### Signed idle updates
 
-Published 3.25.2 includes a separately signed release manifest binding one macOS arm64 app archive to its original qualified npm archive. The public feed and original downloads are verified. An existing 3.25.1 app has an inert updater and requires manual installation of 3.25.2 before it can use this flow. Feed publication alone does not enable automatic updates or approve changed authority.
+The paired release manifest binds one macOS arm64 app archive to its original qualified npm archive. An existing 3.25.1 app has an inert updater and requires a qualified manual installation of 3.25.3 before it can use this flow. The compatibility bridge reads the closed legacy and canonical Phantom profiles; it does not rename the repository or package itself. Feed publication alone does not enable automatic updates or approve changed authority.
 
 In the updated desktop, the top bar shows native update status. Expand it to
 turn **Automatic updates** on or off, see verified download progress, or refresh

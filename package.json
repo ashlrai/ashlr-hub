@@ -1,6 +1,6 @@
 {
   "name": "@ashlr/hub",
-  "version": "3.25.2",
+  "version": "3.25.3",
   "description": "Phantom by AshlrAI: the open-source engineering agent workbench for CLI accounts, local models and autonomous fleets.",
   "publishConfig": {
     "access": "public"

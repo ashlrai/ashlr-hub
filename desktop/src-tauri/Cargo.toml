@@ -1,10 +1,10 @@
 [package]
 name = "ashlr-desktop"
-version = "3.25.2"
-description = "Ashlr Mission Control — desktop wrapper"
+version = "3.25.3"
+description = "Phantom — engineering agent workbench"
 authors = ["Mason Wyatt <mason@evero-consulting.com>"]
 license = "MIT"
-repository = "https://github.com/your-org/ashlr-hub"
+repository = "https://github.com/ashlrai/ashlr-hub"
 edition = "2021"
 rust-version = "1.77"
 build = "build.rs"
