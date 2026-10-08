@@ -47,19 +47,21 @@ See [desktop installation](#the-desktop-app-macos) or the
 
 ## What it is
 
-**Phantom** is an operator console for coding agents. Every Claude Code,
-Codex, Devin and Grok account you own becomes a *seat*, and so does every
-tool-capable local model. Claude Code, Codex and Devin are equal partners:
-routing picks among them by fit, headroom, cost and latency, never by brand. You
-chat with any of them in one workbench. You hand work to Claude Code cloud
-sessions, which keep running remotely on your signed-in Claude account, and to
-Devin sessions. Eligible promotional credits are used first, then included plan
-usage where available; paid-only models and enabled over-limit usage can use
-purchased credits. A **Leader** plans the fleet's work
-and talks with you in Phantom, on Telegram or in the terminal. And the fleet works
-your enrolled repositories only inside a standing grant you sign with Touch ID:
-it starts in shadow, recording what it would merge, and climbs a rollout ladder
-from there.
+**Phantom** brings supported coding agents, accounts and local models into one
+workbench. Connect eligible Claude Code, Codex, Grok or Devin accounts, configure
+an API resource, or use a tool-capable local model. Choose a project and a small,
+checkable task; review the changes and results together.
+
+CLI accounts use the vendor's configured account and billing path. API resources
+have their own metered billing; local inference uses your hardware. A connected
+account does not prove remaining subscription allowance or permission to spend
+purchased credits. Check each resource's readiness and budget before delegating.
+
+For unattended work, give the fleet an outcome and observable acceptance
+criteria. The **Leader** refines priorities and briefs you in Phantom, Telegram
+or the terminal. The fleet works only in enrolled repositories under your
+current signed standing grant; it starts in shadow, recording what it would
+merge, and climbs a rollout ladder from there.
 
 It ships as a macOS desktop app and as the `phm` CLI (canonical package
 `@ashlr/phantom`, also available as `ashlr`), which
@@ -116,6 +118,43 @@ change permission mode. The app restores the workspace you last used.
 |---|---|
 | Describe work in a project; Automatic chooses an eligible connected resource. Use Advanced for a manual override. | Save a desired result and observable acceptance. The Leader refines dependency-ready work across the fleet. |
 | Keep projects, drafts, terminals and source evidence together. | Keep account capacity, goals, outcomes and the work needing you together. |
+
+### How work moves
+
+**Automatic** selects an eligible account and model for a chat. It considers
+task fit, available capacity, your preferences, cost basis and observed latency
+when available. Configured Jev advice
+can inform the choice; it cannot make a blocked resource eligible.
+
+**Manager** coordinates delegation and review for an explicit chat or outcome.
+**Leader** sets fleet priorities, refines work and asks for your decisions.
+These are different roles: the Manager supports the current Claude, Codex,
+Grok and local adapters; the Leader uses Grok or local models, with restricted
+Claude fallback, rather than Codex.
+
+```mermaid
+flowchart LR
+  Chat[Your chat] --> Auto[Automatic: eligible resource]
+  Goal[Your outcome] --> Plan[Leader or enabled Manager: plan]
+  Plan --> Queue[Dependency-ready work]
+  Queue --> Checks[Capacity, budget and authority checks]
+  Checks --> Agents[Eligible agents and local models]
+  Auto --> Agents
+  Agents --> Evidence[Recorded runs, changes and verification]
+  Evidence --> Review[Your review or authorized merge checks]
+```
+
+Independent ready tasks can use several admitted resources. Serving slots,
+account quotas, workspace isolation, budget reserves and signed authority limit
+concurrency; **Automatic** counts do not mean unlimited parallel work. Devin
+fleet sessions use their separate granted launcher and ACU budget.
+
+Open **Resources** to distinguish chat readiness from fleet readiness and see
+reported usage, reset windows and the specific hold. Inspect a turn's tools,
+context and sources, then its diff and verification results. Reported readings,
+estimates and unknowns stay distinct: a running daemon, completed plan or agent's
+success message alone does not prove your outcome was delivered.
+See [Automatic work](docs/AUTOMATIC-OUTCOMES.md) for routing, recovery and permissions.
 
 **Review** opens the relevant changes, sources, usage, agents or decisions without
 starting another run. Advanced preferences let you choose **No preference limit**
@@ -515,8 +554,8 @@ dated, GitHub-sourced star history of these six repositories and their sum.
 | Project | What it helps with |
 |---------|--------------------|
 | **[Phantom](https://github.com/ashlrai/phantom)** | Coordinate coding agents, accounts, local models and guarded fleet work from one console. |
-| **[Phantom Secrets](https://github.com/ashlrai/phantom-secrets)** | Keep real API keys out of agent context with local tokens and a network-edge proxy. |
-| **[Locus](https://github.com/ashlrai/locus)** | Pin the account and workspace identity under which an agent acts. |
+| **[Phantom Secrets](https://github.com/ashlrai/phantom-secrets)** | Manage credentials; configured token/proxy paths can keep real keys out of agent context. API adapters may still reveal a key in-process for a call. |
+| **[Locus](https://github.com/ashlrai/locus)** | Check configured account and session identity; its off, warn, enforce and firm modes have different effects. |
 | **[Lexicon](https://github.com/ashlrai/lexicon)** | Correct names and technical terms that speech-to-text gets wrong before they reach an agent. |
 | **[AshlrCode](https://github.com/ashlrai/ashlrcode)** | Run a multi-provider coding agent in the terminal. |
 | **[Morphkit](https://github.com/ashlrai/morphkit)** | Turn a TypeScript/React app into a SwiftUI project. |

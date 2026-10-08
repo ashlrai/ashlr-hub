@@ -11,6 +11,32 @@ outcome does not activate a dormant fleet or sign a standing grant. Check the
 installed release and [resident setup](AUTONOMY-SETUP.md) before relying on
 unattended execution.
 
+## Resources and routing
+
+Bring supported signed-in CLI accounts, configured API resources and tool-capable
+local models. They share a workbench, not a billing account: CLI subscriptions,
+API charges, Devin ACUs and local hardware capacity retain their own limits.
+Reported organization usage does not establish a personal subscription balance,
+and unknown usage is not spare quota.
+
+Automatic chooses among eligible resources using task fit, current capacity,
+preferences, cost basis and observed latency when available. Configured Jev can
+advise; admission checks still decide whether the resource can run. The fleet
+can distribute independent ready tasks across admitted resources, subject to
+serving slots, workspace isolation, quotas, reserves and current signed authority.
+Devin fleet launches use a separate granted ACU-budget path.
+
+**Manager** coordinates delegation and review for an explicit chat or outcome.
+**Leader** refines fleet priorities, reads results and briefs you. The current
+Manager supports Claude, Codex, Grok and local adapters. The Leader uses Grok
+and local models with restricted Claude fallback; Codex is not a Leader seat.
+Configured Telegram carries the same Leader conversation, short briefs, questions
+and approval controls. A reply or directive does not widen your grant.
+
+Muse is an opt-in metered API resource, not a Muse Code browser subscription.
+Dots, Grok Bot and read-only OpenAI Agents inventory are separate companion
+surfaces; listing them does not connect an execution seat.
+
 ## Work with me
 
 Open **New chat**, choose a project, and describe the work. **Automatic** chooses
@@ -95,6 +121,26 @@ verified merge identity. **Plan verified** means every active plan task has
 verification or explicit gate evidence. Check the desired result against your
 acceptance criteria; that label does not independently prove an arbitrary
 product or business outcome.
+
+## Read the result, not just the status
+
+Use **Resources** for separate chat and fleet readiness, dated usage and available
+reset readings. Expand a turn's tools and context for reported actions and source
+evidence; open changes and verification results to judge the work. Traces show
+what the harness recorded, not every internal thought. Timing and usage may be
+measured, estimated or unknown; missing readings are not zero.
+
+A running worker is progress, not delivery. Recorded proposals, verification and
+merge evidence answer different questions. Compare the actual result with your
+acceptance criteria before treating an outcome as complete. Failures and holds
+remain visible and feed the existing corrective planning path.
+
+[Phantom Secrets](https://github.com/ashlrai/phantom-secrets) manages credentials.
+Configured local-token/proxy paths can keep real keys out of agent context;
+in-process API adapters can still reveal a key for a call. Configured
+[Locus](https://github.com/ashlrai/locus) checks account/session identity with
+explicit off, warn, enforce or firm behavior. Neither tool's presence proves
+all resources are activated or every call has the same credential boundary.
 
 ## Evidence and recovery
 

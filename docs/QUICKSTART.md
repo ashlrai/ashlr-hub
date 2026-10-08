@@ -61,6 +61,24 @@ There is no Linux or Windows desktop package in this release; use the CLI above.
   the saved reserve; Off disables both reset priority and reserve shrinking.
   Read [the reset guide](RESET-AWARE-SCHEDULING.md) before changing the setting.
 
+### Choose how to work
+
+**Work with me** is a conversation you steer: Automatic picks an eligible
+resource; Advanced pins an explicit account or model. Choose **Manager** in the
+Auto seat menu when you want planning, delegation and review in one conversation.
+It uses the resident fleet and its existing authority.
+
+**Work for me** is a durable outcome: the Leader refines priorities and ready
+tasks, while you inspect progress and answer decisions in Phantom or configured
+Telegram. Enabling a Manager on an outcome adds its coordination and review path.
+Saving an outcome or changing workspaces does not start the fleet.
+
+Supported CLI accounts, configured APIs and tool-capable local models share the
+workbench, but keep their own billing and limits. In **Resources**, check both
+chat and fleet readiness. Signed out, missing usage, exhausted quota, reserved
+capacity or missing authority can hold work; connection alone is not readiness.
+See [Automatic work](AUTOMATIC-OUTCOMES.md) for resource boundaries and recovery.
+
 ### Make your first useful turn
 
 1. Choose **Work with me**, open **New chat** and choose a project folder. Saving a folder as a project
@@ -70,8 +88,10 @@ There is no Linux or Windows desktop package in this release; use the CLI above.
    open **Advanced** if you want to pin an account or model. For separate Claude Code, Codex and Grok accounts,
    follow [seat commissioning](RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity).
    Each vendor signs in through its own CLI; Phantom does not take its password.
-3. Ask for a small, checkable change. Review its diff and results in the
-   workbench before accepting it. Use **⌘K** to find actions and **⌘J** for
+3. Ask for a small, checkable change. Inspect reported tools, context and
+   sources, then review the diff and verification results before accepting it.
+   Usage can be reported, estimated or unknown; a producer's success message
+   alone does not prove delivery. Use **⌘K** to find actions and **⌘J** for
    **Needs you**. The full interface is in the [Phantom guide](https://github.com/ashlrai/phantom/blob/master/docs/VERSE.md).
 
 Choose **Work for me**, open Fleet and select **New outcome**. Describe the
