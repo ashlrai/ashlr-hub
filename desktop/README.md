@@ -12,7 +12,8 @@ wording requires its separately qualified helper release; installing the app
 does not replace the helper. Automatic updating is not activated by this filename change.
 
 The versioned [v3.25.3 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.3/Phantom_3.25.3_aarch64.dmg)
-is the candidate installer link; it becomes available only after publication. Check the release artifacts before installing.
+is the verified published compatibility installer. Check the release artifacts
+and installed startup separately before granting resident authority.
 It is locally signed, not Apple Developer ID notarized. macOS may require **Open
 Anyway** on first launch. The desktop CI workflow remains disabled during the
 Linux quarantine; its retained draft-only policy is separate from this local
@@ -24,6 +25,18 @@ The 3.25.2 archives were published and verified, but its macOS updater client re
 
 ---
 
+## Canonical source candidate
+
+The 3.26.0 source candidate uses `ashlrai/phantom` and `@ashlr/phantom`.
+Its fixed discovery endpoint is
+`https://github.com/ashlrai/phantom/releases/latest/download/latest.json`.
+The commissioned public key, `ai.ashlr.desktop` bundle identifier, signer,
+sidecar and saved-data identities stay unchanged. The signed legacy and
+canonical profiles remain distinct; transport redirects do not choose a profile.
+The [candidate v3.26.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.0/Phantom_3.26.0_aarch64.dmg)
+is not published yet. Use the verified compatibility download below until the
+canonical release has its own qualification, publication and startup evidence.
+
 ## Install
 
 Download the versioned [3.25.3 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.3/Phantom_3.25.3_aarch64.dmg)
@@ -32,7 +45,7 @@ Other desktop formats remain subject to the draft artifact policy below.
 
 | Platform | Availability |
 |----------|-----------------------|
-| macOS arm64 | Candidate v3.25.3 `.dmg`; available after publication |
+| macOS arm64 | Published compatibility v3.25.3 `.dmg` |
 | Windows | `.msi` / `.exe` draft only |
 | Linux | Not produced while quarantined |
 
@@ -464,7 +477,7 @@ event permission the page already has (no new capability, no new command).
 | `resident-start` | Reads `ashlr authority resident status --json`, shows a **native** confirm dialog (grant, release, plist, budget, the exact command), then runs `ashlr authority resident start` with a one-time gesture token |
 | `resident-restart` | The same dialog, then `resident stop` + `resident start` |
 | `resident-stop` | A native confirm, then `ashlr authority resident stop` (lowering: no gesture token) |
-| `custody-install` | `checkout` (an ashlr-hub checkout the server found among the enrolled repos; `~/` allowed). Native re-validates it (absolute, `scripts/install-custody.sh` a regular file, `tools/custody/Package.swift`, an `ashlrai/ashlr-hub` remote), shows the command and the script's sha256 in a native dialog, then asks **macOS** for an administrator (`osascript … with administrator privileges`, every value passed as argv through `quoted form of`) |
+| `custody-install` | `checkout` (a Phantom checkout the server found among the enrolled repos; `~/` allowed). Native re-validates it (absolute, `scripts/install-custody.sh` a regular file, `tools/custody/Package.swift`, an exact supported `ashlrai/phantom` or legacy `ashlrai/ashlr-hub` remote), shows the command and the script's sha256 in a native dialog, then asks **macOS** for an administrator (`osascript … with administrator privileges`, every value passed as argv through `quoted form of`) |
 
 **Native → page.** `window.__ASHLR_FLEET_EVENT__(detail)` (non-writable) →
 the `ashlr:fleet` window event: `{ id, op, phase, message, command?, exitCode?, output? }`
@@ -849,7 +862,7 @@ asks you to paste them:
 
 ```sh
 # 0. From the repo root.
-cd /Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub
+cd /absolute/path/to/phantom  # a clean checkout of ashlrai/phantom
 
 # 1. Build the web UI and compile the CLI into a single Bun executable.
 #    `npm run build:binary` runs `npm run build` first.

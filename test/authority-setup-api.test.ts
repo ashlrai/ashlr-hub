@@ -153,7 +153,7 @@ describe('GET /api/verse/authority/setup', () => {
 
 describe('GET /api/verse/authority/setup — the trust-root PR, found with gh api reads', () => {
   const BRANCH = `authority/trust-root-${TEST_ROOT.keyId}`;
-  const PR = 'https://github.com/ashlrai/ashlr-hub/pull/512';
+  const PR = 'https://github.com/ashlrai/phantom/pull/512';
 
   /** A Mac with the helper and key in place, the key not yet compiled in; GitHub answers only `gh api` reads. */
   function keyNotCompiledIn(state: { open?: boolean; merged?: boolean; pushed?: boolean }) {
@@ -172,13 +172,13 @@ describe('GET /api/verse/authority/setup — the trust-root PR, found with gh ap
       if (!isReadOnlyGhApiCall(bin, args)) return { status: 1, stdout: '', stderr: 'refused' };
       const path = args[1]!;
       const ok = (value: unknown): GhResult => ({ status: 0, stdout: JSON.stringify(value), stderr: '' });
-      if (path.startsWith('repos/ashlrai/ashlr-hub/pulls?')) return ok(state.open ? [{ html_url: PR }] : []);
-      if (path === 'repos/ashlrai/ashlr-hub') return ok({ default_branch: 'master' });
-      if (path.startsWith('repos/ashlrai/ashlr-hub/contents/src/core/authority/trust-roots.ts?ref=master')) {
+      if (path.startsWith('repos/ashlrai/phantom/pulls?')) return ok(state.open ? [{ html_url: PR }] : []);
+      if (path === 'repos/ashlrai/phantom') return ok({ default_branch: 'master' });
+      if (path.startsWith('repos/ashlrai/phantom/contents/src/core/authority/trust-roots.ts?ref=master')) {
         const source = state.merged ? `keyId: '${TEST_ROOT.keyId}',` : 'Object.freeze([]);';
         return ok({ encoding: 'base64', content: Buffer.from(source).toString('base64') });
       }
-      if (path === `repos/ashlrai/ashlr-hub/git/ref/heads/${BRANCH}` && state.pushed) return ok({ ref: `refs/heads/${BRANCH}` });
+      if (path === `repos/ashlrai/phantom/git/ref/heads/${BRANCH}` && state.pushed) return ok({ ref: `refs/heads/${BRANCH}` });
       return { status: 1, stdout: '', stderr: 'HTTP 404' };
     };
     setAuthoritySetupPlannerForTest(() => planAuthoritySetup({ custody, run, daemonService: async () => 'not-loaded' }));

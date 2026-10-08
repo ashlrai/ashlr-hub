@@ -22,7 +22,10 @@ export const OPERATOR_DOCUMENTATION = Object.freeze([
   'docs/JEV-INTEGRATION.md',
   'docs/AUTONOMY-GAP.md', 'docs/FIRM-DEMO.md',
 ]);
-const SOURCE_PREFIX = 'https://github.com/ashlrai/ashlr-hub/blob/master/';
+const SOURCE_PREFIXES = Object.freeze([
+  'https://github.com/ashlrai/ashlr-hub/blob/master/',
+  'https://github.com/ashlrai/phantom/blob/master/',
+]);
 const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
 
 function inside(root, target) {
@@ -145,10 +148,11 @@ export function checkDocumentation({ root, mode = 'source', entrypoints = OPERAT
     for (const href of document.links) {
       let local = href;
       let base = dirname(origin);
-      if (href.startsWith(SOURCE_PREFIX)) {
+      const sourcePrefix = SOURCE_PREFIXES.find((prefix) => href.startsWith(prefix));
+      if (sourcePrefix) {
         sourceLinks++;
         if (mode === 'package') continue;
-        local = href.slice(SOURCE_PREFIX.length);
+        local = href.slice(sourcePrefix.length);
         base = canonicalRoot;
       } else if (/^[a-z][a-z\d+.-]*:/iu.test(href) || href.startsWith('//')) {
         externalLinks++;

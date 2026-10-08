@@ -43,6 +43,7 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/m54.self-eval.test.ts', // real temporary Git repositories for source-bound legacy/canonical self-target discovery
   'test/authority-claude-native-adapter.test.ts', // real inert native profile, bounded stdin, metadata and separately jailed tools
   'test/authority-claude-native-broker.test.ts', // real authenticated loopback capability and cancellation lifecycle
   'test/authority-claude-tool-worker.test.ts', // real fixed child process, source pin and filesystem boundary

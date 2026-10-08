@@ -296,7 +296,7 @@ export function validateLaunch(draft: LaunchDraft): LaunchValidation {
   const base = draft.baseBranch.trim();
   const prompt = draft.prompt.trim();
   if (!repo) errors.repo = 'Enter the GitHub repository as owner/name.';
-  else if (!CLOUD_REPO_PATTERN.test(repo)) errors.repo = 'Use the GitHub owner/name form, like ashlrai/ashlr-hub.';
+  else if (!CLOUD_REPO_PATTERN.test(repo)) errors.repo = `Use the GitHub owner/name form, like ${CLOUD_DEFAULT_REPO}.`;
   if (base && !isBranchName(base)) errors.baseBranch = "That isn't a branch name git accepts.";
   if (!prompt) errors.prompt = 'Describe the task for the cloud session.';
   else if (prompt.length > CLOUD_PROMPT_MAX_CHARS) {

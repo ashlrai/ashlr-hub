@@ -144,6 +144,14 @@ describe('tasks', () => {
 });
 
 describe('budget', () => {
+  it('targets the canonical repository for new budgets and retains a saved legacy target', () => {
+    expect(readCloudBudget().selfImprove.repo).toBe('ashlrai/phantom');
+    updateCloudBudget({ selfImprove: { repo: 'ashlrai/ashlr-hub' } });
+    expect(readCloudBudget().selfImprove.repo).toBe('ashlrai/ashlr-hub');
+    updateCloudBudget({ maxConcurrent: 2 });
+    expect(readCloudBudget().selfImprove.repo).toBe('ashlrai/ashlr-hub');
+  });
+
   it('defaults when missing, corrupt, or from another schema version', () => {
     expect(readCloudBudget()).toMatchObject({ ...DEFAULT_CLOUD_BUDGET, selfImprove: { ...DEFAULT_CLOUD_BUDGET.selfImprove } });
     fs.mkdirSync(cloudHome(), { recursive: true, mode: 0o700 });
@@ -163,7 +171,7 @@ describe('budget', () => {
     expect(b.creditsTotalUsd).toBe(100);
     expect(b.estimatedCostPerSessionUsd).toBe(3);
     expect(b.maxConcurrent).toBe(1);
-    expect(b.selfImprove).toEqual({ enabled: false, repo: 'ashlrai/ashlr-hub', maxPerDay: 2, reserveUsd: 40, maxOpenPrs: 3 });
+    expect(b.selfImprove).toEqual({ enabled: false, repo: 'ashlrai/phantom', maxPerDay: 2, reserveUsd: 40, maxOpenPrs: 3 });
   });
 
   it('clamps the self-improvement review backpressure to 1..50 (3.13)', () => {
@@ -182,7 +190,7 @@ describe('budget', () => {
     });
     expect(next).toMatchObject({
       v: 1, creditsTotalUsd: 300.46, creditsSpentAdjustmentUsd: 0, maxSessionsPerDay: 500, maxConcurrent: 4,
-      selfImprove: { enabled: false, repo: 'ashlrai/ashlr-hub', maxPerDay: 4, reserveUsd: 25 },
+      selfImprove: { enabled: false, repo: 'ashlrai/phantom', maxPerDay: 4, reserveUsd: 25 },
     });
     expect(Date.parse(next.updatedAt)).toBeGreaterThanOrEqual(before);
     expect(mode(cloudBudgetPath())).toBe(0o600);

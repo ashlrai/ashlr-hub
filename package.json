@@ -1,19 +1,19 @@
 {
-  "name": "@ashlr/hub",
-  "version": "3.25.3",
+  "name": "@ashlr/phantom",
+  "version": "3.26.0",
   "description": "Phantom by AshlrAI: the open-source engineering agent workbench for CLI accounts, local models and autonomous fleets.",
   "publishConfig": {
     "access": "public"
   },
   "license": "MIT",
   "author": "Mason Wyatt <mason@evero-consulting.com>",
-  "homepage": "https://github.com/ashlrai/ashlr-hub#readme",
+  "homepage": "https://phm.dev",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ashlrai/ashlr-hub.git"
+    "url": "git+https://github.com/ashlrai/phantom.git"
   },
   "bugs": {
-    "url": "https://github.com/ashlrai/ashlr-hub/issues"
+    "url": "https://github.com/ashlrai/phantom/issues"
   },
   "keywords": [
     "cli",

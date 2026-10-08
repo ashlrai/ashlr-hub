@@ -92,7 +92,7 @@ function identityViolations(
   const release = parse(releaseSource) as Workflow;
   const packageIdentity = JSON.parse(packageSource) as { name?: string; version?: string };
   const violations: string[] = [];
-  if (packageIdentity.name !== '@ashlr/hub') violations.push('package name');
+  if (packageIdentity.name !== '@ashlr/phantom') violations.push('package name');
   const versions = [promotion.env?.PROMOTION_VERSION, release.env?.RELEASE_VERSION];
   if (versions.some((version) => version !== EXPECTED_VERSION)) {
     violations.push('release version');
@@ -276,7 +276,7 @@ describe('M522 — production-promotion admission has no npm mutation authority'
     expect(packageMetadata.version).toMatch(CANONICAL_RELEASE_VERSION);
     expect(isSuccessorOfFrozenLane(packageMetadata.version)).toBe(true);
     expect(releaseText).not.toContain(`ashlr-hub-${packageMetadata.version}.tgz`);
-    expect(packageMetadata.name).toBe('@ashlr/hub');
+    expect(packageMetadata.name).toBe('@ashlr/phantom');
     expect(releaseWorkflow.env).toMatchObject({
       RELEASE_VERSION: EXPECTED_VERSION,
       RELEASE_DIST_TAG: 'candidate',

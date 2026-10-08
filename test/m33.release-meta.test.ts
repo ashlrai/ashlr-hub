@@ -40,11 +40,18 @@ describe('package.json publish shape', () => {
     const lock = JSON.parse(readFileSync(join(REPO_ROOT, 'package-lock.json'), 'utf8'));
     expect(pkg['bin']).toEqual({ ashlr: 'bin/ashlr', phm: 'bin/ashlr' });
     expect(lock.packages[''].bin).toEqual(pkg['bin']);
+    expect(lock.name).toBe(pkg['name']);
+    expect(lock.version).toBe(pkg['version']);
+    expect(lock.packages[''].name).toBe(pkg['name']);
+    expect(lock.packages[''].version).toBe(pkg['version']);
     expect((pkg['bin'] as Record<string, string>)['phantom']).toBeUndefined();
   });
 
   it('is the public scoped package; provenance is never baked into publishConfig', () => {
-    expect(pkg['name']).toBe('@ashlr/hub');
+    expect(pkg['name']).toBe('@ashlr/phantom');
+    expect(pkg['homepage']).toBe('https://phm.dev');
+    expect(pkg['repository']).toEqual({ type: 'git', url: 'git+https://github.com/ashlrai/phantom.git' });
+    expect(pkg['bugs']).toEqual({ url: 'https://github.com/ashlrai/phantom/issues' });
     expect(pkg['private']).toBeUndefined();
     // e24a7dae removed `publishConfig.provenance: true` on purpose.
     // npm can only mint provenance from a supported CI provider. The baked-in

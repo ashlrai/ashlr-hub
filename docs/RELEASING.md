@@ -1,5 +1,15 @@
 # Releasing Phantom
 
+## Current canonical source candidate
+
+Version 3.26.0 prepares the canonical `ashlrai/phantom` repository and
+`@ashlr/phantom` package, with `phm` and compatible `ashlr` launchers. It is
+not published yet. Release the original canonical CI archive through complete
+exact-source hosted CI, independent Audit, trusted attestation and the normal
+finalizer/artifact installer. Existing legacy local-production policy receipts
+do not admit this canonical profile. Public registry and installed startup
+acceptance remain separate. The frozen historical lane below stays unchanged.
+
 > **Current release process — rechecked 2026-10-08 UTC:** use
 > [Releasing locally](RELEASING-LOCALLY.md) for the current manual release lane.
 > Qualify the final clean source through the current release lane, inspect
@@ -9,7 +19,7 @@
 > disabled during the Linux dependency quarantine. npm publication uses the
 > maintainer's interactive web 2FA and does not carry CI provenance.
 >
-> `@ashlr/hub@3.25.2`, npm `latest` and GitHub `v3.25.2` are independently
+> `@ashlr/hub@3.25.3`, npm `latest` and GitHub `v3.25.3` are independently
 > verified. Public archives match the original qualified bytes; both CLI
 > aliases and all public SDK imports pass an offline consumer install.
 > Installation and resident activation remain separate gates. The frozen

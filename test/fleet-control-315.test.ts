@@ -13,13 +13,18 @@
  *
  * HOME-isolated: run-cancel and the task queue write under a temporary home.
  */
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildFleetControlState, fleetControlVerdict, type FleetControlInputs } from '../src/core/fleet/fleet-control-model.js';
 import type { FleetControlDeps } from '../src/core/fleet/fleet-control.js';
-import { projectFleetControlTickProgress } from '../src/core/fleet/fleet-control.js';
+import * as enrollmentPolicy from '../src/core/sandbox/policy.js';
+import { fleetMirrorsDir } from '../src/core/fleet/repo-identity.js';
+import { defaultFleetControlDeps, projectFleetControlTickProgress } from '../src/core/fleet/fleet-control.js';
 import type { DaemonLivenessV1 } from '../src/core/daemon/liveness.js';
 import type { DaemonTickProgressRead } from '../src/core/daemon/tick-progress.js';
 import { requestRunCancel, runCancelRequested, RUN_CANCEL_TTL_MS, sweepRunCancelRequests } from '../src/core/fleet/run-cancel.js';
@@ -29,6 +34,48 @@ import type { AuthorityStatusV1 } from '../src/core/authority/types.js';
 import type { VerseApiContext } from '../src/core/verse/verse-api.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import { withTempHome } from './helpers/authority-310b.js';
+
+describe('self checkout discovery', () => {
+  it('discovers either reviewed origin, but not foreign repos, mirrors or incomplete custody source', async () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'fleet-self-discovery-'));
+    const makeCheckout = (path: string, repo: string, complete = true): string => {
+      mkdirSync(join(path, '.git'), { recursive: true });
+      writeFileSync(join(path, '.git', 'config'), `[remote "origin"]\n  url = https://github.com/${repo}.git\n`);
+      if (complete) {
+        mkdirSync(join(path, 'scripts'), { recursive: true });
+        mkdirSync(join(path, 'tools', 'custody'), { recursive: true });
+        writeFileSync(join(path, 'scripts', 'install-custody.sh'), '');
+        writeFileSync(join(path, 'tools', 'custody', 'Package.swift'), '');
+      }
+      return path;
+    };
+    const foreign = makeCheckout(join(fixture, 'foreign'), 'other/phantom');
+    const incomplete = makeCheckout(join(fixture, 'incomplete'), 'ashlrai/phantom', false);
+    const mirror = makeCheckout(join(fleetMirrorsDir(), 'self-discovery-fixture'), 'ashlrai/phantom');
+    const registry = vi.spyOn(enrollmentPolicy, 'readEnrollmentRegistry');
+    let clock = Date.now() - 30 * 60_000;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    try {
+      for (const label of ['ashlrai/ashlr-hub', 'ashlrai/phantom']) {
+        const checkout = makeCheckout(join(fixture, label.split('/')[1]!), label);
+        registry.mockReturnValue({ state: 'ready', reason: 'healthy', repos: [foreign, incomplete, mirror, checkout] });
+        clock += 5 * 60_000 + 1; // a fresh discovery, beyond the existing cache TTL
+        expect(await defaultFleetControlDeps().hubCheckout()).toBe(checkout);
+      }
+      registry.mockReturnValue({ state: 'ready', reason: 'healthy', repos: [foreign, incomplete, mirror] });
+      clock += 5 * 60_000 + 1;
+      expect(await defaultFleetControlDeps().hubCheckout()).toBeNull();
+      registry.mockReturnValue({ state: 'degraded', reason: 'malformed-registry' });
+      clock += 5 * 60_000 + 1;
+      expect(await defaultFleetControlDeps().hubCheckout()).toBeNull();
+    } finally {
+      now.mockRestore();
+      registry.mockRestore();
+      rmSync(fixture, { recursive: true, force: true });
+      rmSync(mirror, { recursive: true, force: true });
+    }
+  });
+});
 
 let restore: () => void;
 beforeEach(() => {

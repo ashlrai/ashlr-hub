@@ -83,7 +83,7 @@ export const LINE_DEFAULTS = Object.freeze({
   briefWindowMinutes: 180,
   /** An unanswered question stops holding the next one after this long. */
   questionHoldMs: 24 * 3_600_000,
-  repo: 'ashlrai/ashlr-hub',
+  repo: 'ashlrai/phantom',
   narrativeTimeoutMs: 12_000,
   instantNarrativeTimeoutMs: 8_000,
   watchMaxAgeMs: 7 * 86_400_000,

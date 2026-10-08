@@ -33,6 +33,7 @@
  */
 import { readFile, stat } from 'node:fs/promises';
 
+import { isHubRepositoryLabel } from '../authority/repository-binding.js';
 import type { AuthorityStatusV1 } from '../authority/types.js';
 import { daysLeft, buildFleetControlState, type FleetControlInputs } from './fleet-control-model.js';
 import type {
@@ -84,8 +85,6 @@ export interface FleetControlDeps {
   grantedRepos(): Promise<string[]>;
   readRunLog(runId: string): Promise<Omit<FleetRunLogV1, 'v' | 'runId' | 'stopRequestedAt'>>;
 }
-
-const HUB = 'ashlrai/ashlr-hub';
 
 async function defaultService(): Promise<{ service: FleetDaemonServiceState; plist: FleetPlistState }> {
   let service: FleetDaemonServiceState = 'unknown';
@@ -174,7 +173,9 @@ async function findHubCheckout(): Promise<string | null> {
     }
     const text = await gitConfigTextAsync(path);
     const url = text ? originUrlFromConfig(text) : null;
-    if (url && nameWithOwnerFromRemote(url)?.toLowerCase() === HUB) return path;
+    const name = url ? nameWithOwnerFromRemote(url) : null;
+    // A discovery hint only; custody and exact granted metadata remain separate gates.
+    if (name && isHubRepositoryLabel(name)) return path;
   }
   return null;
 }

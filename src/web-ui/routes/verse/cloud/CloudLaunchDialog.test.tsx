@@ -1,6 +1,6 @@
 /**
  * CloudLaunchDialog — "New cloud task": the repo defaults to
- * ashlrai/ashlr-hub, each bad field is named before anything is sent, a good
+ * ashlrai/phantom, each bad field is named before anything is sent, a good
  * launch posts exactly the request (origin `operator`) and closes, and a
  * server refusal stays in the dialog with the draft intact.
  */
@@ -50,7 +50,7 @@ describe('CloudLaunchDialog', () => {
   it('opens on the task box with the repo prefilled and the estimate stated', () => {
     stubCloudFetch(overview());
     const { dialog } = setup();
-    expect(within(dialog).getByLabelText('Repository')).toHaveValue('ashlrai/ashlr-hub');
+    expect(within(dialog).getByLabelText('Repository')).toHaveValue('ashlrai/phantom');
     expect(within(dialog).getByLabelText('Base branch')).toHaveValue('');
     expect(within(dialog).getByLabelText('Task')).toHaveFocus();
     expect(dialog).toHaveTextContent('0 of 20,000 characters · estimated at $3 per session');
@@ -67,7 +67,7 @@ describe('CloudLaunchDialog', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Launch' }));
     const alerts = within(dialog).getAllByRole('alert').map((a) => a.textContent);
     expect(alerts).toEqual([
-      'Use the GitHub owner/name form, like ashlrai/ashlr-hub.',
+      'Use the GitHub owner/name form, like ashlrai/phantom.',
       "That isn't a branch name git accepts.",
       'Describe the task for the cloud session.',
     ]);
@@ -87,7 +87,7 @@ describe('CloudLaunchDialog', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Launch' }));
     await waitFor(() => expect(onLaunched).toHaveBeenCalledWith(launched));
     expect(posted).toEqual([
-      { url: '/api/verse/cloud/launch', body: { repo: 'ashlrai/ashlr-hub', baseBranch: 'v3110-cloud', prompt: 'Fix the flaky tracker test.', origin: 'operator' } },
+      { url: '/api/verse/cloud/launch', body: { repo: 'ashlrai/phantom', baseBranch: 'v3110-cloud', prompt: 'Fix the flaky tracker test.', origin: 'operator' } },
     ]);
     expect(onClose).toHaveBeenCalled();
   });

@@ -9,10 +9,10 @@ import type { VerseApiContext } from '../src/core/verse/verse-api.js';
 const now = Date.parse('2026-10-05T12:00:00Z');
 const response = (value: unknown, status = 200, headers: Record<string, string> = {}): AdoptionHttp => ({ status, headers, body: JSON.stringify(value) });
 const repo = () => ({ full_name: ADOPTION_TARGET.repo, private: false, stargazers_count: 0, forks_count: 7 });
-const npm = () => ({ package: '@ashlr/hub', start: '2026-09-01', end: '2026-09-30', downloads: Array.from({ length: 30 }, (_, i) => ({ day: `2026-09-${String(i + 1).padStart(2, '0')}`, downloads: i })) });
+const npm = () => ({ package: '@ashlr/phantom', start: '2026-09-01', end: '2026-09-30', downloads: Array.from({ length: 30 }, (_, i) => ({ day: `2026-09-${String(i + 1).padStart(2, '0')}`, downloads: i })) });
 const traffic = (kind = 'views') => ({ count: 8, uniques: 3, [kind]: [{ timestamp: '2026-10-02T00:00:00Z', count: 0, uniques: 0 }, { timestamp: '2026-10-04T00:00:00Z', count: 8, uniques: 3 }] });
-const release = () => ({ id: 5, tag_name: 'v3.22.2', published_at: '2026-10-01T00:00:00Z', draft: false, prerelease: false, url: 'https://api.github.com/repos/ashlrai/ashlr-hub/releases/5' });
-const asset = (id = 10) => ({ id, name: 'Ashlr.dmg', download_count: 3, state: 'uploaded', url: `https://api.github.com/repos/ashlrai/ashlr-hub/releases/assets/${id}`, browser_download_url: 'https://github.com/ashlrai/ashlr-hub/releases/download/v3.22.2/Ashlr.dmg', uploader: { login: 'private-person' } });
+const release = () => ({ id: 5, tag_name: 'v3.22.2', published_at: '2026-10-01T00:00:00Z', draft: false, prerelease: false, url: 'https://api.github.com/repos/ashlrai/phantom/releases/5' });
+const asset = (id = 10) => ({ id, name: 'Ashlr.dmg', download_count: 3, state: 'uploaded', url: `https://api.github.com/repos/ashlrai/phantom/releases/assets/${id}`, browser_download_url: 'https://github.com/ashlrai/phantom/releases/download/v3.22.2/Ashlr.dmg', uploader: { login: 'private-person' } });
 function fakeTransport(): AdoptionTransport {
   return {
     github: vi.fn(async (path) => response(path.endsWith('/latest') ? release() : path.includes('/assets?') ? [asset()] : path.includes('/traffic/') ? traffic(path.includes('/clones?') ? 'clones' : 'views') : repo())),
@@ -25,6 +25,7 @@ describe('source semantics and strict parsers', () => {
   it('retains zero stocks but refuses a private or wrong repository', () => {
     expect(parseAdoptionRepository(repo())).toEqual({ repo: ADOPTION_TARGET.repo, stars: 0, forks: 7 });
     expect(parseAdoptionRepository({ ...repo(), full_name: 'private/other' })).toBeNull();
+    expect(parseAdoptionRepository({ ...repo(), full_name: 'ashlrai/ashlr-hub' })).toBeNull();
     expect(parseAdoptionRepository({ ...repo(), private: true })).toBeNull();
   });
   it.each([-1, 0.5, Infinity, Number.MAX_SAFE_INTEGER + 1])('refuses malformed count %s', (n) => {
@@ -41,6 +42,7 @@ describe('source semantics and strict parsers', () => {
     expect(parseAdoptionNpm(raw)).toMatchObject({ complete: false, total: null });
     expect(parseAdoptionNpm(raw)?.days[4]).toEqual({ day: '2026-09-05', count: null });
     expect(parseAdoptionNpm({ ...npm(), package: 'other' })).toBeNull();
+    expect(parseAdoptionNpm({ ...npm(), package: '@ashlr/hub' })).toBeNull();
     expect(parseAdoptionNpm({ ...npm(), downloads: [...npm().downloads, npm().downloads[0]] })).toBeNull();
     expect(parseAdoptionNpm({ ...npm(), start: '2026-02-30' })).toBeNull();
   });
@@ -111,13 +113,13 @@ describe('fixed source reader', () => {
   });
   it('latest-only assets require complete valid pagination and retain asset IDs', async () => {
     const t = fakeTransport();
-    t.github = vi.fn(async (path) => path.endsWith('/latest') ? response(release()) : path.endsWith('page=1') ? response([asset()], 200, { link: '<https://api.github.com/repos/ashlrai/ashlr-hub/releases/5/assets?per_page=100&page=2>; rel="next"' }) : response([asset(11)]));
+    t.github = vi.fn(async (path) => path.endsWith('/latest') ? response(release()) : path.endsWith('page=1') ? response([asset()], 200, { link: '<https://api.github.com/repos/ashlrai/phantom/releases/5/assets?per_page=100&page=2>; rel="next"' }) : response([asset(11)]));
     expect(await readAdoptionSource('release', t, signal(), now)).toMatchObject({ ok: true, value: { id: 5, coverage: 'latest-published-release-only', assets: [{ id: 10 }, { id: 11 }] } });
     t.github = vi.fn(async (path) => path.endsWith('/latest') ? response(release()) : response([asset()], 200, { link: '<https://evil.example/secret>; rel="next"' }));
     expect(await readAdoptionSource('release', t, signal(), now)).toMatchObject({ ok: false, reason: 'invalid-response' });
   });
   it('a failure on a later asset page rejects the partial listing', async () => {
-    const t = fakeTransport(); t.github = vi.fn(async (path) => path.endsWith('/latest') ? response(release()) : path.endsWith('page=1') ? response([asset()], 200, { link: '<https://api.github.com/repos/ashlrai/ashlr-hub/releases/5/assets?per_page=100&page=2>; rel="next"' }) : response({}, 429, { 'retry-after': '900' }));
+    const t = fakeTransport(); t.github = vi.fn(async (path) => path.endsWith('/latest') ? response(release()) : path.endsWith('page=1') ? response([asset()], 200, { link: '<https://api.github.com/repos/ashlrai/phantom/releases/5/assets?per_page=100&page=2>; rel="next"' }) : response({}, 429, { 'retry-after': '900' }));
     expect(await readAdoptionSource('release', t, signal(), now)).toEqual({ ok: false, reason: 'rate-limited', retryAt: now + 900_000 });
   });
   it('a repository mismatch and oversized/malformed payload stay unknown', async () => {
