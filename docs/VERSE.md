@@ -2,15 +2,15 @@
 
 # Phantom user guide
 
-Phantom by AshlrAI, formerly Ashlr Verse, is the operator console for the Ashlr
-hub. One window: chat with an agent that can edit your repos, delegate work to
+Phantom by AshlrAI, formerly Ashlr Verse, is the engineering agent workbench.
+One window: chat with an agent that can edit your repos, delegate work to
 the autonomous fleet, review what it produced while you were away, and see what
 every account and local model is costing you.
 
-The CLI remains `ashlr` and `ashlr verse`, the package remains `@ashlr/hub`,
-and routes remain `/verse/`. The compatible macOS installation is still
-`Ashlr.app`; its window and menus display Phantom. Older screenshots and
-historical references retain their captured names. See
+The primary CLI is `phm`; `ashlr` and `ashlr verse` remain compatible. The
+package remains `@ashlr/hub`, and routes remain `/verse/`. Published 3.25.2
+installs `Phantom.app`. The historical 3.25.0 release used `Ashlr.app`; older
+screenshots and references retain their captured names. See
 [the product naming guide](PHANTOM-BRAND.md).
 
 The two primary workspaces are **Work with me** and **Work for me**.
@@ -835,7 +835,7 @@ The resident daemon still re-verifies the grant, Stop and the switch on every
 tick.
 
 In the desktop Fleet control, **Custody source checkout** defaults to the detected
-enrolled Hub checkout. Choose another trusted Hub checkout before **Reinstall /
+enrolled Phantom checkout. Choose another trusted Phantom checkout before **Reinstall /
 upgrade** if it contains the reviewed helper version you need; the install menu
 uses the same choice. Native validates the checkout and shows the installer hash
 and command before asking for administrator approval. Choosing a path does not
@@ -1258,9 +1258,8 @@ picker and the Resources drawer all read it.
 - **Provider marks.** Engine tiles, the seat chip, the chat header, ⌘K, the tasks pane and chart lane labels show
   the provider's own mark: Anthropic's Claude, OpenAI, xAI's Grok or Ollama (path data from @lobehub/icons, MIT).
   The account's name is always written beside the mark.
-- The rail head and public site use the first-party Phantom ghost. The compatible
-  installation remains `Ashlr.app`; native bundle identity and installer migration
-  are separate from the presentation. See [the naming guide](PHANTOM-BRAND.md).
+- The rail head and public site use the first-party Phantom ghost. Published 3.25.2 installs
+  `Phantom.app`; the existing native bundle identity and saved data stay compatible. See [the naming guide](PHANTOM-BRAND.md).
 
 ## Cloud lane (3.11)
 
@@ -1345,7 +1344,7 @@ In 3.10 the V2 Autonomy panels live under **Fleet ▸ Advanced**. They set the
 config-level limits; a standing grant bounds them from above, because effective
 policy is the minimum of the grant, the config and the compiled ceilings.
 
-The Autonomy section is the cockpit for the hub's existing daemon. The loop
+The Autonomy section is the cockpit for Phantom's existing daemon. The loop
 picks work off your goals and backlog, dispatches it to seats, and files the
 results as proposals in Approvals. You read the results later instead of
 watching it happen.
@@ -1419,7 +1418,7 @@ Goals and the backlog are shown read-only in V2.
 ### The emergency stop — what it actually does
 
 **It is not a pause.** Pressing it writes the global sentinel file
-`~/.ashlr/KILL`, and that file is read fail-closed across the whole hub: the
+`~/.ashlr/KILL`, and that file is read fail-closed across Phantom: the
 kill switch counts as *on* unless it is proven absent.
 
 While it is armed:
@@ -1638,146 +1637,48 @@ tray and the Dock badge are the reliable signals there. Details:
 
 ### Install it on this Mac
 
-There is no notarized public installer, but building the compatible Ashlr app for your own Mac
-and keeping it in the Dock is supported. Use a clean release checkout:
+Published 3.25.2 provides the [Phantom macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.2/Phantom_3.25.2_aarch64.dmg).
+It is locally signed, not Apple Developer ID notarized; macOS may require
+**Open Anyway** on first launch. Follow the [desktop installation guide](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md#install)
+for the supported path. Do not copy an app over an existing installation.
 
-```sh
-npm ci
-npm run build:binary
-node desktop/scripts/prepare-sidecar.mjs
-(cd desktop && CI=true cargo tauri build)
-test -d /Applications/Ashlr.app || ditto desktop/src-tauri/target/release/bundle/macos/Ashlr.app /Applications/Ashlr.app
-npm run ship:local -- --native
-```
+For a source build, follow [the guarded installation procedure](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md#installing-the-build-you-make-yourself).
+It requires prior supported Stop/drain and a normally closed, identity-verified
+app. The installer retains rollback evidence and preserves `~/.ashlr`, the
+stable `Ashlr Local` signing identity and current CLI aliases. It does not
+clear Stop, grant new authority or restart the resident fleet.
 
-The `ditto` command seeds a first install only; `ship:local --native` updates
-an existing app with the prebuilt native binary and locally signs it with the
-stable "Ashlr Local" identity. It does not notarize the
-app with Apple Developer ID. The first signing setup may ask for your login
-password and **Always Allow** for the signing key. If Gatekeeper blocks the
-first open, right-click (or Control-click) `Ashlr.app` → **Open**, or use
-System Settings → Privacy & Security → **Open Anyway**.
+Maintainers adopting original release bytes use the separately qualified clean
+implementation's [artifact-only installer](https://github.com/ashlrai/ashlr-hub/blob/master/scripts/install-desktop-artifacts.mjs),
+with the exact candidate source, attested hosted bundle and signed finalizer
+outputs. Inspection does not install; applying is an explicit maintenance
+operation and can remain held or roll back. This is distinct from an ordinary
+DMG download and does not rebuild, repack, sign, grant or resume work.
+
 With Phantom running, right-click its Dock icon → **Options → Keep in Dock**.
-
-**To update:** repeat the build and `ship:local --native` from the new clean
-release checkout, then verify the installed version. The script backs up the
-replaced binary and assets. Nothing in `~/.ashlr` is removed: config, seats,
-autonomy state and window geometry survive.
 
 ### Build it
 
-Prerequisites: Rust ≥ 1.85 with `cargo install tauri-cli --version "^2"`, Bun
-1.x, Node ≥ 22.15, Xcode command line tools. From the repo root:
-
-```sh
-# 1. Compile the CLI into a single Bun executable (runs the web build first)
-npm ci
-npm run build:binary                     # → dist-bin/ashlr + dist-bin/public/
-
-# 2. Stage it as the Tauri sidecar for the host triple
-node desktop/scripts/prepare-sidecar.mjs # → desktop/src-tauri/binaries/ashlr-aarch64-apple-darwin
-                                         # → desktop/src-tauri/resources/public/
-
-# 3. Generate the app icons (once, or after changing icons/icon.svg)
-(cd desktop && npm run icons)
-
-# 4. Bundle
-(cd desktop && CI=true cargo tauri build) # release .app + .dmg
-# For a development bundle instead: (cd desktop && cargo tauri build --debug)
-```
-
-Output: `desktop/src-tauri/target/release/bundle/macos/Ashlr.app` and
-`.../dmg/Ashlr_<version>_aarch64.dmg`. About 6 minutes cold, ~90 seconds when
-only the bundling has to be redone.
-
-**The order is the whole trick.** The `.app` bundles a *copy* of the web
-assets, staged three times on the way in — `vite build` writes
-`dist/core/web/public`, `build:binary` copies that to `dist-bin/public`,
-`prepare-sidecar.mjs` copies that to `desktop/src-tauri/resources/public`, and
-only then does `cargo tauri build` copy that last directory into
-`Ashlr.app/Contents/Resources/public`. `beforeBuildCommand` is deliberately
-empty, so Tauri rebuilds **nothing**: skip step 1 or step 2 and you get a
-freshly compiled Rust shell wrapped around whatever assets a previous run left
-in `resources/`. That has shipped a stale UI more than once. Run steps 1, 2 and
-4 in that order every time, even when only the web changed.
+Use the [desktop build guide](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md#the-exact-steps-on-this-mac)
+for prerequisites and the exact sidecar, web-assets and native build order.
+For release qualification and pinned tools, use [Releasing locally](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
+A compiled shell alone does not prove its bundled CLI or web assets are current.
 
 #### Build failures
 
-The desktop build includes the same dependency inventory and authority-surface
-checks as the CLI build. If `npm run build` or `npm run build:binary` refuses
-an npm runtime closure, stop and inspect the reported toolchain or dependency
-problem. Do not intercept the build command or omit verification steps. Stock
-npm executable shims whose targets remain inside the verified runtime closure
-are supported; escaping links and changed dependency bytes are rejected.
-
-Keep the Mac awake and its lid open during release verification. A suspended
-machine can exhaust a bounded filesystem scan even when the source is valid.
-Re-run the complete gate after resolving the cause; a failed run is not release
-acceptance.
-
-For unattended Tauri packaging, use `CI=true`, not `CI=1`. The CLI parses this
-variable as a boolean, and `CI=true` skips the Finder-driven DMG layout (see
-below).
+Keep failed build and verification results. Resolve the reported cause before
+rerunning the affected complete gate; do not omit dependency, source or
+artifact checks. The [desktop troubleshooting guide](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md#troubleshooting)
+and [DMG diagnostics](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md#is-the-dmg-step-broken)
+cover the existing build failure paths.
 
 #### Verify the bundle actually carries the new assets
 
-Do not trust the build log for this — it reports that it copied a directory,
-not which directory. Check the bundle itself:
-
-```sh
-APP=desktop/src-tauri/target/release/bundle/macos/Ashlr.app
-
-# a. the current native↔web shell contract is present
-grep -rl 'ashlr:desktop-command' "$APP/Contents/Resources/public/next/assets/"
-
-# b. …and it is THIS build's copy, not an older one that also had it
-diff <(cd dist/core/web/public/next/assets && ls | sort) \
-     <(cd "$APP/Contents/Resources/public/next/assets" && ls | sort)
-```
-
-(a) on its own proves nothing: the listener has been in every build for a
-while, so a months-old bundle passes it. (b) is the real test — Vite filenames
-are content hashes, so an identical file list means byte-identical assets.
-
-Then launch it and read the sockets rather than the screen:
-
-```sh
-open "$APP"
-
-lsof -nP -iTCP:7777
-#  LISTEN from Ashlr.app/Contents/MacOS/ashlr  → the sidecar booted
-#  a second ESTABLISHED line from com.apple.WebKit.Networking → the window
-#  loaded the page AND the injected tokens were accepted (that connection is
-#  the SSE stream, which a 401 would never have opened)
-
-ls -a ~/.ashlr/account-connections/ledger | grep -E 'lock|pending'
-#  .resource-quota-refresh.lock and .resource-quota-refresh-pending.json exist
-#  WHILE it runs — that is the collector lease, and it means the app is
-#  gathering live account telemetry rather than serving an empty Usage view
-
-osascript -e 'tell application "Ashlr" to quit'
-lsof -nP -iTCP:7777                        # silent → port released
-pgrep -fl 'Contents/MacOS/ashlr verse'     # silent → sidecar reaped
-ls -a ~/.ashlr/account-connections/ledger | grep -E 'lock|pending'
-                                           # silent → lease released
-```
-
-A lock or pending file surviving the quit means the lease was stranded and the
-next launch will fall back to read-only evidence; delete neither by hand
-without checking that no collector is running.
-
-**The `.app` is the artifact that matters**; the `.dmg` is only a wrapper for
-handing the app to someone else. The DMG step drives Finder over AppleScript to
-lay out the disk-image window, and that step is flaky — it needs a logged-in
-graphical session with Automation permission, and it leaves a mounted
-`/Volumes/dmg.XXXXXX` behind when it fails. `beforeBundleCommand` now clears
-that leftover automatically (`desktop/scripts/dmg-preflight.mjs`), and
-`CI=true cargo tauri build` skips the Finder step entirely, producing a plain
-DMG around an identical app. A DMG failure never invalidates the `.app` that
-was already written. Full diagnosis in `desktop/README.md`.
-
-For a dev loop without bundling, `cd desktop && cargo tauri dev` — it still
-launches the staged sidecar, so run steps 1–2 first.
+Follow the canonical [desktop verification steps](https://github.com/ashlrai/ashlr-hub/blob/master/desktop/README.md#the-exact-steps-on-this-mac)
+and the selected installer's actual byte, signature, process and listener
+checks. A successful build, matching filenames or a visible window alone is
+not installation acceptance. Keep a held rollback journal intact; do not
+clear it or remove a surviving lease merely to make a status look healthy.
 
 ---
 
@@ -1845,13 +1746,13 @@ launches the staged sidecar, so run steps 1–2 first.
   ([DEVIN.md](DEVIN.md#limits)).
 - Caps bound spend per day, not per task. A single expensive dispatch can still
   consume a large share of the day's budget before the meter catches up.
-- Spend figures are the hub's own accounting, not the vendor's billing. Treat
+- Spend figures are Phantom's own accounting, not the vendor's billing. Treat
   them as close, not authoritative.
 - Goals and the backlog are read-only in the Advanced panels — create and edit
   them through the CLI, or let the Leader focus them (every change is in the
   action log and can be vetoed).
 - The emergency stop is global and fail-closed. If the sentinel cannot be read,
-  the hub behaves as though it is armed. That is deliberate, and it means a
+  Phantom behaves as though it is armed. That is deliberate, and it means a
   broken `~/.ashlr` looks like a stopped fleet.
 
 **Usage**
@@ -1906,7 +1807,7 @@ efficiency plugin through temporary per-run configuration. Discovery checks
 executable files on the process PATH, then the managed `~/.local/bin/ashlr-mcp`
 location used by the MCP-only release installation. This handles desktop launches
 without running login-shell startup files. Missing or non-executable files skip
-the optional connection. Hub does not invoke its own `ashlr mcp` server as a
+the optional connection. Phantom does not invoke its own `ashlr mcp` server as a
 substitute. The plugin remains restricted from autonomous runs under the existing
 authority policy.
 
@@ -1924,7 +1825,7 @@ Phone retries distinguish a confirmed server refusal from a missing or failed
 response: uncertain delivery pauses Start and offers chat inspection, keeping
 the prompt instead of blindly dispatching it again.
 
-Port allocation is a physical resource constraint. Workspace creation and restore serialize across repositories in the owning Hub process; exhaustion or an occupied restore range produces an explicit refusal instead of overlapping another workspace. Separate Hub processes do not share a reservation lock. Repositories needing no dedicated ports can set `ports: 0`.
+Port allocation is a physical resource constraint. Workspace creation and restore serialize across repositories in the owning Phantom server process; exhaustion or an occupied restore range produces an explicit refusal instead of overlapping another workspace. Separate Phantom server processes do not share a reservation lock. Repositories needing no dedicated ports can set `ports: 0`.
 
 
 ### Cash exhaustion and resident capacity (3.18)

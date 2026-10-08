@@ -791,7 +791,7 @@ function renderShell() {
   const nav = el('nav', { cls: 'topnav' },
     el('div', { cls: 'nav-brand' },
       el('span', { cls: 'brand-icon' }, '⬡'),
-      el('span', { cls: 'brand-name' }, 'ashlr hub')
+      el('span', { cls: 'brand-name' }, 'Phantom')
     ),
     el('div', { cls: 'nav-links' }, ...navLinks),
     el('div', { cls: 'nav-status' },

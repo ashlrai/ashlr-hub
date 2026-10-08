@@ -139,6 +139,8 @@ describe('agent docs surfaces', () => {
 
   it('agentDocsText is ANSI-free plain text containing every usage line', () => {
     const text = agentDocsText();
+    expect(text).toContain('# Phantom — agent contract');
+    expect(text).toContain('phm or compatible ashlr');
     expect(text).not.toContain('\u001b');
     for (const c of AGENT_COMMANDS) expect(text).toContain(c.usage);
   });
@@ -155,6 +157,8 @@ describe('agent docs surfaces', () => {
 
   it('claudeMdSnippet teaches orient-at-session-start and forbids the human gates', () => {
     const snippet = claudeMdSnippet();
+    expect(snippet).toContain('## Phantom (portfolio command center');
+    expect(snippet).toContain('phm or compatible ashlr');
     expect(snippet).toContain('ashlr orient');
     expect(snippet).toContain('NEVER run');
     expect(snippet).toContain('ashlr inbox approve|reject');
