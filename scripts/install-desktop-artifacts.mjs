@@ -19,7 +19,7 @@ const admissions = new WeakMap();
 const digest = data => createHash('sha256').update(data).digest('hex');
 const same = (a, b) => ['dev','ino','uid','mode','nlink','size','mtimeMs','ctimeMs'].every(k => a[k] === b[k]);
 // These labels identify the failed boundary, never the error's private details.
-const FAILURE_PHASES = new Set(['preflight','implementation','finalized-artifacts','manifest-signature','artifact-bytes','artifact-signature','app-record','package-archive','source','hosted-proof','current','app-identity','aliases','quiescence','staging','package','late-artifacts','late-source','late-implementation','late-hosted-proof','late-package','late-current','late-aliases','late-quiescence','app-transaction','app-move','app-signature','app-launch','owned-health','pointer-switch','alias-create','pointer-recovery']);
+const FAILURE_PHASES = new Set(['preflight','implementation','finalized-artifacts','manifest-signature','artifact-bytes','artifact-signature','app-record','package-archive','source','hosted-proof','current','app-identity','aliases','quiescence','staging','package','late-artifacts','late-source','late-implementation','late-hosted-proof','late-package','late-current','late-aliases','late-quiescence','app-transaction','app-move','app-signature','app-launch','owned-health','pointer-switch','alias-create','pointer-recovery','destination','late-destination']);
 function phaseError(phase,error) {
   const failure=error instanceof Error?error:new Error('Installer boundary refused');
   if (!FAILURE_PHASES.has(failure.installerPhase)) failure.installerPhase=phase;
@@ -204,8 +204,8 @@ export async function applyInspectedDesktopArtifacts(result) {
   // inode-matching bundle whose contents changed during that earlier proof.
   const rename=io.renameExclusive.bind(io);
   io.renameExclusive=(from,to,expected)=>boundary('app-move',()=>{sameApp(transaction.inspectLocalApp(from,m.app.signer,io),{...expected,path:from});rename(from,to,expected);});
-  const current=join(d.home,'.local/share/ashlr/current'),previous=boundary('current',()=>io.readCurrentPointer(current));
-  boundary('current',()=>newerCurrent(previous,m,io));
+  const current=join(d.home,'.local/share/ashlr/current'),destination=join(d.home,'.local/share/ashlr/releases',m.source.revision),previous=boundary('current',()=>io.readCurrentPointer(current));
+  boundary('current',()=>{assert.notEqual(previous?.target,destination,'candidate destination is already current');newerCurrent(previous,m,io);});
   const selected=boundary('app-identity',()=>{const value=transaction.selectLocalApp(m.app.signer,io);assert.ok(value,'existing app unavailable');return value;});
   const aliases=boundary('aliases',()=>transaction.inspectLocalAliases(io));
   await boundary('quiescence',()=>transaction.requireLocalQuiescence(io));
@@ -225,29 +225,43 @@ export async function applyInspectedDesktopArtifacts(result) {
   };
   await freshInputs();
   const releases=join(d.home,'.local/share/ashlr/releases');safeInstallParents(d.home,releases);
-  const destination=join(releases,m.source.revision);boundary('staging',()=>fs.mkdirSync(destination,{mode:0o700}));
-  const stageParent=join(d.home,'.ashlr/updates/manual-staging');safeInstallParents(d.home,stageParent);
-  const stage=fs.mkdtempSync(join(stageParent,'paired-'));fs.chmodSync(stage,0o700);
+  const createdDestination=boundary('destination',()=>{
+    try {fs.mkdirSync(destination,{mode:0o700});return true;} catch(error) {if(error.code!=='EEXIST')throw error;return false;}
+  });
   const archivePins={artifactPath:join(input.artifacts,m.cli.filename),sha256:m.cli.sha256,revision:m.source.revision,version:m.version};
-  const archive=await d.primitives.readPinnedRuntimeArchive(archivePins);d.primitives.extractPinnedRuntimeArchive(archive,destination);
-  const appRoot=d.primitives.extractSignedAppArchive(observed.files.get(m.app.filename).data,stage);
-  const app=transaction.inspectLocalApp(appRoot,m.app.signer,io);assert.equal(app.inventory,m.app.inventorySha256,'app inventory differs');
-  const packageReady=async()=> {
+  if(createdDestination) {
+    const archive=await boundary('package-archive',()=>d.primitives.readPinnedRuntimeArchive(archivePins));
+    boundary('staging',()=>d.primitives.extractPinnedRuntimeArchive(archive,destination));
+  }
+  // A retained release is data, not a replayed stage or saved admission. Never
+  // overwrite it: fresh original-package proof and stable ownership are required.
+  const destinationIdentity=boundary('destination',()=>directory(destination)),destinationAncestors=parents(destination);
+  const destinationStable=()=>{
+    assert.ok(same(destinationIdentity,directory(destination)),'candidate release directory changed');
+    assert.deepEqual(parents(destination),destinationAncestors,'candidate release ancestors changed');
+  };
+  const packageReady=async(phase='destination')=> {
+    boundary(phase,destinationStable);
     await d.primitives.verifyInstalledRuntimeArchive(destination,archivePins);
     const surface=d.primitives.verifyAuthoritySurfaceAt(destination,'installed',{fresh:true});
     assert.ok(surface.ok && surface.digest===m.authoritySurfaceDigest,'candidate authority surface differs');
+    boundary(phase,destinationStable);
   };
+  await boundary('package',packageReady);
+  const stageParent=join(d.home,'.ashlr/updates/manual-staging');safeInstallParents(d.home,stageParent);
+  const stage=fs.mkdtempSync(join(stageParent,'paired-'));fs.chmodSync(stage,0o700);
+  const appRoot=d.primitives.extractSignedAppArchive(observed.files.get(m.app.filename).data,stage);
+  const app=transaction.inspectLocalApp(appRoot,m.app.signer,io);assert.equal(app.inventory,m.app.inventorySha256,'app inventory differs');
   let switched=null,created=[],phase=null;
   const journal=io.writeInstallJournal.bind(io);
   io.writeInstallJournal=(owner,value)=>{journal(owner,value);phase=value.phase;};
   const beforePublication=async()=> {
-    await freshInputs();await boundary('late-package',packageReady);
+    await freshInputs();await boundary('late-package',()=>packageReady('late-destination'));
     boundary('late-current',()=>{assert.deepEqual(io.readCurrentPointer(current),previous,'current pointer changed');newerCurrent(previous,m,io);});
     boundary('late-aliases',()=>assert.deepEqual(transaction.inspectLocalAliases(io),aliases,'CLI aliases changed'));
     await boundary('late-quiescence',()=>transaction.requireLocalQuiescence(io));
   };
   try {
-    await boundary('package',packageReady);
     await boundary('app-transaction',()=>transaction.installLocalApp({selected,source:appRoot,sourceProof:app,signer:m.app.signer,version:m.version,native:true,preserveSigned:true,previousCurrent:previous.target,
       beforeSwitch:async()=>{await beforePublication();sameApp(transaction.selectLocalApp(m.app.signer,io),selected);},
       commitPointer:async()=>{await beforePublication();switched=boundary('pointer-switch',()=>io.switchCurrentPointer(current,previous,destination));created=boundary('alias-create',()=>transaction.createLocalAliases(aliases,io));},

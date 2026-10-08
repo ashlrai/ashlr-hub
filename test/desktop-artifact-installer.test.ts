@@ -259,6 +259,65 @@ describe.skipIf(process.platform==='win32')('manual original paired artifact ins
       await expect(applyInspectedDesktopArtifacts(r)).rejects.toThrow();expect(f.stages.size).toBe(0);
     }
   });
+  it.each(['extra','missing','bytes','executable','directory-link','directory-mode','current'])('refuses retained %s release without overwriting it or creating a new app journal',async kind=> {
+    const f=fixture(),dest=join(f.home,'.local/share/ashlr/releases',f.m.source.revision);
+    const archive=await readPinnedRuntimeArchive({artifactPath:join(f.artifacts,f.m.cli.filename),sha256:f.m.cli.sha256,revision:f.m.source.revision,version:f.m.version});
+    fs.mkdirSync(dest,{mode:0o700});extractPinnedRuntimeArchive(archive,dest);
+    if(kind==='extra')write(join(dest,'foreign'),'preserve foreign bytes');
+    if(kind==='missing')fs.unlinkSync(join(dest,'dist/cli/index.js'));
+    if(kind==='bytes')write(join(dest,'dist/cli/index.js'),'preserve changed bytes',0o644);
+    if(kind==='executable')fs.chmodSync(join(dest,'bin/ashlr'),0o644);
+    if(kind==='directory-link'){fs.renameSync(dest,join(f.root,'original-release'));fs.symlinkSync(join(f.root,'original-release'),dest);}
+    if(kind==='directory-mode')fs.chmodSync(dest,0o777);
+    if(kind==='current'){
+      write(join(dest,'package.json'),JSON.stringify({name:'@ashlr/hub',version:'3.25.1'}),0o644);
+      write(join(dest,'dist/build-identity.json'),JSON.stringify({schemaVersion:1,provenance:'git',dirty:false,revision:f.m.source.revision,packageVersion:'3.25.1'}),0o644);
+      fs.unlinkSync(f.current);fs.symlinkSync(dest,f.current);
+    }
+    const before=fileIdentity(dest),members=fs.readdirSync(dest).sort(),r=await inspectDesktopArtifactInstall(f.input,f.deps);
+    await expect(applyInspectedDesktopArtifacts(r)).rejects.toThrow();
+    expect(fileIdentity(dest)).toEqual(before);expect(fs.readdirSync(dest).sort()).toEqual(members);expect(f.stages.size).toBe(0);
+    if(kind==='extra')expect(fs.readFileSync(join(dest,'foreign'),'utf8')).toBe('preserve foreign bytes');
+    if(kind==='bytes')expect(fs.readFileSync(join(dest,'dist/cli/index.js'),'utf8')).toBe('preserve changed bytes');
+    expect(fs.readFileSync(join(f.retained,'transaction.json'),'utf8')).toBe('old HELD evidence');
+  });
+  it.each([3,4])('refuses same-byte release directory replacement at late proof%d without removing either tree',async contact=> {
+    const f=fixture(),r=await inspectDesktopArtifactInstall(f.input,f.deps),dest=join(f.home,'.local/share/ashlr/releases',f.m.source.revision),saved=join(f.root,'retained-release');
+    const original=ports.verify.getMockImplementation()!;
+    ports.verify.mockImplementation((...args)=>{if(ports.verify.mock.calls.length===contact){fs.renameSync(dest,saved);fs.cpSync(saved,dest,{recursive:true,preserveTimestamps:true});fs.chmodSync(dest,0o700);}return original(...args);});
+    const error=await applyInspectedDesktopArtifacts(r).catch(error=>error);expect(error).toBeInstanceOf(Error);
+    expect(artifactInstallFailure(error)).toMatchObject({state:'rolled-back',phase:'late-destination'});
+    expect(fs.existsSync(saved)).toBe(true);expect(fs.existsSync(dest)).toBe(true);expect(fs.readlinkSync(f.current)).toBe(f.old);
+    expect(fs.readFileSync(join(f.retained,'transaction.json'),'utf8')).toBe('old HELD evidence');
+  });
+  it.each([2,3])('refuses same-byte directory replacement after late package proof%d completes',async proof=> {
+    const f=fixture(),r=await inspectDesktopArtifactInstall(f.input,f.deps),dest=join(f.home,'.local/share/ashlr/releases',f.m.source.revision),saved=join(f.root,'proof-retained-release');
+    let calls=0;
+    f.deps.primitives.verifyInstalledRuntimeArchive=async(root:string,pins:Parameters<typeof verifyInstalledRuntimeArchive>[1])=>{
+      await verifyInstalledRuntimeArchive(root,pins);
+      if(++calls===proof){fs.renameSync(dest,saved);fs.cpSync(saved,dest,{recursive:true,preserveTimestamps:true});fs.chmodSync(dest,0o700);}
+    };
+    const error=await applyInspectedDesktopArtifacts(r).catch(error=>error);expect(error).toBeInstanceOf(Error);
+    expect(artifactInstallFailure(error)).toMatchObject({state:'rolled-back',phase:'late-destination'});
+    expect(fs.existsSync(saved)).toBe(true);expect(fs.existsSync(dest)).toBe(true);expect(fs.readlinkSync(f.current)).toBe(f.old);
+    expect(fs.readFileSync(join(f.retained,'transaction.json'),'utf8')).toBe('old HELD evidence');
+  });
+  it('freshly admits exact retained originals after rollback, creates a new transaction and preserves all previous evidence',async()=> {
+    const f=fixture(),original=ports.verify.getMockImplementation()!,r=await inspectDesktopArtifactInstall(f.input,f.deps);
+    ports.verify.mockImplementation((...args)=>{if(ports.verify.mock.calls.length===4)throw new Error('late original refusal');return original(...args);});
+    await expect(applyInspectedDesktopArtifacts(r)).rejects.toThrow();
+    const first=[...f.stages.keys()][0]!,journal=join(f.applications,basename(first),'transaction.json'),previousJournal=fs.readFileSync(journal);
+    expect(JSON.parse(previousJournal.toString()).phase).toBe('rolled-back');
+    const failed=join(dirname(journal),'failed-bundle'),failedInventory=f.io.appInventory(first+'/failed-bundle');
+    expect(fs.existsSync(failed)).toBe(true);
+    ports.verify.mockImplementation(original);ports.verify.mockClear();
+    const fresh=await inspectDesktopArtifactInstall(f.input,f.deps);
+    expect(await applyInspectedDesktopArtifacts(fresh)).toMatchObject({state:'installed',authorityResumed:false});
+    expect(ports.verify).toHaveBeenCalledTimes(4);expect(f.stages.size).toBe(2);expect(fs.readFileSync(journal)).toEqual(previousJournal);
+    expect(f.io.appInventory(first+'/failed-bundle')).toBe(failedInventory);expect(fs.readFileSync(join(f.retained,'transaction.json'),'utf8')).toBe('old HELD evidence');
+    expect(fs.readlinkSync(f.current)).toBe(join(f.home,'.local/share/ashlr/releases',f.m.source.revision));
+    await expect(applyInspectedDesktopArtifacts(fresh)).rejects.toThrow(/replayed/);
+  });
   it('bounded extractor refuses nonempty/link destinations and original package verifier rejects added members and modes',async()=> {
     const f=fixture(),dest=join(f.root,'extract');fs.mkdirSync(dest,{mode:0o700});write(join(dest,'foreign'),'leave alone');
     expect(()=>extractSignedAppArchive(f.app,dest)).toThrow(/destination/);expect(fs.readFileSync(join(dest,'foreign'),'utf8')).toBe('leave alone');
