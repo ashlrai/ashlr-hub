@@ -9,8 +9,8 @@ every account and local model is costing you.
 
 The primary CLI is `phm`; `ashlr` and `ashlr verse` remain compatible, as do
 `/verse/` routes. The current repository is `ashlrai/phantom` and the source
-package is `@ashlr/phantom` at candidate 3.26.0, which is not yet published.
-The available compatibility release is 3.25.3, distributed as `@ashlr/hub`
+package is the published `@ashlr/phantom@3.26.0`.
+The earlier published compatibility release is 3.25.3, distributed as `@ashlr/hub`
 and `Phantom.app`. The historical 3.25.0 release used `Ashlr.app`; older
 screenshots and references retain their captured names. See
 [the product naming guide](PHANTOM-BRAND.md).
@@ -1264,7 +1264,7 @@ picker and the Resources drawer all read it.
 - **Provider marks.** Engine tiles, the seat chip, the chat header, ⌘K, the tasks pane and chart lane labels show
   the provider's own mark: Anthropic's Claude, OpenAI, xAI's Grok or Ollama (path data from @lobehub/icons, MIT).
   The account's name is always written beside the mark.
-- The rail head and public site use the first-party Phantom ghost. Published 3.25.3 installs
+- The rail head and public site use the first-party Phantom ghost. Published 3.26.0 provides
   `Phantom.app`; the existing native bundle identity and saved data stay compatible. See [the naming guide](PHANTOM-BRAND.md).
 
 ## Cloud lane (3.11)
@@ -1643,9 +1643,9 @@ tray and the Dock badge are the reliable signals there. Details:
 
 ### Install it on this Mac
 
-The available 3.25.3 compatibility release provides the [Phantom macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.25.3/Phantom_3.25.3_aarch64.dmg).
-Canonical 3.26.0 remains an unpublished source candidate.
-The 3.25.3 app is locally signed, not Apple Developer ID notarized; macOS may require
+The published canonical 3.26.0 release provides the [Phantom macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.0/Phantom_3.26.0_aarch64.dmg).
+Publication does not install the app or activate resident authority.
+The 3.26.0 app is locally signed, not Apple Developer ID notarized; macOS may require
 **Open Anyway** on first launch. Follow the [desktop installation guide](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install)
 for the supported path. Do not copy an app over an existing installation.
 

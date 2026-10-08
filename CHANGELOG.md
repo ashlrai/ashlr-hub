@@ -9,11 +9,11 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.26.0] — Unreleased
+## [3.26.0] — 2026-10-08
 
 ### Changed
 
-- Prepare `ashlrai/phantom` and `@ashlr/phantom` as the canonical workbench
+- Adopt `ashlrai/phantom` and `@ashlr/phantom` as the canonical workbench
   identities, with `phm.dev` as the product website. Retain the `phm` and
   `ashlr` launchers, existing accounts and saved data.
 - Bind package installation, release articles and SDK smoke checks to the
