@@ -61,7 +61,7 @@ inbox approval, `applyProposal`, enrollment writes, or config writes.
 - `package.json`: `@ashlr/hub`, public + provenance `publishConfig`,
   `prepublishOnly` (typecheck+lint+test), `prepack` (build), exports map
   (`.`, `./core`, `./types`, `./plugin`, `./package.json`).
-- `.github/workflows/release.yml`: tag `v*` → **verify** (full CI gate) →
+- `.github/workflows/release.yml`: frozen historical tag `v3.3.2` → **verify** (full CI gate) →
   **publish** (`check-version.mjs` tag==version gate, changelog-extract
   release notes — release FAILS without a changelog section,
   `npm publish --provenance`, `gh release create`).

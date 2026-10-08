@@ -1,7 +1,7 @@
 # release.yml — tag-triggered npm candidate publish + recoverable prerelease (M33).
 #
-# Trigger: pushing a tag `v<X.Y.Z>`. Nothing publishes without that explicit
-# human action, and the verify job reuses the exact native CI matrix first.
+# Trigger: only the frozen historical `v3.3.2` tag. The verify job retains
+# the exact native CI matrix; later release tags do not invoke this lane.
 #
 # npm trusted-publisher setup is required for @ashlr/hub and must bind this
 # public repository, release.yml, and the npm-release environment. No
@@ -14,7 +14,7 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v3.3.2"]
 
 permissions: {}
 
