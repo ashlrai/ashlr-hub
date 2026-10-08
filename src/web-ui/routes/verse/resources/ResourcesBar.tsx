@@ -169,7 +169,7 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
     if (row.lastReading) detail.push('Last known usage · latest check failed.');
     if (row.reserve) detail.push(row.reserve.label);
     if (status.usableAgain) detail.push(`Usable again ${status.usableAgain}`);
-    if (status.checked) detail.push(`Checked ${status.checked}`);
+    if (status.checked) detail.push(status.checked);
     out.push({
       key: row.seatId,
       engine: row.engine,

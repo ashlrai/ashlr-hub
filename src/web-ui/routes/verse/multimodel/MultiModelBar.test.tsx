@@ -100,7 +100,11 @@ describe('MultiModelBar', () => {
     stubFetch();
     saveAutoPref('vs_1', 'off');
     const { intercept } = renderBar('anything');
-    expect(screen.getByRole('combobox', { name: 'Auto seat' })).toHaveDisplayValue('Auto off');
+    const routing = screen.getByRole('combobox', { name: 'Routing mode' });
+    expect(routing).toHaveDisplayValue('Manual');
+    await userEvent.setup().tab();
+    expect(routing).toHaveFocus();
+    expect(routing).toHaveAccessibleDescription('Send to the model chosen for this chat.');
     await expect(intercept('anything')).resolves.toBe('send-here');
   });
 
@@ -273,7 +277,7 @@ describe('explicit Manager mode', () => {
       return new Response('unused', { status: 404 });
     }));
     const { intercept } = renderBar('Improve this work');
-    expect(screen.getByRole('combobox', { name: 'Auto seat' })).toHaveDisplayValue('Manager');
+    expect(screen.getByRole('combobox', { name: 'Routing mode' })).toHaveDisplayValue('Delegate');
     await act(async () => { expect(await intercept('Improve this work')).toBe('handled'); });
     expect(posts).toHaveLength(1); expect(posts[0]?.text).toBe('Improve this work');
     expect(flow.send).not.toHaveBeenCalled(); expect(flow.handoff).not.toHaveBeenCalled(); expect(flow.create).not.toHaveBeenCalled();

@@ -315,7 +315,7 @@ describe('queued follow-ups', () => {
     const user = userEvent.setup();
     const p = props({ running: true });
     await renderReady(p);
-    const choice = await screen.findByRole('combobox', { name: 'Auto seat' });
+    const choice = await screen.findByRole('combobox', { name: 'Routing mode' });
     const box = screen.getByRole('textbox', { name: 'Message' });
     await user.type(box, 'Keep this draft');
     expect(screen.getByRole('button', { name: 'Queue this message — it sends when the turn ends' })).toBeEnabled();

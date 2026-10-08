@@ -82,14 +82,16 @@ describe('a Devin chat’s header', () => {
 
 describe('Auto seat on a Devin chat', () => {
   it('is offered exactly as on a Claude chat (3.15): Devin is a routable elite seat, so Auto can stay on it', async () => {
+    // Load the real lazy chunk before measuring the control's render readiness.
+    await import('../multimodel/MultiModelBar.js');
     const claude = session({ id: 'vs_claude', engine: 'claude', seatId: CLAUDE_SEAT.id, accountId: CLAUDE_SEAT.accountId, model: CLAUDE_SEAT.models[0]!.id, turnCount: 1 });
     const { unmount } = render(<Workspace {...props({ view: view(claude), seats: [CLAUDE_SEAT, DEVIN_SEAT] })} />);
-    expect(await screen.findByRole('combobox', { name: 'Auto seat' })).toBeInTheDocument();
+    expect(await screen.findByRole('combobox', { name: 'Routing mode' })).toBeInTheDocument();
     unmount();
 
     render(<Workspace {...props({ seats: [CLAUDE_SEAT, DEVIN_SEAT] })} />);
     await waitFor(() => expect(screen.getByTestId('devin-meter')).toBeInTheDocument());
-    expect(await screen.findByRole('combobox', { name: 'Auto seat' })).toBeInTheDocument();
+    expect(await screen.findByRole('combobox', { name: 'Routing mode' })).toBeInTheDocument();
   });
 });
 
