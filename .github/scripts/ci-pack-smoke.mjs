@@ -309,7 +309,7 @@ export async function preparePack({ root, eventSha, snapshotPath, runNpm = execF
 }
 
 /** Fresh same-job validation; never repack or substitute another archive on refusal. */
-export async function reusePack({ root, eventSha, snapshotPath, recordSha256 }) {
+export async function reusePackDetails({ root, eventSha, snapshotPath, recordSha256 }) {
   root = realpathSync(root);
   const options = { root, eventSha, snapshotPath };
   const observed = validateBuild(options);
@@ -317,7 +317,8 @@ export async function reusePack({ root, eventSha, snapshotPath, recordSha256 }) 
   assert.ok(parent !== root && !parent.startsWith(`${root}${sep}`), 'pack destination must be outside source');
   assert.equal(record.root, root);
   assert.deepEqual(record.source, observed.source, 'original pack source differs');
-  assert.equal(record.filename, `${observedProfile(root, observed).archivePrefix}-${observed.source.identity.packageVersion}.tgz`, 'original package profile differs');
+  const profile = observedProfile(root, observed);
+  assert.equal(record.filename, `${profile.archivePrefix}-${observed.source.identity.packageVersion}.tgz`, 'original package profile differs');
   const destination = packDirectory(parent, record.directory);
   assert.deepEqual(directoryIdentity(privateDirectory(destination)), record.directoryIdentity, 'original pack directory changed');
   assert.deepEqual(readdirSync(destination), [record.filename]);
@@ -326,10 +327,15 @@ export async function reusePack({ root, eventSha, snapshotPath, recordSha256 }) 
   await validateRuntimePackage(options, observed, path, captured);
   readPackRecord(snapshotPath, recordSha256);
   assert.deepEqual(directoryIdentity(privateDirectory(destination)), record.directoryIdentity, 'original pack directory changed during preflight');
-  return path;
+  return Object.freeze({ path, packageName: profile.packageName });
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Retain the original string API; both forms run the same complete admission.
+export async function reusePack(options) {
+  return (await reusePackDetails(options)).path;
+}
+
+async function main() {
   try {
     const [command, operand, extra] = process.argv.slice(2);
     assert.equal(extra, undefined, 'unexpected operand');
@@ -341,16 +347,21 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     else if (command === 'prepare') path = await preparePack({ ...options, snapshotPath: operand });
     else if (command === 'reuse') path = await reusePack({ ...options, snapshotPath: operand,
       recordSha256: process.env.ASHLR_PACK_SMOKE_RECORD_SHA256 });
+    else if (command === 'reuse-details') path = JSON.stringify(await reusePackDetails({ ...options, snapshotPath: operand,
+      recordSha256: process.env.ASHLR_PACK_SMOKE_RECORD_SHA256 }));
     else if (command === 'verify') {
       validateBuild({ ...options, snapshotPath: operand });
       path = 'same-job build unchanged';
     } else if (command === 'cleanup') {
       cleanupSnapshot(operand);
       path = 'owned build snapshot removed';
-    } else assert.fail('expected capture, prepare, reuse, pack, verify or cleanup');
+    } else assert.fail('expected capture, prepare, reuse, reuse-details, pack, verify or cleanup');
     console.log(path);
   } catch (error) {
     console.error(`pack smoke refused: ${error.message}`);
     process.exitCode = 1;
   }
 }
+
+// Keep the closed profile resolver importable by source-only package smoke.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) void main();
