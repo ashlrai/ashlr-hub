@@ -117,10 +117,12 @@ async function fixture(mode: Mode) {
     return { url: 'http://127.0.0.1:1', consoleUrl: 'http://127.0.0.1:1', close: async () => { isOpen = false; } };
   });
   adapters.request.mockImplementation(async ({ path, body }: { path: string; body?: Record<string, unknown> }) => {
-    if (path === '/api/resources/engineering-supervision') return { configId: (active!.policy as typeof policy).id, sourceState: 'healthy', paused: false,
-      deadlineAt: config.deadlineAt, entries: [{ state: 'completed' }] };
+    if (path === '/api/resources/engineering-supervision') return { schemaVersion: 1, configId: (active!.policy as typeof policy).id,
+      configDigest: missionHash(active!.policy), sourceState: 'healthy', state: 'completed', paused: false, revision: 1,
+      deadlineAt: config.deadlineAt, entries: [{ enrollmentId: tipFor(active!).enrollmentId,
+        enrollmentDigest: tipFor(active!).enrollmentDigest, state: 'completed', reasons: ['completed'], attempts: 1 }] };
     if (path === '/api/resources/engineering-successors') return { supervisionId: (active!.policy as typeof policy).id,
-      deadlineAt: config.deadlineAt, entries: [{ state: 'admitted' }] };
+      deadlineAt: config.deadlineAt, entries: [{ state: 'admitted', successorId: tipFor(active!).enrollmentId }] };
     if (path === '/api/resources/tasks') {
       const { retainHistory: _retain, projectId: _project, ...submitted } = body!;
       task = { ...submitted, schemaVersion: 1, cwd: workspace } as ResourceTask;
