@@ -47,6 +47,8 @@ vi.mock('../src/core/resources/engineering-mission-console.js', async () => {
         const row = project(value); const entries = Array.isArray(row?.entries) ? row.entries.slice(0, 8).map(project) : [];
         if (route === 'supervision') missionDiagnostics.latestQueue = {
           state: closed(row?.state, ['idle', 'running', 'paused', 'completed', 'timed-out', 'closed', 'unavailable']),
+          revision: typeof row?.revision === 'number' && Number.isSafeInteger(row.revision) && row.revision >= 0 ? row.revision : null,
+          entryCount: Array.isArray(row?.entries) ? row.entries.length : null,
           sourceState: closed(row?.sourceState, ['healthy', 'degraded']), paused: typeof row?.paused === 'boolean' ? row.paused : null,
           entries: entries.map(entry => ({ state: closed(entry?.state, ['waiting', 'running', 'completed', 'held', 'stopped', 'unavailable']),
             attempts: finite(entry?.attempts), reasons: Array.isArray(entry?.reasons) ? entry.reasons.slice(0, 8).map(reason => closed(reason,
@@ -198,7 +200,8 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     const first = await runResourceEngineeringMission(f.config, { signal: stop.signal, onProgress(value) {
       phases.push(`${value.scope}:${value.phase}`); if (value.scope === 1 && value.phase === 'verifying') stop.abort(); reportPhase(value);
     } });
-    if (first.state !== 'stopped' || first.scopesReserved !== 1 || first.deadlineAt !== f.config.deadlineAt) failureDiagnostics('first');
+    if (first.state !== 'stopped' || first.scopesReserved !== 1 || first.deadlineAt !== f.config.deadlineAt ||
+      f.calls.generation !== 2 || f.calls.successor !== 1 || f.calls.mission !== 0) failureDiagnostics('first');
     expect(first, JSON.stringify({ first, phases, calls: f.calls, errors: f.errors })).toMatchObject({ state: 'stopped', scopesReserved: 1, deadlineAt: f.config.deadlineAt });
     expect(f.calls).toEqual({ generation: 2, successor: 1, mission: 0 });
     expect(readEngineeringMissionInvocations(f.config)).toMatchObject({ count: 1, unfinishedCount: 0,
