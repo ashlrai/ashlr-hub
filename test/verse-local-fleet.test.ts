@@ -530,6 +530,69 @@ describe('projectFleetSnapshot — the cockpit contract', () => {
 });
 
 describe('localFleetOutcomeOf', () => {
+  it.each([
+    ['engine-failed', 'failed'],
+    ['producer-failed', 'failed'],
+    ['gate-blocked', 'failed'],
+    ['cancelled', 'cancelled'],
+    ['proposal-created', 'proposed'],
+    ['empty-diff', 'no-proposal'],
+    ['no-diff', 'no-proposal'],
+    ['unknown-outcome', 'no-proposal'],
+  ] as const)('preserves %s detail and classifies it as %s', (production, outcome) => {
+    expect(localFleetOutcomeOf({ dispatched: true, dispatch: { production: { outcome: production } } }))
+      .toEqual({ outcome, detail: production });
+  });
+
+  it('keeps an undispatched engine failure skipped and absent production a no-proposal', () => {
+    expect(localFleetOutcomeOf({ dispatched: false, dispatch: {
+      production: { outcome: 'engine-failed' }, skipReason: 'kill-switch',
+    } })).toEqual({ outcome: 'skipped', detail: 'kill-switch' });
+    expect(localFleetOutcomeOf({ dispatched: true }))
+      .toEqual({ outcome: 'no-proposal', detail: 'no proposal produced' });
+  });
+
+  it('keeps real engine failures in the serving-runtime backoff until a successful dispatch', () => {
+    let clock = 1_000;
+    const monitor = new LocalFleetMonitor({ now: () => clock });
+    monitor.setSettings(readLocalFleetSettings(localOnlyCfg()));
+    monitor.setCapacity(capacity());
+
+    // Exercise the classification/monitor contract consumed by superviseFleetTurn:
+    // failed dispatches grow the streak, success-like dispatches clear it, and
+    // cancellation or a pre-dispatch skip supplies neither observation.
+    const settle = (result: Parameters<typeof localFleetOutcomeOf>[0]) => {
+      const classified = localFleetOutcomeOf(result);
+      if (classified.outcome === 'failed') monitor.recordRuntimeFailure(classified.detail);
+      else if (classified.outcome === 'proposed' || classified.outcome === 'no-proposal') {
+        monitor.recordRuntimeSuccess();
+      }
+      return classified;
+    };
+    const failed = { dispatched: true, dispatch: { production: { outcome: 'engine-failed' } } };
+    settle(failed);
+    const first = monitor.health();
+    expect(first.consecutiveRuntimeFailures).toBe(1);
+    expect(first.backoffMs).toBeGreaterThan(0);
+    clock = 2_000;
+    settle(failed);
+    const second = monitor.health();
+    expect(second.consecutiveRuntimeFailures).toBe(2);
+    expect(second.backoffMs).toBeGreaterThan(first.backoffMs);
+    expect(second.lastRuntimeSuccessAt).toBe(first.lastRuntimeSuccessAt);
+    expect(second.reasons).toEqual(['engine-failed']);
+
+    settle({ dispatched: true, dispatch: { production: { outcome: 'cancelled' } } });
+    settle({ dispatched: false, dispatch: { skipReason: 'kill-switch' } });
+    expect(monitor.health()).toEqual(second);
+    clock = 3_000;
+    settle({ dispatched: true, dispatch: { production: { outcome: 'proposal-created' } } });
+    expect(monitor.health()).toMatchObject({
+      state: 'healthy', consecutiveRuntimeFailures: 0, backoffMs: 0, reasons: [],
+      lastRuntimeSuccessAt: new Date(clock).toISOString(),
+    });
+  });
+
   it('classifies a filed proposal, a no-diff run, a failure and a skip', () => {
     expect(localFleetOutcomeOf({ dispatched: true, dispatch: { production: { outcome: 'proposal-created' } } }).outcome)
       .toBe('proposed');
