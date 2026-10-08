@@ -629,6 +629,7 @@ jobs:
           rustfmt --edition 2021 --check
           desktop/src-tauri/src/lib.rs
           desktop/src-tauri/src/native_launchd_broker.rs
+          desktop/src-tauri/src/native_updates.rs
 
       - name: Check native broker library
         run: >-
@@ -643,7 +644,7 @@ jobs:
       - name: Test native broker library
         run: >-
           cargo test --manifest-path desktop/src-tauri/Cargo.toml
-          --lib --locked native_launchd_broker -- --nocapture
+          --lib --locked -- --nocapture
 
       - name: Remove disposable Tauri sidecar fixture
         if: always()

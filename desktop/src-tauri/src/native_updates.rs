@@ -864,7 +864,7 @@ mod tests {
         assert!(host_result(good, "3.25.3").is_err());
         assert!(host_result(&good.replace("null", r#""private error""#), "3.25.2").is_err());
         let regression = good
-            .replace("waiting-native-exit", "held")
+            .replace("waiting-native-exit", "blocked")
             .replace("null", r#""candidate-identity-regression""#);
         let result = host_result(&regression, "3.25.2").unwrap();
         assert_eq!(
