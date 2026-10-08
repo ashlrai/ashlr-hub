@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync,
-  openSync, readdirSync, readFileSync, realpathSync, writeFileSync,
+  openSync, readdirSync, readFileSync, readSync, realpathSync, writeFileSync, type BigIntStats,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
@@ -13,6 +13,32 @@ export const MAX_ARTIFACT_ENTRIES = 8_192;
 
 export function digest(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+/** Fresh pinned executable bytes, without an executable-sized allocation or hash cache. */
+export function evaluationExecutableDigest(path: string): string {
+  const changed = (): never => { throw new Error('Evaluator executable unavailable or changed'); };
+  const same = (a: BigIntStats, b: BigIntStats): boolean =>
+    a.dev === b.dev && a.ino === b.ino && a.mode === b.mode && a.uid === b.uid && a.gid === b.gid &&
+    a.nlink === b.nlink && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
+  const before = lstatSync(path, { bigint: true });
+  // executable() already selects a canonical regular path. System ownership,
+  // multiple links and empty files remain compatible with legacy comparators.
+  if (!before.isFile() || before.size < 0n || before.size > BigInt(Number.MAX_SAFE_INTEGER) || realpathSync(path) !== path) changed();
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  try {
+    if (!same(before, fstatSync(fd, { bigint: true }))) changed();
+    const hash = createHash('sha256'), chunk = Buffer.allocUnsafe(256 * 1024);
+    const size = Number(before.size); let offset = 0;
+    while (offset < size) {
+      const count = readSync(fd, chunk, 0, Math.min(chunk.length, size - offset), offset);
+      if (count <= 0) changed();
+      hash.update(chunk.subarray(0, count)); offset += count;
+    }
+    if (readSync(fd, chunk, 0, 1, size) !== 0 || !same(before, fstatSync(fd, { bigint: true })) ||
+        !same(before, lstatSync(path, { bigint: true })) || realpathSync(path) !== path) changed();
+    return hash.digest('hex');
+  } finally { closeSync(fd); }
 }
 
 export function canonical(value: unknown): string {

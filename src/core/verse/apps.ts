@@ -307,7 +307,7 @@ export function buildTerminalScript(input: {
   const lines = [
     '#!/bin/sh',
     'rm -f -- "$0"',
-    `printf '%s\\n' ${shellQuote(`Ashlr Verse: ${stripControl(input.banner).slice(0, 120)}`)}`,
+    `printf '%s\\n' ${shellQuote(`Phantom: ${stripControl(input.banner).slice(0, 120)}`)}`,
     `printf '%s\\n\\n' ${shellQuote(`$ ${commandText(input.display)}`)}`,
     `export PATH=${shellQuote(input.path)}`,
   ];
@@ -433,9 +433,9 @@ function desktopRow(snapshot: AppsSnapshot, entry: AppCatalogEntry): VerseAppRow
     };
   }
   const word = detection.state === 'on'
-    ? detection.source === 'verse-record' ? 'on (as last set from Verse)' : 'on'
+    ? detection.source === 'verse-record' ? 'on (as last set from Phantom)' : 'on'
     : detection.state === 'off'
-      ? detection.source === 'verse-record' ? 'off (as last set from Verse)' : 'off'
+      ? detection.source === 'verse-record' ? 'off (as last set from Phantom)' : 'off'
       : 'state not read';
   return {
     ...base,
@@ -577,7 +577,7 @@ export function buildAppsResponse(snapshot: AppsSnapshot): VerseAppsResponse {
     {
       id: 'desktop',
       title: APP_GROUP_TITLES.desktop,
-      caveat: 'These switch another app to local Ollama models. Leave Claude Desktop off: Verse’s local seats already use Ollama.',
+      caveat: 'These switch another app to local Ollama models. Leave Claude Desktop off: Phantom’s local seats already use Ollama.',
       apps: APPS_CATALOG.filter((e) => e.group === 'desktop').map((e) => desktopRow(snapshot, e)),
     },
     {

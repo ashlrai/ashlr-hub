@@ -313,9 +313,9 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
 /** Render the cheat sheet as plain text (llms.txt-style; no ANSI). */
 export function agentDocsText(): string {
   const lines: string[] = [
-    '# ashlr — agent contract (CLI-first)',
+    '# Phantom — agent contract (CLI-first; phm or compatible ashlr)',
     '',
-    'ashlr is a local-first command center: portfolio memory (genome), local RAG,',
+    'Phantom is a local-first command center: portfolio memory (genome), local RAG,',
     'work discovery (backlog), repo health, and a human-gated approval inbox.',
     'Selected CLI discovery metadata follows; this is not an exhaustive command list',
     'or execution permission. JSON output is ANSI-free. Check each command description',
@@ -353,9 +353,9 @@ export function agentDocsText(): string {
 /** Ready-to-paste CLAUDE.md block (for `ashlr wire --claude-md`). */
 export function claudeMdSnippet(): string {
   return [
-    '## ashlr (portfolio command center)',
+    '## Phantom (portfolio command center; phm or compatible ashlr)',
     '',
-    'This machine runs ashlr — local-first portfolio memory, RAG, and work',
+    'This machine runs Phantom — local-first portfolio memory, RAG, and work',
     'discovery. Use it via Bash:',
     '',
     '- **Session start:** `ashlr orient --repo <repo> --json` — prior decisions,',

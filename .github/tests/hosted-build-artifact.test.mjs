@@ -24,7 +24,7 @@ function tinyTar(path, data) {
   h.write(`${h.reduce((a, b) => a + b, 0).toString(8).padStart(6, '0')}\0 `, 148);
   return Buffer.concat([h, data, Buffer.alloc((512 - data.length % 512) % 512), Buffer.alloc(1024)]);
 }
-function fixture(t, complete = false, repository = hub.legacyName) {
+function fixture(t, complete = false, repository = hub.legacyName, packageName = repository === hub.renamedName ? '@ashlr/phantom' : '@ashlr/hub') {
   const parent = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'ashlr-hosted-artifact-')));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const root = join(parent, 'root'); fs.mkdirSync(root);
@@ -37,7 +37,7 @@ function fixture(t, complete = false, repository = hub.legacyName) {
   t.after(() => { for (const [key, value] of previous) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
   const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   git('init', '--quiet'); fs.writeFileSync(join(root, '.gitignore'), 'dist/\n');
-  fs.writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@ashlr/hub', version: '3.24.3', files: ['dist'] }));
+  fs.writeFileSync(join(root, 'package.json'), JSON.stringify({ name: packageName, version: '3.24.3', files: ['dist'] }));
   fs.writeFileSync(join(root, 'package-lock.json'), '{}'); git('add', '.');
   if (complete) {
     for (const p of ['.github/workflows/ci.yml', 'scripts/test-ci-sharded.mjs', 'vitest.config.ts', 'vitest.config.web.ts']) {
@@ -63,7 +63,7 @@ function fixture(t, complete = false, repository = hub.legacyName) {
   }
   fs.writeFileSync(packageTarball, gzipSync(Buffer.concat([...packaged, Buffer.alloc(1024)])));
   const out = join(parent, 'artifact');
-  const graph = { name: '@ashlr/hub', version: '3.24.3' };
+  const graph = { name: packageName, version: '3.24.3' };
   const options = { root, sha: revision, snapshot, packageTarball, out, tools: () => ({ node: { version: 'v22.22.3', sha256: 'a'.repeat(64) },
     npm: { version: '11.15.0', sha256: 'b'.repeat(64) }, platform: 'linux', arch: 'x64', dependencyGraph: { graph, sha256: digest(JSON.stringify(graph)) } }) };
   return { ...options, options, write, git, parent };
@@ -403,3 +403,22 @@ test('final repository observation cannot change candidate source before admissi
   assert.throws(() => verifyArtifact(f.options), /source is dirty/);
   assert.equal(changed, true); assert.equal(f.calls.length, 3); assert.ok(fs.existsSync(join(f.root, 'dist')));
 });
+
+
+for (const [repository, packageName, filename] of [
+  [hub.legacyName, '@ashlr/hub', 'ashlr-hub-3.24.3.tgz'],
+  [hub.renamedName, '@ashlr/phantom', 'ashlr-phantom-3.24.3.tgz'],
+]) test(`capture binds original source package and exact producer namespace ${repository}`, t => {
+  const f = fixture(t, false, repository, packageName), before = fs.readFileSync(f.packageTarball);
+  const captured = captureArtifact(f.options);
+  assert.equal(captured.package.filename, filename); assert.equal(captured.producer.repository, repository);
+  assert.deepEqual(fs.readFileSync(join(f.out, filename)), before);
+  assert.equal(captured.schemaVersion, 2); // Hosted transport schema is independent from the signed updater profile.
+});
+for (const [repository, packageName] of [[hub.legacyName, '@ashlr/phantom'], [hub.renamedName, '@ashlr/hub']]) {
+  test(`capture refuses mixed source/producer ${repository} ${packageName} before output`, t => {
+    const f = fixture(t, false, repository, packageName);
+    assert.throws(() => captureArtifact(f.options), /source package and producer repository differ/);
+    assert.equal(fs.existsSync(f.out), false);
+  });
+}

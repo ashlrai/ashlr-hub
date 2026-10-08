@@ -52,7 +52,7 @@ export function ConnectionPanel() {
 
   return (
     <Panel title="Connection">
-      <SettingRow label="Server" description="This window talks to one local hub. Nothing leaves your machine.">
+      <SettingRow label="Server" description="This window talks to one local server. Nothing leaves your machine.">
         <div className={styles.origin}>
           <Input value={origin} readOnly mono size="sm" aria-label="Server address" />
         </div>
@@ -108,7 +108,7 @@ export function ConnectionPanel() {
             <strong>Where the tokens come from.</strong> Start the console with{' '}
             <code className={styles.code}>ashlr verse</code> — it prints a read token and a mutation token in that
             terminal, and opens this page. The desktop app injects both for you. Tokens are never displayed here, and
-            the hub never writes them into a page, a log line or an API response. Lost them? Stop the server and start
+            the server never writes them into a page, a log line or an API response. Lost them? Stop the server and start
             it again; it mints a fresh pair.
           </span>
         </p>

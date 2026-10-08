@@ -156,7 +156,7 @@ export function parseDevinMessageBody(body: Record<string, unknown>): { message:
 // Dismiss (local visibility only; remote exposure remains reserved)
 // ---------------------------------------------------------------------------
 
-export const DEVIN_DISMISS_REASON = 'Dismissed in Verse.';
+export const DEVIN_DISMISS_REASON = 'Dismissed in Phantom.';
 
 export function dismissDevinTask(id: string, now: Date = new Date()): { ok: true; task: DevinTaskV1 } | { ok: false; status: 404 | 409; error: string } {
   const task = readDevinTask(id);
@@ -314,7 +314,7 @@ export function devinCliNeedsYouItems(chats: readonly DevinCliChatPrs[], dismiss
         kind: 'owner-lane-pr',
         severity: 'info',
         title: clip(`Devin (CLI) pull request: ${pr.repo}#${pr.number}`, NEEDS_YOU_TITLE_MAX),
-        detail: 'Seen in a Devin (CLI) chat’s output. Verse did not open, verify or track it — review it on GitHub.',
+        detail: 'Seen in a Devin (CLI) chat’s output. Phantom did not open, verify or track it — review it on GitHub.',
         since: new Date(seen).toISOString(),
         expiresAt: new Date(seen + DEVIN_CLI_PR_WINDOW_MS).toISOString(),
         subject: { repo: pr.repo, pr: pr.number, seatId: 'devin-cli', sessionId: chat.sessionId, engine: null },

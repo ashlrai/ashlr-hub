@@ -8,6 +8,7 @@ import { gunzipSync } from 'node:zlib';
 import { Header } from 'tar';
 import { parseBuildIdentity } from '../build-identity.js';
 import { fsyncDirectory } from '../util/durability.js';
+import {getDesktopUpdateProfile, type DesktopUpdateProfileName} from '../desktop/update-manifest.js';
 
 const MAX_COMPRESSED = 64 * 1024 * 1024;
 const MAX_EXPANDED = 128 * 1024 * 1024;
@@ -22,6 +23,8 @@ export interface PinnedRuntimeArchiveOptions {
   sha256: string;
   revision: string;
   version: string;
+  /** Omission preserves the original legacy reader contract. This is data admission, not authority. */
+  identityProfile?: DesktopUpdateProfileName;
 }
 
 export interface RuntimeArchivePins {
@@ -140,6 +143,7 @@ function parseEntries(bytes: Buffer): RuntimeArchiveEntry[] {
 }
 
 function verifyPackage(entries: readonly RuntimeArchiveEntry[], pins: PinnedRuntimeArchiveOptions): void {
+  const profile = getDesktopUpdateProfile(pins.identityProfile ?? 'legacy-v1');
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
   const required = ['package.json', 'dist/build-identity.json', 'bin/ashlr',
     'dist/cli/index.js', 'dist/core/universe/index.js'];
@@ -150,7 +154,7 @@ function verifyPackage(entries: readonly RuntimeArchiveEntry[], pins: PinnedRunt
   let pkg: { name?: unknown; version?: unknown; type?: unknown; bin?: { ashlr?: unknown } };
   try { pkg = JSON.parse(packageBytes.toString('utf8')) as typeof pkg; }
   catch { return fail('invalid package.json'); }
-  if (!pkg || pkg.name !== '@ashlr/hub' || pkg.version !== pins.version ||
+  if (!pkg || pkg.name !== profile.packageName || pkg.version !== pins.version ||
       pkg.type !== 'module' || pkg.bin?.ashlr !== 'bin/ashlr' || !byPath.get('bin/ashlr')!.executable) {
     fail('package name, version, module type or launcher does not match');
   }

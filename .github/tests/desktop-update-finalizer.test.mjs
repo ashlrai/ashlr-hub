@@ -16,9 +16,9 @@ import {inspectTar} from '../../scripts/hosted-build-artifact.mjs';
 const hash = data => createHash('sha256').update(data).digest('hex');
 const repository = {fullName: 'ashlrai/ashlr-hub', repositoryId: 1263526319, repositoryNodeId: 'R_kgDOS0_hrw', ownerLogin: 'ashlrai', ownerId: 258113726, ownerNodeId: 'O_kgDOD2KAvg'};
 const metadata = {full_name: repository.fullName, id: repository.repositoryId, node_id: repository.repositoryNodeId, owner: {id: repository.ownerId, login: repository.ownerLogin}, default_branch: 'master', private: false, visibility: 'public'};
-async function fixture(t) {
+async function fixture(t, profileName = 'legacy-v1') {
   const dir = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'phantom-update-finalizer-test-'))); t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
-  fs.writeFileSync(join(dir, 'package.json'), '{"type":"module"}');
+  fs.writeFileSync(join(dir, 'package.json'), JSON.stringify({type: 'module', name: profileName === 'canonical-v2' ? '@ashlr/phantom' : '@ashlr/hub', version: '3.25.1'}));
   for (const name of ['desktop/update-manifest', 'authority/canonical-json']) {
     const out = join(dir, 'core', `${name}.js`); fs.mkdirSync(join(out, '..'), {recursive: true});
     fs.writeFileSync(out, ts.transpileModule(fs.readFileSync(new URL(`../../src/core/${name}.ts`, import.meta.url), 'utf8'), {compilerOptions: {target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022}}).outputText);
@@ -31,18 +31,19 @@ async function fixture(t) {
   const sig = data => {const signed = sign(null, createHash('blake2b512').update(data).digest(), privateKey); const comment = 'test-only finalizer'; return Buffer.from(`untrusted comment: test\n${Buffer.concat([Buffer.from('ED'), id, signed]).toString('base64')}\ntrusted comment: ${comment}\n${sign(null, Buffer.concat([signed, Buffer.from(comment)]), privateKey).toString('base64')}\n`).toString('base64');};
   const bundle = join(dir, 'bundle'), outputParent = join(dir, 'output'); fs.mkdirSync(bundle); fs.mkdirSync(outputParent, {mode: 0o700});
   const revision = 'a'.repeat(40), source = {revision, tree: 'b'.repeat(40)}, version = '3.25.1', packageBytes = Buffer.from('test-only original package');
-  const packageSha256 = hash(packageBytes), packageName = `ashlr-hub-${version}.tgz`;
+  const profile = module.getDesktopUpdateProfile(profileName), repo = {...repository, fullName: profile.repository};
+  const packageSha256 = hash(packageBytes), packageName = `${profile.archivePrefix}-${version}.tgz`;
   fs.writeFileSync(join(bundle, packageName), packageBytes);
-  const hosted = {producer: {repository: repository.fullName}, source, package: {filename: packageName, sha256: packageSha256}, buildIdentity: {revision, dirty: false, packageVersion: version}};
+  const hosted = {producer: {repository: repo.fullName}, source, package: {filename: packageName, sha256: packageSha256}, buildIdentity: {revision, dirty: false, packageVersion: version}};
   fs.writeFileSync(join(bundle, 'manifest.json'), JSON.stringify(hosted));
   const receipt = {source, manifestSha256: hash(Buffer.from(JSON.stringify(hosted))), packageSha256, archiveSha256: 'c'.repeat(64), qualificationSha256: 'd'.repeat(64), official: {runId: 10, runAttempt: 1, eventSha: 'e'.repeat(40)}, attestor: {revision: 'f'.repeat(40), runId: 11, runAttempt: 1}};
   const calls = [], input = {root: dir, revision, bundle, outputParent, policy: {runId: 10, runAttempt: 1, attestorSha: 'f'.repeat(40), attestorRun: 11, attestorAttempt: 1}, audit: {runId: 12, runAttempt: 1}};
-  const defaults = async () => ({...module, canonicalJson, trust: {publicKey: trusted, repository, platform: 'darwin-aarch64', channel: 'stable'}, toolchain: {}, surface: (_root, _target, options) => {assert.equal(options.fresh, true); return {ok: true, digest: '1'.repeat(64)};}, readArchive: async options => {calls.push('archive'); assert.equal(options.sha256, packageSha256); assert.equal(options.revision, revision);}});
+  const defaults = async () => ({...module, canonicalJson, trust: {publicKey: trusted, repository: repo, platform: 'darwin-aarch64', channel: 'stable'}, trustForProfile: name => {assert.equal(name, profileName); return {publicKey: trusted, repository: repo, platform: 'darwin-aarch64', channel: 'stable'};}, toolchain: {}, surface: (_root, _target, options) => {assert.equal(options.fresh, true); return {ok: true, digest: '1'.repeat(64)};}, readArchive: async options => {calls.push('archive'); assert.equal(options.sha256, packageSha256); assert.equal(options.revision, revision); assert.equal(options.identityProfile, profileName);}});
   const dependencies = {defaults, source: () => source, verify: () => {calls.push('verify'); return receipt;}, adopt: () => {calls.push('adopt');}, validate: () => {calls.push('validate');}, validateTools: () => null,
-    audit: () => {calls.push('audit'); return {revision, ...input.audit};}, read: () => metadata,
+    audit: () => {calls.push('audit'); return {revision, ...input.audit};}, read: () => ({...metadata, full_name: repo.fullName}),
     build: async () => {calls.push('build'); return {bytes: Buffer.from('test-only built app'), inventorySha256: '2'.repeat(64), signer: 'A'.repeat(40)};},
     sign: (path, _tools, verify, publicKey) => {calls.push('sign'); const result = sig(fs.readFileSync(path)); fs.writeFileSync(`${path}.sig`, result); verify(fs.readFileSync(path), result, publicKey); return result;}};
-  return {dir, input, dependencies, module, canonicalJson, calls, receipt, sig, metadata};
+  return {dir, input, dependencies, module, canonicalJson, calls, receipt, sig, metadata, profile};
 }
 test('producer signs paired exact bytes only after fresh gates and exports no publication claim', async t => {
   const f = await fixture(t), result = await finalizeDesktopUpdate(f.input, f.dependencies);
@@ -262,3 +263,31 @@ test('independent Audit observes actual source/run/runner/all required steps', t
     const before = object[key]; object[key] = value; assert.throws(() => verifyUpdateAudit(input)); object[key] = before;
   }
 });
+
+
+test('canonical source exports only a genuine signed V2 envelope with the original canonical package bytes', async t => {
+  const f = await fixture(t, 'canonical-v2'), result = await finalizeDesktopUpdate(f.input, f.dependencies);
+  const latest = JSON.parse(fs.readFileSync(join(result.output, 'latest.json')));
+  const checked = f.module.verifyCompatibleUpdateManifest(latest.phantom, (await f.dependencies.defaults()).trust);
+  assert.equal(checked.manifest.schemaVersion, 2); assert.equal(checked.manifest.repository.nameWithOwner, 'ashlrai/phantom');
+  assert.equal(checked.manifest.cli.packageName, '@ashlr/phantom'); assert.equal(checked.manifest.cli.filename, 'ashlr-phantom-3.25.1.tgz');
+  assert.deepEqual(fs.readFileSync(join(result.output, checked.manifest.cli.filename)), fs.readFileSync(join(f.input.bundle, checked.manifest.cli.filename)));
+  assert.equal(result.manifestDigest, checked.digest); assert.equal(result.published, false);
+});
+for (const profile of ['legacy-v1', 'canonical-v2']) for (const mismatch of ['repository', 'filename', 'package', 'version']) {
+  test(`producer refuses ${profile} source ${mismatch} mismatch before native build or signatures`, async t => {
+    const f = await fixture(t, profile);
+    if (mismatch === 'package' || mismatch === 'version') {
+      const pkg = JSON.parse(fs.readFileSync(join(f.dir, 'package.json')));
+      pkg[mismatch === 'package' ? 'name' : 'version'] = mismatch === 'package' ? '@other/phantom' : '3.25.2';
+      fs.writeFileSync(join(f.dir, 'package.json'), JSON.stringify(pkg));
+    } else {
+      const path = join(f.input.bundle, 'manifest.json'), hosted = JSON.parse(fs.readFileSync(path));
+      if (mismatch === 'repository') hosted.producer.repository = profile === 'legacy-v1' ? 'ashlrai/phantom' : 'ashlrai/ashlr-hub';
+      else hosted.package.filename = profile === 'legacy-v1' ? 'ashlr-phantom-3.25.1.tgz' : 'ashlr-hub-3.25.1.tgz';
+      const data = JSON.stringify(hosted); fs.writeFileSync(path, data); f.receipt.manifestSha256 = hash(Buffer.from(data));
+    }
+    await assert.rejects(finalizeDesktopUpdate(f.input, f.dependencies));
+    assert.equal(f.calls.includes('build'), false); assert.equal(f.calls.includes('sign'), false); assert.deepEqual(fs.readdirSync(f.input.outputParent), []);
+  });
+}

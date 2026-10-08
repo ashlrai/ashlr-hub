@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { inspectBuiltinEvaluatorBundle, resolveBuiltinEvaluator } from '../src/core/universe/builtin-evaluator-registry.js';
 import { comparatorDigest, validateUniverseManifest, type ManifestRecord } from '../src/core/universe/store.js';
-import { canonical, digest } from '../src/core/universe/artifacts.js';
+import { canonical, digest, evaluationExecutableDigest } from '../src/core/universe/artifacts.js';
 import { resolvePreparationGit } from '../scripts/evaluators/preparation-verification-native.mjs';
 
 
@@ -229,5 +229,85 @@ describe('closed installed built-in evaluator registry', () => {
   });
   it('never resolves an arbitrary identifier or executable', () => {
     expect(() => resolveBuiltinEvaluator('/tmp/controller' as 'preparation-measurement-v1')).toThrow();
+  });
+});
+
+// These files are read as evaluator identities; no fixture executable is launched.
+describe('fresh streaming evaluator executable identity', () => {
+  function executable(bytes = Buffer.alloc(600_013, 0x61)) {
+    const root = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'evaluator-digest-'))); roots.push(root);
+    const path = join(root, 'evaluator'); fs.writeFileSync(path, bytes, { mode: 0o700 });
+    return { root, path, bytes };
+  }
+  function duringRead(path: string, action: () => void) {
+    const selected = fs.lstatSync(path, { bigint: true }), original = fs.readSync;
+    let acted = false;
+    vi.spyOn(fs, 'readSync').mockImplementation(((...args: [number, NodeJS.ArrayBufferView, number, number, number | null]) => {
+      const count = Reflect.apply(original, fs, args), opened = fs.fstatSync(args[0], { bigint: true });
+      if (!acted && count > 0 && opened.dev === selected.dev && opened.ino === selected.ino) {
+        acted = true; action();
+      }
+      return count;
+    }) as typeof fs.readSync);
+    return () => expect(acted).toBe(true);
+  }
+  it.each([0, 17, 600_013])('retains the exact digest for %i bytes with bounded read buffers', size => {
+    const f = executable(Buffer.alloc(size, 0x61)), original = fs.readSync;
+    const lengths: number[] = [];
+    vi.spyOn(fs, 'readSync').mockImplementation(((...args: [number, NodeJS.ArrayBufferView, number, number, number | null]) => {
+      lengths.push(args[1].byteLength); return Reflect.apply(original, fs, args);
+    }) as typeof fs.readSync);
+    expect(evaluationExecutableDigest(f.path)).toBe(hash(f.bytes));
+    expect(lengths.length).toBeGreaterThan(0);
+    expect(Math.max(...lengths)).toBeLessThanOrEqual(256 * 1024);
+  });
+  it('accepts partial positive reads and hashes fresh bytes on each invocation', () => {
+    const f = executable(Buffer.alloc(313, 0x61)), original = fs.readSync;
+    vi.spyOn(fs, 'readSync').mockImplementation(((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: number | null) =>
+      original(fd, buffer, offset, Math.min(length, 7), position)) as typeof fs.readSync);
+    expect(evaluationExecutableDigest(f.path)).toBe(hash(f.bytes));
+    fs.writeFileSync(f.path, Buffer.alloc(313, 0x62));
+    expect(evaluationExecutableDigest(f.path)).toBe(hash(Buffer.alloc(313, 0x62)));
+  });
+  it('keeps canonical real Node and multiply linked evaluator files compatible', () => {
+    const node = fs.realpathSync(process.execPath), f = executable(Buffer.from('inert'));
+    fs.linkSync(f.path, join(f.root, 'second-name'));
+    expect(evaluationExecutableDigest(f.path)).toBe(hash(f.bytes));
+    expect(evaluationExecutableDigest(node)).toBe(hash(fs.readFileSync(node)));
+  });
+  it.each(['write', 'replace', 'symlink', 'grow', 'truncate', 'parent-alias'] as const)('refuses %s during the read and closes its descriptor', change => {
+    const f = executable(), before = fs.statSync(f.path);
+    const assertActed = duringRead(f.path, () => {
+      if (change === 'write') {
+        fs.writeFileSync(f.path, Buffer.alloc(f.bytes.length, 0x62));
+        fs.utimesSync(f.path, before.atime, before.mtime);
+      } else if (change === 'grow') fs.appendFileSync(f.path, 'extra');
+      else if (change === 'truncate') fs.truncateSync(f.path, 2);
+      else if (change === 'parent-alias') {
+        fs.renameSync(f.root, `${f.root}-moved`); roots.push(`${f.root}-moved`);
+        fs.symlinkSync(`${f.root}-moved`, f.root);
+      } else {
+        fs.renameSync(f.path, join(f.root, 'previous'));
+        if (change === 'replace') fs.writeFileSync(f.path, f.bytes, { mode: 0o700 });
+        else fs.symlinkSync(join(f.root, 'previous'), f.path);
+      }
+    });
+    const closed = vi.spyOn(fs, 'closeSync');
+    expect(() => evaluationExecutableDigest(f.path)).toThrow(/changed/);
+    assertActed(); expect(closed).toHaveBeenCalledOnce();
+    expect(() => fs.fstatSync(closed.mock.calls[0]![0])).toThrow();
+  });
+  it('refuses premature EOF even when the named file tuple is unchanged', () => {
+    const f = executable(); vi.spyOn(fs, 'readSync').mockReturnValue(0);
+    expect(() => evaluationExecutableDigest(f.path)).toThrow(/changed/);
+  });
+  it('refuses replacement between named inspection and open', () => {
+    const f = executable(), original = fs.openSync;
+    vi.spyOn(fs, 'openSync').mockImplementation(((...args: Parameters<typeof fs.openSync>) => {
+      fs.renameSync(f.path, join(f.root, 'previous'));
+      fs.writeFileSync(f.path, f.bytes, { mode: 0o700 });
+      return Reflect.apply(original, fs, args);
+    }) as typeof fs.openSync);
+    expect(() => evaluationExecutableDigest(f.path)).toThrow(/changed/);
   });
 });

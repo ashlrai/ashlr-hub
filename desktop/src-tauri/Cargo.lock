@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "ashlr-desktop"
-version = "3.25.2"
+version = "3.25.3"
 dependencies = [
  "base64 0.22.1",
  "block2",
@@ -94,6 +94,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-web-kit",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

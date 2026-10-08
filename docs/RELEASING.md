@@ -1,4 +1,4 @@
-# Releasing @ashlr/hub
+# Releasing Phantom
 
 > **Current release process — rechecked 2026-10-08 UTC:** use
 > [Releasing locally](RELEASING-LOCALLY.md) for the current manual release lane.
@@ -9,12 +9,10 @@
 > disabled during the Linux dependency quarantine. npm publication uses the
 > maintainer's interactive web 2FA and does not carry CI provenance.
 >
-> The source version is `@ashlr/hub@3.25.2` (unreleased). Verify its exact-source checks,
-> registry version and dist-tags, GitHub release assets and installed runtime
-> independently before reporting those delivery layers as complete. The
-> npm `latest` and the GitHub release currently resolve to 3.25.1. That
-> published release remains the current distribution until the candidate
-> completes those gates. The frozen
+> `@ashlr/hub@3.25.2`, npm `latest` and GitHub `v3.25.2` are independently
+> verified. Public archives match the original qualified bytes; both CLI
+> aliases and all public SDK imports pass an offline consumer install.
+> Installation and resident activation remain separate gates. The frozen
 > `release.yml` and `promote.yml`
 > procedures below describe the historical 3.3.2 lane, not a publishing path
 > for later versions. Keep source versions strictly above `3.3.2`. Publication

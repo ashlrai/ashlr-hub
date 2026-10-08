@@ -368,8 +368,8 @@ export function readLeaseHolderPid(ledgerRoot: string): number | null {
  * that is not running.
  */
 export function leaseHolderSentence(pid: number | null): string {
-  const who = pid === null ? 'Another Ashlr process' : `Another Ashlr process (pid ${pid})`;
-  return `${who} holds the native metadata lease — usually the desktop app's Verse or the fleet daemon's 5-minute sample; Verse reads its shared evidence and takes over when it is released.`;
+  const who = pid === null ? 'Another Phantom process' : `Another Phantom process (pid ${pid})`;
+  return `${who} holds the native metadata lease — usually the desktop app or the fleet daemon's 5-minute sample; Phantom reads its shared evidence and takes over when it is released.`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -910,7 +910,7 @@ function providerNotes(
     // (V3.10: Verse's Reconnect runs that command server-side, in Terminal)
     // and say plainly why the rest is withheld.
     notes.push(
-      `${VERSE_PROVIDER_NAME[provider]} is signed out. Re-authenticate it with Reconnect in Verse, which opens this ` +
+      `${VERSE_PROVIDER_NAME[provider]} is signed out. Re-authenticate it with Reconnect in Phantom, which opens this ` +
       "profile's own sign-in in Terminal, before this seat can be used; the profile path is withheld from this " +
       'payload on purpose.',
     );
@@ -1687,7 +1687,7 @@ export async function startVerseAccountCollector(
       }
       return owner === 'another-collector'
         ? leaseHolderSentence(holderPid)
-        : 'The native metadata lease is unavailable; Verse is reading shared evidence only.';
+        : 'The native metadata lease is unavailable; Phantom is reading shared evidence only.';
     }
     return 'Native account metadata collection is not configured for this accounts root.';
   }

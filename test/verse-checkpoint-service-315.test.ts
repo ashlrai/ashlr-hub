@@ -391,6 +391,8 @@ describe('engine gate', () => {
     expect(t.turnId).toBe(turnId);
     const pre = t.roots[0]!.pre!.commit!;
     const post = t.roots[0]!.post!.commit!;
+    expect(git(repo, 'show', '-s', '--format=%s', pre).trim()).toBe(`Phantom checkpoint: before turn ${turnId}`);
+    expect(git(repo, 'show', '-s', '--format=%s', post).trim()).toBe(`Phantom checkpoint: after turn ${turnId}`);
     // The pre-turn checkpoint holds NONE of the agent's writes; the post one holds all.
     expect(git(repo, 'ls-tree', '--name-only', pre)).not.toContain('agent-wrote.txt');
     expect(git(repo, 'show', `${pre}:a.txt`)).toBe(BASE_A);

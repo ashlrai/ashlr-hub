@@ -164,7 +164,8 @@ describe('M479 npm release workflow supply-chain admission', () => {
   });
 
   it('preserves explicit tag activation, native CI, provenance, and version gates', () => {
-    expect(workflowText).toContain('tags: ["v*"]');
+    expect(workflowText).toContain('tags: ["v3.3.2"]');
+    expect(workflowText).not.toContain('tags: ["v*"]');
     expect(workflow.permissions).toEqual({});
     expect(workflow.concurrency).toEqual({
       group: 'npm-candidate-${{ github.ref }}',

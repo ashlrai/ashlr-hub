@@ -24,6 +24,7 @@ describe('buildCloudPrompt', () => {
 
   it('starts with the task text and carries every contract term', () => {
     expect(prompt.startsWith('Fix the flaky tracker test in test/x.test.ts.\n')).toBe(true);
+    expect(prompt).toContain('DELIVERY CONTRACT (Phantom cloud task');
     expect(prompt).toContain('Create branch `ashlr-cloud/ct_20260924T2331_k3f9q2` from `v3110-cloud`');
     expect(prompt).toContain('Never push to any other branch');
     expect(prompt).toContain('Never merge anything');

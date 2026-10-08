@@ -181,7 +181,7 @@ export function inspectCurrentPointer(path, io) {
     const pkg = JSON.parse(io.readBoundedFile(join(target, 'package.json'), 65536));
     const actual = Buffer.from(io.readBoundedFile(launcher, 65536));
     const expected = Buffer.from(io.readBoundedFile(join(io.repoRoot, 'bin/ashlr'), 65536));
-    if (pkg.name !== '@ashlr/hub' || typeof pkg.version !== 'string' || !/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(pkg.version) || !actual.equals(expected)) fail('current release package/canonical launcher identity is unsupported');
+    if (!['@ashlr/hub', '@ashlr/phantom'].includes(pkg.name) || typeof pkg.version !== 'string' || !/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(pkg.version) || !actual.equals(expected)) fail('current release package/canonical launcher identity is unsupported');
     const after = io.lstat(path);
     if (!after?.isSymbolicLink || stat.dev !== after.dev || stat.ino !== after.ino || stat.ctimeMs !== after.ctimeMs) fail('current release changed while reading');
     return {target, dev: stat.dev, ino: stat.ino, ctimeMs: stat.ctimeMs, birthtimeMs: stat.birthtimeMs};

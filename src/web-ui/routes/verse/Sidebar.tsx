@@ -80,7 +80,7 @@ export interface SidebarProps {
   onNew: () => void;
   onRetry: () => void;
   onCollapse: () => void;
-  /** Called only once the operator confirms the footer's "Disconnect from hub" dialog. */
+  /** Called only once the operator confirms the footer's "Disconnect from Phantom" dialog. */
   onDisconnect: () => void;
   /** 3.10 — C1's activity (null: not on this server / not answered yet). */
   activity?: VerseActivityResponse | null;
@@ -220,9 +220,9 @@ export function Sidebar(props: SidebarProps) {
             the tooltip, because "Disconnect" alone reads like a network blip.
             It throws away unsent drafts, so — like Settings ▸ Connection — it
             asks first; onDisconnect runs only from the dialog's red button. */}
-        <Tooltip label="Signs this window out: clears cached chats and unsent drafts here. Chats stay on the hub." placement="top">
+        <Tooltip label="Signs this window out: clears cached chats and unsent drafts here. Chats stay on the server." placement="top">
           <button type="button" onClick={() => setConfirmDisconnect(true)} className={styles.footerButton}
-            aria-haspopup="dialog">Disconnect from hub</button>
+            aria-haspopup="dialog">Disconnect from Phantom</button>
         </Tooltip>
       </footer>
 
@@ -231,8 +231,8 @@ export function Sidebar(props: SidebarProps) {
           Escape and the backdrop cancel, and focus returns to the footer
           button. */}
       <Dialog open={confirmDisconnect} onClose={() => setConfirmDisconnect(false)} titleId={disconnectTitleId}
-        title="Disconnect from this hub?" initialFocusRef={disconnectCancelRef}
-        description="Unsent drafts in open chats will be cleared. Your chats stay on the hub; you will need the read token to reconnect.">
+        title="Disconnect from this server?" initialFocusRef={disconnectCancelRef}
+        description="Unsent drafts in open chats will be cleared. Your chats stay on the server; you will need the read token to reconnect.">
         <div className={styles.confirmActions}>
           <Button ref={disconnectCancelRef} variant="subtle" onClick={() => setConfirmDisconnect(false)}>Cancel</Button>
           <Button variant="danger" onClick={() => {

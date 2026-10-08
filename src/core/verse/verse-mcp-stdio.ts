@@ -102,7 +102,7 @@ export async function resolveVerseMcpCredential(io: VerseMcpStdioIo): Promise<Ve
   return null;
 }
 
-const OFF_MESSAGE = 'Ashlr Verse tools are not available to this turn (they are switched off for this chat, or the turn has ended). Ask the operator to switch them on in the chat\'s Agent tools.';
+const OFF_MESSAGE = 'Phantom tools are not available to this turn (they are switched off for this chat, or the turn has ended). Ask the operator to switch them on in the chat\'s Agent tools.';
 
 /** What the bridge answers by itself when it has no live credential. */
 export function offlineAnswer(message: Record<string, unknown>): Record<string, unknown> | null {

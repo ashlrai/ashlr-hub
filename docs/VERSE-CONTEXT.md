@@ -1,4 +1,6 @@
-# Ashlr Verse — context windows, compaction and orchestration (V3.9)
+<a id="ashlr-verse--context-windows-compaction-and-orchestration-v39"></a>
+
+# Phantom — context windows, compaction and orchestration (V3.9)
 
 Verified on this machine, 2026-09-23, from the pinned CLI binaries, each seat's own model catalog,
 every September Codex rollout on disk (1,388), Verse's own session store and the providers' published
@@ -30,7 +32,7 @@ readings unclamped and lets the UI decide how to draw them.
 
 ### 1.1 Window sources and precedence
 
-Every window Verse shows carries a `VerseWindowSource` so nothing on screen implies more certainty than
+Every window Phantom shows carries a `VerseWindowSource` so nothing on screen implies more certainty than
 it has:
 
 | Source | Meaning | Examples |
@@ -58,11 +60,11 @@ else the **only** row carrying a numeric `contextWindow` (Grok keys its row diff
 Claude adds side-call rows such as Haiku without one). Anything more ambiguous yields no runtime
 window, not a guess.
 
-**Local seats ignore runtime windows.** Verse sets a local seat's window itself (§1.5) and tells the
-CLI with `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, so the CLI's `modelUsage` only echoes Verse's own number back.
+**Local seats ignore runtime windows.** Phantom sets a local seat's window itself (§1.5) and tells the
+CLI with `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, so the CLI's `modelUsage` only echoes Phantom's own number back.
 Without that variable it would echo the CLI's 200k guess, which is wrong. The number the CLI is told
 and the number the meter draws are the **same** one — the session's stored `usage.contextWindow` —
-and before each local turn launches Verse re-resolves the seat's window from live discovery and
+and before each local turn launches Phantom re-resolves the seat's window from live discovery and
 corrects the stored value if it changed (§1.5), so a stale record cannot tell the CLI one window
 while the meter shows another.
 
@@ -91,7 +93,7 @@ events in `~/.ashlr/agent-logs` that carry `modelUsage`.
 - **Why 1M without `[1m]`.** Claude Code gives 1M to any model whose catalog entry carries
   `native_1m` when it talks to Anthropic first-party, which is exactly how a seat's launcher runs it.
   Adding `[1m]` would be harmless on these ids and a lie on Haiku 4.5 and Opus 4.5, where the CLI would
-  then claim 1M for a 200k model. Verse sends the bare id.
+  then claim 1M for a 200k model. Phantom sends the bare id.
 - **Observed at runtime:** `claude-fable-5` reported `contextWindow: 1000000, maxOutputTokens: 64000`
   in 20 result events (19 runs); `claude-opus-4-8[1m]` reported 1,000,000 / 64,000 in 11. The other rows
   rest on the catalog and the resolver code, not on observed turns.
@@ -133,7 +135,7 @@ events in `~/.ashlr/agent-logs` that carry `modelUsage`.
   undo any migration the newer CLI made to the seat's native state on its first run, so run
   `ashlr resources launcher check` (or the CLI's own auth status) after re-pinning.
 - **Not offered:** `claude-mythos-5` and `claude-mythos-5-1` are in the 2.1.280 catalog (1M); whether
-  the account can use them is unknown, so Verse does not list them.
+  the account can use them is unknown, so Phantom does not list them.
 
 ### 1.3 Codex
 
@@ -162,14 +164,14 @@ it on the same arithmetic.)
   compactions ranged from 181,491 to 255,423 (median 227,452), apparently because its check also
   counts tool output added since the last call. The meter's compaction tick is therefore a ceiling,
   not a promise.
-- **Expansive is real only where `max_context_window > context_window`.** Verse passes
+- **Expansive is real only where `max_context_window > context_window`.** Phantom passes
   `-c model_context_window=<max>` **and** `-c model_auto_compact_token_limit=<90 % of max>` together,
   on both `exec` and `exec resume`. Setting only the window resets codex's token accounting and breaks
   auto-compaction ([openai/codex#16068](https://github.com/openai/codex/issues/16068)). The limit is
   90 % of the raw window — the same ratio codex applies to its default window.
 - **No catalog yet.** codex-a has never run a turn, so it has no `models_cache.json`. Its models come
-  from Verse's documented list (GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5) with the same
-  arithmetic and `windowSource: 'documented'`, and the seat says so: *"Model list is Verse's built-in
+  from Phantom's documented list (GPT-6 Astra/Sol/Luna, GPT-5.6 Sol/Terra/Luna, GPT-5.5) with the same
+  arithmetic and `windowSource: 'documented'`, and the seat says so: *"Model list is Phantom's built-in
   list until this seat's first turn fetches its own catalog."* Seats also run different binaries
   (codex-a 0.136, codex-b 0.155), which is why catalogs are read per seat.
 - Hidden slugs are not offered. `gpt-reserve` was offered by 3.8 and should not have been.
@@ -177,7 +179,7 @@ it on the same arithmetic.)
 ### 1.4 Grok
 
 Read from the seat's `native-state/models_cache.json` (grok 0.2.118). That file's `.models` is a
-dictionary whose values also carry a per-model `api_key` field; Verse reads **only `.info`**.
+dictionary whose values also carry a per-model `api_key` field; Phantom reads **only `.info`**.
 
 | Id | Label (`info.name`) | Window | Compacts at |
 |---|---|---:|---:|
@@ -188,16 +190,16 @@ dictionary whose values also carry a per-model `api_key` field; Verse reads **on
 
 - The compaction point is `auto_compact_threshold_percent` (80 in the catalog) of `context_window`.
   Grok's bundled docs give 85 as the `[session]` default; the seat sets no `[session]` block, and the
-  catalog's per-model 80 is what Verse uses. A runtime `compact_boundary` shows which one actually won.
+  catalog's per-model 80 is what Phantom uses. A runtime `compact_boundary` shows which one actually won.
 - Grok checks after a turn ("Auto-compact triggers next turn"), so one long turn can run past 400k
   toward 500k.
 - No expansive mode: Grok's windows are fixed per built-in model, and its compaction threshold is
-  settable only in the seat's `config.toml`, which Verse does not write.
+  settable only in the seat's `config.toml`, which Phantom does not write.
 - Runtime: the `result` line's `modelUsage` row can be keyed by a different id than the CLI was given
-  (`grok-4.6-build` for `grok-4.6`), so Verse takes the single row that carries a numeric
+  (`grok-4.6-build` for `grok-4.6`), so Phantom takes the single row that carries a numeric
   `contextWindow`.
 - The catalog's `compactions_remaining: 1` is a server-sent quota field whose meaning is unresolved.
-  Nothing in Verse is built on it.
+  Nothing in Phantom is built on it.
 
 ### 1.5 Local (Ollama and llama-server)
 
@@ -212,12 +214,12 @@ whatever the **runner** serves — and one resolver (`local-models.ts`) decides 
    `qwen3.8:27b-ctx64k` pins 65,536 and always loads at 65,536.
 3. **Ollama, not pinned:** `min(server default, native)`. The **server default** — what an unpinned
    request actually gets — wins over residency: `OLLAMA_CONTEXT_LENGTH` as the **running** server
-   printed it in its config line in `~/.ollama/logs/server.log` (the macOS app does not share Verse's
+   printed it in its config line in `~/.ollama/logs/server.log` (the macOS app does not share Phantom's
    environment); the last `vram-based default context … default_num_ctx=N` line in that log; the same
-   variable (> 0) in Verse's own environment. Only when none of those is known does the tag's `/api/ps`
+   variable (> 0) in Phantom's own environment. Only when none of those is known does the tag's `/api/ps`
    `context_length` count, because a resident runner may have been loaded by **another client** with
    its own `num_ctx` (a summarizer asking for 8k would otherwise shrink the seat to 8k, while Ollama
-   reloads the tag at its default for Verse's own request). With none of these, the native
+   reloads the tag at its default for Phantom's own request). With none of these, the native
    (trained) length is used and marked `fallback`, because Ollama may allocate far less. A server
    default is only applied when the native length is known to cap it — a 262,144 VRAM default on an
    8k model would be a 32× overstatement. That default is **machine-dependent**:
@@ -231,7 +233,7 @@ pinned `num_ctx` and a server default are `provider-catalog`; the trained length
 
 The compaction point is the Claude formula over that window with an unknown max output:
 `W − 20,000 − 13,000` — **32,536 on a 64k tag**, 229,144 on a 256k one. Below about 33k the formula
-reaches zero, so no compaction point is shown rather than a tick at the left edge. Verse passes
+reaches zero, so no compaction point is shown rather than a tick at the left edge. Phantom passes
 `CLAUDE_CODE_MAX_CONTEXT_TOKENS=<W>`, which Claude Code honours for any id that is not a Claude model;
 without it the CLI prints *"set CLAUDE_CODE_MAX_CONTEXT_TOKENS to its real window"* and keeps the
 session within the 200k it assumes. Local seats also pass `--exclude-dynamic-system-prompt-sections`,
@@ -275,7 +277,7 @@ first compaction. Use an unpinned or larger-`num_ctx` tag for long local session
 Claude Code's other thresholds, for reference: it warns 20,000 before the compaction point and blocks
 input 10,000 after it (1M at `auto`: warns 947k, compacts 967k, blocks 977k). `--autocompact` accepts
 100k–1M and is capped at the model's window. A background pre-compaction flag
-(`tengu_amber_moleskin`) may start earlier in some modes; it is not fully traced and Verse does not
+(`tengu_amber_moleskin`) may start earlier in some modes; it is not fully traced and Phantom does not
 model it.
 
 ### 1.7 Occupancy: what `contextTokens` measures
@@ -284,7 +286,7 @@ model it.
 running total:
 
 - **Claude, Grok, local:** the last call's `input + cache_read + cache_creation` (the buckets are
-  disjoint). Grok's own count also includes the previous call's output, so Verse's reading can be one
+  disjoint). Grok's own count also includes the previous call's output, so Phantom's reading can be one
   output short of Grok's.
 - **Codex:** `codex exec --json` never reports per-call usage. `turn.completed.usage` is a sum over
   every model call in the turn (a 20-call turn reports ~20× the live prompt), and on `exec resume`
@@ -302,13 +304,13 @@ running total:
     else the sum of this turn's calls, else the printed figure converted to a delta against the
     rollout's running total. A resumed thread is never counted twice: `exec resume` seeds codex's
     counter from the rollout, so the printed `turn.completed` figure is **thread-cumulative**, and
-    Verse uses the rollout's per-turn sums instead. With no readable rollout the printed figure is
+    Phantom uses the rollout's per-turn sums instead. With no readable rollout the printed figure is
     used as-is and the reading is marked as an upper bound. A compaction's own request never appears
     as a `token_count`; only the 0.149+ per-turn record counts it, so before CLI 0.149 no codex
-    output counts compaction requests — Verse's totals then match the CLI's own, both short by the
+    output counts compaction requests — Phantom's totals then match the CLI's own, both short by the
     compactions.
 
-  Verse reads the rollout every 2 s while a codex turn runs and once after it, and emits `context`
+  Phantom reads the rollout every 2 s while a codex turn runs and once after it, and emits `context`
   events with `exact: true`. Reads are bounded: the first looks at most 2 MB back from the end
   (widening to a hard cap only when the turn began further back), later ones scan only what was
   appended, and a `compacted` line — routinely 2–17 MB, since it embeds the replacement history — is
@@ -355,7 +357,7 @@ running total:
   **next turn**: it reads the whole context to write a summary, which **spends usage on a paid seat**,
   replaces early turns with that summary and starts a new prompt cache. The mode menu says so before
   you switch.
-- Verse **never switches mode by itself.** (Recording `expansive` on a pre-V3.9 Claude record is not a
+- Phantom **never switches mode by itself.** (Recording `expansive` on a pre-V3.9 Claude record is not a
   switch: it writes down the mode that session already ran in.) It may *suggest* expansive (`expansiveAdvice`) — only for a
   standard session whose model has a real expansive budget, and only on evidence: the session has
   already compacted at least twice, or the reachable code only fits the expansive budget (§5). The
@@ -409,7 +411,7 @@ subscription limits weight cache reads is not documented.**
 
 - The ratio compounds: every turn after the session passes 367k pays it again, and each compaction is
   itself a full-window read plus a summary.
-- The cache-miss column is why an idle long session is the single most expensive thing Verse can let
+- The cache-miss column is why an idle long session is the single most expensive thing Phantom can let
   happen: past the cache TTL (1 h on a subscription, 5 min once usage credits are in play) the next turn
   re-writes the whole prefix.
 - **Codex:** above 272k, GPT-5.6 reportedly bills the whole request at 2× input and 1.5× output and
@@ -422,7 +424,7 @@ subscription limits weight cache reads is not documented.**
   hedge.
 - **Grok:** above 200k every rate doubles for the whole request
   ([docs.x.ai pricing](https://docs.x.ai/developers/pricing)). That includes Grok's standard budget
-  (compacting at 400k), which Verse cannot lower per invocation — the handoff banner (§4) is the lever.
+  (compacting at 400k), which Phantom cannot lower per invocation — the handoff banner (§4) is the lever.
 - **Fable in `-p` mode** can bill usage credits on some plans without a consent prompt
   ([model config](https://code.claude.com/docs/en/model-config)). Watch the seat's credit state.
 
@@ -448,34 +450,34 @@ sessions, or narrow the scope, instead of enlarging one context.
 
 ## 3. Compaction per engine
 
-Every CLI compacts its own conversation; Verse observes, counts and explains it, and never replaces it.
+Every CLI compacts its own conversation; Phantom observes, counts and explains it, and never replaces it.
 Each native compaction becomes a persisted `compaction` event (`session.compactionCount` increments)
 and a divider in the transcript.
 
-| Engine | How Verse sees it | Counts |
+| Engine | How Phantom sees it | Counts |
 |---|---|---|
 | Claude, local | stream-json `{"type":"system","subtype":"compact_boundary","compact_metadata":{trigger, pre_tokens, post_tokens?, duration_ms?}}` | the CLI's own: "Auto-compacted 967k → 19k in 1m 58s" |
 | Grok | the same `system/compact_boundary` line in `streaming-messages-json` | the CLI's own |
-| Codex | `exec --json` has **no** compaction item; the rollout records a top-level `compacted` line. Verse counts those written during the turn and emits one event each (trigger `auto`), mid-turn from the live poll once the reading after it lands, else after the turn | **bracketing readings**: `preTokens` is the last `token_count` before the `compacted` line, `postTokens` the first after it (codex writes one straight after compacting); `durationMs` is null. The divider then reads like Claude's ("Auto-compacted 240k → 35k"); a side with no reading stays null, and with neither it says "Codex compacted its context" |
+| Codex | `exec --json` has **no** compaction item; the rollout records a top-level `compacted` line. Phantom counts those written during the turn and emits one event each (trigger `auto`), mid-turn from the live poll once the reading after it lands, else after the turn | **bracketing readings**: `preTokens` is the last `token_count` before the `compacted` line, `postTokens` the first after it (codex writes one straight after compacting); `durationMs` is null. The divider then reads like Claude's ("Auto-compacted 240k → 35k"); a side with no reading stays null, and with neither it says "Codex compacted its context" |
 
 - A compaction **is** a model call on the seat's account: the CLI reads the whole window and writes a
-  summary. It happens inside a turn the operator started; Verse never triggers one on its own.
+  summary. It happens inside a turn the operator started; Phantom never triggers one on its own.
 - **Compact now.** On **every** Claude and local session the operator can compact on demand, from the
   chip beside the meter — the Standard / Expansive chip, or a chip reading **Context** on a model with
   one budget (a local chat, Opus 4.5, Haiku 4.5), whose menu holds just this item; it is disabled until
-  the chat has had a turn — and from the handoff banner (§4) when that shows. Verse sends `/compact` as an ordinary turn, through the same `startTurn` gate as every turn. Headless `/compact`
+  the chat has had a turn — and from the handoff banner (§4) when that shows. Phantom sends `/compact` as an ordinary turn, through the same `startTurn` gate as every turn. Headless `/compact`
   was verified on a local seat — the CLI emitted `compact_boundary` with trigger `manual`,
   14,988 → 1,750 tokens, in about 156 s on a 27B model over a 15k context — the divider reads
   "Compacted on request …" and the meter then shows the post-compaction figure. On a local seat it is free (but slow); **on a paid seat it spends
   usage**, because the CLI reads the whole window to write the summary. That spend is not itemised
   per turn: a `/compact` turn's `result.usage` is all zeros and `modelUsage` is cumulative (§1.1).
-  Not offered on Codex or Grok, whose headless manual compaction Verse has not verified.
+  Not offered on Codex or Grok, whose headless manual compaction Phantom has not verified.
 - After a compaction the meter drops. The divider says why, so the drop is never unexplained.
 - The meter warns at **80 %** of the compaction point and turns red at **95 %** — *before* the CLI
   compacts, not after (the old fixed 70 / 90 % of the window went red after Grok and Codex had
   already compacted). Standard Claude 1M: warns ≈ 294k, red ≈ 349k. Codex: ≈ 196k / 233k. Grok:
   320k / 380k.
-- Two compactions is Verse's threshold for "early turns now survive only as summaries"
+- Two compactions is Phantom's threshold for "early turns now survive only as summaries"
   (`HANDOFF_COMPACTION_THRESHOLD`), which feeds both the handoff advice (§4) and the expansive
   suggestion (§2.1).
 - **Compact now** is the only manual compaction, and only the operator presses it. The handoff (§4)
@@ -592,7 +594,7 @@ shows **split** — which is true: its code cannot all be in view at once there.
 
 Seats run in isolated homes (each launcher pins `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GROK_HOME` to its
 own `native-state`), so none of the vendors' own memory features reach them, and a Claude session and a
-Codex session on the same project start knowing nothing the other learned. Verse gives every seat on a
+Codex session on the same project start knowing nothing the other learned. Phantom gives every seat on a
 project one shared directory instead:
 
 ```
@@ -601,7 +603,7 @@ project one shared directory instead:
 
 - **Outside the repository on purpose.** Memory never lands in a working tree, never appears in a diff,
   and is not a workspace root. The hash of the real path keeps two checkouts named `api` apart.
-- **One fixed block per session.** At creation Verse snapshots a short instruction block — where
+- **One fixed block per session.** At creation Phantom snapshots a short instruction block — where
   memory lives; read `MEMORY.md` before substantial work; keep it a concise index (≤ 200 lines) of
   durable facts **with their reasons** (decisions, conventions, gotchas, plan status); update it at
   milestones; never store secrets — plus the current `MEMORY.md`, secrets scrubbed and truncated with
@@ -646,7 +648,7 @@ project one shared directory instead:
   editable.
 - **What it is not:** it is not the vendors' auto-memory and not a background consolidation job. Codex
   memories, Claude's auto-dream and Grok's memory all run extra model calls on their own schedule, which
-  spends; Verse leaves them off.
+  spends; Phantom leaves them off.
 
 ---
 
@@ -659,13 +661,13 @@ contributes at most 3 hits. The scan is bounded — the newest ≤ 200 sessions 
 text — and the response says how many sessions it scanned and whether it stopped early. `limit`
 defaults to 20, at most 50; each hit carries a ≤ 240-character, whitespace-collapsed,
 `scrubSecrets`'d snippet around the first match. No index, no embeddings, no network, no spend: it
-reads Verse's own session store.
+reads Phantom's own session store.
 
 ---
 
 ## 8. Efficiency
 
-Computed **client-side** from usage Verse already stores — no new server state:
+Computed **client-side** from usage Phantom already stores — no new server state:
 
 - **Cache-hit ratio** = `cacheRead / (input + cacheRead + cacheCreation)`. Adapters report
   `inputTokens` excluding cached tokens, so the buckets are disjoint. Per session in the Resources panel
@@ -679,7 +681,7 @@ Computed **client-side** from usage Verse already stores — no new server state
 
 What breaks the prompt cache, so the numbers make sense: switching model; changing effort (except on
 Opus 5.5 and Fable 5.1); connecting or disconnecting MCP servers or plugins; a compaction; a CLI
-upgrade (a re-pin). Verse holds the rest constant by design: an empty, fixed MCP set, the memory block
+upgrade (a re-pin). Phantom holds the rest constant by design: an empty, fixed MCP set, the memory block
 snapshotted at creation, and on local seats the dynamic prompt sections moved out of the system prompt.
 Switching to expansive does not break it; switching back to standard does only when the session is
 already past the standard compaction point, because the next turn then compacts (§2.1).
@@ -695,11 +697,11 @@ already past the standard compaction point, because the next turn then compacts 
   than it knows — no "over the window" tone and no near-compaction or idle advice from a bound (§4).
 - **Readings are stored unclamped.** Over-window is a state the meter shows, not a number it hides.
 - **The runtime wins.** A CLI's own reading replaces any catalog value (except on local seats, where the
-  CLI would only echo Verse's number).
+  CLI would only echo Phantom's number).
 - **A mode a model lacks is absent,** never approximated. No expansive on Grok, local, GPT-5.5 or the
   200k Claude models.
 - **Unavailable models are listed with their reason,** not hidden, so the operator learns why.
-- **Advice suggests, never acts.** Verse never switches mode, compacts, summarizes or sends a handoff on
+- **Advice suggests, never acts.** Phantom never switches mode, compacts, summarizes or sends a handoff on
   its own.
 - **Nothing is invented from a single source.** Figures resting on one secondary source (Codex's 2×
   above 272k, Astra's exemption) are labelled as such.
@@ -714,7 +716,7 @@ already past the standard compaction point, because the next turn then compacts 
 
 ## 10. What spends, and what does not
 
-Every model call goes through Verse's one chokepoint, `startTurn`, which carries the local-only gate
+Every model call goes through Phantom's one chokepoint, `startTurn`, which carries the local-only gate
 (`policy/local-only.ts`): under local-only, paid seats are refused and loopback seats are allowed.
 Nothing in V3.9 adds a model call.
 
@@ -739,7 +741,7 @@ Local seats run on this machine and cost nothing at the margin.
 - **Compact now on a paid seat** was not run for real (it would spend); headless `/compact` was
   verified on a local seat, which runs the same Claude Code binary. Its spend on a paid seat is not
   itemised per turn (§3).
-- **Codex `developer_instructions` on resume:** Verse sends the memory block on **every** `exec` and
+- **Codex `developer_instructions` on resume:** Phantom sends the memory block on **every** `exec` and
   `exec resume`, and must keep doing so. Codex diffs each turn's developer context against a baseline
   it persists in the rollout, and in ~4,000 local rollouts an unchanged section was never re-emitted, so
   an identical block should be a no-op — but no local rollout has yet carried a non-empty
@@ -749,10 +751,10 @@ Local seats run on this machine and cost nothing at the margin.
   compaction. If a real multi-turn rollout ever shows the block repeating, the fix is upstream in
   Codex, not turn-1-only (the reasoning is in the `memoryOverrides` comment in
   `src/core/verse/adapters/codex.ts`).
-- **A codex seat with no catalog yet** runs on Verse's built-in list, which leads with GPT-6 Astra;
+- **A codex seat with no catalog yet** runs on Phantom's built-in list, which leads with GPT-6 Astra;
   an older binary (codex-a runs 0.136, whose bundled catalog has no GPT-6 or GPT-5.6) may reject that
   id on the first turn.
-- **Grok's threshold:** the catalog's 80 % vs the documented 85 % `[session]` default. Verse uses 80;
+- **Grok's threshold:** the catalog's 80 % vs the documented 85 % `[session]` default. Phantom uses 80;
   a runtime `compact_boundary` settles it per seat. `compactions_remaining` is unexplained and unused.
 - **Codex can compact below its tick** (observed from 181,491). The tick is a ceiling.
 - **GPT-5.6 Sol at 872k** is in the catalog, while an upstream issue
@@ -763,7 +765,7 @@ Local seats run on this machine and cost nothing at the margin.
 - **The claude-a seat is pinned to 2.1.257.** Opus 5.5 stays unavailable there until the seat is
   re-pinned to 2.1.280 or later (`ashlr resources profile repin`). Sessions created under the old
   `claude-opus-5.5` id keep that id in their record (they ran Opus 5), but their turns now ask for
-  the real `claude-opus-5-5`, which a 2.1.257 binary does not know. Verse refuses such a turn up
+  the real `claude-opus-5-5`, which a 2.1.257 binary does not know. Phantom refuses such a turn up
   front (409 `VERSE_MODEL_UNAVAILABLE`, with the reason) rather than starting a CLI that would answer
   `[claude-code:unrecognized_model]`. Re-pin the seat, or continue the session in a fresh chat on a
   runnable model.
@@ -776,7 +778,7 @@ Local (read-only):
 
 - Claude Code binaries `~/.local/share/claude/versions/2.1.257` and `2.1.280` (embedded model catalog,
   `--autocompact`, `--append-system-prompt`, `--add-dir`, `--exclude-dynamic-system-prompt-sections`,
-  `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `compact_boundary` — every flag Verse passes exists in both, and
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `compact_boundary` — every flag Phantom passes exists in both, and
   each new one was also accepted by both binaries' option parsers, §1.2);
   `~/.claude/cache/model-catalog/*.json` (`min_claude_code_version: 2.1.280` for `claude-opus-5-5`);
   `~/.ashlr/agent-logs/*.log` (runtime `modelUsage`); `~/.claude/projects` (observed compactions).
@@ -786,7 +788,7 @@ Local (read-only):
   uncompacted calls, 2,939 compactions), re-scanned 2026-09-23.
 - Ollama 0.33.3 `/api/tags`, `/api/show`, `/api/ps`, `~/.ollama/logs/server.log`; llama-server `/props`,
   `/slots`.
-- Verse's own store `~/.ashlr/verse/sessions/`.
+- Phantom's own store `~/.ashlr/verse/sessions/`.
 
 Published:
 

@@ -1,5 +1,5 @@
 /**
- * `ashlr wire` — wire the ashlr MCP gateway into editor config(s).
+ * `ashlr wire` — wire the Phantom CLI MCP gateway into editor config(s).
  *
  * Usage:
  *   ashlr wire [claude|codex|cursor|all]  [--config <path>]  [--json]
@@ -97,7 +97,7 @@ function parseWireArgs(args: string[]): ParsedWireArgs {
 
 function printWireHelp(): void {
   console.log('');
-  console.log(bold('  ashlr wire') + dim(' — wire the ashlr MCP gateway into editor config(s)'));
+  console.log(bold('  ashlr wire') + dim(' — wire the Phantom CLI MCP gateway into editor config(s)'));
   console.log('');
   console.log('  ' + bold('Usage:'));
   console.log('');

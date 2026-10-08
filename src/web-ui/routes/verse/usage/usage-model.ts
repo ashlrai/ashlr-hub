@@ -90,7 +90,7 @@ export const ENGINE_COLOR: Record<VerseEngine, string> = {
 /** Exact copy for every "we do not know" case, exported so tests pin it. */
 export const NO_SIGNAL_REASON: Partial<Record<VerseEngine, string>> = {
   claude:
-    'Claude publishes no local utilization signal, so there is no window percentage to read. Ashlr deliberately never throttles this seat on a guess.',
+    'Claude publishes no local utilization signal, so there is no window percentage to read. Phantom deliberately never throttles this seat on a guess.',
   // Grok is absent from frontier-usage.ts entirely, so /api/usage can never
   // carry it. Its real state comes from the per-account probe behind
   // /api/verse/accounts; this copy is only ever seen on the fallback roster.

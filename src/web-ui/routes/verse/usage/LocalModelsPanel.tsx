@@ -198,7 +198,7 @@ function ContextCell({ row }: { row: LocalModelRow }): ReactNode {
   if (row.nativeContext === null && row.configuredContext === null) return <span>—</span>;
   if (!row.contextTruncated) return <span>{formatContextWindow(row.nativeContext ?? row.configuredContext)}</span>;
   return (
-    <span title={`Native context is ${formatContextWindow(row.nativeContext)}; Ashlr runs this seat at ${formatContextWindow(row.configuredContext)}.`}>
+    <span title={`Native context is ${formatContextWindow(row.nativeContext)}; Phantom runs this seat at ${formatContextWindow(row.configuredContext)}.`}>
       {`${formatContextWindow(row.configuredContext)} of ${formatContextWindow(row.nativeContext)}`}
     </span>
   );
@@ -442,7 +442,7 @@ export function LocalModelsPanel({
         </p>
       ) : view.rows.length === 0 ? (
         <p className={styles.muted}>
-          No models installed. Pull one to give Ashlr a local seat.
+          No models installed. Pull one to give Phantom a local seat.
         </p>
       ) : (
         <>

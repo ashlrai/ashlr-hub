@@ -1,8 +1,10 @@
 /** Fixed evaluator seam with inert subprocess/activity mocks; no native process is launched. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { runFixedUniverseEvaluator } from '../src/core/universe/fixed-evaluator.js';
 import { runVerifySubprocessAsync } from '../src/core/run/verify-commands.js';
-import { artifactDigest } from '../src/core/universe/artifacts.js';
+import { artifactDigest, digest } from '../src/core/universe/artifacts.js';
 import { assertComparatorUnchanged } from '../src/core/universe/store.js';
 import type { ManifestRecord } from '../src/core/universe/store.js';
 import type { VerifySubprocessResult } from '../src/core/run/verify-commands.js';
@@ -36,6 +38,26 @@ beforeEach(() => {
   vi.mocked(runVerifySubprocessAsync).mockReset().mockResolvedValue(response());
 });
 describe('fixed builtin evaluator custody contract', () => {
+  it('freshly refuses a legacy executable changed after initial comparator admission, before dispatch', async () => {
+    const fs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const root = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'legacy-evaluator-pin-')));
+    try {
+      const path = join(root, 'evaluator'), bytes = 'inert pinned executable';
+      fs.writeFileSync(path, bytes, { mode: 0o700 });
+      const legacy = { ...record, manifest: { evaluation: { command: [path] } },
+        evaluationCommand: [path], evaluationExecutableDigest: digest(bytes), seedArtifact: { path: root } } as ManifestRecord;
+      vi.mocked(artifactDigest).mockImplementation(() => {
+        fs.writeFileSync(path, 'changed executable', { mode: 0o700 });
+        return 'd'.repeat(64);
+      });
+      const guard = vi.fn();
+      await expect(runFixedUniverseEvaluator(legacy, root, '/archive', 'd'.repeat(64), root,
+        30_000, new AbortController().signal, {}, false, guard)).rejects.toThrow('Evaluator executable changed');
+      expect(assertComparatorUnchanged).toHaveBeenCalledOnce();
+      expect(artifactDigest).toHaveBeenCalledOnce();
+      expect(guard).not.toHaveBeenCalled(); expect(runVerifySubprocessAsync).not.toHaveBeenCalled();
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
   it('publishes activity before the caller dispatch guard and forces group exit even for ordinary trials', async () => {
     const guard = vi.fn(() => {
       expect(initializeBuiltinActivity).toHaveBeenCalledOnce();

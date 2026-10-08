@@ -1,5 +1,20 @@
 # Phantom efficiency roadmap
 
+## Earlier release feedback: 2026-10-08
+
+The 3.25.3 candidate runs nine whole modules through the existing
+`npm run check:release` preflight before the producer build. Resident-service
+documentation and release-workflow contracts now join the seven existing modules;
+these caught stale link-label and legacy tag-filter expectations during this release.
+The local run passed 140 cases with one existing platform skip in 5.20 seconds.
+This is local feedback time, not total hosted CI or release time.
+
+The required native library lane also tests the real updater HTTP client in a fresh
+process. Moving its two cases from the binary suite preserves 371 passing cases
+and four existing ignores across both suites. Every platform job, full qualification,
+Audit, original-artifact verification and installed startup check remains required.
+Publication and installed acceptance of this candidate are still pending.
+
 ## Measured engineering efficiency: 2026-10-07
 
 Optimize time to verified working software, preserving supported-platform
@@ -52,7 +67,7 @@ installation and does not replace the full matrix, Audit or release acceptance.
 
 ### Narrow improvements in the 3.24.4 candidate
 
-As of this review, the installed and published release is **3.24.3**.
+At the historical review below, the installed and published release was **3.24.3**.
 The following work is source-qualified in the **3.24.4 candidate** at
 `022e024dbf9b6d25d27c56ac9d72ccddae9acfb5`; it has not yet established
 installed, published or production performance improvements.
@@ -65,9 +80,9 @@ installed, published or production performance improvements.
 
 ### Prioritized remaining work
 
-1. **Reject cheap release failures before expensive CI starts.** A shared
-   read-only hosted release preflight is proposed and awaits architectural
-   approval. Preserve all 15 platform jobs, exhaustive test membership, existing
+1. **Reject cheap release failures before expensive CI starts.** Keep the shared
+   read-only hosted release preflight before the producer build. Preserve all
+   15 platform jobs, exhaustive test membership, existing
    deadlines, producer capture and protected-master attestation. Measure failed
    iteration time saved and successful-run startup overhead separately.
 2. **Profile the real fixture hot spans.** The longest observed modules were

@@ -83,7 +83,9 @@ describe('browser tap — media capture is refused', () => {
   it('rejects getUserMedia and getDisplayMedia with NotAllowedError', async () => {
     const { navigator, grants } = loadPage();
     const md = navigator.mediaDevices as Md;
-    await expect(md.getUserMedia({ audio: true })).rejects.toMatchObject({ name: 'NotAllowedError' });
+    await expect(md.getUserMedia({ audio: true })).rejects.toMatchObject({
+      name: 'NotAllowedError', message: 'Media capture is disabled in the Phantom browser pane.',
+    });
     await expect(md.getDisplayMedia({ video: true })).rejects.toMatchObject({ name: 'NotAllowedError' });
     expect(await md.enumerateDevices()).toEqual([]);
     expect(grants).toEqual([]);

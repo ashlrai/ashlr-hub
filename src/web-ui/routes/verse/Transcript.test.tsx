@@ -38,16 +38,23 @@ describe('Transcript', () => {
     const summary = screen.getByText('Tools and context');
     expect(summary.tagName).toBe('SUMMARY');
     const details = summary.closest('details')!;
+    const footer = summary.closest('footer')!;
+    expect(footer).toHaveAttribute('data-kind', 'turn-meta');
+    expect(footer.lastElementChild).toBe(details);
+    summary.focus();
+    expect(summary).toHaveFocus();
     expect(details.open).toBe(false);
     await user.click(summary);
     expect(details.open).toBe(true);
     const disclosure = within(details);
     expect(disclosure.getByText('3 reported tool calls; 2 with an MCP name.')).toBeInTheDocument();
-    expect(disclosure.getByText('Ashlr MCP: Read')).toBeInTheDocument();
+    expect(disclosure.getByText('Phantom CLI MCP: Read')).toBeInTheDocument();
     expect(disclosure.getByText('1 call, 1 failed')).toBeInTheDocument();
     expect(disclosure.getByText('1 call, 1 pending')).toBeInTheDocument();
     expect(disclosure.getByText('1 cited source; 1 recorded playbook reference.')).toBeInTheDocument();
     expect(disclosure.getByText('Reported by the chat. Server identity and skill loading are unknown.')).toBeInTheDocument();
+    await user.click(summary);
+    expect(details.open).toBe(false);
   });
 
   it('shows no observed calls and unknown loading for a historical text-only turn', () => {
@@ -56,8 +63,34 @@ describe('Transcript', () => {
       ev(2, 'assistant-message', { turnId: 't1', text: 'hello back' }),
     ])} loaded loadError={null} />);
     const details = screen.getByText('Tools and context').closest('details')!;
+    expect(details.closest('footer')).toHaveAttribute('data-kind', 'turn-meta');
     expect(within(details).getByText('No observed tool calls in this turn.')).toBeInTheDocument();
     expect(within(details).getByText(/skill loading are unknown/)).toBeInTheDocument();
+  });
+
+  it('keeps an open tools disclosure mounted when a running turn settles into footer metadata', async () => {
+    const user = userEvent.setup();
+    const events = [
+      ev(1, 'user-message', { turnId: 't1', text: 'check' }),
+      ev(2, 'turn-started', { turnId: 't1', pid: 1 }),
+      ev(3, 'tool-use', { turnId: 't1', toolUseId: 'a', name: 'Read', input: {} }),
+    ];
+    const { rerender } = render(<Transcript transcript={buildTranscript(events)} loaded loadError={null} />);
+    const summary = screen.getByText('Tools and context'), details = summary.closest('details')!;
+    const footer = details.closest('footer')!;
+    expect(within(details).getByText('1 call, 1 pending')).toBeInTheDocument();
+    await user.click(summary);
+    expect(details.open).toBe(true);
+    rerender(<Transcript transcript={buildTranscript([...events,
+      ev(4, 'tool-result', { turnId: 't1', toolUseId: 'a', output: 'ok', isError: false }),
+      ev(5, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: null, durationMs: 4_200 }),
+    ])} loaded loadError={null} />);
+    expect(screen.getByText('Tools and context')).toBe(summary);
+    expect(summary.closest('details')).toBe(details);
+    expect(details.open).toBe(true);
+    expect(details.closest('footer')).toBe(footer);
+    expect(within(footer).getByText('4.2s')).toBeInTheDocument();
+    expect(within(details).queryByText(/pending/)).toBeNull();
   });
 
   it('never republishes raw tool/server names, inputs, paths or outputs in the evidence disclosure', () => {
@@ -79,10 +112,10 @@ describe('Transcript', () => {
       ev(3, 'tool-result', { turnId: 'same-turn', toolUseId: 'same-call', output: '', isError: failed }),
     ]);
     const { rerender } = render(<Transcript sessionId="account-a-chat" transcript={build('mcp:ashlr.read', false)} loaded loadError={null} />);
-    expect(within(screen.getByText('Tools and context').closest('details')!).getByText('Ashlr MCP: Read')).toBeInTheDocument();
+    expect(within(screen.getByText('Tools and context').closest('details')!).getByText('Phantom CLI MCP: Read')).toBeInTheDocument();
     rerender(<Transcript sessionId="account-b-chat" transcript={build('Bash', true)} loaded loadError={null} />);
     const details = screen.getByText('Tools and context').closest('details')!;
-    expect(within(details).queryByText('Ashlr MCP: Read')).not.toBeInTheDocument();
+    expect(within(details).queryByText('Phantom CLI MCP: Read')).not.toBeInTheDocument();
     expect(within(details).getByText('Command')).toBeInTheDocument();
     expect(within(details).getByText('1 call, 1 failed')).toBeInTheDocument();
   });
@@ -603,6 +636,9 @@ describe('Transcript — 3.10.1 polish', () => {
     const foot = screen.getByRole('log').querySelector('[data-kind="turn-meta"]') as HTMLElement;
     expect(foot).toHaveTextContent('4.2s');
     expect(within(foot).getByRole('button', { name: /1 failure in this turn/ })).toBeInTheDocument();
+    const details = within(foot).getByText('Tools and context').closest('details')!;
+    expect(details.open).toBe(false);
+    expect(within(foot).getByRole('button', { name: /1 failure in this turn/ }).closest('details')).toBeNull();
   });
 
   it('settles reasoning to "Thought …" with the shared ▸ and no stray bullet', () => {

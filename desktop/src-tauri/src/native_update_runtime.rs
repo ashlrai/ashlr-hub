@@ -1,7 +1,10 @@
 //! Native-only signed staging and the exact installed host handoff. Never calls Update::install.
 #[cfg(target_os = "macos")]
 mod platform {
-    use ashlr_desktop::native_updates as policy;
+    use ashlr_desktop::{
+        native_update_client::{allowed_url, client},
+        native_updates as policy,
+    };
     use futures_util::StreamExt;
     use policy::{Envelope, Phase, UpdateState};
     use serde_json::Value;
@@ -83,34 +86,6 @@ mod platform {
             })
             .ok_or("uncommissioned-key")?;
         Ok((key.to_owned(), endpoint.to_owned(), repository.to_owned()))
-    }
-    fn allowed_url(url: &reqwest::Url) -> bool {
-        url.scheme() == "https"
-            && url.port_or_known_default() == Some(443)
-            && url.username().is_empty()
-            && url.password().is_none()
-            && matches!(
-                url.host_str(),
-                Some(
-                    "github.com"
-                        | "release-assets.githubusercontent.com"
-                        | "objects.githubusercontent.com"
-                )
-            )
-    }
-    fn client() -> Result<reqwest::Client, &'static str> {
-        reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(600))
-            .redirect(reqwest::redirect::Policy::custom(|a| {
-                if a.previous().len() < 5 && allowed_url(a.url()) {
-                    a.follow()
-                } else {
-                    a.stop()
-                }
-            }))
-            .build()
-            .map_err(|_| "download-unavailable")
     }
     async fn fetch(
         client: &reqwest::Client,
@@ -345,7 +320,7 @@ mod platform {
     }
     async fn check(app: AppHandle, updates: Updates, epoch: u64) {
         let result = async {
-            let (key, endpoint, repository) = trusted_config()?;
+            let (key, endpoint, _repository) = trusted_config()?;
             if std::env::consts::ARCH != "aarch64" {
                 return Err("unsupported-platform");
             }
@@ -362,7 +337,7 @@ mod platform {
                 policy::stable_version(env!("CARGO_PKG_VERSION")).ok_or("invalid-manifest")?;
             let mut remembered = None;
             if let Some(id) = policy::remembered_stage(&home).map_err(|_| "unsafe-stage")? {
-                let m = policy::reload_stage(&home, &id, &key, &repository)
+                let m = policy::reload_compatible_stage(&home, &id, &key)
                     .map_err(|_| "unsafe-stage")?;
                 let version = policy::stable_version(m.version()).ok_or("invalid-manifest")?;
                 if version >= current {
@@ -412,13 +387,9 @@ mod platform {
             let latest: Value = serde_json::from_slice(&raw).map_err(|_| "invalid-manifest")?;
             let envelope: Envelope = serde_json::from_value(latest["phantom"].clone())
                 .map_err(|_| "invalid-manifest")?;
-            let manifest = policy::verify_manifest(envelope, &key, &repository)
+            let manifest = policy::verify_compatible_manifest(envelope, &key)
                 .map_err(|_| "invalid-manifest")?;
-            let platform = &latest["platforms"]["darwin-aarch64"];
-            if latest["version"].as_str() != Some(manifest.version())
-                || platform["url"].as_str() != Some(manifest.app_url())
-                || platform["signature"].as_str() != Some(manifest.app_signature())
-            {
+            if !policy::discovery_matches(&latest, &manifest) {
                 return Err("invalid-manifest");
             }
             let next = policy::stable_version(manifest.version()).ok_or("invalid-manifest")?;
@@ -904,23 +875,6 @@ mod platform {
             let r = first_result(child, pipe, &stage, Duration::from_secs(1)).unwrap();
             assert_eq!(r.state, "waiting-native-exit");
             assert!(!policy::ready_to_handoff(&r));
-        }
-        #[test]
-        fn https_redirects_have_a_closed_origin_set() {
-            for good in [
-                "https://github.com/a",
-                "https://release-assets.githubusercontent.com/a",
-            ] {
-                assert!(allowed_url(&reqwest::Url::parse(good).unwrap()));
-            }
-            for bad in [
-                "http://github.com/a",
-                "https://github.com.evil.test/a",
-                "https://user@github.com/a",
-                "https://github.com:444/a",
-            ] {
-                assert!(!allowed_url(&reqwest::Url::parse(bad).unwrap()));
-            }
         }
     }
 }

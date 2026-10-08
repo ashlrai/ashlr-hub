@@ -1,6 +1,8 @@
-# Verse integrated browser
+<a id="verse-integrated-browser"></a>
 
-A browser inside Verse that you and a chat's agents share. You browse in it;
+# Phantom integrated browser
+
+A browser inside Phantom that you and a chat's agents share. You browse in it;
 with your say-so, the chat's agents can look at your local apps through it —
 open a page, read its structure, take a screenshot, read its console and
 network — and, in the desktop app, act in it: click, type, choose options,
@@ -55,7 +57,7 @@ bottom of the pane: **Agents in this chat can use this browser**. The switch
 needs the mutation token.
 
 When access is on, eligible local seats get the browser tools from their next
-turn through Verse's unified `ashlr-verse` MCP server on loopback. Cloud Devin
+turn through Phantom's unified `ashlr-verse` MCP server on loopback. Cloud Devin
 does not reach the local Browser pane. Two more switches appear
 under the first one: **Click and type** (on with access; switch it off to
 leave agents looking only) and **Run scripts (localhost)** (off until you
@@ -65,7 +67,7 @@ checks again.
 | Tool | Scope | Does |
 |---|---|---|
 | `browser_status` | look | What the active tab shows, what this shell can do, what you allow, and the chat's dev servers |
-| `browser_navigate` | look | Navigates the visible pane while observing; URL must be localhost or an operator-allowed origin, and the Verse server's own port is refused. Navigation can issue a GET request. |
+| `browser_navigate` | look | Navigates the visible pane while observing; URL must be localhost or an operator-allowed origin, and the Phantom server's own port is refused. Navigation can issue a GET request. |
 | `browser_snapshot` | look | An accessibility-style outline of the visible page: role, name, state and a ref (`e12`) per element. Hidden and `aria-hidden` content is left out; password and payment values read `[redacted]` |
 | `browser_screenshot` | look | An image of the visible page or of one element (`ref`), at most 1280×800 px, with its scale so pixel coordinates map back to the page. Full-page capture isn't available |
 | `browser_read_text` | look | The page's visible text |
@@ -152,12 +154,12 @@ It follows the same rules as Claude's own in-app browser.
   a field's content in one place and never for a secret field.
 - **Localhost by default.** An agent may open and look at loopback pages
   (`localhost`, `127.0.0.1`, `[::1]`, `*.localhost`), meaning your own dev
-  servers. It cannot open Verse itself on any spelling of its port.
+  servers. It cannot open Phantom itself on any spelling of its port.
 - **External sites need your explicit allow, per chat.** When an agent asks
   for another origin, the request is refused and appears in the pane as
   **Agent asked for https://… → Allow for this chat**. If you are already on
   such a page, the pane offers **Allow** for it. Allowed origins are
-  per-origin and per-chat, and they are forgotten when Verse restarts.
+  per-origin and per-chat, and they are forgotten when Phantom restarts.
 - **The gate runs twice.** The sidecar checks a URL before queueing a
   navigation. The pane checks the active tab before capturing anything. The
   sidecar checks the URL of every capture again. A page you are browsing
@@ -179,17 +181,17 @@ It follows the same rules as Claude's own in-app browser.
 - **Isolation in the desktop app.**
   - Browser tabs are separate windows that no Tauri capability matches, so
     websites get no IPC.
-  - They use their own website data store, never Verse's cookies.
+  - They use their own website data store, never Phantom's cookies.
   - Navigations are limited to `http` and `https`.
   - `target=_blank` opens in the same tab.
   - Downloads are refused.
 
-When every Agent tools scope is off, the next turn loads no Verse MCP server.
+When every Agent tools scope is off, the next turn loads no Phantom MCP server.
 
 ## Limits
 
 - A native webview is a separate layer above the page. The pane hides it
-  whenever a Verse dialog, menu or listbox opens, whenever the pane is hidden,
+  whenever a Phantom dialog, menu or listbox opens, whenever the pane is hidden,
   and whenever the window is hidden. Tooltips that overlap the page draw
   underneath it.
 - Screenshots and acting are macOS-only for now (`WKWebView takeSnapshot`,
@@ -204,5 +206,5 @@ When every Agent tools scope is off, the next turn loads no Verse MCP server.
   events rather than trusted input.
 - Refs last for one page load; after a navigation or reload the agent takes a
   new snapshot.
-- Grants and allowed origins last only as long as the Verse process. Turn
+- Grants and allowed origins last only as long as the Phantom process. Turn
   access back on after a restart.

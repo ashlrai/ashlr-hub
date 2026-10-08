@@ -70,10 +70,10 @@ function windowLabel(provider: ResourceAccountConnection['provider'], id: string
 
 function missingQuotaAction(account: ResourceAccountConnection, current: boolean): string | null {
   if (account.reason === 'connection-monitor-stopped') return 'The connection monitor stopped. Restart the scoped console to collect a new sample.';
-  if (account.provider === 'claude' && account.reason === 'usage-version-unsupported') return 'This Claude version has not been verified for automatic usage reads. Check /usage in the native client; Hub will not send an unverified command.';
+  if (account.provider === 'claude' && account.reason === 'usage-version-unsupported') return 'This Claude version has not been verified for automatic usage reads. Check /usage in the native client; Phantom will not send an unverified command.';
   if (account.provider === 'claude' && account.reason === 'usage-account-changed') return 'The native account changed. Verify the intended profile and restart the scoped console before collecting usage.';
   if (account.provider === 'claude' && ['usage-output-invalid', 'usage-process-failed', 'usage-identity-unavailable'].includes(account.reason)) {
-    return 'Claude’s native usage report could not be verified. Check /usage in the intended native account; Hub will not estimate allowance.';
+    return 'Claude’s native usage report could not be verified. Check /usage in the intended native account; Phantom will not estimate allowance.';
   }
   if (account.provider === 'claude' && current && account.authentication === 'signed-in' && account.reason === 'status-login-observed') {
     return 'Native auth status confirms sign-in but does not report allowance. Check usage in this account’s native Claude session.';
@@ -115,7 +115,7 @@ function AccountRow({ account, sampledAt, historical, ceiling }: {
     <div className={styles.identity}>
       <h3>{account.label}</h3>
       <p>{provider} <span aria-hidden="true">·</span> {planLabel(account.planType)}</p>
-      <span className={styles.adapter}>{executionIntegrated ? 'Hub transport available' : 'Execution not integrated'}</span>
+      <span className={styles.adapter}>{executionIntegrated ? 'Phantom transport available' : 'Execution not integrated'}</span>
       <div className={styles.connection}>
       <span className={styles.caption}>Native account</span>
       <div className={styles.badges}>
@@ -128,7 +128,7 @@ function AccountRow({ account, sampledAt, historical, ceiling }: {
         : account.state === 'checking' ? 'A metadata check is in progress; no task is being started.'
           : !current ? 'Current sign-in and connection health are not established.'
             : 'Sign-in metadata is not proof of task readiness.'}</p>
-      {account.provider === 'grok' ? <p>Grok metadata does not enable Hub execution.</p> : null}
+      {account.provider === 'grok' ? <p>Grok metadata does not enable Phantom execution.</p> : null}
       {account.onDemandEnabled !== null ? <p className={account.onDemandEnabled ? styles.warning : undefined}>
         {current ? '' : 'Last reported: '}{account.onDemandEnabled ? 'On-demand billing enabled' : 'On-demand billing disabled'}</p> : null}
       </div>

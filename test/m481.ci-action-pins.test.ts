@@ -120,15 +120,18 @@ describe('M481 CI workflow action trust chain', () => {
         'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
         'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
         'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+        'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
       ],
       'mac-general': [
         'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
         'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
         'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
+        'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
       ],
       'mac-isolated': [
         'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
         'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
+        'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
         'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a',
       ],
       'native-macos-broker-foundation': [
@@ -168,7 +171,12 @@ describe('M481 CI workflow action trust chain', () => {
     expect(serialized).toContain('rustfmt --edition 2021 --check desktop/src-tauri/src/lib.rs desktop/src-tauri/src/native_launchd_broker.rs');
     expect(serialized).toContain('cargo check --manifest-path desktop/src-tauri/Cargo.toml --lib --locked');
     expect(serialized).toContain('cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --lib --locked -- -D warnings');
-    expect(serialized).toContain('cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib --locked native_launchd_broker -- --nocapture');
+    // The signed-update policy shares this library; filtering to the broker
+    // would silently omit its identity and host-result contracts.
+    expect(serialized).toContain('cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib --locked -- --nocapture');
+    expect(serialized).not.toContain('--lib --locked native_launchd_broker');
+    expect(serialized).toContain('desktop/src-tauri/src/native_updates.rs');
+    expect(serialized).toContain('desktop/src-tauri/src/native_update_client.rs');
   });
 
   it('restores only exact debug compilation keys and saves only successful master pushes after cleanup', () => {

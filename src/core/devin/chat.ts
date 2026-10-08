@@ -246,7 +246,7 @@ export async function terminateDevinChat(taskId: string, deps: DevinServiceDeps 
     ...current,
     ...(session ? { session: snapshotOf(session, now) } : {}),
     // A PR already open stays with Needs-you; otherwise the task is done.
-    ...(TERMINAL_TASK_STATES.has(current.state) ? {} : { state: 'closed' as const, stateReason: 'Terminated from its Verse chat.' }),
+    ...(TERMINAL_TASK_STATES.has(current.state) ? {} : { state: 'closed' as const, stateReason: 'Terminated from its Phantom chat.' }),
   };
   try {
     writeDevinTask(next);

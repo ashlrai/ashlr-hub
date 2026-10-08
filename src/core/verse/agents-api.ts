@@ -866,7 +866,7 @@ export const handleAgentsApi: ApiModule = async (ctx: VerseApiContext, req, res,
           const draft = optBool(body, 'draft');
           const result = await openPullRequest(agent.workspace.path, {
             title,
-            body: typeof prBody === 'string' && prBody.trim() ? prBody : `Opened from the Ashlr Verse agent “${agent.title}”.`,
+            body: typeof prBody === 'string' && prBody.trim() ? prBody : `Opened from the Phantom agent “${agent.title}”.`,
             ...(draft ? { draft: true } : {}),
           }, deps.ops ?? {});
           payload = { agent, pr: result.pr };

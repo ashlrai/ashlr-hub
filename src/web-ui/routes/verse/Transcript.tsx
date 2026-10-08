@@ -702,39 +702,38 @@ const TurnView = memo(function TurnView({ turn, index, facts, explained, engine,
       </ol>
       {turn.citations.length > 0 ? <SourceList citations={turn.citations} openFile={openFile} jumpToTool={onJumpTool} /> : null}
       {turn.files.length > 0 ? <FileActivity files={turn.files} onJump={onJumpTool} /> : null}
-      <details className={styles.resourceEvidence}>
-        <summary className={styles.resourceSummary}>Tools and context</summary>
-        <div className={styles.resourceBody}>
-          <p>{turn.resources.calls === 0 ? 'No observed tool calls in this turn.' : `${turn.resources.calls} reported tool call${turn.resources.calls === 1 ? '' : 's'}; ${turn.resources.mcpCalls} with an MCP name.`}</p>
-          {turn.resources.groups.length > 0 ? (
-            <ul className={styles.resourceGroups} aria-label="Reported tools this turn">
-              {turn.resources.groups.map((group) => (
-                <li key={group.label}>
-                  <span>{group.label}</span>
-                  <span>{group.calls} call{group.calls === 1 ? '' : 's'}{group.pending ? `, ${group.pending} pending` : ''}{group.failed ? `, ${group.failed} failed` : ''}{group.unknown ? `, ${group.unknown} unknown result` : ''}</span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          <p>{turn.resources.sources} cited source{turn.resources.sources === 1 ? '' : 's'}; {turn.resources.playbooks} recorded playbook reference{turn.resources.playbooks === 1 ? '' : 's'}.</p>
-          {turn.resources.partial ? <p>Partial summary: call, source or tool-group limits reached.</p> : null}
-          <p>Reported by the chat. Server identity and skill loading are unknown.</p>
-        </div>
-      </details>
-      {tookMs !== null || errorJump || work || quiet ? (
-        <footer className={styles.turnFoot} data-kind="turn-meta">
-          {work ? <span className={styles.turnWork} data-kind="turn-work">{work}</span> : null}
-          {tookMs !== null ? (
-            <span><span className="visually-hidden">Turn took </span><span>{formatDuration(tookMs)}</span></span>
-          ) : null}
-          {quiet ? <span className={styles.turnQuiet} data-kind="reasoning-not-shared">{quiet}</span> : null}
-          {errorJump ? (
-            <button type="button" className={styles.turnErrorJump} onClick={() => onJumpAnchor(errorJump)}>
-              {turn.errorCount} failure{turn.errorCount === 1 ? '' : 's'} in this turn — jump to the first
-            </button>
-          ) : null}
-        </footer>
-      ) : null}
+      {/* Keep the disclosure mounted as a turn settles; opening it is local UI state. */}
+      <footer className={styles.turnFoot} data-kind="turn-meta">
+        {work ? <span className={styles.turnWork} data-kind="turn-work">{work}</span> : null}
+        {tookMs !== null ? (
+          <span><span className="visually-hidden">Turn took </span><span>{formatDuration(tookMs)}</span></span>
+        ) : null}
+        {quiet ? <span className={styles.turnQuiet} data-kind="reasoning-not-shared">{quiet}</span> : null}
+        {errorJump ? (
+          <button type="button" className={styles.turnErrorJump} onClick={() => onJumpAnchor(errorJump)}>
+            {turn.errorCount} failure{turn.errorCount === 1 ? '' : 's'} in this turn — jump to the first
+          </button>
+        ) : null}
+        <details className={styles.resourceEvidence}>
+          <summary className={styles.resourceSummary}>Tools and context</summary>
+          <div className={styles.resourceBody}>
+            <p>{turn.resources.calls === 0 ? 'No observed tool calls in this turn.' : `${turn.resources.calls} reported tool call${turn.resources.calls === 1 ? '' : 's'}; ${turn.resources.mcpCalls} with an MCP name.`}</p>
+            {turn.resources.groups.length > 0 ? (
+              <ul className={styles.resourceGroups} aria-label="Reported tools this turn">
+                {turn.resources.groups.map((group) => (
+                  <li key={group.label}>
+                    <span>{group.label}</span>
+                    <span>{group.calls} call{group.calls === 1 ? '' : 's'}{group.pending ? `, ${group.pending} pending` : ''}{group.failed ? `, ${group.failed} failed` : ''}{group.unknown ? `, ${group.unknown} unknown result` : ''}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            <p>{turn.resources.sources} cited source{turn.resources.sources === 1 ? '' : 's'}; {turn.resources.playbooks} recorded playbook reference{turn.resources.playbooks === 1 ? '' : 's'}.</p>
+            {turn.resources.partial ? <p>Partial summary: call, source or tool-group limits reached.</p> : null}
+            <p>Reported by the chat. Server identity and skill loading are unknown.</p>
+          </div>
+        </details>
+      </footer>
     </li>
   );
 });

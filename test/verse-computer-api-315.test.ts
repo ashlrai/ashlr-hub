@@ -144,7 +144,7 @@ describe('computer routes through the real server', () => {
     // No window polling yet: an immediate, actionable refusal.
     const early = await tool('computer_list_apps').handler({}, { sessionId: 's-1' });
     expect(early.isError).toBe(true);
-    expect(JSON.stringify(early)).toMatch(/Verse window is not open/);
+    expect(JSON.stringify(early)).toMatch(/Phantom window is not open/);
 
     const pollOnce = async (): Promise<VerseComputerCommand> => {
       const polled = await request(handle.port, 'GET', '/api/verse/computer/commands?wait=5000', read);

@@ -269,7 +269,7 @@ function failWhere(match: (p: PendingCommand) => boolean, outcome: ComputerOutco
 }
 
 const WINDOW_NOT_OPEN =
-  'The Ashlr Verse window is not open in the desktop app, so there is nothing to act through. Ask the operator to open Verse (desktop app, macOS), then try again.';
+  'The Phantom window is not open in the desktop app, so there is nothing to act through. Ask the operator to open Phantom (desktop app, macOS), then try again.';
 
 function newCommandId(): string {
   return `cc_${randomBytes(9).toString('base64url')}`;

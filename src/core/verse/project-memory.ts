@@ -150,7 +150,7 @@ function cutToBytes(text: string, maxBytes: number): string {
 function memoryInstructions(dir: string, projectName: string, writable: boolean): string {
   const file = join(dir, VERSE_MEMORY_FILE);
   const lines = [
-    '# Shared project memory (Ashlr Verse)',
+    '# Shared project memory (Phantom)',
     '',
     `Every AI seat that works on "${projectName}" shares one memory directory, kept outside the repository:`,
     `  ${dir}`,

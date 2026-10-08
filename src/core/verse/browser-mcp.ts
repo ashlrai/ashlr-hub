@@ -15,7 +15,7 @@ export const BROWSER_MCP_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-
 const SERVER_INFO = { name: 'ashlr-verse-browser', version: '1.0.0' };
 
 const INSTRUCTIONS = [
-  'These tools use the Browser pane the operator has open in Ashlr Verse, on this chat.',
+  'These tools use the Browser pane the operator has open in Phantom, on this chat.',
   'You see exactly what the operator sees. Use them to check the operator\'s own local apps (dev servers on localhost):',
   'open a page, take a screenshot, read its text, and read its console and failed network requests.',
   'Only localhost pages are allowed unless the operator allowed another origin for this chat.',

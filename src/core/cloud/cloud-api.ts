@@ -249,14 +249,14 @@ export function parseCloudPrCloseBody(body: Record<string, unknown>): { headSha:
 // Dismiss (local record only — never GitHub)
 // ---------------------------------------------------------------------------
 
-export const CLOUD_DISMISS_REASON = 'Dismissed in Verse.';
+export const CLOUD_DISMISS_REASON = 'Dismissed in Phantom.';
 
 export type CloudDismissResult =
   | { ok: true; task: CloudTaskV1 }
   | { ok: false; status: 404 | 409; error: string };
 
 /**
- * Mark a task `closed` with "Dismissed in Verse." — idempotent for a task
+ * Mark a task `closed` with "Dismissed in Phantom." — idempotent for a task
  * already closed. Refused for a MERGED task (closing it would rewrite what
  * happened) and while a launch is still in flight (the service would then
  * overwrite the dismissal with `running`).
@@ -305,7 +305,7 @@ export function dismissAction(task: Pick<CloudTaskV1, 'id'>, confirmFirst: boole
     confirm: confirmFirst
       ? {
         title: `Stop tracking this ${noun}?`,
-        body: 'Verse marks it closed. The pull request on GitHub is not touched.',
+        body: 'Phantom marks it closed. The pull request on GitHub is not touched.',
         confirmLabel: 'Dismiss',
       }
       : null,

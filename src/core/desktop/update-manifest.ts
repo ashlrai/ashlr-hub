@@ -44,6 +44,35 @@ export interface UpdateManifest {
 }
 export interface UpdateEnvelope { manifestText: string; signature: string }
 export interface VerifiedUpdateManifest { manifest: UpdateManifest; digest: string }
+export type DesktopUpdateProfileName = 'legacy-v1' | 'canonical-v2';
+export interface DesktopUpdateProfile {
+  readonly name: DesktopUpdateProfileName;
+  readonly schemaVersion: 1 | 2;
+  readonly repository: UpdateTrust['repository']['fullName'];
+  readonly packageName: '@ashlr/hub' | '@ashlr/phantom';
+  readonly archivePrefix: 'ashlr-hub' | 'ashlr-phantom';
+  readonly binName: 'ashlr';
+}
+const profiles: Readonly<Record<DesktopUpdateProfileName, DesktopUpdateProfile>> = Object.freeze({
+  'legacy-v1': Object.freeze({name: 'legacy-v1', schemaVersion: 1, repository: 'ashlrai/ashlr-hub', packageName: '@ashlr/hub', archivePrefix: 'ashlr-hub', binName: 'ashlr'}),
+  'canonical-v2': Object.freeze({name: 'canonical-v2', schemaVersion: 2, repository: 'ashlrai/phantom', packageName: '@ashlr/phantom', archivePrefix: 'ashlr-phantom', binName: 'ashlr'}),
+});
+/** Closed identity data, never an authority grant or a caller-selected namespace. */
+export function getDesktopUpdateProfile(name: DesktopUpdateProfileName): DesktopUpdateProfile {
+  requireValue(name === 'legacy-v1' || name === 'canonical-v2', 'identity profile');
+  return profiles[name];
+}
+/** Publishers must independently bind the returned profile to their fresh exact repository. */
+export function desktopUpdateProfileForPackage(packageName: unknown): DesktopUpdateProfile {
+  requireValue(packageName === '@ashlr/hub' || packageName === '@ashlr/phantom', 'package identity');
+  return profiles[packageName === '@ashlr/hub' ? 'legacy-v1' : 'canonical-v2'];
+}
+export type CanonicalUpdateManifest = Omit<UpdateManifest, 'schemaVersion' | 'cli'> & {
+  schemaVersion: 2;
+  cli: UpdateArtifact & {packageName: '@ashlr/phantom'; binName: 'ashlr'};
+};
+export type CompatibleUpdateManifest = UpdateManifest | CanonicalUpdateManifest;
+export interface VerifiedCompatibleUpdateManifest {manifest: CompatibleUpdateManifest; digest: string}
 export interface UpdateBundleRecord {
   schemaVersion: 1;
   version: string;
@@ -143,8 +172,39 @@ export function verifyUpdateManifest(envelope: UpdateEnvelope, trust: UpdateTrus
   const manifest = parseUpdateManifest(envelope.manifestText, trust);
   return freeze({ manifest, digest: createHash('sha256').update(envelope.manifestText).digest('hex') });
 }
+/** Keep the original V1 parser intact; the new production lane accepts only two whole tuples. */
+export function parseCompatibleUpdateManifest(manifestText: string, trust: UpdateTrust): CompatibleUpdateManifest {
+  requireValue(typeof manifestText === 'string' && Buffer.byteLength(manifestText) <= MAX_UPDATE_MANIFEST_BYTES && Buffer.from(manifestText).toString() === manifestText, 'manifest UTF-8/size');
+  const value = JSON.parse(manifestText) as Record<string, unknown>;
+  requireValue(value !== null && typeof value === 'object' && !Array.isArray(value), 'manifest');
+  requireValue(value.schemaVersion === 1 || value.schemaVersion === 2, 'release schema');
+  const profile = profiles[value.schemaVersion === 1 ? 'legacy-v1' : 'canonical-v2'];
+  const repository = object(value.repository, ['nameWithOwner', 'repositoryId', 'repositoryNodeId', 'ownerId', 'ownerLogin', 'defaultBranch'], 'repository');
+  const cli = object(value.cli, ['filename', 'url', 'bytes', 'sha256', 'signature', 'packageName', 'binName'], 'artifact');
+  requireValue(repository.nameWithOwner === profile.repository && cli.packageName === profile.packageName && cli.filename === `${profile.archivePrefix}-${String(value.version)}.tgz`, 'identity profile tuple');
+  requireValue(canonicalJson(value) === manifestText, 'canonical manifest');
+  requireValue(trust.repository.fullName === 'ashlrai/ashlr-hub' || trust.repository.fullName === 'ashlrai/phantom', 'commissioned repository');
+  const profileTrust: UpdateTrust = {...trust, repository: {...trust.repository, fullName: profile.repository}};
+  if (value.schemaVersion === 1) return parseUpdateManifest(manifestText, profileTrust);
+  // Reuse every V1 field/bound/source validation on a private validation view.
+  // Only the original V2 bytes are authenticated, returned and digested.
+  const legacyFilename = `ashlr-hub-${String(value.version)}.tgz`;
+  const canonicalUrl = `https://github.com/${profile.repository}/releases/download/v${String(value.version)}/${String(cli.filename)}`;
+  requireValue(cli.url === canonicalUrl, 'release URL');
+  const validationView = {...value, schemaVersion: 1, cli: {...cli, packageName: '@ashlr/hub', filename: legacyFilename,
+    url: `https://github.com/${profile.repository}/releases/download/v${String(value.version)}/${legacyFilename}`}};
+  parseUpdateManifest(canonicalJson(validationView), profileTrust);
+  return value as unknown as CanonicalUpdateManifest;
+}
+export function verifyCompatibleUpdateManifest(envelope: UpdateEnvelope, trust: UpdateTrust): VerifiedCompatibleUpdateManifest {
+  object(envelope, ['manifestText', 'signature'], 'envelope');
+  requireValue(typeof envelope.manifestText === 'string' && Buffer.byteLength(envelope.manifestText) <= MAX_UPDATE_MANIFEST_BYTES, 'manifest size');
+  verifyMinisign(Buffer.from(envelope.manifestText), envelope.signature, trust.publicKey);
+  const manifest = parseCompatibleUpdateManifest(envelope.manifestText, trust);
+  return freeze({manifest, digest: createHash('sha256').update(envelope.manifestText).digest('hex')});
+}
 /** Read only after Apple code identity/inventory verification. This record is not an independent signature. */
-export function verifyUpdateBundleRecord(text: string, manifest: UpdateManifest): void {
+export function verifyUpdateBundleRecord(text: string, manifest: CompatibleUpdateManifest): void {
   requireValue(typeof text === 'string' && Buffer.byteLength(text) <= 4096 && Buffer.from(text).toString() === text, 'bundle record UTF-8/size');
   const expected: UpdateBundleRecord = {schemaVersion: 1, version: manifest.version, source: manifest.source,
     authoritySurfaceDigest: manifest.authoritySurfaceDigest, packageSha256: manifest.cli.sha256};

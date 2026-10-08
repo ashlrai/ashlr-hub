@@ -1,10 +1,12 @@
-# Hub reference: Universe, resource pools and the legacy fleet
+<a id="hub-reference-universe-resource-pools-and-the-legacy-fleet"></a>
 
-> Moved from the top-level [README](../README.md) to keep the README short. Content is unchanged apart from link paths.
+# Phantom reference: Universe, resource pools and the legacy fleet
+
+> Moved from the top-level [README](../README.md) to keep the README short. Compatibility identifiers are retained; current product prose uses Phantom.
 
 ## Reference
 
-The sections below document the Hub underneath the console: the Universe
+The sections below document the Phantom underneath the console: the Universe
 experiment kernel, resource pools, and the legacy enrolled-repository fleet with
 its dashboard and CLI.
 
@@ -46,7 +48,7 @@ work. See the [demo guide](DEMO.md) for expected results and recovery.
 | Build your next step | Guide |
 |---------------------|-------|
 | Understand the demo and its evidence | [Demo walkthrough](DEMO.md) |
-| Configure your own experiments and campaigns | [Ashlrverse operator guide](ASHLR-UNIVERSE.md) |
+| Configure your own experiments and campaigns | [Phantom operator guide](ASHLR-UNIVERSE.md) |
 | Connect native/local workers and budget their usage | [Resource Pools](RESOURCE-POOLS.md) |
 | Run a verified package independently of this checkout | [Pinned local runtime](ASHLR-UNIVERSE.md#install-a-pinned-local-runtime) |
 | Understand the components or contribute | [Architecture](ARCHITECTURE.md#current-runtime-map) · [Documentation map](README.md) |
@@ -67,7 +69,7 @@ task submission, pause/resume, cancellation and session-local output.
 
 ### The legacy enrolled-repository fleet
 
-ashlr-hub also contains the original autonomous fleet for enrolled repositories.
+ashlr-Phantom also contains the original autonomous fleet for enrolled repositories.
 In the current production build its compiled daemon and conductor trust roots are
 empty, so live non-dry fleet execution is dormant unless a standing grant (see [Autonomy setup](AUTONOMY-SETUP.md))
 admits the tick; verified dry-run, status and local-console paths remain
@@ -133,7 +135,7 @@ End-State Spec (your vision)
 - Adding a new backend (a NIM, a local Qwen, a different API) is one config entry, no code change.
 
 **Legacy fleet properties:** The following policy describes the enrolled-repo
-daemon/swarm path, not every Hub command. Universe and Resource Pools have
+daemon/swarm path, not every Phantom command. Universe and Resource Pools have
 separate [execution boundaries](ARCHITECTURE.md#current-runtime-map).
 
 - **Preflight-first activation.** `ashlr preflight` verifies daemon readiness, backend connectivity, and key configuration before you enroll any repos. Run it once before your first enroll.
@@ -154,7 +156,7 @@ For Universe experiments and the resource fleet map, follow the
 It needs no provider account for the deterministic demonstration. Real workers
 have a separate [commissioning procedure](RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity).
 
-The instructions below cover the **general Hub and legacy fleet configuration**.
+The instructions below cover the **general Phantom and legacy fleet configuration**.
 They do not install an unreleased source feature or activate the dormant daemon.
 
 ### Install from source
@@ -386,10 +388,10 @@ On macOS, `cfg.foundry.confinement` wraps the spawn in `sandbox-exec` (read-jail
 
 That legacy path carries HMAC-signed `{engineModel, engineTier}` provenance
 (M47.1); its merge gate re-verifies the HMAC. This is not the provenance or
-containment contract for every Hub operation. Universe runs candidates and a
+containment contract for every Phantom operation. Universe runs candidates and a
 pinned evaluator through its own isolation profile. Resource Pool native workers
 run in the explicitly selected `cwd` using the native adapter's read-only or
-workspace-write controls, not an automatically created Hub worktree. Consult
+workspace-write controls, not an automatically created Phantom worktree. Consult
 [Universe](ASHLR-UNIVERSE.md) and [Resource Pools](RESOURCE-POOLS.md#run-one-task)
 before authorizing either path.
 
@@ -474,7 +476,7 @@ next actions point at work the daemon can select now instead of phantom backlog.
 
 | Command | What it does |
 |---------|-------------|
-| `ashlr verse [--port N] [--no-open] [--json]` | Start the Verse console at `127.0.0.1:7777/verse/` |
+| `ashlr verse [--port N] [--no-open] [--json]` | Start the Phantom console at `127.0.0.1:7777/verse/` |
 | `ashlr authority setup/status/switch/stop/grant/revoke/ledger` | Standing authority: the one-time setup, Touch ID grants, the autonomy switch, Stop and the ledger |
 | `ashlr leader show/run/tick/veto` | The Leader: latest memo, a run when due, due class-B actions, veto |
 | `ashlr cloud launch/list/refresh/improve/budget/backlog` | The cloud lane: Claude Code cloud sessions, their budget and the self-improvement backlog |
@@ -525,7 +527,7 @@ next actions point at work the daemon can select now instead of phantom backlog.
 
 The following invariants describe the **legacy enrolled-repository fleet** and
 its named adversarial test contracts. They are not blanket claims about every
-CLI, model transport or state store in Hub. Universe and Resource Pools enforce
+CLI, model transport or state store in Phantom. Universe and Resource Pools enforce
 their separately documented scopes; a green test for one path does not prove
 containment or activation of another.
 

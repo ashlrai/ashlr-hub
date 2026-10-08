@@ -10,7 +10,7 @@ mirror and build-provenance bindings are qualified. A new npm identity,
 Existing package imports, CLI commands and saved data must remain compatible
 through either migration. Availability checks do not reserve either name.
 
-The native window, menus and About identify Phantom. Published 3.25.1 uses `Phantom.app` and `Phantom_3.25.1_aarch64.dmg`; the historical 3.25.0 release retains `Ashlr.app`. The guarded installer requires prior Stop/drain and a closed, identity-verified app, then coordinates the app/current CLI links with a full rollback archive. It refuses conflicting names or uncertain work. The bundle identifier, signing identity, custody keys, grants, data and launch-agent names are retained. This does not activate automatic updates. Signed idle updates remain a 3.25.2 source candidate, with no activated public feed or notarization claim.
+The native window, menus and About identify Phantom. Published 3.25.1 uses `Phantom.app` and `Phantom_3.25.1_aarch64.dmg`; the historical 3.25.0 release retains `Ashlr.app`. The guarded installer requires prior Stop/drain and a closed, identity-verified app, then coordinates the app/current CLI links with a full rollback archive. It refuses conflicting names or uncertain work. The bundle identifier, signing identity, custody keys, grants, data and launch-agent names are retained. This does not activate automatic updates. Published 3.25.2 supplies the verified signed app/CLI feed. Existing 3.25.1 installs require a manual update to use it; feed publication does not activate automatic updates or resident authority. No notarization is claimed.
 
 ## Mark provenance
 

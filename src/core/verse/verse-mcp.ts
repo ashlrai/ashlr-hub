@@ -117,7 +117,7 @@ export interface VerseMcpToolListing {
   annotations: VerseMcpToolAnnotations;
 }
 
-const DESKTOP_ONLY = 'This tool needs the Ashlr desktop app: this Verse server runs without a built-in terminal, browser or screen access. Ask the operator to open the chat in the desktop app.';
+const DESKTOP_ONLY = 'This tool needs the Phantom desktop app: this Phantom server runs without a built-in terminal, browser or screen access. Ask the operator to open the chat in the desktop app.';
 
 export function textContent(t: string): VerseMcpContent {
   return { type: 'text', text: t };
@@ -232,8 +232,8 @@ export interface VerseMcpRequestContext {
 }
 
 const BASE_INSTRUCTIONS = [
-  'These tools act on the operator\'s own machine through Ashlr Verse, on this chat, with what the operator allowed for it.',
-  'Terminal tools run commands in visible Verse terminal tabs the operator can watch; a tab you open is marked "Agent".',
+  'These tools act on the operator\'s own machine through Phantom, on this chat, with what the operator allowed for it.',
+  'Terminal tools run commands in visible Phantom terminal tabs the operator can watch; a tab you open is marked "Agent".',
   'You may only type into your own tabs, or a shell the operator explicitly shared with you.',
   'If the operator types in a tab you are driving, they have taken it over: stop and wait for them to hand it back.',
   'Destructive commands (rm -rf, force pushes, sudo, piping downloads into a shell, killing processes, …) wait for the operator to allow them.',
@@ -291,7 +291,7 @@ async function callTool(tool: VerseMcpTool, rawArgs: unknown, ctx: VerseMcpReque
   const args = isRecord(rawArgs) ? { ...rawArgs } : {};
   delete args['_meta'];
   const toolCtx = ctx.toolContext();
-  if (toolCtx.signal.aborted) return toolError('This turn\'s access to Verse tools has ended.');
+  if (toolCtx.signal.aborted) return toolError('This turn\'s access to Phantom tools has ended.');
   try {
     return await tool.handler(args, toolCtx);
   } catch (err) {

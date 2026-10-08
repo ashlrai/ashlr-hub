@@ -88,9 +88,9 @@ describe('MCP', () => {
 
   it('offers the hub and JSON accounts as targets; TOML accounts say why not', () => {
     expect(mcpTargets(snapshot)).toEqual([
-      { id: 'hub', label: 'Hub gateway registry', disabledReason: null },
+      { id: 'hub', label: 'Phantom gateway registry', disabledReason: null },
       { id: 'account:claude-a', label: 'Claude Max (claude)', disabledReason: null },
-      { id: 'account:codex-a', label: 'Personal Codex (codex)', disabledReason: 'Keeps its MCP servers in TOML, which Hub does not rewrite.' },
+      { id: 'account:codex-a', label: 'Personal Codex (codex)', disabledReason: 'Keeps its MCP servers in TOML, which Phantom does not rewrite.' },
     ]);
     expect(mcpTargets(null)).toHaveLength(1);
   });

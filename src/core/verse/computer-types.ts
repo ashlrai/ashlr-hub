@@ -212,7 +212,7 @@ function inList(list: readonly string[], bundleId: string): boolean {
  */
 export function computerAppPolicy(bundleId: string | null | undefined, executablePath?: string | null): ComputerAppPolicy {
   if (typeof executablePath === 'string' && COMPUTER_DENIED_EXECUTABLE_PREFIXES.some((p) => executablePath.startsWith(p))) {
-    return { ceiling: null, category: 'denied', reason: 'The Ashlr custody helper signs authority grants; agents may never touch its prompts.' };
+    return { ceiling: null, category: 'denied', reason: 'The Phantom custody helper signs authority grants; agents may never touch its prompts.' };
   }
   if (typeof bundleId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9.-]{0,199}$/.test(bundleId)) {
     return { ceiling: null, category: 'denied', reason: 'This process has no app identity, so it cannot be granted.' };
@@ -222,12 +222,12 @@ export function computerAppPolicy(bundleId: string | null | undefined, executabl
       ceiling: null,
       category: 'denied',
       reason: bundleMatches('ai.ashlr.desktop', bundleId)
-        ? 'Agents may never control Ashlr itself (they could approve their own access).'
+        ? 'Agents may never control Phantom itself (they could approve their own access).'
         : 'Password managers, the keychain and system authentication prompts are never available to agents.',
     };
   }
   if (inList(COMPUTER_BROWSER_BUNDLES, bundleId)) {
-    return { ceiling: 'read', category: 'browser', reason: 'Browsers are read-only: agents use the web through the Verse Browser pane.' };
+    return { ceiling: 'read', category: 'browser', reason: 'Browsers are read-only: agents use the web through the Phantom Browser pane.' };
   }
   if (inList(COMPUTER_TERMINAL_IDE_BUNDLES, bundleId)) {
     return { ceiling: 'click', category: 'terminal-ide', reason: 'Terminals and editors are click-only: no typing, keys, right-click or drag.' };

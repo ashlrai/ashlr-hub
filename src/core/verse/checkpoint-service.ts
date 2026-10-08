@@ -438,7 +438,7 @@ export function createCheckpointService(opts: CheckpointServiceOptions = {}): Ch
       if (repos.size === 0) return;
       const snaps = budget.aborted
         ? [...repos].map(([rootId, path]) => ({ rootId, path, commit: null, error: skipped, skipped: 0, ms: 0, snap: null }))
-        : await snapRoots(repos, `Ashlr Verse checkpoint: before turn ${info.turnId}`, () => budget.aborted);
+        : await snapRoots(repos, `Phantom checkpoint: before turn ${info.turnId}`, () => budget.aborted);
       for (const s of snaps) {
         // A commit here finished before the budget ran out (snapRoots drops
         // any that finished later), so its content predates the agent.
@@ -474,7 +474,7 @@ export function createCheckpointService(opts: CheckpointServiceOptions = {}): Ch
         await record(info.sessionId, { kind: 'turn-end', at: nowIso(clock()), turnId: info.turnId, outcome: info.outcome, roots: [] });
         return;
       }
-      const snaps = await snapRoots(repos, `Ashlr Verse checkpoint: after turn ${info.turnId}`, () => false);
+      const snaps = await snapRoots(repos, `Phantom checkpoint: after turn ${info.turnId}`, () => false);
       for (const s of snaps) {
         if (!s.commit) continue;
         try {
@@ -595,7 +595,7 @@ export function createCheckpointService(opts: CheckpointServiceOptions = {}): Ch
   function snapshotNow(gitRoot: string, fresh = false): Promise<SnapshotResult> {
     const hit = nowCache.get(gitRoot);
     if (!fresh && hit && clock() - hit.at < 1_500) return hit.snap;
-    const snap = snapshotWorkingTree(gitRoot, { run, label: 'Ashlr Verse snapshot', ...(opts.limits ?? {}) });
+    const snap = snapshotWorkingTree(gitRoot, { run, label: 'Phantom snapshot', ...(opts.limits ?? {}) });
     nowCache.set(gitRoot, { at: clock(), snap });
     snap.catch(() => nowCache.delete(gitRoot));
     return snap;

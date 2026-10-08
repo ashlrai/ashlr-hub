@@ -114,9 +114,9 @@ pub const FIT_MAX_HEIGHT: f64 = 800.0;
 const ERROR_MAX_CHARS: usize = 300;
 
 pub const TOOK_OVER_MESSAGE: &str =
-    "The operator took over. Wait for them to hand control back with Resume in Verse.";
+    "The operator took over. Wait for them to hand control back with Resume in Phantom.";
 pub const STOPPED_MESSAGE: &str =
-    "The operator stopped computer use. It stays off until they turn it back on in Verse.";
+    "The operator stopped computer use. It stays off until they turn it back on in Phantom.";
 
 /// The deep links `open-settings` may open (closed enum; mirrors
 /// `COMPUTER_SETTINGS_URLS` in computer-types.ts).
@@ -1108,7 +1108,7 @@ pub fn authorize(
     };
     if !tier_allows(tier, action) {
         let why = match category {
-            Category::Browser => " (browsers are read-only: use the Verse Browser pane)",
+            Category::Browser => " (browsers are read-only: use the Phantom Browser pane)",
             Category::TerminalIde => " (terminals and editors are click-only)",
             _ => "",
         };
@@ -2784,7 +2784,7 @@ mod mac {
         if !verse_window_present(handle) {
             return Err(Failure::new(
                 ErrorCode::OperatorTookOver,
-                "The Verse window is hidden, so desktop control is paused. Ask the operator to bring Verse back.",
+                "The Phantom window is hidden, so desktop control is paused. Ask the operator to bring Phantom back.",
             ));
         }
         let transition = lock(&state.takeover)

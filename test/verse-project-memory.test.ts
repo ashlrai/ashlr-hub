@@ -145,8 +145,12 @@ describe('prepareProjectMemory', () => {
   });
 
   it('snapshots the current MEMORY.md into the block', () => {
-    writeProjectMemory(project, '# Decisions\n- Use pnpm, because the lockfile is pnpm.\n', root);
+    const historical = '# Shared project memory (Ashlr Verse)\n- Use pnpm, because the lockfile is pnpm.\n';
+    writeProjectMemory(project, historical, root);
     const { block } = prepareProjectMemory(project, { writable: true, root });
+    expect(block).toMatch(/^# Shared project memory \(Phantom\)/);
+    expect(block).toContain(historical.trim());
+    expect(readFileSync(join(projectMemoryDir(project, root), 'MEMORY.md'), 'utf8')).toBe(historical);
     expect(block).toContain('- Use pnpm, because the lockfile is pnpm.');
     expect(block).not.toContain('nothing recorded yet');
   });

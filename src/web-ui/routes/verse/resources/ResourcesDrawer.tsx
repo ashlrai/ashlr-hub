@@ -40,6 +40,7 @@ import { useFocusTrap } from '../../../components/primitives/focus-trap.js';
 import { IconRefresh, IconX } from '../../../components/primitives/icons.js';
 import { Tooltip } from '../../../components/primitives/Tooltip.js';
 import { useQuery, useRefetch, useRefresh } from '../../../data/hooks.js';
+import { ApiError } from '../../../data/client.js';
 import type { ReadinessFix, ResourceReadinessRow } from '../../../../core/routing/readiness-types.js';
 import type { AccountAction } from '../apps/apps-model.js';
 import { servingRuntimeQuery } from '../autonomy/fleet-queries.js';
@@ -140,11 +141,26 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
   const refreshBudget = useRefresh(budgetQuery);
   const refreshDevin = useRefresh(devinQuery);
   usePollWhileVisible(refetchReadiness, RESOURCES_POLL_MS.readiness);
+  // Retained cache data is not a fresh readiness verdict after a failed read,
+  // including while a retry is pending. Capacity/credit readings are separate.
+  const readinessCurrent = readinessRead.status === 'success' && readinessRead.error === undefined
+    && readinessRead.data?.state === 'ready';
+  const readinessNotice = readinessRead.error !== undefined
+    ? readinessRead.error instanceof ApiError && readinessRead.error.status === 401
+      ? 'Readiness unavailable · sign in again.'
+      : readinessRead.data?.state === 'ready'
+        ? 'Readiness unavailable · last result is unverified.'
+        : 'Readiness unavailable · try Read everything again.'
+    : readinessRead.status === 'idle' || readinessRead.status === 'loading' || readinessRead.status === 'refreshing'
+      ? 'Checking Chat and Fleet readiness…'
+      : readinessRead.data?.state === 'unsupported' ? 'Readiness isn’t available on this version.' : null;
   const readinessById = useMemo(() => {
     const map = new Map<string, ResourceReadinessRow>();
-    for (const r of readinessRead.data?.value?.resources ?? []) map.set(r.id, r);
+    if (readinessCurrent) {
+      for (const r of readinessRead.data?.value?.resources ?? []) map.set(r.id, r);
+    }
     return map;
-  }, [readinessRead.data]);
+  }, [readinessRead.data, readinessCurrent]);
 
   const rows = useMemo(
     () => buildCapacityRows(data.seats, { health: data.health, budget: data.budget, now }),
@@ -346,6 +362,7 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
         </Suspense>
         {data.refreshing ? <p className={styles.subtle} role="status">Updating readings…</p> : null}
         {data.readFailed ? <p className={styles.subtle} role="status">Refresh unavailable{data.rosterUnavailable ? '.' : ' · showing last readings.'}</p> : null}
+        {readinessNotice ? <p className={styles.subtle} role="status">{readinessNotice}</p> : null}
         {data.loading ? (
           <p className={styles.subtle} aria-busy="true">Reading accounts…</p>
         ) : !data.rosterUnavailable && paid.length === 0 && devinRows.length === 0 ? (

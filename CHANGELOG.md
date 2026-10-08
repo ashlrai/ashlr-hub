@@ -9,7 +9,29 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.25.2] — Unreleased
+## [3.25.3] — 2026-10-08
+
+### Fixed
+
+- Configure the native updater's TLS provider before constructing its HTTPS
+  client, preventing the reproduced startup abort.
+- Make authority help observational and show the exact safe installer failure
+  phase. Retry retained original CLI bytes through fresh verification without
+  overwriting prior transactions or rollback evidence.
+- Unify current UI, CLI, cloud and Devin messages and guides under Phantom.
+  Preserve historical records and recognize both old and new closure markers.
+- Consolidate chat evidence into an expandable footer and clarify resource
+  readiness while keeping account usage and credits separate.
+
+### Added
+
+- A compatibility bridge for signed legacy and canonical Phantom identities.
+  Existing repository/package names stay in place for this release; the closed
+  canonical profile enables the subsequent migration without mixed identities.
+- Advisory incremental CI observations alongside the required full checks.
+  No cached result substitutes for release qualification.
+
+## [3.25.2] — 2026-10-08
 
 ### Added
 

@@ -146,7 +146,7 @@ describe('cloud turn: first message starts a Devin session bound to the repo', (
     expect(body['repos']).toEqual([REPO]);
     expect(body['max_acu_limit']).toBe(readDevinBudget().maxAcuPerSession);
     expect(String(body['prompt'])).toMatch(/^Add a health check endpoint/);
-    expect(String(body['prompt'])).toMatch(/Ashlr Verse chat/);
+    expect(String(body['prompt'])).toMatch(/Phantom chat/);
     expect(String(body['prompt'])).not.toMatch(/still push an empty commit/);
     expect(body['structured_output_schema']).toBeUndefined();
 
@@ -288,7 +288,7 @@ describe('cloud turn: follow-ups, suspension, errors, Stop', () => {
     const del = api.requests.filter((r) => r.method === 'DELETE');
     expect(del).toHaveLength(1);
     expect(del[0]!.path).toBe(`/v3/organizations/${FAKE_ORG}/sessions/${onlySession().id}`);
-    expect(readDevinTask(taskId)).toMatchObject({ state: 'closed', stateReason: 'Terminated from its Verse chat.' });
+    expect(readDevinTask(taskId)).toMatchObject({ state: 'closed', stateReason: 'Terminated from its Phantom chat.' });
 
     const after = scripted([]);
     expect(await runDevinCloudTurn(payload({ nativeId: taskId, text: 'Hello?' }), after.io, deps())).toBe(1);

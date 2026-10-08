@@ -156,6 +156,8 @@ describe('M30 CI workflow', () => {
       'test/cli-registry-drift.test.ts',
       'test/authority-tier1-closure-310b.test.ts',
       'test/sidecar-literal-imports-315.test.ts',
+      'test/m93.service-authority-docs.test.ts',
+      'test/m479.release-workflow-policy.test.ts',
     ].join(' '));
     expect(ciYml.match(/run: npm run check:release/g)).toHaveLength(1);
     for (const [id, condition] of [
@@ -196,6 +198,30 @@ describe('M30 CI workflow', () => {
     expect(job).toContain('--reports "${{ steps.web.outputs.lane_dir }}"');
     expect(job).toContain('name: ashlr-build-${{ github.run_id }}-${{ github.run_attempt }}');
     expect(job).toContain('if-no-files-found: error');
+  });
+
+  it('keeps advisory impact shadow separate from full qualification and accepted artifacts', () => {
+    for (const id of ['ci', 'mac-general', 'mac-isolated']) {
+      const job = workflowJob(id);
+      const observations = [...job.matchAll(/^ {6}- name: (?:Observe|Upload) advisory [^\n]+\n[\s\S]*?(?=^ {6}- name:|$(?![\s\S]))/gm)].map((match) => match[0]);
+      expect(observations).toHaveLength(2);
+      for (const step of observations) {
+        expect(step).toContain('continue-on-error: true');
+        expect(step).toContain('timeout-minutes: 2');
+        expect(step).not.toMatch(/always\(\)|needs:|permissions:|qualifyArtifact|verifyArtifact|adoptArtifact/);
+      }
+      expect(observations[0]).toContain('ASHLR_SHADOW_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}');
+      expect(observations[1]).toContain("if: success() && steps.shadow.outputs.shadow_dir != ''");
+      expect(observations[1]).toContain('name: phantom-impact-shadow-');
+      const full = job.match(/^ {6}- name: Test (?:web operator console|complete Mac [^\n]+)\n[\s\S]*?(?=^ {6}- name:)/m)?.[0] ?? '';
+      expect(full).not.toBe('');
+      expect(full).not.toContain('continue-on-error');
+      expect(job.indexOf(observations[0])).toBeGreaterThan(job.indexOf(full));
+    }
+    expect(ciYml).toContain('.github/tests/ci-impact-shadow.test.mjs');
+    expect(qualificationLane).not.toContain('shadow');
+    const verifier = readFileSync(resolve(repoRoot, 'scripts/hosted-build-artifact.mjs'), 'utf8');
+    expect(verifier).not.toContain('ci-impact-shadow');
   });
 
   it('runs independent native broker coverage without giving CI signing authority', () => {
@@ -689,6 +715,8 @@ describe('M30 CI workflow', () => {
       'test/authority-tier1-closure-310b.test.ts',
       'test/sidecar-literal-imports-315.test.ts',
       ...Array<string>(4).fill('test/m342.dispatch-production-ledger.test.ts'),
+      'test/m93.service-authority-docs.test.ts',
+      'test/m479.release-workflow-policy.test.ts',
     ].sort());
     expect(windowsPortabilityThree).toContain('--reporter=dot');
     expect(windowsPortabilityOverflow).toContain('--reporter=dot');

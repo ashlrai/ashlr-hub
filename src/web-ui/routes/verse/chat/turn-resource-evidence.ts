@@ -67,8 +67,8 @@ function toolLabel(name: unknown): { label: string; mcp: boolean } {
   if (!mcp) return { label: tool, mcp: false };
   // Recognize the transport envelope, not an executable/plugin identity.
   const server = /^mcp:/i.test(trimmed) ? trimmed.slice(4, trimmed.indexOf('.')) : trimmed.split('__')[1];
-  const family = server === 'ashlr' || server === 'plugin_ashlr_ashlr' ? 'Ashlr MCP'
-    : server === 'ashlr-efficiency' ? 'Ashlr efficiency MCP'
+  const family = server === 'ashlr' || server === 'plugin_ashlr_ashlr' ? 'Phantom CLI MCP'
+    : server === 'ashlr-efficiency' ? 'Phantom efficiency MCP'
       : server === 'ashlr-verse' ? 'Phantom MCP' : 'Other MCP';
   return { label: `${family}: ${tool}`, mcp: true };
 }

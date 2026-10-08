@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   type ImmutablePrivateRecordCodec, type ImmutablePrivateRecordStoreConfig,
@@ -8,7 +8,7 @@ import {
 import { acquireLocalStoreLock, ownsLocalStoreLock, releaseLocalStoreLock, verifiedProcessStartRef } from '../fleet/local-store-lock.js';
 import {
   artifactDigest, canonical, defaultUniverseRoot, digest, ensureUniverseRoot,
-  executable, freezeArtifact, inspectPrivateDirectory, materializeSeed, pinSeed, privateDirectory,
+  executable, evaluationExecutableDigest, freezeArtifact, inspectPrivateDirectory, materializeSeed, pinSeed, privateDirectory,
 } from './artifacts.js';
 import type { UniverseArtifact, UniverseDiagnostic, UniverseElite, UniverseManifest, UniverseOverview, UniverseRun,
   UniverseStoreOptions, UniverseSummary, UniverseTrial } from './types.js';
@@ -361,7 +361,7 @@ function initUniverseRecord(input: UniverseManifest, options: UniverseStoreOptio
     const evalCommand = builtin?.command ?? pinnedEvaluationCommand(manifest, seedPath);
     const partial: Omit<ManifestRecord, 'comparatorDigest'> = { id: 'manifest', kind: 'manifest', manifest,
       manifestDigest: digest(canonical(manifest)), seedArtifact: { path: seedPath, digest: seedDigest, revision: manifest.seed.revision },
-      evaluationCommand: evalCommand, evaluationExecutableDigest: digest(readFileSync(evalCommand[0]!)),
+      evaluationCommand: evalCommand, evaluationExecutableDigest: evaluationExecutableDigest(evalCommand[0]!),
       ...(builtin ? { evaluationBuiltinDigest: builtin.digest } : {}),
       ...(origin ? { integrationOrigin: origin } : {}), ...(campaignOrigin ? { campaignDeliveryOrigin: campaignOrigin } : {}) };
     freezeArtifact(seedPath);
@@ -387,7 +387,7 @@ export function assertComparatorUnchanged(record: ManifestRecord): void {
         canonical(record.evaluationCommand) !== canonical(builtin.command)) throw new Error('Universe installed evaluator changed');
   } else if (record.evaluationBuiltinDigest !== undefined) throw new Error('Universe evaluator kind changed');
   if (artifactDigest(record.seedArtifact.path) !== record.seedArtifact.digest ||
-      digest(readFileSync(record.evaluationCommand[0]!)) !== record.evaluationExecutableDigest ||
+      evaluationExecutableDigest(record.evaluationCommand[0]!) !== record.evaluationExecutableDigest ||
       record.comparatorDigest !== comparatorDigest(record)) throw new Error('Universe evaluator or seed comparator changed');
 }
 

@@ -18,15 +18,15 @@
 
 ## Install
 
-Phantom 3.25.1:
+Phantom 3.25.2:
 
 ```sh
-npm install -g @ashlr/hub@3.25.1   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
+npm install -g @ashlr/hub@3.25.2   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
 phm verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 On an Apple silicon Mac, download the
-[v3.25.1 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.1/Phantom_3.25.1_aarch64.dmg).
+[v3.25.2 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.2/Phantom_3.25.2_aarch64.dmg).
 It is locally signed, not Apple notarized; macOS may require **Open Anyway** on
 first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
@@ -67,7 +67,7 @@ account-aware resource pools.
 
 Phantom was formerly Ashlr Verse. Names stay compatible. The repository is `ashlr-hub`, the package is
 `@ashlr/hub`, and `phm` and `ashlr` share the same entrypoint. Experiments remain compatible with `ashlr universe`
-and the `@ashlr/hub/universe` SDK. Existing manifests, schemas and stores need no naming migration. Published 3.25.1 uses `Phantom.app`; 3.25.0 retains its historical `Ashlr.app` filename. See [branding and compatibility](https://github.com/ashlrai/ashlr-hub/blob/master/docs/PHANTOM-BRAND.md).
+and the `@ashlr/hub/universe` SDK. Existing manifests, schemas and stores need no naming migration. Published 3.25.2 uses `Phantom.app`; 3.25.0 retains its historical `Ashlr.app` filename. See [branding and compatibility](https://github.com/ashlrai/ashlr-hub/blob/master/docs/PHANTOM-BRAND.md).
 
 The user guide is [`docs/VERSE.md`](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md).
 See [Automatic work](docs/AUTOMATIC-OUTCOMES.md) for chat routing, editable outcomes and recovery.
@@ -213,7 +213,7 @@ separate Node.js install to run.
 
 ### Install
 
-Use the [v3.25.1 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.1)
+Use the [v3.25.2 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.2)
 for the versioned arm64 DMG. It is locally signed, not Apple Developer ID notarized,
 so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
@@ -301,18 +301,18 @@ check identity and quota, are in
 The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
-Published 3.25.1 provides `phm` as the primary CLI command. Both `phm` and
+Published 3.25.2 provides `phm` as the primary CLI command. Both `phm` and
 `ashlr` use the same workbench entrypoint; existing `ashlr` scripts keep working.
 When building from source, `./install.sh` installs both aliases and refuses
 unrelated files or links. The separate Phantom Secrets command remains `phantom`.
 
 ```sh
-npm install -g @ashlr/hub@3.25.1
+npm install -g @ashlr/hub@3.25.2
 phm --version
 phm verse                 # start the server and open http://127.0.0.1:7777/verse/
 ```
 
-The 3.25.1 package also preserves the public SDK entrypoints `@ashlr/hub`,
+The 3.25.2 package also preserves the public SDK entrypoints `@ashlr/hub`,
 `@ashlr/hub/core`, `@ashlr/hub/types`, `@ashlr/hub/plugin` and `@ashlr/hub/universe`.
 
 `phm verse` prints two tokens. Paste the **read token** into the page once. It
@@ -494,7 +494,7 @@ repository or changelog state alone is not publication evidence.
 
 ---
 
-## The Ashlr ecosystem
+## The Phantom ecosystem
 
 Phantom is the flagship workbench. These related open-source projects solve
 different parts of a developer's workflow and remain useful on their own:

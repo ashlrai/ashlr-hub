@@ -200,8 +200,8 @@ describe('release workflow', () => {
   const action = (job: WorkflowJob, prefix: string): WorkflowStep | undefined =>
     steps(job).find((step) => step.uses?.startsWith(prefix));
 
-  it('is tag-triggered and reuses the exact native CI gate before publish', () => {
-    expect(parsed.on?.push?.tags).toEqual(['v*']);
+  it('admits only the frozen 3.3.2 tag and retains the exact native CI gate before publish', () => {
+    expect(parsed.on).toEqual({ push: { tags: ['v3.3.2'] } });
     expect(parsed.env).toEqual({
       RELEASE_VERSION: '3.3.2',
       RELEASE_DIST_TAG: 'candidate',

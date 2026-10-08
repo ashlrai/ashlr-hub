@@ -1,11 +1,11 @@
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { buildSandboxLauncher, escapeSbplPath } from '../sandbox/confine.js';
 import { runVerifySubprocessAsync } from '../run/verify-commands.js';
-import { artifactDigest, digest } from './artifacts.js';
+import { artifactDigest, evaluationExecutableDigest } from './artifacts.js';
 import { assertComparatorUnchanged, type ManifestRecord } from './store.js';
 import { resolveBuiltinEvaluator } from './builtin-evaluator-registry.js';
 import { initializeBuiltinActivity, inspectBuiltinActivity, type BuiltinActivityOwner } from '../../../scripts/evaluators/preparation-verification-activity.mjs';
@@ -82,7 +82,7 @@ export async function runFixedUniverseEvaluator(record: ManifestRecord, root: st
       result.processGroupSettlement === 'not-started' ? 'not-started' : 'completed') };
   }
   const evaluator = record.evaluationCommand;
-  if (digest(readFileSync(evaluator[0]!)) !== record.evaluationExecutableDigest) throw new Error('Evaluator executable changed');
+  if (evaluationExecutableDigest(evaluator[0]!) !== record.evaluationExecutableDigest) throw new Error('Evaluator executable changed');
   const argv = confinedUniverseArgv(evaluator, scratch, scratch, [record.seedArtifact.path, artifactPath], root);
   // Run after potentially expensive integrity/profile preparation. The async
   // subprocess runner reaches its spawn synchronously from this call.

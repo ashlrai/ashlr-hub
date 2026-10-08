@@ -9,9 +9,9 @@ const done = { pending: false, failed: false };
 
 describe('reported tools and context evidence', () => {
   it.each([
-    ['mcp__plugin_ashlr_ashlr__ashlr__edit', 'Ashlr MCP: Edit'],
-    ['mcp__ashlr__ashlr__read', 'Ashlr MCP: Read'],
-    ['mcp:ashlr-efficiency.ashlr__read', 'Ashlr efficiency MCP: Read'],
+    ['mcp__plugin_ashlr_ashlr__ashlr__edit', 'Phantom CLI MCP: Edit'],
+    ['mcp__ashlr__ashlr__read', 'Phantom CLI MCP: Read'],
+    ['mcp:ashlr-efficiency.ashlr__read', 'Phantom efficiency MCP: Read'],
     ['mcp__ashlr-verse__exec_command', 'Phantom MCP: Command'],
     ['mcp:other.read', 'Other MCP: Read'],
   ])('recognizes a reported envelope without asserting server loading: %s', (name, label) => {

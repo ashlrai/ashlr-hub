@@ -14,7 +14,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SeatHealthReport } from '../../../../core/verse/health-types.js';
 import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
-import { evictAll, runQuery } from '../../../data/cache.js';
+import { evictAll, getQuerySnapshot, runQuery } from '../../../data/cache.js';
+import { ApiError } from '../../../data/client.js';
 import { capacity, CLAUDE_TIGHT_SEAT, GROK_SEAT, LOCAL_SEAT_V2, nativeSeat, seatWindow } from '../seat-fixtures.test-support.js';
 import { resetGuard } from '../shell/guarded-action.js';
 import { getVerseUiState, resetVerseUi, setVerseActiveSession } from '../verse-ui-store.js';
@@ -22,6 +23,7 @@ import { verseBootstrapQuery } from '../verse-queries.js';
 import { budgetQuery } from '../budget/budget-queries.js';
 import { ResourcesBar } from './ResourcesBar.js';
 import { ResourcesDrawer } from './ResourcesDrawer.js';
+import { resourceReadinessQuery } from './resources-queries.js';
 import { getResourcesUi, openResources, reloadResourcesUiForTest } from './resources-store.js';
 
 const TOKEN = 'test-token';
@@ -147,6 +149,7 @@ interface Call { method: string; url: string; body: unknown; token: string | nul
 let calls: Call[];
 let cloud: unknown;
 let readiness: unknown;
+let readinessResponse: (() => Promise<Response>) | null;
 let localModels: unknown;
 let devin: unknown;
 let roster: unknown[];
@@ -183,6 +186,7 @@ function stubFetch() {
       case '/api/verse/local-models':
         return json(localModels);
       case '/api/verse/budget/readiness':
+        if (readinessResponse) return readinessResponse();
         return readiness === 404 ? json({ error: 'not found' }, 404) : json(readiness);
       case '/api/verse/runtime':
         return json(RUNTIME);
@@ -204,6 +208,7 @@ beforeEach(() => {
   calls = [];
   cloud = 404;
   readiness = 404;
+  readinessResponse = null;
   localModels = LOCAL_MODELS;
   devin = 404;
   roster = ROSTER;
@@ -492,6 +497,77 @@ describe('ResourcesDrawer — readiness for chat and the fleet (3.14)', () => {
     render(<ResourcesDrawer mode="docked" now={NOW} />);
     await screen.findByRole('heading', { name: /^Cash Margin Partners/ });
     expect(screen.queryByRole('group', { name: /readiness/ })).toBeNull();
+    expect(await screen.findByText('Readiness isn’t available on this version.')).toBeInTheDocument();
+    expect(getQuerySnapshot(resourceReadinessQuery.key).status).toBe('success');
+  });
+
+  it('explains the pending initial read and shows readiness only when that read succeeds', async () => {
+    let complete!: (response: Response) => void;
+    readinessResponse = () => new Promise<Response>((resolve) => { complete = resolve; });
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    await screen.findByRole('heading', { name: /^Cash Margin Partners/ });
+    expect(screen.getByText('Checking Chat and Fleet readiness…')).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: /readiness/ })).toBeNull();
+    await act(async () => { complete(json(READINESS)); });
+    expect(await screen.findByRole('group', { name: 'Claude Max: readiness' })).toBeInTheDocument();
+    expect(screen.queryByText('Checking Chat and Fleet readiness…')).toBeNull();
+  });
+
+  it.each([
+    ['service failure', () => Promise.resolve(json({ error: 'unavailable' }, 503))],
+    ['network failure', () => Promise.reject(new TypeError('Failed to fetch'))],
+    ['invalid body', () => Promise.resolve(json({ v: 1, resources: [], autonomy: {} }))],
+    ['invalid verdict', () => Promise.resolve(json({ ...READINESS, resources: [{ ...READINESS.resources[0], chat: { ready: true } }] }))],
+    ['coded refusal', () => Promise.resolve(json({ error: 'unavailable', code: 'READINESS_UNAVAILABLE' }, 404))],
+  ] as const)('explains %s without treating it as unsupported or ready', async (_name, response) => {
+    readinessResponse = response;
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    expect(await screen.findByText('Readiness unavailable · try Read everything again.')).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: /readiness/ })).toBeNull();
+    expect(screen.queryByText('Readiness isn’t available on this version.')).toBeNull();
+    expect(getQuerySnapshot(resourceReadinessQuery.key).status).toBe('error');
+    expect(within(cardOf('Claude Max')).getByText('92%')).toBeInTheDocument();
+  });
+
+  it('retains but never reports a failed last result as Ready, including during retry, then recovers', async () => {
+    readiness = READINESS;
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    await screen.findByRole('group', { name: 'Claude Max: readiness' });
+    const previous = getQuerySnapshot(resourceReadinessQuery.key).data;
+    readinessResponse = async () => json({ error: 'unavailable' }, 503);
+    fireEvent.click(screen.getByRole('button', { name: 'Read everything again' }));
+    expect(await screen.findByText('Readiness unavailable · last result is unverified.')).toBeInTheDocument();
+    expect(getQuerySnapshot(resourceReadinessQuery.key).data).toBe(previous);
+    expect(screen.queryByRole('group', { name: /readiness/ })).toBeNull();
+    let complete!: (response: Response) => void;
+    readinessResponse = () => new Promise<Response>((resolve) => { complete = resolve; });
+    fireEvent.click(screen.getByRole('button', { name: 'Read everything again' }));
+    await waitFor(() => expect(getQuerySnapshot(resourceReadinessQuery.key).status).toBe('refreshing'));
+    expect(screen.getByText('Readiness unavailable · last result is unverified.')).toBeInTheDocument();
+    expect(screen.queryByRole('group', { name: /readiness/ })).toBeNull();
+    await act(async () => { complete(json(READINESS)); });
+    expect(await screen.findByRole('group', { name: 'Claude Max: readiness' })).toBeInTheDocument();
+    expect(screen.queryByText('Readiness unavailable · last result is unverified.')).toBeNull();
+    expect(getQuerySnapshot(resourceReadinessQuery.key).error).toBeUndefined();
+  });
+
+  it('keeps session expiry as an authenticated error and never admits retained readiness', async () => {
+    readiness = READINESS;
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    await screen.findByRole('group', { name: 'Claude Max: readiness' });
+    readinessResponse = async () => json({ error: 'expired' }, 401);
+    fireEvent.click(screen.getByRole('button', { name: 'Read everything again' }));
+    expect(await screen.findByText('Readiness unavailable · sign in again.')).toBeInTheDocument();
+    const error = getQuerySnapshot(resourceReadinessQuery.key).error;
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(401);
+    expect(screen.queryByRole('group', { name: /readiness/ })).toBeNull();
+  });
+
+  it('propagates cancellation instead of treating an aborted read as an unsupported route', async () => {
+    const aborted = new DOMException('Cancelled', 'AbortError');
+    readinessResponse = () => Promise.reject(aborted);
+    await expect(resourceReadinessQuery.fetch()).rejects.toBe(aborted);
   });
 
   it('every account card answers Chat and Fleet, with the reserve kept for Mason in words', async () => {

@@ -37,7 +37,7 @@
   // guard on purpose, and is itself idempotent: a second run's
   // defineProperty on a locked property throws and is swallowed.
   ;(function () {
-    var MESSAGE = 'Media capture is disabled in the Ashlr browser pane.'
+    var MESSAGE = 'Media capture is disabled in the Phantom browser pane.'
     function refusal() {
       try {
         var DomException = window.DOMException

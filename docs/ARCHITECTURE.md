@@ -1,6 +1,6 @@
 # Architecture
 
-Hub is the local execution and observation kernel for [Ashlr Universe](NORTH-STAR.md).
+Phantom is the local execution and observation kernel for [Phantom](NORTH-STAR.md).
 It ships a TypeScript/ESM CLI and SDK plus a React web console, with Node 22.15+
 as the package runtime floor. The backend primarily uses Node builtins and bundles
 three declared runtime dependencies: MCP transport (`@modelcontextprotocol/sdk`),
@@ -17,7 +17,7 @@ These are separate executable paths, not one automatically commissioned loop:
 | `resources pool` → `src/core/resources/` | Admit explicit native/local workers against quota, rolling task and shared concurrency limits; supervise a foreground queue | Durable assignments, output and reported usage. Worker completion is not verified engineering acceptance | [Resource Pools](RESOURCE-POOLS.md) |
 | `runtime` → `src/core/local-runtime/` | Install, verify, select and roll back trusted exact local packages | A selected unsigned candidate is not npm publication or resident-service qualification; forwarded commands remain explicitly scoped | [Pinned runtime](ASHLR-UNIVERSE.md#install-a-pinned-local-runtime) |
 | Scoped consoles → `src/core/web/` + `src/web-ui/` | Observe one Universe store or inspect/control one explicit resource pool | Loopback authentication; Universe console is read-only, resource mutations require execution enablement and separate authority | [Universe console](ASHLR-UNIVERSE.md#observe-one-universe-store), [resource console](RESOURCE-POOLS.md#operate-the-resource-console) |
-| General Hub / legacy fleet | Shared configuration, enrolled-repository status, proposal and goal workflows | General dashboard is distinct from the scoped consoles; resident dispatch remains dormant as described below | [General Hub setup](QUICKSTART.md#general-hub-and-legacy-fleet-setup) |
+| General Phantom / legacy fleet | Shared configuration, enrolled-repository status, proposal and goal workflows | General dashboard is distinct from the scoped consoles; resident dispatch remains dormant as described below | [General Phantom setup](QUICKSTART.md#general-hub-and-legacy-fleet-setup) |
 
 The [North Star](NORTH-STAR.md) is the integrated product objective: useful accepted
 changes per measured token and hour. The opt-in [resource generation bridge](ASHLR-UNIVERSE.md#generate-candidates-through-an-enrolled-resource-pool)
@@ -246,7 +246,7 @@ and evaluator isolation profile. Do not infer one path's confinement from anothe
 
 | File | Responsibility |
 |------|---------------|
-| `store.ts` | `loadGenome`, `appendHubEntry`: aggregate the hub store (`~/.ashlr/genome/hub.jsonl`) with every project's `<repo>/.ashlrcode/genome/`. Append-only; never modifies existing entries. |
+| `store.ts` | `loadGenome`, `appendHubEntry`: aggregate the Phantom store (`~/.ashlr/genome/hub.jsonl`) with every project's `<repo>/.ashlrcode/genome/`. Append-only; never modifies existing entries. |
 | `recall.ts` | `recall`: keyword/TF-IDF ranked retrieval, with optional Ollama embedding rerank. Fully offline. |
 | `consolidate.ts` | Periodic consolidation: cluster related entries, synthesize playbooks. |
 | `playbook.ts` | Build structured playbooks from genome entries. |
@@ -327,7 +327,7 @@ trusted transport boundary before changing that behavior.
 
 ## The `~/.ashlr/` home layout
 
-The general Hub defaults to `~/.ashlr/` (resolved at runtime, never a hardcoded
+The general Phantom defaults to `~/.ashlr/` (resolved at runtime, never a hardcoded
 personal path). It is not the only supported state root. Universe can select an
 explicit `--root`; Resource Pools use an explicit ledger root and private pool,
 binding and observation files; managed packages use a separate `--store`.
@@ -371,7 +371,7 @@ directory-handle-relative primitive on Windows, so Windows performs no
 scorecard-history writes and reports the source as degraded with
 `unsupported-platform`; there is no absolute-path fallback.
 
-External paths the hub reads but never writes:
+External paths Phantom reads but never writes:
 - `~/.claude/projects/**/*.jsonl` — Claude Code session usage metadata (token counts, model, timestamp; never message content)
 - `~/.claude.json`, `~/.claude/settings.json`, `~/.mcp.json`, `~/.ashlrcode/settings.json` — MCP server discovery
 - `<repo>/.ashlrcode/genome/` — per-project genomes (aggregated at recall time)

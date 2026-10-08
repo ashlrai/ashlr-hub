@@ -379,7 +379,7 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
                     onChange={(event) => setCheckoutOverride(event.target.value)}
                     disabled={busy} autoComplete="off" spellCheck={false}
                     placeholder="/absolute/path/to/ashlr-hub"
-                    hint="Choose the trusted Hub source to build. Native checks the checkout and confirms its installer hash and command; administrator approval is required."
+                    hint="Choose the trusted Phantom source to build. Native checks the checkout and confirms its installer hash and command; administrator approval is required."
                     error={checkoutOverride !== null && !checkoutValid ? 'Enter an absolute path or ~/path within the native 1024-character limit.' : undefined} />
                   <span className={styles.inlineButtons}>
                     <Button size="sm" variant="ghost" onClick={() => installCustody()} disabled={busy || !checkoutValid}>

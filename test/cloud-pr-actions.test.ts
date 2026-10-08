@@ -160,7 +160,7 @@ describe('POST /api/verse/cloud/tasks/<id>/land', () => {
     const stored = readCloudTask(ID)!;
     expect(stored.state).toBe('merged');
     expect(stored.pr!.state).toBe('merged');
-    expect(stored.stateReason).toBe('Landed from Verse (#42).');
+    expect(stored.stateReason).toBe('Landed from Phantom (#42).');
   });
 
   it('refuses when the branch moved since the operator looked — nothing is sent', async () => {
@@ -226,10 +226,10 @@ describe('close and update-branch', () => {
     expect(status).toBe(200);
     expect(mutations()).toEqual([['pr', 'close', '42', '--repo', REPO, '--comment', CLOUD_CLOSE_COMMENT]]);
     expect(body.task.state).toBe('closed');
-    expect(readCloudTask(ID)!.stateReason).toBe('Closed in Verse without landing.');
+    expect(readCloudTask(ID)!.stateReason).toBe('Closed in Phantom without landing.');
   });
 
-  it('3.15: a close reason is scrubbed, recorded as `Closed in Verse: …` and carried in the GitHub comment', async () => {
+  it('3.15: a close reason is scrubbed, recorded as `Closed in Phantom: …` and carried in the GitHub comment', async () => {
     const secret = `ghp_${'a'.repeat(36)}`;
     const { status, body } = await post<{ ok: boolean; task: CloudTaskV1 }>(`/api/verse/cloud/tasks/${ID}/close`, {
       headSha: HEAD,
@@ -237,16 +237,16 @@ describe('close and update-branch', () => {
     });
     expect(status).toBe(200);
     const expected = 'Wrong approach: the drawer should reuse the list [REDACTED]';
-    expect(mutations()).toEqual([['pr', 'close', '42', '--repo', REPO, '--comment', `Closed from Ashlr Verse (Needs you) without landing. Reason: ${expected}`]]);
-    expect(body.task.stateReason).toBe(`Closed in Verse: ${expected}`);
-    expect(readCloudTask(ID)!.stateReason).toBe(`Closed in Verse: ${expected}`);
+    expect(mutations()).toEqual([['pr', 'close', '42', '--repo', REPO, '--comment', `Closed from Phantom (Needs you) without landing. Reason: ${expected}`]]);
+    expect(body.task.stateReason).toBe(`Closed in Phantom: ${expected}`);
+    expect(readCloudTask(ID)!.stateReason).toBe(`Closed in Phantom: ${expected}`);
     expect(JSON.stringify(gh.calls)).not.toContain(secret);
   });
 
   it('3.15: a blank reason is no reason; a non-string or over-long one is a 400 and nothing is sent', async () => {
     const blank = await post<{ task: CloudTaskV1 }>(`/api/verse/cloud/tasks/${ID}/close`, { headSha: HEAD, reason: '   ' });
     expect(blank.status).toBe(200);
-    expect(blank.body.task.stateReason).toBe('Closed in Verse without landing.');
+    expect(blank.body.task.stateReason).toBe('Closed in Phantom without landing.');
     expect(mutations()).toEqual([['pr', 'close', '42', '--repo', REPO, '--comment', CLOUD_CLOSE_COMMENT]]);
     writeCloudTask(task());
     gh.calls = [];

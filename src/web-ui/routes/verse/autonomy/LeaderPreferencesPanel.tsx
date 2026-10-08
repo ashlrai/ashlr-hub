@@ -23,7 +23,7 @@ export function LeaderPreferencesPanel({ preferences, guard, dispatchEnabled }: 
       <p className={styles.goalNote}>Choose daily run preferences and requested capacity. Run intervals, account availability, Stop and your signed permissions still apply. Removing a preference limit does not start work.</p>
       {read.state === 'ready' ? <LeaderPreferencesForm read={read} serverValue={preferences!} guard={guard} dispatchEnabled={dispatchEnabled} />
         : <p className={styles.empty} role="status">{read.state === 'unsupported'
-          ? 'Leader preferences are unavailable from this server. Update Hub to view and change them.'
+          ? 'Leader preferences are unavailable from this server. Update Phantom to view and change them.'
           : read.state === 'unavailable' ? 'Saved Leader preferences could not be read. Refresh the connection before changing them.'
             : 'Saved Leader preferences need attention. Correct the configuration and refresh before changing them here.'}</p>}
     </details>

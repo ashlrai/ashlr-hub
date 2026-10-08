@@ -486,6 +486,7 @@ describe('verse accounts — collector lifecycle', () => {
     // Names the holder by pid, and no longer blames a resource-console that
     // is usually not the holder at all (3.14).
     expect(status.note).toContain('holds the native metadata lease');
+    expect(status.note).toContain('Another Phantom process');
     expect(status.note).toContain(`pid ${process.pid}`);
     expect(status.holderPid).toBe(process.pid);
     // A read-only collector spawns nothing and reports no live connections.

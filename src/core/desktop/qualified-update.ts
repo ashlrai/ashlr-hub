@@ -11,10 +11,10 @@ import { Header } from 'tar';
 import { evaluateStandingAuthority } from '../authority/effective-config.js';
 import { runningPackageRoot, verifyAuthoritySurfaceAt } from '../authority/surface.js';
 import { censusExecutionLeases } from '../sandbox/execution-leases.js';
-import { readPinnedRuntimeArchive, extractPinnedRuntimeArchive } from '../local-runtime/archive.js';
+import { readPinnedRuntimeArchive, extractPinnedRuntimeArchive, type PinnedRuntimeArchiveOptions } from '../local-runtime/archive.js';
 import { parseBuildIdentity } from '../build-identity.js';
 import { fsyncDirectory } from '../util/durability.js';
-import { verifyUpdateManifest, verifyMinisign, verifyUpdateBundleRecord, type UpdateTrust, type UpdateManifest, type UpdateArtifact } from './update-manifest.js';
+import { verifyCompatibleUpdateManifest, desktopUpdateProfileForPackage, verifyMinisign, verifyUpdateBundleRecord, type UpdateTrust, type CompatibleUpdateManifest, type UpdateArtifact } from './update-manifest.js';
 
 export type DesktopUpdateState = 'waiting-native-exit' | 'ready' | 'blocked' | 'applied' | 'rollback-held' | 'rolled-back';
 export interface DesktopUpdateResult {
@@ -31,7 +31,7 @@ export interface DesktopUpdateDependencies {
   admission(): UpdateAdmission;
   currentPackageRoot(): string | null;
   captureParent(): NativeUpdateParent | null;
-  verifyParent(parent: NativeUpdateParent, manifest: UpdateManifest): Promise<boolean>;
+  verifyParent(parent: NativeUpdateParent, manifest: CompatibleUpdateManifest): Promise<boolean>;
   parentState(parent: NativeUpdateParent): 'same' | 'gone' | 'changed' | 'unknown';
   now(): number; sleep(ms: number): Promise<void>;
   download(url: string, maximum: number): Promise<Buffer>;
@@ -85,7 +85,7 @@ function validateArtifact(data: Buffer, artifact: UpdateArtifact, trust: UpdateT
   if (data.length !== artifact.bytes || sha(data) !== artifact.sha256) hold('artifact-mismatch');
   verifyMinisign(data, artifact.signature, trust.publicKey);
 }
-function readStage(stageId: string, deps: DesktopUpdateDependencies): {stage: string; manifest: UpdateManifest; digest: string; app: Buffer; entries: readonly AppEntry[]; identity: fs.Stats} {
+function readStage(stageId: string, deps: DesktopUpdateDependencies): {stage: string; manifest: CompatibleUpdateManifest; digest: string; app: Buffer; entries: readonly AppEntry[]; identity: fs.Stats} {
   if (!deps.trust) hold('trust-not-commissioned');
   if (deps.platform !== 'darwin' || deps.architecture !== 'arm64' || !deps.packageRoot) hold('unsupported-installed-runtime');
   const stage = desktopUpdateStagePath(deps.home, stageId);
@@ -93,7 +93,7 @@ function readStage(stageId: string, deps: DesktopUpdateDependencies): {stage: st
   const encoded = bytes(join(stage, 'manifest.json'), 64 * 1024);
   const text = encoded.toString('utf8'); if (!Buffer.from(text).equals(encoded)) hold('verification-failed');
   const signature = bytes(join(stage, 'manifest.sig'), 8192).toString('utf8');
-  const verified = verifyUpdateManifest({manifestText: text, signature}, deps.trust);
+  const verified = verifyCompatibleUpdateManifest({manifestText: text, signature}, deps.trust);
   const app = bytes(join(stage, 'app.tar.gz'), verified.manifest.app.bytes);
   validateArtifact(app, verified.manifest.app, deps.trust);
   const entries = inspectSignedAppArchive(app);
@@ -105,12 +105,19 @@ function readStage(stageId: string, deps: DesktopUpdateDependencies): {stage: st
   return {stage, manifest: verified.manifest, digest: verified.digest, app, entries, identity};
 }
 /** The installed consumer rejects stale stages independently of native discovery. */
-function requireNewerVersion(deps: DesktopUpdateDependencies, candidate: string): void {
+function requireNewerVersion(deps: DesktopUpdateDependencies, candidate: CompatibleUpdateManifest): void {
   const root = deps.packageRoot;
   if (!root || deps.currentPackageRoot() !== root) hold('running-current-mismatch');
   const identity = parseBuildIdentity(installedBytes(join(root, 'dist', 'build-identity.json'), 64 * 1024).toString('utf8'));
   if (!identity || identity.dirty || identity.provenance !== 'git' || !identity.packageVersion || !/^\d+\.\d+\.\d+$/.test(identity.packageVersion)) hold('current-version-unverified');
-  const old = identity.packageVersion.split('.').map(BigInt), next = candidate.split('.').map(BigInt);
+  let currentProfile: ReturnType<typeof desktopUpdateProfileForPackage>;
+  try {
+    const pkg = JSON.parse(installedBytes(join(root, 'package.json'), 1024 * 1024).toString('utf8')) as {name?: unknown; version?: unknown; type?: unknown; bin?: {ashlr?: unknown}};
+    if (pkg.version !== identity.packageVersion || pkg.type !== 'module' || pkg.bin?.ashlr !== 'bin/ashlr') hold('installed-current-unverified');
+    currentProfile = desktopUpdateProfileForPackage(pkg.name);
+  } catch {hold('installed-current-unverified');}
+  if (currentProfile.name === 'canonical-v2' && candidate.schemaVersion === 1) hold('candidate-identity-regression');
+  const old = identity.packageVersion.split('.').map(BigInt), next = candidate.version.split('.').map(BigInt);
   const first = next.findIndex((part, i) => part !== old[i]);
   if (first < 0 || next[first]! < old[first]!) hold('candidate-not-newer');
 }
@@ -133,7 +140,7 @@ export function inspectQualifiedDesktopUpdate(stageId: string, deps: DesktopUpda
     const staged = readStage(stageId, deps); version = staged.manifest.version;
     try {bytes(join(staged.stage, 'consumer-attempt.json'), 8192); return result('blocked', version, 'update-attempt-already-recorded');}
     catch (error) {if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;}
-    requireNewerVersion(deps, version);
+    requireNewerVersion(deps, staged.manifest);
     const reason = admissionReason(deps.admission(), staged.manifest.authoritySurfaceDigest);
     return result(reason ? 'blocked' : 'ready', version, reason, reason === 'authority-reapproval-required' || reason === 'grant-unavailable');
   } catch (error) { return result('blocked', version, error instanceof Held ? error.reason : 'verification-failed'); }
@@ -209,6 +216,13 @@ function extractApp(entries: readonly AppEntry[], dest: string): string {
   return join(dest, 'Phantom.app');
 }
 
+/** Manual maintainer staging shares the installed parser; caller entry arrays are never trusted. */
+export function extractSignedAppArchive(compressed: Buffer, destination: string): string {
+  directory(destination);
+  if (fs.realpathSync(destination) !== destination || fs.readdirSync(destination).length !== 0) hold('unsafe-app-destination');
+  return extractApp(inspectSignedAppArchive(compressed), destination);
+}
+
 export async function downloadQualifiedUpdateArtifact(url: string, maximum: number): Promise<Buffer> {
   let next = new URL(url);
   for (let redirects = 0; redirects <= 3; redirects++) {
@@ -265,7 +279,7 @@ function privateParents(home: string, path: string): void {
     }
   }
 }
-function verifyAppReleaseRecord(appRoot: string, manifest: UpdateManifest, read?: (path: string, maximum: number) => string): void {
+function verifyAppReleaseRecord(appRoot: string, manifest: CompatibleUpdateManifest, read?: (path: string, maximum: number) => string): void {
   const recordPath = join(appRoot, 'Contents', 'Resources', 'phantom-release.json');
   let text: string;
   if (read) text = read(recordPath, 8192);
@@ -293,7 +307,7 @@ async function installPairedUpdate(stageId: string, staged: ReturnType<typeof re
   validateArtifact(data, staged.manifest.cli, deps.trust!);
   const original = join(staged.stage, 'package.tgz'); writeExclusive(original, data); fsyncDirectory(staged.stage);
   const archive = await readPinnedRuntimeArchive({artifactPath: original, sha256: staged.manifest.cli.sha256,
-    revision: staged.manifest.source.revision, version: staged.manifest.version}).catch(() => hold('package-archive-refused'));
+    revision: staged.manifest.source.revision, version: staged.manifest.version, identityProfile: staged.manifest.schemaVersion === 1 ? 'legacy-v1' : 'canonical-v2'}).catch(() => hold('package-archive-refused'));
   if (archive.pins.size !== staged.manifest.cli.bytes) hold('artifact-mismatch');
   const entries = staged.entries;
   const releases = join(deps.home, '.local', 'share', 'ashlr', 'releases'); privateParents(deps.home, releases);
@@ -321,7 +335,7 @@ async function installPairedUpdate(stageId: string, staged: ReturnType<typeof re
     await verifyInstalledPackage(destination, staged, deps);
     const observed = verifyAuthoritySurfaceAt(destination, 'installed', {fresh: true});
     if (!observed.ok || observed.digest !== staged.manifest.authoritySurfaceDigest) hold('candidate-surface-unverified');
-    requireNewerVersion(deps, staged.manifest.version);
+    requireNewerVersion(deps, staged.manifest);
     if (JSON.stringify(io.readCurrentPointer(current)) !== JSON.stringify(previous) || readStage(stageId, deps).digest !== staged.digest) hold('current-or-stage-changed');
     freshAdmission(deps, expected, staged.manifest.authoritySurfaceDigest);
   };
@@ -361,8 +375,13 @@ async function installPairedUpdate(stageId: string, staged: ReturnType<typeof re
 async function verifyInstalledPackage(root: string, staged: ReturnType<typeof readStage>, deps: DesktopUpdateDependencies): Promise<void> {
   const original = join(staged.stage, 'package.tgz');
   validateArtifact(bytes(original, staged.manifest.cli.bytes), staged.manifest.cli, deps.trust!);
-  const archive = await readPinnedRuntimeArchive({artifactPath: original, sha256: staged.manifest.cli.sha256,
-    revision: staged.manifest.source.revision, version: staged.manifest.version}).catch(() => hold('package-archive-refused'));
+  await verifyInstalledRuntimeArchive(root, {artifactPath: original, sha256: staged.manifest.cli.sha256,
+    revision: staged.manifest.source.revision, version: staged.manifest.version, identityProfile: staged.manifest.schemaVersion === 1 ? 'legacy-v1' : 'canonical-v2'});
+}
+
+/** Original archive membership, bytes and executable modes; this is data proof, never installation authority. */
+export async function verifyInstalledRuntimeArchive(root: string, pins: PinnedRuntimeArchiveOptions): Promise<void> {
+  const archive = await readPinnedRuntimeArchive(pins).catch(() => hold('package-archive-refused'));
   const expected = new Set<string>();
   const parents = new Set<string>(['']);
   for (const entry of archive.entries) {
@@ -424,7 +443,7 @@ export async function applyQualifiedDesktopUpdate(stageId: string, deps: Desktop
     const staged = readStage(stageId, deps); version = staged.manifest.version;
     const expected = deps.admission(); const reason = admissionReason(expected, staged.manifest.authoritySurfaceDigest);
     if (reason) return result('blocked', version, reason, reason === 'authority-reapproval-required' || reason === 'grant-unavailable');
-    requireNewerVersion(deps, version);
+    requireNewerVersion(deps, staged.manifest);
     const parent = deps.captureParent(); if (!parent) hold('native-parent-unverified');
     const ackDeadline = deps.now() + 9000;
     if (!await deps.verifyParent(parent, staged.manifest)) hold('native-parent-unverified');

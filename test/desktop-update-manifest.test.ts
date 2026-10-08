@@ -2,7 +2,7 @@ import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { canonicalJson } from '../src/core/authority/canonical-json.js';
-import { parseUpdateManifest, verifyMinisign, verifyUpdateManifest, verifyUpdateBundleRecord, type UpdateManifest, type UpdateTrust } from '../src/core/desktop/update-manifest.js';
+import { parseUpdateManifest, verifyMinisign, verifyUpdateManifest, verifyCompatibleUpdateManifest, verifyUpdateBundleRecord, type UpdateManifest, type UpdateTrust } from '../src/core/desktop/update-manifest.js';
 
 // In-memory test-only keys are never the commissioned publisher key.
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -126,5 +126,59 @@ describe('paired desktop update manifest', () => {
       expect(() => verifyUpdateBundleRecord(canonicalJson(changed), value)).toThrow('release record');
     }
     expect(() => verifyUpdateBundleRecord(`${canonicalJson(record)}\n`, value)).toThrow('release record');
+  });
+});
+
+
+describe('closed compatibility profiles', () => {
+  it('verifies the shared genuine signed V2 fixture without changing original bytes or the V1 reader', () => {
+    const fixture = JSON.parse(readFileSync(new URL('./fixtures/desktop-update-paired-phantom-tauri.json', import.meta.url), 'utf8'));
+    const currentTrust = {...trust, publicKey: fixture.publicKey};
+    const checked = verifyCompatibleUpdateManifest(fixture.envelope, currentTrust);
+    expect(checked.manifest).toEqual(JSON.parse(fixture.envelope.manifestText));
+    expect(checked.digest).toBe(createHash('sha256').update(fixture.envelope.manifestText).digest('hex'));
+    expect(Object.isFrozen(checked.manifest.cli)).toBe(true);
+    expect(() => verifyUpdateManifest(fixture.envelope, currentTrust)).toThrow('release scope');
+    for (const [name, encoded] of [['app', fixture.appBase64], ['cli', fixture.cliBase64]] as const) {
+      const bytes = Buffer.from(encoded, 'base64');
+      expect(bytes.length).toBe(checked.manifest[name].bytes);
+      expect(createHash('sha256').update(bytes).digest('hex')).toBe(checked.manifest[name].sha256);
+      expect(() => verifyMinisign(bytes, checked.manifest[name].signature, fixture.publicKey)).not.toThrow();
+    }
+  });
+  it('keeps the original signed V1 result and exact historical explicit-trust behavior', () => {
+    const fixture = JSON.parse(readFileSync(new URL('./fixtures/desktop-update-paired-tauri.json', import.meta.url), 'utf8'));
+    const currentTrust = {...trust, publicKey: fixture.publicKey};
+    expect(verifyCompatibleUpdateManifest(fixture.envelope, currentTrust)).toEqual(verifyUpdateManifest(fixture.envelope, currentTrust));
+    const legacy = manifest();legacy.repository.nameWithOwner = 'ashlrai/phantom';
+    legacy.app.url = legacy.app.url.replace('ashlr-hub/', 'phantom/');legacy.cli.url = legacy.cli.url.replace('ashlr-hub/', 'phantom/');
+    const envelope = {manifestText: canonicalJson(legacy), signature: signature(Buffer.from(canonicalJson(legacy)))};
+    const renamedTrust = {...trust, repository: {...trust.repository, fullName: 'ashlrai/phantom' as const}};
+    expect(() => verifyUpdateManifest(envelope, renamedTrust)).not.toThrow();
+    expect(() => verifyCompatibleUpdateManifest(envelope, renamedTrust)).toThrow('profile tuple');
+  });
+  const tuples = [1,2].flatMap(schema => ['ashlrai/ashlr-hub','ashlrai/phantom'].flatMap(repo => ['@ashlr/hub','@ashlr/phantom'].flatMap(pkg => ['ashlr-hub','ashlr-phantom'].map(prefix => ({schema,repo,pkg,prefix})))));
+  it.each(tuples)('admits only the whole schema$schema/$repo/$pkg/$prefix tuple', ({schema,repo,pkg,prefix}) => {
+    const value = manifest() as unknown as Record<string, unknown>;
+    const original = manifest();
+    value.schemaVersion = schema;
+    value.repository = {...original.repository, nameWithOwner: repo};
+    value.app = {...original.app, url: `https://github.com/${repo}/releases/download/v${original.version}/${original.app.filename}`};
+    const filename = `${prefix}-${original.version}.tgz`;
+    value.cli = {...original.cli, packageName: pkg, filename, url: `https://github.com/${repo}/releases/download/v${original.version}/${filename}`};
+    const text = canonicalJson(value), envelope = {manifestText: text, signature: signature(Buffer.from(text))};
+    const accepted = schema === 1 ? repo === 'ashlrai/ashlr-hub' && pkg === '@ashlr/hub' && prefix === 'ashlr-hub' : repo === 'ashlrai/phantom' && pkg === '@ashlr/phantom' && prefix === 'ashlr-phantom';
+    if (accepted) expect(verifyCompatibleUpdateManifest(envelope, trust).manifest).toEqual(value);
+    else expect(() => verifyCompatibleUpdateManifest(envelope, trust)).toThrow('profile tuple');
+  });
+  it('authenticates raw bytes before selecting a profile and preserves original V2 canonical encoding', () => {
+    expect(() => verifyCompatibleUpdateManifest({manifestText: '{not-json', signature: signature(Buffer.from('other'))}, trust)).toThrow('payload signature');
+    const fixture = JSON.parse(readFileSync(new URL('./fixtures/desktop-update-paired-phantom-tauri.json', import.meta.url), 'utf8'));
+    for (const alternate of [fixture.envelope.manifestText + '\n', fixture.envelope.manifestText.replace('"schemaVersion":2','"schemaVersion":2,"schemaVersion":2')]) {
+      expect(() => verifyCompatibleUpdateManifest({manifestText: alternate, signature: signature(Buffer.from(alternate))}, trust)).toThrow('canonical');
+    }
+    const value = JSON.parse(fixture.envelope.manifestText);value.repository.repositoryId++;
+    const text = canonicalJson(value);
+    expect(() => verifyCompatibleUpdateManifest({manifestText: text, signature: signature(Buffer.from(text))}, trust)).toThrow('repository identity');
   });
 });

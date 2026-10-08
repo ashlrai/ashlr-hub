@@ -511,13 +511,13 @@ describe('Sidebar 3.10.1', () => {
   it('labels the footer action for what it does, and explains it in a tooltip', async () => {
     const user = userEvent.setup();
     const { onDisconnect, nav } = mountList([session()]);
-    const button = within(nav).getByRole('button', { name: 'Disconnect from hub' });
+    const button = within(nav).getByRole('button', { name: 'Disconnect from Phantom' });
     button.focus();
     const tip = await screen.findByRole('tooltip');
     expect(tip).toHaveTextContent('Signs this window out');
     expect(tip).toHaveTextContent('unsent drafts');
-    expect(tip).toHaveTextContent('Chats stay on the hub');
-    // One click only ASKS (see "Sidebar — Disconnect from hub asks first").
+    expect(tip).toHaveTextContent('Chats stay on the server');
+    // One click only ASKS (see "Sidebar — Disconnect from Phantom asks first").
     await user.click(button);
     expect(onDisconnect).not.toHaveBeenCalled();
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Disconnect' }));
@@ -529,7 +529,7 @@ describe('Sidebar 3.10.1', () => {
 // 3.10.1 — the footer's Disconnect confirms, like Settings ▸ Connection
 // ===========================================================================
 
-describe('Sidebar — Disconnect from hub asks first', () => {
+describe('Sidebar — Disconnect from Phantom asks first', () => {
   /**
    * Disconnecting signs this window out AND throws away every unsent draft,
    * so one stray click in the footer must not do it. Settings ▸ Connection
@@ -543,7 +543,7 @@ describe('Sidebar — Disconnect from hub asks first', () => {
         selectedId={null} query="" onQuery={() => {}} onSelect={() => {}} onNew={() => {}} onRetry={() => {}}
         onCollapse={() => {}} onDisconnect={onDisconnect} />,
     );
-    const trigger = within(screen.getByRole('navigation', { name: 'Chats' })).getByRole('button', { name: 'Disconnect from hub' });
+    const trigger = within(screen.getByRole('navigation', { name: 'Chats' })).getByRole('button', { name: 'Disconnect from Phantom' });
     return { onDisconnect, trigger };
   }
 
@@ -554,13 +554,13 @@ describe('Sidebar — Disconnect from hub asks first', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
 
     await user.click(trigger);
-    const dialog = screen.getByRole('dialog', { name: 'Disconnect from this hub?' });
+    const dialog = screen.getByRole('dialog', { name: 'Disconnect from this server?' });
     expect(dialog).toHaveAttribute('aria-modal', 'true');
     expect(dialog).toHaveTextContent('Unsent drafts in open chats will be cleared.');
     // Announced, not just drawn: focus opens on Cancel, so the warning is
     // only heard because it is the dialog's description (3.10.1 review).
     expect(dialog).toHaveAccessibleDescription(
-      'Unsent drafts in open chats will be cleared. Your chats stay on the hub; you will need the read token to reconnect.');
+      'Unsent drafts in open chats will be cleared. Your chats stay on the server; you will need the read token to reconnect.');
     expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus();
     expect(within(dialog).getByRole('button', { name: 'Disconnect' })).toBeInTheDocument();
     expect(onDisconnect).not.toHaveBeenCalled();
@@ -612,7 +612,7 @@ describe('Sidebar — Disconnect from hub asks first', () => {
     await user.click(trigger);
     await user.keyboard('{Escape}');
     await user.click(trigger);
-    expect(screen.getByRole('dialog', { name: 'Disconnect from this hub?' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Disconnect from this server?' })).toBeInTheDocument();
     expect(onDisconnect).not.toHaveBeenCalled();
   });
 });

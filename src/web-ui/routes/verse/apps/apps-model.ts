@@ -189,7 +189,7 @@ export function mcpSeatRows(snapshot: McpSnapshot): McpSeatRow[] {
       servers: seat.servers,
       loads: n > 0 ? `loads ${n} server${n === 1 ? '' : 's'}` : isolated ? 'loads none — isolated by Phantom' : 'loads none',
       isolated,
-      sentence: reasonSentence(SEAT_REASON_COPY, seat.reason, 'Hub cannot say what this seat would load.'),
+      sentence: reasonSentence(SEAT_REASON_COPY, seat.reason, 'Phantom cannot say what this seat would load.'),
       reason: seat.reason,
       notes: seat.notes,
     };
@@ -205,7 +205,7 @@ export interface McpTargetOption {
 }
 
 export function mcpTargets(snapshot: McpSnapshot | null): McpTargetOption[] {
-  const out: McpTargetOption[] = [{ id: 'hub', label: 'Hub gateway registry', disabledReason: null }];
+  const out: McpTargetOption[] = [{ id: 'hub', label: 'Phantom gateway registry', disabledReason: null }];
   for (const seat of snapshot?.seats ?? []) {
     if (seat.seatId === 'local') continue;
     // An isolated (Claude) account CAN be written — Claude Code in a terminal
@@ -214,7 +214,7 @@ export function mcpTargets(snapshot: McpSnapshot | null): McpTargetOption[] {
     out.push({
       id: `account:${seat.accountId}`,
       label: `${seat.label} (${seat.engine})`,
-      disabledReason: toml ? 'Keeps its MCP servers in TOML, which Hub does not rewrite.' : null,
+      disabledReason: toml ? 'Keeps its MCP servers in TOML, which Phantom does not rewrite.' : null,
     });
   }
   return out;

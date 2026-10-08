@@ -1,6 +1,8 @@
-# Devin in Verse
+<a id="devin-in-verse"></a>
 
-Verse works with **Devin** (Cognition's hosted coding agent) in three places:
+# Devin in Phantom
+
+Phantom works with **Devin** (Cognition's hosted coding agent) in three places:
 
 - **Two chat seats.** **Devin (cloud)** runs a Devin session per chat; **Devin
   (CLI)** drives the `devin` command-line agent on this Mac. Both are in New
@@ -22,14 +24,14 @@ judges under an `elite-direct` grant. Otherwise the gates record a would-merge
 
 The lane is **off by default**; only the Devin (CLI) seat appears without it,
 once Cognition's `devin` CLI is installed. The code is in `src/core/devin/`, the CLI is
-`ashlr devin`, and the Verse routes are under `/api/verse/devin`. The cloud
+`ashlr devin`, and the Phantom routes are under `/api/verse/devin`. The cloud
 lane it mirrors is described in [CLOUD.md](CLOUD.md).
 
 ---
 
 ## Setup
 
-You do every step yourself, in your own terminal and on app.devin.ai. Verse
+You do every step yourself, in your own terminal and on app.devin.ai. Phantom
 never asks for the key in the page, and no HTTP route accepts one.
 
 1. **Access.** Check your organization's plan and permissions for the v3
@@ -63,7 +65,7 @@ never asks for the key in the page, and no HTTP route accepts one.
    Both start with `cog_`. Legacy `apk_` keys are refused because they do not
    work with the v3 API. Cognition documents personal-token sessions as
    attributed to that user; a service user can attribute sessions to a human
-   with `create_as_user_id` and `ImpersonateOrgSessions`. Verse does not send
+   with `create_as_user_id` and `ImpersonateOrgSessions`. Phantom does not send
    `create_as_user_id`, so a connected service user or matching organization
    does not establish access to a human's included quota
    ([session attribution](https://docs.devin.ai/api-reference/overview#session-attribution)).
@@ -103,10 +105,10 @@ never asks for the key in the page, and no HTTP route accepts one.
    - `ashlr devin fleet on` records the opt-in.
    - Reinstall the custody helper so it can sign grants that name Devin
      (helper 1.1.0 or later): `sudo scripts/install-custody.sh` from the
-     ashlr-hub checkout. With an older helper, a drafted grant leaves Devin
+     ashlr-Phantom checkout. With an older helper, a drafted grant leaves Devin
      out and its summary says to reinstall.
    - Sign a grant that includes Devin: `ashlr authority draft`, or re-approve
-     from Verse. With the opt-in on, a key connected and the new helper, the
+     from Phantom. With the opt-in on, a key connected and the new helper, the
      draft adds `devin` to the grant and a Devin seat that may only produce.
 
    Until the grant names Devin, the Devin card's Fleet line reads **Not in the
@@ -159,7 +161,7 @@ behavior; this does not qualify their subscription funding.
 
 ### Budget
 
-Verse's API launch ledger uses the ACUs in session readings and requested
+Phantom's API launch ledger uses the ACUs in session readings and requested
 session caps. Its configured budget is not a provider-reported credit balance
 or subscription allowance. Devin's [self-serve plans](https://docs.devin.ai/admin/billing/self-serve)
 include subscription quota and prepaid on-demand credits; purchased credits
@@ -168,8 +170,8 @@ that a personal CLI subscription funds its sessions.
 
 Max has a weekly included allowance shared between Devin sessions, CLI and
 Desktop, with no daily cap. That allowance and purchased on-demand credits are
-separate from Verse's tracked ACU ledger and organization consumption report.
-Verse does not read Max's remaining weekly allowance or on-demand balance;
+separate from Phantom's tracked ACU ledger and organization consumption report.
+Phantom does not read Max's remaining weekly allowance or on-demand balance;
 check the account's Usage page on app.devin.ai. Enterprise ACU billing does not
 define a personal Max allowance
 ([self-serve billing](https://docs.devin.ai/admin/billing/self-serve)).
@@ -190,7 +192,7 @@ app.devin.ai for actual account usage. The ledger lives in
 | Setting | Default | Flag |
 |---|---|---|
 | Total ACUs | 50 | `--acu` |
-| Correction for usage Verse did not see | 0 | `--spent` |
+| Correction for usage Phantom did not see | 0 | `--spent` |
 | ACUs per session, sent to Devin as the hard `max_acu_limit` | 10 | `--per-session` |
 | ACUs per day, used plus unresolved exposure | 30 | `--per-day` |
 | Reserve kept for you (the fleet never dips into it) | 10 | `--reserve` |
@@ -216,8 +218,8 @@ Devin (cloud) chats are your own work: they count against the ACU budget, but
 never against the fleet caps or the reserve. A chat's first message is gated
 like any launch; follow-ups in an existing chat are not re-checked against
 the daily cap or the pause, because the session's own ACU cap bounds them.
-**Devin (CLI) chats are not counted in Verse's ACU ledger**: the CLI does not
-report usage to Verse. Your selected model and native account's billing still
+**Devin (CLI) chats are not counted in Phantom's ACU ledger**: the CLI does not
+report usage to Phantom. Your selected model and native account's billing still
 apply; missing usage is not evidence of free use.
 
 ---
@@ -248,7 +250,7 @@ Pick a Devin seat in **New chat**.
   A built-in SWE-2 fallback can appear before a listing is available. A picker
   price label or fallback is not autonomous pricing admission. Manual chat
   retains the available model choices, including paid models. Before every
-  turn Verse checks that the binary is installed and that the CLI's
+  turn Phantom checks that the binary is installed and that the CLI's
   credentials file exists (it never runs the CLI to check). If not, the turn
   is refused before anything starts:
   - "The Devin CLI is logged out. Run `devin auth login` in a terminal, then
@@ -256,7 +258,7 @@ Pick a Devin seat in **New chat**.
   - "The Devin CLI is not installed on this Mac. Install it with `brew install
     --cask devin-cli`, run `devin auth login`, then send again."
 
-Both seats run through Verse's own turn process, and every line they print is
+Both seats run through Phantom's own turn process, and every line they print is
 scrubbed. Auto is available on Devin chats and can choose an eligible Devin
 seat, subject to routing preferences and readiness. An Auto choice does not
 verify remaining subscription quota or funding. A handoff note can start a
@@ -267,7 +269,7 @@ auto-matched to a chat.
 **Where chat PRs go.** A PR from a Devin (cloud) chat comes to Needs you like
 any Devin PR, naming the chat. A GitHub PR link that a Devin (CLI) turn prints
 is recorded for that chat (`~/.ashlr/devin/cli-prs/`), shown as the chat's PR
-card, and listed in Needs you with **Dismiss** only. Verse did not check those
+card, and listed in Needs you with **Dismiss** only. Phantom did not check those
 PRs, so there is no Land or Close; the item expires after 7 days.
 
 ### Hand Devin a task
@@ -358,9 +360,9 @@ report marked unverified, a **Clean** or **Held** verdict and the same actions
 as a cloud PR: **Land**, **Close**, **Update branch** and **Dismiss**, each
 pinned to the PR head, and **Land all clean**. **Evidence** opens the task's
 timeline: session status and detail, ACUs used out of the cap with the dollar
-estimate, messages sent from Verse, and the shared PR, gate, merge and release
+estimate, messages sent from Phantom, and the shared PR, gate, merge and release
 steps. Close takes an optional one-line reason (up to 200 characters); the
-task records "Closed in Verse: <reason>", the GitHub close comment includes
+task records "Closed in Phantom: <reason>", the GitHub close comment includes
 it, and the retro learns from it. Sessions waiting on you ("Devin is
 waiting") and launches that failed in the last 24 hours are listed too.
 
@@ -395,7 +397,7 @@ creating another session does not resolve the first one's exposure.
 
 **Tracking.** Status and ACUs come from Devin's API; delivery comes only from
 GitHub, read with `gh`. A PR that Devin reports on some other branch is never
-pinned. Verse refreshes every 60 seconds while a session is live and every 10
+pinned. Phantom refreshes every 60 seconds while a session is live and every 10
 minutes otherwise. `ASHLR_DEVIN_AUTO=0` in the server's environment stops that.
 
 **Devin's own engine identity.** In routing and in grants Devin is its own
@@ -441,7 +443,7 @@ its edit is captured as a pending proposal. The command is
   Autonomous admission requires exactly one matching row in a complete native
   catalog, marked Free with no contradictory nonzero price. Paid, ambiguous,
   fallback or unknown evidence holds the lane without a paid fallback.
-- **Readiness.** Beyond binary and login-file presence, Verse runs supported
+- **Readiness.** Beyond binary and login-file presence, Phantom runs supported
   native `auth status`, `models list`, then `auth status` again on the exact
   executable. It requires the same native principal, reported origins and
   team, with unchanged executable and private credential-file metadata. The
@@ -459,7 +461,7 @@ its edit is captured as a pending proposal. The command is
 **Cash exhaustion and expiring pricing evidence.** The Devin CLI does not
 qualify for the exhausted-USD exception. Its positive-budget admission and the
 hosted lane's separate ACU policy remain unchanged. Native execution evidence
-lasts at most 60 seconds. For the three promotional SWE-2 model IDs, Verse also
+lasts at most 60 seconds. For the three promotional SWE-2 model IDs, Phantom also
 holds admission at or after its conservative October 16, 2026, 00:00 UTC
 boundary. This is a host safety boundary, not an inferred vendor reset or
 expiry timezone. The [official pricing page](https://devin.ai/pricing),
@@ -517,7 +519,7 @@ errors redact `cog_…` and `apk_…` keys.
   the PR waits for you.
 - **Fleet use needs a new custody helper and a new grant.** Helpers before
   1.1.0 cannot sign a grant that names Devin.
-- **CLI chat usage is not reported to Verse, and its PRs are unverified.**
+- **CLI chat usage is not reported to Phantom, and its PRs are unverified.**
   Those chats are not counted in the ACU budget; native account billing still
   applies. Their PRs get only Dismiss in Needs you.
 - **macOS only for the key.** Storing it needs the macOS Keychain.

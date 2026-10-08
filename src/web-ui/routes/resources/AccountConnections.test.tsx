@@ -120,9 +120,9 @@ describe('account connections evidence', () => {
     render(<AccountConnections connections={snapshot([account({ provider: 'grok', label: 'SuperGrok', planType: 'supergrok',
       executionSupported: true, onDemandEnabled: true })])} />);
     expect(screen.getByText('Execution not integrated')).toBeVisible();
-    expect(screen.getByText('Grok metadata does not enable Hub execution.')).toBeVisible();
+    expect(screen.getByText('Grok metadata does not enable Phantom execution.')).toBeVisible();
     expect(screen.getByText('On-demand billing enabled')).toBeVisible();
-    expect(screen.queryByText('Hub transport available')).not.toBeInTheDocument();
+    expect(screen.queryByText('Phantom transport available')).not.toBeInTheDocument();
   });
 
   it('does not present historical billing metadata as current configuration', () => {
@@ -232,12 +232,12 @@ describe('account connections evidence', () => {
     expect(screen.getByRole('meter')).toHaveAttribute('data-historical', 'true');
   });
 
-  it('keeps Grok comparisons explicitly unrelated to Hub execution', () => {
+  it('keeps Grok comparisons explicitly unrelated to Phantom execution', () => {
     render(<AccountConnections ceilingPercent={75} connections={snapshot([account({ provider: 'grok', executionSupported: false,
       windows: [{ id: 'grok_build_weekly', usedPercent: 8, resetsAt: RESET }],
     })])} />);
     expect(screen.getByText('67 percentage points below the 75% reference')).toBeVisible();
-    expect(screen.getByText('Grok metadata does not enable Hub execution.')).toBeVisible();
+    expect(screen.getByText('Grok metadata does not enable Phantom execution.')).toBeVisible();
     expect(screen.getByText('Execution not integrated')).toBeVisible();
   });
 
