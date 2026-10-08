@@ -19,6 +19,21 @@ export function leaderDisplayText(text: string, nowMs: number = Date.now()): str
   return formatLeaderDisplayText(text, (iso) => describeResetAt(iso, nowMs));
 }
 
+// Display-only structured measurements; exact provider values remain in their records.
+// Match the shared chart convention without coupling core to the web UI.
+const metric = new Intl.NumberFormat('en-US', { maximumSignificantDigits: 2 });
+export function telegramMetric(value: number | null | undefined): string {
+  return typeof value === 'number' && Number.isFinite(value) ? metric.format(value) : 'unknown';
+}
+export function telegramUsd(value: number | null | undefined): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `${value < 0 ? '-' : ''}$${telegramMetric(Math.abs(value))}` : 'unknown';
+}
+export function telegramPercent(value: number | null | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 100) return 'unknown';
+  // Display rounding must not make a not-yet-spent allowance look exhausted.
+  return value < 100 && metric.format(value) === '100' ? '<100%' : `${telegramMetric(value)}%`;
+}
 /** Telegram's hard cap on a single message's text, in characters. */
 export const TELEGRAM_MAX_MESSAGE = 4096;
 

@@ -6,6 +6,8 @@ const DISPLAY_ID_PARENS = new RegExp(String.raw`(^|\n)([ \t]*[•-]\s+\[[ABC]\][
 const DISPLAY_ID_LABEL = new RegExp(String.raw`\b((?:Leader\s+)?(?:memo|action|message|directive|question))\s+${LEADER_DISPLAY_ID}(?![\w./-])`, 'gi');
 const DISPLAY_ID_OUTCOME = new RegExp(String.raw`\b(Approved|Not approved|Vetoed|Could not veto)\s+${LEADER_DISPLAY_ID}(?![\w./-])`, 'g');
 const DISPLAY_ID_ITEM = new RegExp(String.raw`(^|\n)([ \t]*[•-]\s*)(${LEADER_DISPLAY_ID})(?![\w./-])`, 'g');
+const DISPLAY_UUID_LABEL = /\b(task|run|session|trajectory|proposal)\s+[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}(?![\w/-]|\.[\w])/gi;
+const DISPLAY_COMMIT = /\b(commit(?: SHA)?)\s+([a-f0-9]{40})(?![\w/-]|\.[\w])/gi;
 const DISPLAY_ISO = /(?<![\w./-])\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})(?![\w./-])/g;
 const DISPLAY_LITERAL = /(https?:\/\/[^\s]+|```[\s\S]*?```|`[^`\r\n]*`|"[^"\r\n]*")/g;
 
@@ -39,6 +41,8 @@ export function formatLeaderDisplayText(text: string, formatInstant?: (iso: stri
     if (index % 2 === 1) return part;
     return part
       .replace(DISPLAY_ID_LABEL, '$1')
+      .replace(DISPLAY_UUID_LABEL, '$1')
+      .replace(DISPLAY_COMMIT, (_match, label: string, sha: string) => `${label} ${sha.slice(0, 7)}`)
       .replace(DISPLAY_ID_OUTCOME, '$1 action')
       .replace(DISPLAY_ID_ITEM, (_match, start: string, bullet: string, id: string) => {
         const label = id.startsWith('la-') ? 'action' : id.startsWith('od-') ? 'directive' : id.startsWith('lt-') ? 'message' : 'memo';
