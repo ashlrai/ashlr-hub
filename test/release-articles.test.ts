@@ -1,6 +1,7 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, readFileSync, writeFileSync, symlinkSync, mkdirSync, renameSync, linkSync, chmodSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import * as privateStorage from '../src/core/util/private-storage.js';
 import * as preferences from '../src/core/verse/preferences.js';
 import { pathToFileURL } from 'node:url';
@@ -24,14 +25,27 @@ const release = { id: 19, tag_name: 'v3.24.3', draft: false, prerelease: false, 
     digest: `sha256:${'d'.repeat(64)}`, state: 'uploaded', browser_download_url: `https://github.com/${REPO}/releases/download/v3.24.3/ashlr-hub-3.24.3.tgz` }] };
 const ref = { ref: 'refs/tags/v3.24.3', object: { type: 'commit', sha: MERGED } };
 const pkg = { name: '@ashlr/hub', version: '3.24.3', dist: { tarball: 'https://registry.npmjs.org/@ashlr/hub/-/hub-3.24.3.tgz', integrity: `sha512-${'A'.repeat(86)}==` } };
-function fixtureReader(change?: (endpoint: string, value: unknown) => unknown): ReleasePublicReader {
+function sourcePackageEvidence(bytes: Buffer) {
+  const sha = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+  return { tree: { sha: TREE, truncated: false, tree: [{ path: 'package.json', mode: '100644', type: 'blob', sha, size: bytes.length }] },
+    blob: { sha, encoding: 'base64', size: bytes.length, content: bytes.toString('base64').match(/.{1,60}/g)!.join('\n') + '\n' } };
+}
+function fixtureReader(change?: (endpoint: string, value: unknown) => unknown,
+  options: { repository?: typeof REPO | 'ashlrai/phantom'; packageName?: '@ashlr/hub' | '@ashlr/phantom'; packageBytes?: Buffer } = {}): ReleasePublicReader {
+  const repository = options.repository ?? REPO; const packageName = options.packageName ?? '@ashlr/hub';
+  const source = sourcePackageEvidence(options.packageBytes ?? Buffer.from(JSON.stringify({ name: packageName, version: proposed.version })));
+  const boundRepo = { ...repo, full_name: repository };
+  const published = { ...release, html_url: release.html_url.replace(REPO, repository),
+    assets: release.assets.map(asset => ({ ...asset, browser_download_url: asset.browser_download_url.replace(REPO, repository) })) };
   const github = vi.fn(async (endpoint: string): Promise<unknown> => {
     let value: unknown;
-    if (endpoint === `repos/${REPO}`) value = repo;
-    else if (endpoint.endsWith('/releases/latest') || endpoint.endsWith('/releases/tags/v3.24.3')) value = release;
+    if (endpoint === `repos/${repository}`) value = boundRepo;
+    else if (endpoint.endsWith('/releases/latest') || endpoint.endsWith('/releases/tags/v3.24.3')) value = published;
     else if (endpoint.endsWith('/git/ref/tags/v3.24.3')) value = ref;
     else if (endpoint.endsWith(`/git/commits/${MERGED}`)) value = { sha: MERGED, tree: { sha: TREE }, parents: [{ sha: 'f'.repeat(40) }, { sha: SOURCE }] };
     else if (endpoint.endsWith(`/git/commits/${SOURCE}`)) value = { sha: SOURCE, tree: { sha: TREE } };
+    else if (endpoint === `repos/${repository}/git/trees/${TREE}`) value = source.tree;
+    else if (endpoint === `repos/${repository}/git/blobs/${source.blob.sha}`) value = source.blob;
     else if (endpoint.includes('/actions/workflows/')) value = { total_count: 1, workflow_runs: [{ id: endpoint.includes('dependency-audit') ? 21 : 20, run_attempt: 1, head_sha: SOURCE }] };
     else if (endpoint.includes('/jobs?')) {
       const audit = endpoint.includes('/runs/21/'); const names = audit ? ['Dependency audit (root + Raycast)'] : RELEASE_CI_JOBS;
@@ -39,12 +53,16 @@ function fixtureReader(change?: (endpoint: string, value: unknown) => unknown): 
         head_sha: SOURCE, status: 'completed', conclusion: 'success', labels: ['ubuntu-latest', 'macos-15', 'windows-latest', 'windows-2022', 'macos-latest'],
         steps: releaseRequiredSteps(name).map((step) => ({ name: step, status: 'completed', conclusion: 'success' })) })) };
     } else if (/\/actions\/runs\/(20|21)(?:\/attempts\/1)?$/.test(endpoint)) value = { id: /\/runs\/21(?:\/|$)/.test(endpoint) ? 21 : 20,
-      run_attempt: 1, head_sha: SOURCE, repository: repo, path: /\/runs\/21(?:\/|$)/.test(endpoint) ? '.github/workflows/dependency-audit.yml' : '.github/workflows/ci.yml',
+      run_attempt: 1, head_sha: SOURCE, repository: boundRepo, path: /\/runs\/21(?:\/|$)/.test(endpoint) ? '.github/workflows/dependency-audit.yml' : '.github/workflows/ci.yml',
       status: 'completed', conclusion: 'success', event: 'pull_request' };
     else throw new Error(`Unexpected fixture endpoint ${endpoint}`);
     return change ? change(endpoint, structuredClone(value)) : structuredClone(value);
   });
-  return { github, npm: vi.fn(async () => structuredClone(pkg)) };
+  return { github, npm: vi.fn(async (_version, _signal, selectedName = '@ashlr/hub') => {
+    expect(selectedName).toBe(packageName);
+    return { ...structuredClone(pkg), name: packageName,
+      dist: { ...pkg.dist, tarball: `https://registry.npmjs.org/${packageName}/-/${packageName.split('/')[1]}-${proposed.version}.tgz` } };
+  }) };
 }
 function deps(reader = fixtureReader()): ReleaseArticlesDeps {
   return { now: () => NOW, reader, policy: () => makePolicy({ repos: [{ ...makePolicy().repos[0]!, nameWithOwner: RELEASE_ARTICLE_REPO }] }),
@@ -62,7 +80,7 @@ describe('fresh public facts are data, not saved release authority', () => {
   it('freshly binds exact numeric repo, tag, identical candidate tree, all 15 jobs, Audit and npm integrity', async () => {
     const reader = fixtureReader(); const facts = await verifyPublishedRelease(proposed, reader, NOW);
     expect(facts).toMatchObject({ sourceSha: SOURCE, mergedSha: MERGED, treeSha: TREE, ci: { id: 20, attempt: 1 }, audit: { id: 21, attempt: 1 }, packageIntegrity: pkg.dist.integrity });
-    expect(RELEASE_CI_JOBS).toHaveLength(15); expect(reader.npm).toHaveBeenCalledWith('3.24.3', undefined);
+    expect(RELEASE_CI_JOBS).toHaveLength(15); expect(reader.npm).toHaveBeenCalledWith('3.24.3', undefined, '@ashlr/hub');
     expect((reader.github as ReturnType<typeof vi.fn>).mock.calls.filter(([path]) => path === `repos/${REPO}`)).toHaveLength(2);
   });
   it.each(['numeric', 'redirect', 'tree', 'ci-failed', 'audit-failed', 'job-missing', 'step-skipped', 'runner', 'tag-race', 'release-race', 'rerun-race'])('withholds facts for %s', async (kind) => {
@@ -108,6 +126,152 @@ describe('fresh public facts are data, not saved release authority', () => {
     expect(await defaultReleasePublicReader().npm('3.24.3')).toEqual(pkg);
     expect(fetcher).toHaveBeenCalledTimes(1); expect(fetcher.mock.calls[0]![0]).toBe('https://registry.npmjs.org/@ashlr%2fhub/3.24.3');
     expect(fetcher.mock.calls[0]![1]).toMatchObject({ redirect: 'error', headers: { 'Cache-Control': 'no-cache' } });
+  });
+});
+
+describe('source-bound release package identity', () => {
+  it.each([
+    [REPO, '@ashlr/hub'], ['ashlrai/phantom', '@ashlr/hub'], ['ashlrai/phantom', '@ashlr/phantom'],
+  ] as const)('selects %s history from exact source package %s, never the repository label', async (repository, packageName) => {
+    const bytes = Buffer.from(JSON.stringify({ name: packageName, version: proposed.version, description: 'Phantom · 工程',
+      repository: { url: 'https://github.com/ashlrai/ashlr-hub' }, privatePrompt: 'SECRET' }));
+    const reader = fixtureReader(undefined, { repository, packageName, packageBytes: bytes });
+    const facts = await verifyPublishedRelease({ ...proposed, repository }, reader, NOW);
+    const evidence = sourcePackageEvidence(bytes);
+    expect(reader.github).toHaveBeenCalledWith(`repos/${repository}/git/trees/${TREE}`, undefined);
+    expect(reader.github).toHaveBeenCalledWith(`repos/${repository}/git/blobs/${evidence.blob.sha}`, undefined);
+    expect((reader.github as ReturnType<typeof vi.fn>).mock.calls.filter(([path]) => path.includes('/git/trees/'))).toHaveLength(1);
+    expect((reader.github as ReturnType<typeof vi.fn>).mock.calls.some(([path]) => path.includes('recursive'))).toBe(false);
+    expect(reader.npm).toHaveBeenCalledExactlyOnceWith(proposed.version, undefined, packageName);
+    expect(Object.hasOwn(facts, 'packageName')).toBe(packageName === '@ashlr/phantom');
+    expect(publicArticleDraft(facts).sources).toContain(`https://www.npmjs.com/package/${packageName}/v/${proposed.version}`);
+    expect(JSON.stringify(facts)).not.toMatch(/SECRET|description|repository.*url/);
+    expect(publicArticleDraft({ ...facts, observedAt: new Date(NOW + 1000).toISOString() }).factsDigest).toBe(publicArticleDraft(facts).factsDigest);
+  });
+  it('retains exact legacy fact bytes and digest without a new package property', async () => {
+    const facts = await verifyPublishedRelease(proposed, fixtureReader(), NOW);
+    const legacy = { ...proposed, sourceSha: SOURCE, mergedSha: MERGED, treeSha: TREE, releaseId: 19,
+      publishedAt: '2026-10-07T03:50:00.000Z', observedAt: new Date(NOW).toISOString(),
+      ci: { id: 20, attempt: 1 }, audit: { id: 21, attempt: 1 }, packageIntegrity: pkg.dist.integrity,
+      assets: [{ name: release.assets[0]!.name, bytes: 30, digest: release.assets[0]!.digest }] };
+    expect(JSON.stringify(facts)).toBe(JSON.stringify(legacy));
+    expect(publicArticleDraft(facts)).toEqual(publicArticleDraft(legacy));
+    expect(publicArticleDraft(facts).factsDigest).toBe('743a721867c1e7bb1368c11d0cb05859920ce22aebe348f40b3d08e812e7c17b');
+    expect(Object.hasOwn(publicArticleDraft(facts).facts, 'packageName')).toBe(false);
+  });
+  it('refuses canonical source under the legacy repository before npm', async () => {
+    const reader = fixtureReader(undefined, { packageName: '@ashlr/phantom' });
+    await expect(verifyPublishedRelease(proposed, reader, NOW)).rejects.toThrow('canonical release repository');
+    expect(reader.npm).not.toHaveBeenCalled();
+  });
+  it.each(['wrong-tree', 'truncated', 'not-array', 'too-many', 'missing', 'duplicate-package', 'duplicate-root',
+    'nested-path', 'symlink', 'submodule', 'directory', 'unknown-mode', 'array-mode', 'zero-size', 'fraction-size', 'oversize', 'bad-sha'])('refuses %s source trees before npm', async kind => {
+    const reader = fixtureReader((endpoint, raw) => {
+      if (!endpoint.includes('/git/trees/')) return raw;
+      const value = raw as { sha: string; truncated: boolean; tree: Record<string, unknown>[] };
+      const entry = value.tree[0]!;
+      switch (kind) {
+        case 'wrong-tree': value.sha = SOURCE; break;
+        case 'truncated': value.truncated = true; break;
+        case 'not-array': return { ...value, tree: {} };
+        case 'too-many': value.tree = Array.from({ length: 10_001 }, (_, i) => ({ path: `file-${i}` })); break;
+        case 'missing': value.tree = []; break;
+        case 'duplicate-package': value.tree.push({ ...entry }); break;
+        case 'duplicate-root': value.tree.push({ path: 'src' }, { path: 'src' }); break;
+        case 'nested-path': value.tree.push({ path: 'src/package.json' }); break;
+        case 'symlink': entry['mode'] = '120000'; break;
+        case 'submodule': entry['type'] = 'commit'; entry['mode'] = '160000'; break;
+        case 'directory': entry['type'] = 'tree'; break;
+        case 'unknown-mode': entry['mode'] = '100600'; break;
+        case 'array-mode': entry['mode'] = ['100644']; break;
+        case 'zero-size': entry['size'] = 0; break;
+        case 'fraction-size': entry['size'] = 1.5; break;
+        case 'oversize': entry['size'] = 1024 * 1024 + 1; break;
+        case 'bad-sha': entry['sha'] = '../other'; break;
+      }
+      return value;
+    });
+    await expect(verifyPublishedRelease(proposed, reader, NOW)).rejects.toThrow(); expect(reader.npm).not.toHaveBeenCalled();
+  });
+  it.each(['wrong-sha', 'encoding', 'size', 'space', 'tab', 'alphabet', 'partial', 'padding', 'noncanonical',
+    'content-bound', 'raw-size', 'raw-hash'])('refuses %s blob evidence before npm', async kind => {
+    const reader = fixtureReader((endpoint, raw) => {
+      if (!endpoint.includes('/git/blobs/')) return raw;
+      const value = raw as { sha: string; encoding: string; size: number; content: string };
+      switch (kind) {
+        case 'wrong-sha': value.sha = SOURCE; break;
+        case 'encoding': value.encoding = 'utf-8'; break;
+        case 'size': value.size++; break;
+        case 'space': value.content += ' '; break;
+        case 'tab': value.content += '\t'; break;
+        case 'alphabet': value.content = '!!!!'; break;
+        case 'partial': value.content = 'AAA'; break;
+        case 'padding': value.content = 'AAAA===='; break;
+        case 'noncanonical': value.content = 'AB=='; break;
+        case 'content-bound': value.content = 'A'.repeat(2 * 1024 * 1024 + 1); break;
+        case 'raw-size': value.content = Buffer.from('{}').toString('base64'); break;
+        case 'raw-hash': value.content = Buffer.from('x'.repeat(value.size)).toString('base64'); break;
+      }
+      return value;
+    });
+    await expect(verifyPublishedRelease(proposed, reader, NOW)).rejects.toThrow(); expect(reader.npm).not.toHaveBeenCalled();
+  });
+  it.each([
+    Buffer.from([0xff]), Buffer.from('{bad json'), Buffer.from('[]'),
+    Buffer.from(JSON.stringify({ name: '@ashlr/hub-lookalike', version: proposed.version })),
+    Buffer.from(JSON.stringify({ name: 'constructor', version: proposed.version })),
+    Buffer.from(JSON.stringify({ name: '@ashlr/hub', version: '3.24.4' })),
+  ])('refuses hash-valid invalid source package %j without npm or code execution', async packageBytes => {
+    const reader = fixtureReader(undefined, { packageBytes });
+    await expect(verifyPublishedRelease(proposed, reader, NOW)).rejects.toThrow(); expect(reader.npm).not.toHaveBeenCalled();
+  });
+  it('rejects noncanonical padding bits even when decoded bytes, length and Git hash match', async () => {
+    const reader = fixtureReader((endpoint, raw) => endpoint.includes('/git/blobs/') ? { ...(raw as object), content: 'MB==' } : raw,
+      { packageBytes: Buffer.from('0') });
+    await expect(verifyPublishedRelease(proposed, reader, NOW)).rejects.toThrow('package Base64');
+    expect(reader.npm).not.toHaveBeenCalled();
+  });
+  it('accepts documented CRLF wrapping and executable regular package mode', async () => {
+    const reader = fixtureReader((endpoint, raw) => {
+      const value = raw as Record<string, unknown>;
+      if (endpoint.includes('/git/trees/')) (value['tree'] as Record<string, unknown>[])[0]!['mode'] = '100755';
+      if (endpoint.includes('/git/blobs/')) value['content'] = (value['content'] as string).replaceAll('\n', '\r\n');
+      return value;
+    });
+    expect((await verifyPublishedRelease(proposed, reader, NOW)).packageIntegrity).toBe(pkg.dist.integrity);
+  });
+  it('draft projection refuses unknown/mixed package identities', async () => {
+    const facts = await verifyPublishedRelease(proposed, fixtureReader(), NOW);
+    for (const packageName of ['@ashlr/hub', '@ashlr/other', null, {}, ['@ashlr/phantom']]) {
+      expect(() => publicArticleDraft({ ...facts, packageName } as never)).toThrow();
+    }
+    expect(() => publicArticleDraft({ ...facts, packageName: '@ashlr/phantom' })).toThrow();
+  });
+  it('the production npm adapter supports the finite canonical argument and refuses unknown names before fetch', async () => {
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    await defaultReleasePublicReader().npm(proposed.version, undefined, '@ashlr/phantom');
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith('https://registry.npmjs.org/@ashlr%2fphantom/3.24.3', expect.objectContaining({ redirect: 'error' }));
+    fetcher.mockClear();
+    for (const name of ['constructor', '@ashlr/hub/../../other', null, {}]) {
+      await expect(defaultReleasePublicReader().npm(proposed.version, undefined, name as never)).rejects.toThrow();
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it('fresh canonical source unavailability retains durable fences without replay or false publication', async () => {
+    configureReleaseArticles(true, 'ashlrai/phantom');
+    const ports = deps(fixtureReader(undefined, { repository: 'ashlrai/phantom', packageName: '@ashlr/phantom' }));
+    const first = await syncReleaseArticles(ports); expect(first.records[0]!.state).toBe('queued');
+    ports.production = async () => true;
+    const published = await syncReleaseArticles(ports); expect(published.records[0]!.state).toBe('published');
+    ports.reader = fixtureReader((endpoint, raw) => endpoint.includes('/git/trees/') ? { ...(raw as object), truncated: true } : raw,
+      { repository: 'ashlrai/phantom', packageName: '@ashlr/phantom' });
+    for (let pass = 0; pass < 2; pass++) {
+      const row = (await syncReleaseArticles(ports)).records[0]!;
+      expect(row.state).toBe('pending-public-verification'); expect(row.attempted).toBe(true);
+      expect(row.taskId).toBe(first.records[0]!.taskId); expect(row.digest).toBe(first.records[0]!.digest);
+      expect(row.publishedAt).toBe(published.records[0]!.publishedAt);
+    }
+    expect(ports.reader.npm).not.toHaveBeenCalled(); expect(ports.enqueue).toHaveBeenCalledTimes(1);
   });
 });
 

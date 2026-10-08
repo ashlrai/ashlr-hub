@@ -1,6 +1,8 @@
 /** Fresh public release facts. This is claim eligibility, never build or effect authority. */
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { requireHubRepositoryMetadata, requireHubRepositoryReference, type HubRepositoryLabel } from './authority/repository-binding.js';
+import { desktopUpdateProfileForPackage, type DesktopUpdateProfile } from './desktop/update-manifest.js';
 
 export interface ProposedRelease { v: 1; repository: HubRepositoryLabel; version: string }
 export interface PublishedReleaseFacts extends ProposedRelease {
@@ -9,14 +11,17 @@ export interface PublishedReleaseFacts extends ProposedRelease {
   ci: { id: number; attempt: number }; audit: { id: number; attempt: number };
   packageIntegrity: string;
   assets: { name: string; bytes: number; digest: string | null }[];
+  /** Omitted for legacy facts so their stable public representation is unchanged. */
+  packageName?: '@ashlr/phantom';
 }
 export interface ReleasePublicReader {
   github(endpoint: string, signal?: AbortSignal): Promise<unknown>;
-  npm(version: string, signal?: AbortSignal): Promise<unknown>;
+  npm(version: string, signal?: AbortSignal, packageName?: DesktopUpdateProfile['packageName']): Promise<unknown>;
 }
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const SHA = /^[a-f0-9]{40}$/;
 const MAX_JSON = 4 * 1024 * 1024;
+const MAX_PACKAGE = 1024 * 1024;
 const object = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid public release response');
   return value as Record<string, unknown>;
@@ -60,10 +65,11 @@ export function defaultReleasePublicReader(): ReleasePublicReader {
       });
       return JSON.parse(output) as unknown;
     },
-    npm: async (version, signal) => {
+    npm: async (version, signal, packageName = '@ashlr/hub') => {
       if (!VERSION.test(version)) throw new Error('Invalid npm release version');
+      const profile = desktopUpdateProfileForPackage(packageName);
       const timeout = AbortSignal.timeout(10_000);
-      const response = await fetch(`https://registry.npmjs.org/@ashlr%2fhub/${version}`, {
+      const response = await fetch(`https://registry.npmjs.org/${profile.packageName.replace('/', '%2f')}/${version}`, {
         redirect: 'error', signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
         headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
       });
@@ -175,6 +181,47 @@ export async function discoverLatestRelease(repository: HubRepositoryLabel, read
   return parseProposedRelease({ v: 1, repository, version: release['tag_name'].slice(1) });
 }
 
+/** A renamed repository does not identify an historical release's npm package. */
+async function sourcePackageProfile(base: string, treeSha: string, pin: ProposedRelease, reader: ReleasePublicReader,
+  signal?: AbortSignal): Promise<DesktopUpdateProfile> {
+  // Omit recursive entirely: GitHub treats even recursive=0 as recursive.
+  const tree = object(await reader.github(`${base}/git/trees/${treeSha}`, signal));
+  equal(tree['sha'], treeSha, 'package source tree');
+  if (tree['truncated'] !== false || !Array.isArray(tree['tree']) || tree['tree'].length > 10_000) {
+    throw new Error('Complete bounded package source tree unavailable');
+  }
+  const paths = new Set<string>(); let entry: Record<string, unknown> | undefined;
+  for (const raw of tree['tree']) {
+    const row = object(raw); const path = row['path'];
+    if (typeof path !== 'string' || path.length < 1 || path.length > 255 || path === '.' || path === '..' ||
+      /[\\/\0]/.test(path) || paths.has(path)) throw new Error('Invalid root package source tree');
+    paths.add(path);
+    if (path === 'package.json') entry = row;
+  }
+  if (!entry || entry['type'] !== 'blob' || !['100644', '100755'].includes(entry['mode'] as string) ||
+    !Number.isSafeInteger(entry['size']) || Number(entry['size']) < 1 || Number(entry['size']) > MAX_PACKAGE) {
+    throw new Error('Regular bounded source package unavailable');
+  }
+  const blobSha = hash(entry['sha']); const blob = object(await reader.github(`${base}/git/blobs/${blobSha}`, signal));
+  equal(blob['sha'], blobSha, 'package source blob'); equal(blob['encoding'], 'base64', 'package blob encoding');
+  equal(blob['size'], entry['size'], 'package source size');
+  const content = blob['content'];
+  if (typeof content !== 'string' || content.length > MAX_PACKAGE * 2) throw new Error('Package blob exceeds bound');
+  // GitHub wraps Base64 with ASCII line breaks; Buffer's other tolerances are refused.
+  const encoded = content.replace(/[\r\n]/g, '');
+  if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
+    throw new Error('Invalid package blob Base64');
+  }
+  const bytes = Buffer.from(encoded, 'base64');
+  equal(bytes.length, entry['size'], 'package raw byte length'); equal(bytes.toString('base64'), encoded, 'package Base64');
+  const actualSha = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+  equal(actualSha, blobSha, 'package Git blob hash');
+  const pkg = object(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown);
+  const profile = desktopUpdateProfileForPackage(pkg['name']); equal(pkg['version'], pin.version, 'source package version');
+  if (profile.name === 'canonical-v2') equal(pin.repository, profile.repository, 'canonical release repository');
+  return profile;
+}
+
 export async function verifyPublishedRelease(proposed: ProposedRelease, reader: ReleasePublicReader, nowMs: number, signal?: AbortSignal): Promise<PublishedReleaseFacts> {
   const pin = parseProposedRelease(proposed); const base = `repos/${pin.repository}`; const tag = `v${pin.version}`;
   requireHubRepositoryMetadata(pin.repository, await reader.github(base, signal));
@@ -197,9 +244,10 @@ export async function verifyPublishedRelease(proposed: ProposedRelease, reader: 
   equal(source['sha'], sourceSha, 'source commit'); equal(object(source['tree'])['sha'], treeSha, 'candidate tree');
   const ci = await successfulRun(reader, base, pin.repository, sourceSha, 'ci.yml', signal);
   const audit = await successfulRun(reader, base, pin.repository, sourceSha, 'dependency-audit.yml', signal);
-  const pkg = object(await reader.npm(pin.version, signal)); const dist = object(pkg['dist']);
-  equal(pkg['name'], '@ashlr/hub', 'npm package'); equal(pkg['version'], pin.version, 'npm version');
-  equal(dist['tarball'], `https://registry.npmjs.org/@ashlr/hub/-/hub-${pin.version}.tgz`, 'npm tarball');
+  const profile = await sourcePackageProfile(base, treeSha, pin, reader, signal);
+  const pkg = object(await reader.npm(pin.version, signal, profile.packageName)); const dist = object(pkg['dist']);
+  equal(pkg['name'], profile.packageName, 'npm package'); equal(pkg['version'], pin.version, 'npm version');
+  equal(dist['tarball'], `https://registry.npmjs.org/${profile.packageName}/-/${profile.packageName.split('/')[1]}-${pin.version}.tgz`, 'npm tarball');
   if (typeof dist['integrity'] !== 'string' || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(dist['integrity'])) throw new Error('npm integrity missing');
   if (!Array.isArray(release['assets']) || release['assets'].length === 0 || release['assets'].length > 100) throw new Error('Published asset inventory unavailable');
   const assets = release['assets'].map((raw) => {
@@ -220,5 +268,6 @@ export async function verifyPublishedRelease(proposed: ProposedRelease, reader: 
   for (const field of ['id', 'tag_name', 'draft', 'prerelease', 'published_at', 'assets']) equal(JSON.stringify(finalRelease[field]), JSON.stringify(release[field]), 'release stability');
   if (signal?.aborted) throw new Error('Release observation stopped');
   return { ...pin, sourceSha, mergedSha, treeSha, releaseId: positive(release['id']), publishedAt: iso(release['published_at']),
-    observedAt: new Date(nowMs).toISOString(), ci, audit, packageIntegrity: dist['integrity'], assets };
+    observedAt: new Date(nowMs).toISOString(), ci, audit, packageIntegrity: dist['integrity'], assets,
+    ...(profile.name === 'canonical-v2' ? { packageName: '@ashlr/phantom' as const } : {}) };
 }
