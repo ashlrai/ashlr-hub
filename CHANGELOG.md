@@ -9,7 +9,7 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.25.2] — Unreleased
+## [3.25.2] — 2026-10-08
 
 ### Added
 
