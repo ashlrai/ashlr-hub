@@ -130,6 +130,41 @@ describe('independent pinned local runtime archive acceptance', () => {
     expect(fs.lstatSync(join(destination, 'bin/ashlr')).mode & 0o111).not.toBe(0);
   });
 
+  it.each([20_000, 20_001])('enforces the finite entry boundary at %i inert regular files', async (entryCount) => {
+    const value = await fixture();
+    const initial = await readPinnedRuntimeArchive(value.pins);
+    const expanded = gunzipSync(fs.readFileSync(value.pins.artifactPath));
+    let end = 0;
+    while (!expanded.subarray(end, end + 512).every((byte) => byte === 0)) {
+      const header = new Header(expanded.subarray(end, end + 512));
+      end += 512 + Math.ceil(header.size! / 512) * 512;
+    }
+    // Empty, unique regular files isolate the entry limit from byte/file limits.
+    // No large file tree or package code is created or executed by this fixture.
+    const extra = Array.from({ length: entryCount - initial.entries.length }, (_, index) => {
+      const block = Buffer.alloc(512);
+      const header = new Header(expanded.subarray(0, 512));
+      header.path = `package/entry-count-fixture/${String(index).padStart(5, '0')}.bin`;
+      header.size = 0;
+      header.mode = 0o644;
+      header.encode(block);
+      return block;
+    });
+    const bytes = gzipSync(Buffer.concat([expanded.subarray(0, end), ...extra, Buffer.alloc(1024)]));
+    fs.writeFileSync(value.pins.artifactPath, bytes);
+    const pins = { ...value.pins, sha256: hash(bytes) };
+    if (entryCount === 20_000) {
+      const archive = await readPinnedRuntimeArchive(pins);
+      expect(archive.entries).toHaveLength(entryCount);
+      expect(archive.entries.slice(0, initial.entries.length)).toEqual(initial.entries);
+      expect(archive.entries.slice(initial.entries.length).every((entry) => entry.bytes.length === 0)).toBe(true);
+    } else {
+      await expect(readPinnedRuntimeArchive(pins)).rejects.toThrow('entry count exceeds limit');
+    }
+    expect(fs.readFileSync(value.pins.artifactPath)).toEqual(bytes);
+    expect(fs.existsSync(value.marker)).toBe(false);
+  });
+
   it.each(['digest', 'revision', 'version', 'truncated'] as const)('rejects %s mismatch before extraction or execution', async (kind) => {
     const value = await fixture();
     const pins = { ...value.pins };
