@@ -193,7 +193,7 @@ export function startComputerRunner(hooks: ComputerRunnerHooks): ComputerRunner 
 
   async function runNative(id: string, op: NativeComputerOp): Promise<void> {
     if (!isRecord(op) || typeof op.op !== 'string' || !RELAYABLE_OPS.has(op.op)) {
-      await post(refuse(id, 'invalid', 'The Verse window does not relay that desktop operation.'));
+      await post(refuse(id, 'invalid', 'The Phantom window does not relay that desktop operation.'));
       return;
     }
     if (!('req' in op)) {
@@ -250,7 +250,7 @@ export function startComputerRunner(hooks: ComputerRunnerHooks): ComputerRunner 
         return;
       }
       default:
-        void post(refuse(id, 'unsupported', 'This Verse window does not understand that command. Update Ashlr.'));
+        void post(refuse(id, 'unsupported', 'This Phantom window does not understand that command. Update Phantom.'));
     }
   }
 

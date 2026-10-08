@@ -25,7 +25,7 @@ export function GoalPreferencesPanel({ preferences, focusMode, focusThreshold, f
       {read.state === 'ready' ? <GoalPreferencesForm read={read} serverValue={preferences!}
         focusMode={focusMode} focusThreshold={focusThreshold} focusDefaulted={focusDefaulted} guard={guard} dispatchEnabled={dispatchEnabled} /> : (
         <p className={styles.empty} role="status">{read.state === 'unsupported'
-          ? 'Goal preferences are unavailable from this server. Update Hub to view and change them.'
+          ? 'Goal preferences are unavailable from this server. Update Phantom to view and change them.'
           : read.state === 'unavailable' ? 'Saved goal preferences could not be read. Refresh the connection before changing them.'
             : 'Saved goal preferences need attention. Correct the configuration and refresh before changing them here.'}</p>
       )}
