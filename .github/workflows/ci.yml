@@ -227,6 +227,10 @@ jobs:
           snapshot="$(node .github/scripts/ci-pack-smoke.mjs capture "$RUNNER_TEMP")"
           printf 'ASHLR_PACK_SMOKE_SNAPSHOT=%s\n' "$snapshot" >> "$GITHUB_ENV"
           npm run check:first-paint:built
+          # Pack once before the full suites; fail on the actual consumer archive
+          # limits now, then retain these exact original bytes for late acceptance.
+          record_sha="$(node .github/scripts/ci-pack-smoke.mjs prepare "$snapshot")"
+          printf 'ASHLR_PACK_SMOKE_RECORD_SHA256=%s\n' "$record_sha" >> "$GITHUB_ENV"
 
       # Surface UI regressions before the exhaustive backend partition. This
       # is the same complete web suite, run once in its existing Ubuntu job.
@@ -297,8 +301,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Build already succeeded above; refuse changed bytes instead of
-          # running prepack's duplicate build. JSON selects one exact tarball.
+          # Reuse the original early pack; source/build/archive drift refuses.
+          # Never run npm pack or prepack again after the suites.
           SOURCE_DIR="$PWD"
           SMOKE_DIR=$(mktemp -d)
           cleanup() {
@@ -309,7 +313,7 @@ jobs:
             exit "$status"
           }
           trap cleanup EXIT
-          TARBALL="$(RUNNER_TEMP="$SMOKE_DIR" node .github/scripts/ci-pack-smoke.mjs pack "$ASHLR_PACK_SMOKE_SNAPSHOT")"
+          TARBALL="$(node .github/scripts/ci-pack-smoke.mjs reuse "$ASHLR_PACK_SMOKE_SNAPSHOT")"
           cd "$SMOKE_DIR"
           npm init -y > /dev/null
           npm install "$TARBALL" > /dev/null
@@ -318,6 +322,7 @@ jobs:
           node -e "import('@ashlr/hub/core').then((m) => { if (typeof m.loadConfig !== 'function') throw new Error('core surface broken'); console.log('core surface ok'); })"
           cd "$SOURCE_DIR"
           node .github/scripts/ci-pack-smoke.mjs verify "$ASHLR_PACK_SMOKE_SNAPSHOT"
+          test "$(node .github/scripts/ci-pack-smoke.mjs reuse "$ASHLR_PACK_SMOKE_SNAPSHOT")" = "$TARBALL"
           handoff="$RUNNER_TEMP/ashlr-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           node scripts/hosted-build-artifact.mjs capture --root "$SOURCE_DIR" --sha "$ASHLR_CI_SOURCE_SHA" --snapshot "$ASHLR_PACK_SMOKE_SNAPSHOT" --package-tarball "$TARBALL" --out "$handoff" --reports "${{ steps.web.outputs.lane_dir }}"
           printf 'ASHLR_CI_BUILD_HANDOFF=%s\n' "$handoff" >> "$GITHUB_ENV"
