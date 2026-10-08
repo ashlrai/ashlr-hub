@@ -48,7 +48,7 @@ describe('Transcript', () => {
     expect(details.open).toBe(true);
     const disclosure = within(details);
     expect(disclosure.getByText('3 reported tool calls; 2 with an MCP name.')).toBeInTheDocument();
-    expect(disclosure.getByText('Ashlr MCP: Read')).toBeInTheDocument();
+    expect(disclosure.getByText('Phantom CLI MCP: Read')).toBeInTheDocument();
     expect(disclosure.getByText('1 call, 1 failed')).toBeInTheDocument();
     expect(disclosure.getByText('1 call, 1 pending')).toBeInTheDocument();
     expect(disclosure.getByText('1 cited source; 1 recorded playbook reference.')).toBeInTheDocument();
@@ -112,10 +112,10 @@ describe('Transcript', () => {
       ev(3, 'tool-result', { turnId: 'same-turn', toolUseId: 'same-call', output: '', isError: failed }),
     ]);
     const { rerender } = render(<Transcript sessionId="account-a-chat" transcript={build('mcp:ashlr.read', false)} loaded loadError={null} />);
-    expect(within(screen.getByText('Tools and context').closest('details')!).getByText('Ashlr MCP: Read')).toBeInTheDocument();
+    expect(within(screen.getByText('Tools and context').closest('details')!).getByText('Phantom CLI MCP: Read')).toBeInTheDocument();
     rerender(<Transcript sessionId="account-b-chat" transcript={build('Bash', true)} loaded loadError={null} />);
     const details = screen.getByText('Tools and context').closest('details')!;
-    expect(within(details).queryByText('Ashlr MCP: Read')).not.toBeInTheDocument();
+    expect(within(details).queryByText('Phantom CLI MCP: Read')).not.toBeInTheDocument();
     expect(within(details).getByText('Command')).toBeInTheDocument();
     expect(within(details).getByText('1 call, 1 failed')).toBeInTheDocument();
   });
