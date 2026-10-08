@@ -29,6 +29,24 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Bind the updater and packaged installation helper to the authority surface.
   Keep release-signing keys outside the repository and compiler environment.
 
+### Fixed
+
+- Make Leader and Telegram updates concise and action-oriented. Use readable
+  quantities and task names while preserving exact answers, links and callbacks.
+- Resolve Fleet runs from explicit terminal relationships, retaining unknown
+  state when the relationship is absent or ambiguous.
+- Accept runtime archives with up to 20,000 regular files. Preserve compressed,
+  expanded and per-file byte limits, canonical paths and exact package identity.
+- Validate the original npm archive immediately after the CI build, before long
+  test suites, then reuse those exact bytes for the late consumer smoke check.
+- Reuse a verified delivery report within a completed campaign observation,
+  retaining independent freshness samples and existing refusal behavior.
+- Clarify chat routing with Manual, Automatic, Local first and Delegate,
+  accessible descriptions and unchanged saved routing preferences. Remove
+  duplicated wording from resource freshness tooltips.
+- Run publication preflight once before the producer build and avoid a repeated
+  core typecheck. Retain web typechecking and all platform builds and tests.
+
 ## [3.25.1] — 2026-10-07
 
 ### Fixed

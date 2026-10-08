@@ -103,7 +103,7 @@ describe('Telegram drain × real Leader thread', () => {
   it('a proactive Leader update posted to the thread is drained and marked sent', async () => {
     const msg = postLeaderMessage({ channel: 'system', kind: 'update', text: 'Seat grok reset — lanes resume.' });
     await runCommsCycle(cfg, fast);
-    expect(sends().map((c) => c.body['text'])).toContain('Leader update:\nSeat grok reset — lanes resume.');
+    expect(sends().map((c) => c.body['text'])).toContain('Phantom update:\nSeat grok reset — lanes resume.');
     expect(listThread().find((x) => x.id === msg.id)?.delivery?.telegram).toBe('sent');
   });
 });

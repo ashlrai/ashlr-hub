@@ -71,7 +71,7 @@ function fixture(secondWorker = false) {
   vi.spyOn(universeStore, 'manifestRecord').mockImplementation(() => ({ seedArtifact: { digest: hash('0') } }) as ReturnType<typeof universeStore.manifestRecord>);
   vi.spyOn(universeStore, 'projectUniverse').mockImplementation(() => universe);
   vi.spyOn(delivery, 'readUniverseDeliveries').mockReturnValue({ sourceState: 'missing', deliveries: [], reasons: [] });
-  vi.spyOn(recovery, 'readCompletedCampaignDelivery').mockReturnValue(null);
+  vi.spyOn(recovery, 'readCompletedCampaignDeliveryObservation').mockReturnValue(null);
   function add(score: number, selected: boolean, status: 'passed' | 'failed' = 'passed', workerId = 'worker') {
     const ordinal = universe.runs.length + 1; const runId = `run-${ordinal}`;
     const receipt: ResourceTaskReceipt = { schemaVersion: 1, id: resourceGenerationTaskId({ universeId: 'universe', runId, variantId: 'variant' }),
@@ -210,6 +210,33 @@ describe('engineering outcomes receipt joins', () => {
   it('retains unknown delivery proof rather than mapping a degraded branch to zero', () => {
     const f = fixture(); f.add(1, true); vi.mocked(delivery.readUniverseDeliveries).mockReturnValue({ sourceState: 'degraded', reasons: ['private error'], deliveries: [] });
     expect(f.read()).toMatchObject({ complete: false, campaigns: [{ stages: { verifiedLocalDeliveries: null }, reasons: ['delivery-evidence-unavailable'] }] });
+  });
+  it('reports the verified delivery with its coherent recovery report without an unrelated branch observation', () => {
+    const f = fixture(); const { run, trial } = f.add(2, true);
+    const receipt: delivery.UniverseDeliveryReceipt = { schemaVersion: 1, id: 'delivery', universeId: 'universe',
+      runId: run.id, trialId: trial.id, niche: trial.niche, manifestDigest: f.campaign.manifestDigest,
+      comparatorDigest: f.campaign.comparatorDigest, artifactDigest: trial.artifact!.digest,
+      repo: f.universe.manifest.seed.repo, branch: 'codex/result', baseCommit: 'f'.repeat(40),
+      commit: 'a'.repeat(40), tree: 'b'.repeat(40), changedFiles: ['private.ts'], status: 'delivered', createdAt: at, completedAt: at };
+    const observation = { receipt, universe: f.universe, deliveries: { sourceState: 'healthy' as const, deliveries: [receipt], reasons: [] } };
+    vi.mocked(recovery.readCompletedCampaignDeliveryObservation).mockReturnValue(observation);
+    // A separate report is not part of this successful observation.
+    vi.mocked(delivery.readUniverseDeliveries).mockImplementation(() => { throw new Error('later unrelated read unavailable'); });
+    const before = tree(f.outer);
+    expect(f.read()).toMatchObject({ sourceState: 'healthy', campaigns: [{ stages: { verifiedLocalDeliveries: 1 }, reasons: [] }] });
+    expect(tree(f.outer)).toBe(before);
+    // Later samples must freshly refuse rather than reuse an earlier success.
+    vi.mocked(recovery.readCompletedCampaignDeliveryObservation).mockReturnValueOnce(observation).mockReturnValue(null);
+    vi.mocked(delivery.readUniverseDeliveries).mockReturnValue({ sourceState: 'degraded', deliveries: [], reasons: [] });
+    expect(f.read()).toMatchObject({ sourceState: 'degraded', reasons: ['evidence-changed-during-sampling'],
+      campaigns: [{ stages: { verifiedLocalDeliveries: null } }] });
+    expect(tree(f.outer)).toBe(before);
+  });
+  it('keeps a delivered branch with refused recovery unknown instead of declaring verified zero', () => {
+    const f = fixture(); f.add(1, true);
+    vi.mocked(delivery.readUniverseDeliveries).mockReturnValue({ sourceState: 'healthy', reasons: [],
+      deliveries: [{ branch: 'codex/result', status: 'delivered' } as delivery.UniverseDeliveryReceipt] });
+    expect(f.read()).toMatchObject({ complete: false, campaigns: [{ stages: { verifiedLocalDeliveries: null }, reasons: ['delivery-evidence-unverified'] }] });
   });
   it('detects changes across samples without overwriting or repairing evidence', () => {
     const f = fixture(); f.add(1, true); let call = 0;

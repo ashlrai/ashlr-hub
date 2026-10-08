@@ -1,12 +1,10 @@
 /**
- * core/comms/fleet-pulse.ts — M262 rich Telegram fleet pulse.
+ * core/comms/fleet-pulse.ts — M262 concise Telegram fleet summary.
  *
  * Sends a concise, scannable "fleet pulse" message to Telegram with:
- *   - Resource posture header (availability color-coded via emoji)
- *   - Backend status grid (availability, used%, resets-in)
- *   - Fleet activity summary (merges, dispatches, proposals)
- *   - Cost & savings (today's spend, plugin savings, cache rate)
- *   - Director focus + escalation count (if director enabled)
+ *   - Recorded focus and decisions needing input
+ *   - One recorded work line and one status/reset line per resource
+ *   - One ledger cost estimate; optional diagnostics stay in the snapshot/UI
  *
  * GATED: cfg.comms?.proactive must be true. When false/absent, no-ops.
  * SAFETY: read-only; never mutates proposals/goals/merges.
@@ -15,37 +13,27 @@
 
 import type { AshlrConfig } from '../types.js';
 import { sendTelegramMessage, telegramEnabled } from '../integrations/telegram.js';
-import { escapeTelegramHtml } from '../integrations/telegram-format.js';
+import { escapeTelegramHtml, leaderDisplayText, telegramMetric, telegramUsd, telegramPercent } from '../integrations/telegram-format.js';
+import { scrubSecrets } from '../util/scrub.js';
 import type { VisibilitySnapshot } from '../web/visibility.js';
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
-function availabilityEmoji(avail: string): string {
-  switch (avail) {
-    case 'open':      return '🟢';
-    case 'near':      return '🟡';
-    case 'throttled': return '🟠';
-    case 'exhausted': return '🔴';
-    default:          return '⚪';
+function availabilityLabel(value: string): string {
+  switch (value) {
+    case 'open': return 'available';
+    case 'near': return 'near limit';
+    case 'throttled': return 'throttled';
+    case 'exhausted': return 'exhausted';
+    default: return 'status unknown';
   }
 }
 
-function fmtPct(pct: number | null): string {
-  if (pct === null) return '?%';
-  return `${Math.round(pct)}%`;
-}
-
-function fmtUsd(usd: number): string {
-  if (usd < 0.01) return '<$0.01';
-  return `$${usd.toFixed(2)}`;
-}
-
-function fmtTokens(tokens: number): string {
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
-  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K`;
-  return String(tokens);
+function backendName(name: string): string {
+  return ({ claude: 'Claude', codex: 'Codex', 'local-coder': 'Local coder', local: 'Local',
+    grok: 'Grok', 'grok-cli': 'Grok CLI', devin: 'Devin', nim: 'NVIDIA NIM' } as Record<string, string>)[name] ?? name;
 }
 
 /** Dynamic text inside the pulse's Telegram HTML — the shared escaper. */
@@ -53,26 +41,24 @@ const html = escapeTelegramHtml;
 
 function postureHeader(posture: string): string {
   switch (posture) {
-    case 'full':       return '🚀 POSTURE: full headroom — use frontier freely';
-    case 'preserve':   return '⚡ POSTURE: preserve — favour cheaper backends';
-    case 'local-only': return '🔋 POSTURE: local-only — frontier exhausted';
-    case 'degraded':   return '⚠️ POSTURE: degraded — multiple sources down';
-    default:           return `📊 POSTURE: ${html(posture)}`;
+    case 'full':       return 'Capacity available';
+    case 'preserve':   return 'Capacity limited — prefer lower-cost engines';
+    case 'local-only': return 'Use local engines — frontier allowance exhausted';
+    case 'degraded':   return 'Capacity degraded — some sources unavailable';
+    default:           return `Capacity: ${html(posture)}`;
   }
 }
 
-function resetsIn(resetsAt: string | null): string {
+function resetsIn(resetsAt: string | null, nowMs: number): string {
   if (!resetsAt) return '';
-  try {
-    const ms = new Date(resetsAt).getTime() - Date.now();
-    if (ms <= 0) return ' (reset due)';
-    const h = Math.floor(ms / 3_600_000);
-    const m = Math.floor((ms % 3_600_000) / 60_000);
-    if (h > 0) return ` resets ${h}h${m > 0 ? `${m}m` : ''}`;
-    return ` resets ${m}m`;
-  } catch {
-    return '';
-  }
+  const at = Date.parse(resetsAt);
+  if (!Number.isFinite(at) || !Number.isFinite(nowMs)) return ' · reset time unknown';
+  const ms = at - nowMs;
+  if (ms <= 0) return ' · reset due';
+  if (ms < 60_000) return ' · resets in under a minute';
+  if (ms >= 86_400_000) return ` · resets in ${telegramMetric(ms / 86_400_000)} days`;
+  if (ms >= 3_600_000) return ` · resets in ${telegramMetric(ms / 3_600_000)} hours`;
+  return ` · resets in ${telegramMetric(ms / 60_000)} min`;
 }
 
 // ---------------------------------------------------------------------------
@@ -80,104 +66,34 @@ function resetsIn(resetsAt: string | null): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Build the rich fleet-pulse Telegram message from a VisibilitySnapshot.
+ * Build the concise fleet Telegram message from a VisibilitySnapshot.
  * Returns Telegram-HTML text because sendTelegramMessage uses parse_mode=HTML.
  */
 export function buildFleetPulseMessage(snap: VisibilitySnapshot): string {
-  const lines: string[] = [];
-  const ts = new Date(snap.generatedAt);
-  const dateStr = ts.toLocaleDateString('en-US', {
-    weekday: 'short',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-
-  lines.push(`<b>Fleet Pulse</b> — ${html(dateStr)}`);
-  lines.push('');
-
-  // Resource posture
+  const lines: string[] = ['<b>Phantom fleet</b>'];
+  const at = Date.parse(snap.generatedAt);
+  const focus = snap.director.topGoalObjective;
+  if (focus) lines.push(`Focus: ${html(leaderDisplayText(scrubSecrets(focus)).replace(/\s+/g, ' ').trim())}`);
+  if (snap.director.escalationCount > 0) {
+    lines.push(`${telegramMetric(snap.director.escalationCount)} decision${snap.director.escalationCount === 1 ? '' : 's'} awaiting your input`);
+  }
   lines.push(postureHeader(snap.director.resourcePosture));
-  lines.push('');
 
-  // Backend grid
-  if (snap.resourceGrid.length > 0) {
-    lines.push('<b>BACKENDS</b>');
-    for (const b of snap.resourceGrid) {
-      const pct = fmtPct(b.usedPct);
-      const rst = resetsIn(b.resetsAt);
-      const cost = b.costPerMTokenOut > 0 ? ` · $${b.costPerMTokenOut}/M` : '';
-      const lat = b.p50LatencyMs != null ? ` · p50=${b.p50LatencyMs}ms` : '';
-      lines.push(`  ${availabilityEmoji(b.availability)} <b>${html(b.backend)}</b>: ${html(pct)} used${html(rst)}${html(cost)}${html(lat)}`);
-    }
-    lines.push('');
+  const activity = snap.fleetActivity;
+  // These are recorded dispatch/outcome counts, not a claim about live agents or deliveries.
+  lines.push(`Recorded work (24h): ${telegramMetric(activity.totalDispatches)} dispatches · ${telegramMetric(activity.mergedToday)} merged · ${telegramMetric(activity.rejectedToday)} rejected · ${telegramMetric(activity.proposalsPending)} ${activity.proposalsPending === 1 ? 'proposal' : 'proposals'} pending`);
+  for (const resource of snap.resourceGrid) {
+    const pct = telegramPercent(resource.usedPct);
+    const usage = pct === 'unknown' ? 'usage unknown' : `${pct} used`;
+    const reset = resource.resetsAt ? resetsIn(resource.resetsAt, at)
+      : resource.capWindow ? ' · reset time unknown' : '';
+    const reason = resource.reason.trim();
+    // Preserve a concise real blocker; full diagnostics and measurements stay in the snapshot/UI.
+    const blocker = reason ? ` · ${leaderDisplayText(scrubSecrets(reason)).replace(/\s+/g, ' ').slice(0, 120)}` : '';
+    lines.push(`${html(backendName(resource.backend))}: ${html(availabilityLabel(resource.availability))} · ${html(usage)}${html(reset)}${html(blocker)}`);
   }
-
-  // Fleet activity
-  const fa = snap.fleetActivity;
-  if (fa.totalDispatches > 0 || fa.mergedToday > 0) {
-    lines.push('<b>FLEET (24h)</b>');
-    lines.push(`  Dispatches: ${fa.totalDispatches}` +
-      (fa.byBackend.length > 0
-        ? ` (${html(fa.byBackend.slice(0, 3).map(b => `${b.backend}:${b.count}`).join(', '))})`
-        : ''));
-    if (fa.mergedToday > 0) lines.push(`  ✅ Merged: ${fa.mergedToday}`);
-    if (fa.rejectedToday > 0) lines.push(`  ❌ Rejected: ${fa.rejectedToday}`);
-    if (fa.proposalsPending > 0) lines.push(`  ⏳ Pending proposals: ${fa.proposalsPending}`);
-    if (fa.recentMergeTitles.length > 0) {
-      lines.push('  Recent merges:');
-      for (const t of fa.recentMergeTitles.slice(0, 3)) {
-        lines.push(`    • ${html(t)}`);
-      }
-    }
-    lines.push('');
-  }
-
-  // Cost & savings
-  const cs = snap.costSavings;
-  lines.push('<b>COST &amp; SAVINGS</b>');
-  lines.push(`  Today's spend: ${html(fmtUsd(cs.todaySpendUsd))}`);
-  if (cs.spendByBackend.length > 0) {
-    const byB = cs.spendByBackend.slice(0, 3).map(b => `${b.backend}:${fmtUsd(b.costUsd)}`).join(' · ');
-    lines.push(`    By backend: ${html(byB)}`);
-  }
-  if (cs.pluginSavingsLifetimeTokens > 0) {
-    lines.push(
-      `  Plugin savings: ${html(fmtTokens(cs.pluginSavingsLifetimeTokens))} tokens (≈${html(fmtUsd(cs.pluginSavingsLifetimeUsd))}) lifetime`,
-    );
-  }
-  if (cs.routingSavedUsd > 0.001) {
-    lines.push(`  Routing saved: ${html(fmtUsd(cs.routingSavedUsd))} (local vs. frontier)`);
-  }
-  if (cs.cacheHitRate > 0) {
-    lines.push(`  Cache hit rate: ${Math.round(cs.cacheHitRate * 100)}%`);
-  }
-  lines.push(`  Claude budget: ${cs.claudeBudgetPreserved ? '✅ preserved' : '⚠️ near limit'}`);
-  lines.push('');
-
-  // Director focus
-  if (snap.director.directorEnabled || snap.director.topGoalObjective) {
-    lines.push('<b>DIRECTOR</b>');
-    if (snap.director.topGoalObjective) {
-      lines.push(`  Focus: ${html(snap.director.topGoalObjective)}`);
-    }
-    if (snap.director.escalationCount > 0) {
-      lines.push(
-        `  ⚠️ ${snap.director.escalationCount} escalation${snap.director.escalationCount > 1 ? 's' : ''} need your call`,
-      );
-    } else {
-      lines.push('  No escalations pending');
-    }
-    if (snap.director.latestDigest) {
-      const excerpt = snap.director.latestDigest.slice(0, 300);
-      lines.push('');
-      lines.push('<i>' + html(excerpt.replace(/\n/g, ' ')) + '</i>');
-    }
-    lines.push('');
-  }
-
-  return lines.join('\n').trim();
+  lines.push(`Ledger estimate (24h): ${html(telegramUsd(snap.costSavings.todaySpendUsd))}`);
+  return lines.join('\n');
 }
 
 // ---------------------------------------------------------------------------

@@ -33,6 +33,7 @@ import { crossFamilyReviewer } from '../../../../core/verse/multimodel/compare.j
 import { assessDraft } from '../../../../core/verse/multimodel/escalation.js';
 import type { ChatMeter, PromptClassification, SeatAdvice, SeatAdviceOption } from '../../../../core/verse/multimodel/types.js';
 import { useQuery } from '../../../data/hooks.js';
+import { Tooltip } from '../../../components/primitives/Tooltip.js';
 import { useVerseTranscript } from '../useVerseTranscript.js';
 import { formatTokens } from '../verse-readouts.js';
 import { DEFAULT_FLOW_API, escalate, routeMessage, type FlowTarget } from './multimodel-flows.js';
@@ -59,7 +60,13 @@ export interface MultiModelBarProps {
   onConsumeDraft(text: string): void;
 }
 
-const PREF_LABEL: Record<AutoPref, string> = { off: 'Auto off', auto: 'Auto', 'cheap-first': 'Cheap-first', manager: 'Manager' };
+const PREF_LABEL: Record<AutoPref, string> = { off: 'Manual', auto: 'Automatic', 'cheap-first': 'Local first', manager: 'Delegate' };
+const PREF_DESCRIPTION: Record<AutoPref, string> = {
+  off: 'Send to the model chosen for this chat.',
+  auto: 'Choose a model for each message automatically.',
+  'cheap-first': 'Prefer a local draft and escalate when needed.',
+  manager: 'Let the fleet plan, delegate, and review.',
+};
 
 interface PendingDraft {
   text: string;
@@ -261,10 +268,11 @@ export function MultiModelBar({ sessionId, seats, text, running, registerInterce
 
   return (
     <div className={styles.bar} role="group" aria-label="Models">
-      <select className={styles.select} aria-label="Auto seat" value={pref} onChange={(e) => changePref(e.target.value as AutoPref)}
-        title="Manager plans, delegates, reviews. Auto routes messages; Cheap-first drafts locally.">
-        {AUTO_PREFS.map((p) => <option key={p} value={p}>{PREF_LABEL[p]}</option>)}
-      </select>
+      <Tooltip label={PREF_DESCRIPTION[pref]}>
+        <select className={styles.select} aria-label="Routing mode" value={pref} onChange={(e) => changePref(e.target.value as AutoPref)}>
+          {AUTO_PREFS.map((p) => <option key={p} value={p}>{PREF_LABEL[p]}</option>)}
+        </select>
+      </Tooltip>
 
       {pref === 'manager' ? <Suspense fallback={<span className={styles.why}>Loading manager…</span>}><ManagerStatus sessionId={sessionId}
         retryMessage={async message => { const route = await intercept(message); if (route === 'handled' && text === message) onConsumeDraft(text); }} /></Suspense> : null}

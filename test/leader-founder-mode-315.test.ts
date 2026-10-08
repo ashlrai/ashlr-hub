@@ -213,6 +213,18 @@ describe('persona — a founder-operator that never claims to be a real person',
     expect(leaderDisplayText(`• ${memo} — Merge PR #543`)).toBe('• memo — Merge PR #543');
   });
 
+  it('replaces generated task metadata without altering literal references or useful numbers', () => {
+    const id = '93715601-ff99-4914-bcb1-095fe8101008';
+    const sha = 'c938f914b7ea6a772141fdcbc5ec1786218ab1cc';
+    const raw = `Task ${id} failed. Run ${id} is held; commit ${sha}. PR #635 uses v3.25.2.`;
+    expect(leaderDisplayText(raw)).toBe('Task failed. Run is held; commit c938f91. PR #635 uses v3.25.2.');
+    for (const literal of [`https://github.com/ashlrai/ashlr-hub/commit/${sha}`, `src/${id}.ts`,
+      `"Task ${id}"`, `\`run ${id}\``, `\`\`\`\nTask ${id}\n\`\`\``,
+      `Invoice 12345678901234567890; model qwen3.8:27b; 12,345 tokens`, `task ${id}.json`]) {
+      expect(leaderDisplayText(literal)).toBe(literal);
+    }
+  });
+
   it('leaves exact URLs, filenames, code and quoted task text intact', () => {
     const id = 'lm-20260927140000-abcdef';
     const iso = '2026-09-27T14:00:00.000Z';

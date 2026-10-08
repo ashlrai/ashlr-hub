@@ -34,6 +34,20 @@ Native compilation, signing, rollback checks, installation and live acceptance
 remain separate. This avoids repeating successful source qualification; it does
 not treat a saved receipt or an unfinished CI run as a passing gate.
 
+## Fast development feedback
+
+Run the whole test modules affected by a change first. Use `npm run check:release`
+for publication, CLI and documentation contracts; use `node --test` with the
+affected `.github/tests` modules for workflow and packaging changes. Import-based
+related selection cannot discover every test that reads a workflow as text.
+
+Use `npm run gate -- --base <ref>` for broader feedback while coding. Before
+shipping, consolidate changes into one clean candidate and run its complete
+hosted qualification once. Reuse that candidate's original qualified build and
+tarball rather than running `gate:full`, `prepublishOnly` and another build in
+sequence. If source changes or a required check fails, qualify the new candidate;
+the previous candidate's results cannot qualify changed source.
+
 ## Local qualification fallback
 
 Run these commands in order from the final clean release commit. Each stops on
@@ -50,7 +64,7 @@ npm publish <tarball> --access public   # the path ship:local printed; see Publi
 ```
 
 Run `npm run check:release` before an expensive build or pushing release changes.
-It runs five existing whole publication, documentation and CLI discovery contract
+It runs seven existing whole publication, documentation and CLI discovery contract
 modules against source files, using the hermetic test runner; it does not require
 built `dist` output or provider credentials. Versioned installer links, release
 policy mismatches and missing help or completions fail here early. This focused

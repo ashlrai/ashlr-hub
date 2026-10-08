@@ -414,7 +414,7 @@ describe('Composer manager interjections', () => {
     }));
     try {
       const p = props({ sessionId: id, running: true }); render(<Composer {...p} />);
-      expect(await screen.findByRole('combobox', { name: 'Auto seat' })).toHaveDisplayValue('Manager');
+      expect(await screen.findByRole('combobox', { name: 'Routing mode' })).toHaveDisplayValue('Delegate');
       const user = userEvent.setup(); await user.type(screen.getByRole('textbox', { name: 'Message' }), 'Guide this work');
       await user.click(screen.getByRole('button', { name: 'Send message' }));
       await waitFor(() => expect(posts).toHaveLength(1));

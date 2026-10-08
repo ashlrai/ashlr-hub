@@ -292,7 +292,7 @@ describe('Controller completed-dispatch recovery', () => {
 
 describe('Read-only campaign delivery provenance', () => {
   it('does not mistake another campaign, unchanged artifact, or degraded branch for this campaign delivery', async () => {
-    const { readCompletedCampaignDelivery } = await vi.importActual<typeof import('../src/core/universe/campaign-delivery-recovery.js')>(
+    const { readCompletedCampaignDelivery, readCompletedCampaignDeliveryProjection, readCompletedCampaignDeliveryObservation } = await vi.importActual<typeof import('../src/core/universe/campaign-delivery-recovery.js')>(
       '../src/core/universe/campaign-delivery-recovery.js');
     const campaign = { sourceState: 'healthy', state: 'completed', definition: { id: 'a', universeId: 'universe-a' },
       definitionDigest: HASH, manifestDigest: HASH, comparatorDigest: HASH, steps: [{ runId: 'run', ordinal: 1 }] } as UniverseCampaignSummary;
@@ -308,12 +308,20 @@ describe('Read-only campaign delivery provenance', () => {
     hooks.manifest.mockReturnValue({ seedArtifact: { digest: 'seed' } });
     hooks.deliveries.mockReturnValue({ sourceState: 'healthy', deliveries: [receipt] });
     const options = { root: '/synthetic/root' };
+    const observation = readCompletedCampaignDeliveryObservation(campaign, target, options);
+    expect(observation).toEqual({ receipt, universe: hooks.universe.mock.results.at(-1)?.value, deliveries: hooks.deliveries.mock.results.at(-1)?.value });
+    expect(Object.keys(observation!)).toEqual(['receipt', 'universe', 'deliveries']);
+    const projection = readCompletedCampaignDeliveryProjection(campaign, target, options);
+    expect(projection).toEqual({ receipt: observation!.receipt, universe: observation!.universe });
+    expect(Object.keys(projection!)).toEqual(['receipt', 'universe']);
     expect(readCompletedCampaignDelivery(campaign, target, options)).toEqual(receipt);
     expect(readCompletedCampaignDelivery({ ...campaign, reason: 'altered caller summary' }, target, options)).toBeNull();
     run.campaign.id = 'different'; expect(readCompletedCampaignDelivery(campaign, target, options)).toBeNull(); run.campaign.id = 'a';
     trial.delta = 0; expect(readCompletedCampaignDelivery(campaign, target, options)).toBeNull(); trial.delta = 1;
     trial.artifact.digest = 'seed'; expect(readCompletedCampaignDelivery(campaign, target, options)).toBeNull(); trial.artifact.digest = 'changed';
     hooks.deliveries.mockReturnValue({ sourceState: 'degraded', deliveries: [receipt] });
+    expect(readCompletedCampaignDeliveryObservation(campaign, target, options)).toBeNull();
+    expect(readCompletedCampaignDeliveryProjection(campaign, target, options)).toBeNull();
     expect(readCompletedCampaignDelivery(campaign, target, options)).toBeNull(); expect(hooks.deliver).not.toHaveBeenCalled();
   });
 });

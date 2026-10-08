@@ -260,7 +260,7 @@ describe('release workflow', () => {
     }
     const smoke = JSON.parse(readFileSync(join(REPO_ROOT, 'scripts/gate-smoke.json'), 'utf8')) as { backend: Array<{ file: string }> };
     expect(smoke.backend.filter((entry) => entry.file === 'test/authority-codeowners-310b.test.ts')).toHaveLength(1);
-    expect(ciSteps.find((step) => step.name === 'Typecheck')?.run).toBe('npm run typecheck');
+    expect(ciSteps.find((step) => step.name === 'Typecheck')?.run).toBe('npm run typecheck:web');
     expect(ciSteps.find((step) => step.name === 'Typecheck')?.if)
       .toBe(`matrix.label == '${sharedChecksLabel}'`);
     expect(ciSteps.find((step) => step.name === 'Lint')?.run).toBe('npm run lint');
@@ -275,8 +275,11 @@ describe('release workflow', () => {
     expect(ciSteps.indexOf(snapshot!)).toBeLessThan(ciSteps.findIndex((step) => step.name === 'Test (hermetic)'));
     expect(snapshot?.run).toContain('node --test .github/tests/ci-pack-smoke.test.mjs');
     expect(snapshot?.run).toContain('node .github/scripts/ci-pack-smoke.mjs capture "$RUNNER_TEMP"');
+    expect(snapshot?.run).toContain('node .github/scripts/ci-pack-smoke.mjs prepare "$snapshot"');
+    expect(snapshot?.run).toContain('ASHLR_PACK_SMOKE_RECORD_SHA256=%s');
     expect(packSmoke?.if).toBe("matrix.label == 'ubuntu, authority 1/3'");
-    expect(packSmoke?.run).toContain('RUNNER_TEMP="$SMOKE_DIR" node .github/scripts/ci-pack-smoke.mjs pack "$ASHLR_PACK_SMOKE_SNAPSHOT"');
+    expect(packSmoke?.run).toContain('node .github/scripts/ci-pack-smoke.mjs reuse "$ASHLR_PACK_SMOKE_SNAPSHOT"');
+    expect(packSmoke?.run).not.toContain('ci-pack-smoke.mjs pack ');
     expect(packSmoke?.run).not.toMatch(/(?:^|\n)\s*npm pack\b/);
     expect(packSmoke?.run).not.toContain('ashlr-hub-*.tgz');
     expect(packSmoke?.run).toContain('npm install "$TARBALL" > /dev/null');

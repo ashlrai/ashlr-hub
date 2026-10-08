@@ -62,6 +62,7 @@ describe('barRows', () => {
     expect(grok!.leftPercent).toBe(72);
     expect(grok!.value).toBe('72% left');
     expect(grok!.detail[0]).toBe('Weekly window: 28% used · resets Sat 8:43 AM');
+    expect(grok!.detail.at(-1)).toBe('checked 1m ago');
   });
 
   it('says "resets" once when the accounts model already worded the reset', () => {

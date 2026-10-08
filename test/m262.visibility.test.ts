@@ -530,7 +530,23 @@ describe('M262 — buildVisibilitySnapshot sections', () => {
   });
 });
 
+import { telegramMetric, telegramUsd, telegramPercent } from '../src/core/integrations/telegram-format.js';
+
 describe('M262 — buildFleetPulseMessage', () => {
+  it('retains precise display helpers for requested diagnostics without rounding identifiers', () => {
+    expect(telegramMetric(12345)).toBe('12,000');
+    expect(telegramUsd(0)).toBe('$0');
+    expect(telegramUsd(0.00004321789)).toBe('$0.000043');
+    expect(telegramPercent(99.6)).toBe('<100%');
+    expect(telegramPercent(100)).toBe('100%');
+    expect(telegramPercent(1.2345)).toBe('1.2%');
+    for (const value of [null, undefined, NaN, Infinity]) {
+      expect(telegramMetric(value)).toBe('unknown');
+      expect(telegramUsd(value)).toBe('unknown');
+      expect(telegramPercent(value)).toBe('unknown');
+    }
+  });
+
   it('formats a message with posture header and backend grid', () => {
     const snap = {
       generatedAt: FIXED_NOW_ISO,
@@ -568,18 +584,50 @@ describe('M262 — buildFleetPulseMessage', () => {
     };
 
     const msg = buildFleetPulseMessage(snap);
-    expect(msg).toContain('Fleet Pulse');
-    expect(msg).toContain('POSTURE: preserve');
-    expect(msg).toContain('claude');
-    expect(msg).toContain('FLEET (24h)');
-    expect(msg).toContain('Merged: 3');
-    expect(msg).toContain('COST &amp; SAVINGS');
-    expect(msg).toContain('DIRECTOR');
+    expect(msg).toContain('Phantom fleet');
+    expect(msg).toContain('Capacity limited — prefer lower-cost engines');
+    expect(msg).toContain('Claude');
+    expect(msg).toContain('Recorded work (24h):');
+    expect(msg).toContain('3 merged');
+    expect(msg).toContain('Ledger estimate (24h):');
     expect(msg).toContain('Ship M262');
-    expect(msg).toContain('No escalations pending');
   });
 
-  it('omits FLEET block when no dispatches or merges', () => {
+  it('renders real-shaped measurements concisely without changing the underlying observations', () => {
+    const snap = {
+      generatedAt: FIXED_NOW_ISO,
+      resourceGrid: [
+        { backend: 'codex', availability: 'near' as const, usedPct: 99.99, capWindow: '7d', costPerMTokenOut: 15.123456789, p50LatencyMs: 12345.6789, resetsAt: new Date(Date.parse(FIXED_NOW_ISO) + 3_600_000 * 2.345).toISOString(), reason: '' },
+        { backend: 'local', availability: 'open' as const, usedPct: null, capWindow: null, costPerMTokenOut: 0, p50LatencyMs: 0, resetsAt: 'invalid', reason: '' },
+        { backend: 'claude', availability: 'unknown' as const, usedPct: NaN, capWindow: null, costPerMTokenOut: 0, p50LatencyMs: Infinity, resetsAt: null, reason: '' },
+      ],
+      fleetActivity: { totalDispatches: 12345, byBackend: [], mergedToday: 0, rejectedToday: 0,
+        proposalsPending: 0, proposalsApplied: 0, queueBacklog: 0, recentMergeTitles: [] },
+      costSavings: { todaySpendUsd: 0.00004321789, spendByBackend: [], pluginSavingsLifetimeTokens: 1234567,
+        pluginSavingsLifetimeUsd: 0, routingSavedUsd: 0, cacheHitRate: 0.012345, claudeBudgetPreserved: true },
+      director: { resourcePosture: 'degraded', latestDigest: 'raw machine detail', topGoalObjective: null,
+        escalationCount: 0, directorEnabled: false, lastRunAt: null },
+    };
+    const before = structuredClone(snap);
+    const msg = buildFleetPulseMessage(snap);
+    expect(msg).toContain('&lt;100% used');
+    expect(msg).toContain('resets in 2.3 hours');
+    expect(msg).toContain('usage unknown');
+    expect(msg).toContain('reset time unknown');
+    expect(msg).toContain('12,000 dispatches');
+    expect(msg).toContain('Ledger estimate (24h): $0.000043');
+    expect(msg).not.toMatch(/latency|output tokens|Cache hit rate|Plugin savings|raw machine detail/);
+    expect(msg.split('\n').length).toBeLessThanOrEqual(10);
+    const almostFullCache = buildFleetPulseMessage({ ...snap, costSavings: { ...snap.costSavings, cacheHitRate: 0.996 } });
+    expect(almostFullCache).not.toContain('Cache hit rate:'); // Optional diagnostics stay in the snapshot/UI.
+    expect(msg).not.toMatch(/NaN|Infinity|12345\.6789|15\.123456789|raw machine detail/);
+    expect(snap).toEqual(before);
+    const zero = buildFleetPulseMessage({ ...snap, costSavings: { ...snap.costSavings, todaySpendUsd: 0 } });
+    expect(zero).toContain('Ledger estimate (24h): $0');
+    expect(zero).not.toContain('&lt;$0.01');
+  });
+
+  it('keeps zero recorded work explicit without inventing focus or decisions', () => {
     const snap = {
       generatedAt: FIXED_NOW_ISO,
       resourceGrid: [],
@@ -600,15 +648,16 @@ describe('M262 — buildFleetPulseMessage', () => {
       },
     };
     const msg = buildFleetPulseMessage(snap);
-    expect(msg).not.toContain('FLEET (24h)');
-    expect(msg).not.toContain('DIRECTOR');
+    expect(msg).toContain('Recorded work (24h): 0 dispatches · 0 merged · 0 rejected · 0 proposals pending');
+    expect(msg).not.toContain('Focus:');
+    expect(msg).not.toContain('awaiting your input');
   });
 
   it('escapes dynamic text for Telegram HTML parse mode', () => {
     const snap = {
       generatedAt: FIXED_NOW_ISO,
       resourceGrid: [
-        { backend: 'claude<bad>&codex', availability: 'open' as const, usedPct: 1, capWindow: null, costPerMTokenOut: 0, p50LatencyMs: null, resetsAt: null, reason: '' },
+        { backend: 'claude<bad>&codex', availability: 'exhausted' as const, usedPct: 1, capWindow: null, costPerMTokenOut: 0, p50LatencyMs: null, resetsAt: null, reason: 'Authentication <held> & unavailable' },
       ],
       fleetActivity: {
         totalDispatches: 1, byBackend: [{ backend: 'claude&codex', count: 1 }],
@@ -628,11 +677,12 @@ describe('M262 — buildFleetPulseMessage', () => {
     };
 
     const msg = buildFleetPulseMessage(snap);
-    expect(msg).toContain('<b>Fleet Pulse</b>');
-    expect(msg).toContain('claude&lt;bad&gt;&amp;codex');
-    expect(msg).toContain('Fix &lt;tag&gt; &amp; deps');
+    expect(msg).toContain('<b>Phantom fleet</b>');
+    expect(msg).toContain('claude&lt;bad&gt;&amp;codex: exhausted');
+    expect(msg).toContain('Authentication &lt;held&gt; &amp; unavailable');
+    expect(msg).not.toContain('Fix &lt;tag&gt; &amp; deps'); // Routine pulse omits the optional title list.
     expect(msg).toContain('Ship &lt;M262&gt;');
-    expect(msg).toContain('<i>Digest &lt;x&gt; &amp; y</i>');
+    expect(msg).not.toContain('Digest &lt;x&gt; &amp; y'); // Keep unsolicited summaries focused; full digest stays in Phantom.
   });
 });
 

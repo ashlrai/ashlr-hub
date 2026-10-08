@@ -1,6 +1,6 @@
 # Releasing @ashlr/hub
 
-> **Current release process — rechecked 2026-10-07 UTC:** use
+> **Current release process — rechecked 2026-10-08 UTC:** use
 > [Releasing locally](RELEASING-LOCALLY.md) for the current manual release lane.
 > Qualify the final clean source through the current release lane, inspect
 > hosted pull-request checks for that exact revision, and independently
@@ -9,10 +9,11 @@
 > disabled during the Linux dependency quarantine. npm publication uses the
 > maintainer's interactive web 2FA and does not carry CI provenance.
 >
-> The source version is `@ashlr/hub@3.25.1` (release candidate). Verify its exact-source checks,
+> The source version is `@ashlr/hub@3.25.2` (unreleased). Verify its exact-source checks,
 > registry version and dist-tags, GitHub release assets and installed runtime
 > independently before reporting those delivery layers as complete. The
-> published 3.25.0 release remains the current distribution until the candidate
+> npm `latest` and the GitHub release currently resolve to 3.25.1. That
+> published release remains the current distribution until the candidate
 > completes those gates. The frozen
 > `release.yml` and `promote.yml`
 > procedures below describe the historical 3.3.2 lane, not a publishing path
@@ -144,7 +145,11 @@ parameterized titles. Failed or unfinished runs cannot qualify.
 
 The first Ubuntu job captures `dist.tar`, its source/build manifest, the exact
 archive used by its successful npm installation smoke check, and the full web
-report. Each Mac job uploads its actual report closure. After the candidate is
+report. It creates the npm archive once after the build and checks it with the
+normal bounded runtime archive reader before the web/backend suites. The late
+consumer smoke check revalidates and reuses that original file, then checks it
+again before handoff capture. Archive, source or build drift fails rather than
+repacking. Each Mac job uploads its actual report closure. After the candidate is
 merged with an identical default-branch tree, dispatch **Attest qualified CI
 build** on `master` with the exact CI run ID, attempt, candidate SHA and producer
 artifact ID. The trusted workflow checks fresh official jobs/artifact metadata,
