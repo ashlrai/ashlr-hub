@@ -53,6 +53,49 @@
 
 /* ------------------------------------------------------------------ head */
 
+.guide {
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line-relaxed);
+  color: var(--text-secondary);
+}
+
+.guide summary {
+  cursor: pointer;
+  font-weight: var(--font-weight-medium);
+  color: var(--text-primary);
+}
+
+.guide summary:focus-visible,
+.guide a:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 3px;
+}
+
+.guide dl {
+  margin: var(--space-3) 0;
+}
+
+.guide dt {
+  margin-top: var(--space-3);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-primary);
+}
+
+.guide dd {
+  margin: var(--space-1) 0 0;
+}
+
+.guide p {
+  margin-bottom: var(--space-3);
+}
+
+.guide a {
+  color: var(--text-link);
+  text-underline-offset: 3px;
+}
+
 .head {
   display: flex;
   align-items: flex-start;
