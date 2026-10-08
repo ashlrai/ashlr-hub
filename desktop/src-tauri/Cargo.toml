@@ -49,6 +49,7 @@ sha2 = "0.10"
 minisign-verify = "=0.2.5"
 futures-util = { version = "=0.3.32", default-features = false, features = ["std"] }
 reqwest = { version = "=0.13.4", default-features = false, features = ["stream", "rustls-no-provider"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 
 # `libc` was already a macOS dependency; the target is widened to every unix so
 # `sidecar_guard`'s `kill(2)` / signal handling compiles on Linux too (the Linux

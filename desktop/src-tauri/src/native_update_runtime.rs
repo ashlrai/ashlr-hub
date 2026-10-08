@@ -99,6 +99,9 @@ mod platform {
             )
     }
     fn client() -> Result<reqwest::Client, &'static str> {
+        // rustls-no-provider requires a process default before reqwest construction.
+        // Installation is once-only; concurrent clients retain the installed provider.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(600))
@@ -702,6 +705,33 @@ mod platform {
             ));
             fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
             fs::canonicalize(home).unwrap()
+        }
+        #[test]
+        fn updater_client_constructs_in_a_fresh_process_without_network() {
+            const CHILD: &str = "PHANTOM_TLS_CLIENT_TEST_CHILD";
+            if std::env::var_os(CHILD).is_some() {
+                assert!(rustls::crypto::CryptoProvider::get_default().is_none());
+                client().expect("updater client must configure its TLS provider");
+                client().expect("repeated construction must remain safe");
+                assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+                return;
+            }
+            // A separate test process prevents another TLS test from masking startup.
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "native_update_runtime::platform::tests::updater_client_constructs_in_a_fresh_process_without_network",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "fresh updater client failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         #[test]
         fn preference_cancels_old_future_and_cannot_fabricate_a_stage() {
