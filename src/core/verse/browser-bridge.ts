@@ -413,7 +413,7 @@ export function cancelBrowserCommands(sessionId: string): void {
 }
 
 const PANE_NOT_OPEN =
-  'The Browser pane is not open on this chat in Verse, so there is no browser to use. Ask the operator to open the Browser pane on this chat, then try again.';
+  'The Browser pane is not open on this chat in Phantom, so there is no browser to use. Ask the operator to open the Browser pane on this chat, then try again.';
 
 /**
  * Queue one command for the chat's pane and wait for its answer. Resolves —
