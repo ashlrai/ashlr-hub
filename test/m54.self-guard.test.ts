@@ -7,6 +7,9 @@
  * when the suite is green flag-off AND flag-on.
  */
 
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
   isSafetyTestFile,
@@ -170,6 +173,37 @@ describe('M54 — selfEvalParityAsync (async suite green flag-off AND flag-on)',
 });
 
 describe('M54 — isSelfTargetProposal', () => {
+  it.each(['@ashlr/hub', '@ashlr/phantom'])('recognizes the closed self package %s', (name) => {
+    const repo = mkdtempSync(join(tmpdir(), 'ashlr-m54-self-name-'));
+    try {
+      writeFileSync(join(repo, 'package.json'), JSON.stringify({ name }));
+      expect(isSelfTargetProposal({ repo } as Proposal)).toBe(true);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['@ashlr/other', '@ashlr/phantom-extra', '@other/phantom', 'Phantom', null, 42, ['@ashlr/phantom'], {}])(
+    'rejects unregistered or nonstring package names: %j', (name) => {
+      const repo = mkdtempSync(join(tmpdir(), 'ashlr-m54-other-name-'));
+      try {
+        writeFileSync(join(repo, 'package.json'), JSON.stringify({ name }));
+        expect(isSelfTargetProposal({ repo } as Proposal)).toBe(false);
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('rejects a package with a missing name', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'ashlr-m54-missing-name-'));
+    try {
+      writeFileSync(join(repo, 'package.json'), '{}');
+      expect(isSelfTargetProposal({ repo } as Proposal)).toBe(false);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
   it('true for the ashlr-hub repo (cwd → package name @ashlr/hub)', () => {
     expect(isSelfTargetProposal({ repo: process.cwd() } as Proposal)).toBe(true);
   });
