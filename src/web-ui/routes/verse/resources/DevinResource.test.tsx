@@ -120,10 +120,10 @@ describe('DevinResource', () => {
 
   it('connected: ACUs left of the budget with an estimate note and the usage link', async () => {
     mount();
-    expect(await screen.findByText('Local budget · 34 ACUs of 50 ACUs left')).toBeTruthy();
+    expect(await screen.findByText('Local safety budget · 34 ACUs of 50 ACUs left')).toBeTruthy();
     expect(screen.getByRole('img', { name: /Devin ACUs: 12 ACUs accounted for of 50 ACUs, 34 ACUs left/ })).toBeTruthy();
     expect(screen.getByText(/Recorded cost coverage is unavailable/)).toBeTruthy();
-    expect(screen.getByText(/1 running · 2 today/)).toBeTruthy();
+    expect(screen.getByText(/1 running · 2 new sessions today/)).toBeTruthy();
     expect(screen.getByRole('link', { name: /Real usage on app\.devin\.ai/ }).getAttribute('href')).toBe('https://app.devin.ai/settings/usage');
     expect(screen.getByText('Connected')).toBeTruthy();
   });
@@ -156,7 +156,7 @@ describe('DevinResource', () => {
     expect(screen.getByRole('region', { name: 'Devin subscription and purchased credits' }).textContent).toContain('Subscription-only spending is unverified.');
     expect(section.textContent).not.toMatch(/live|fresh|0%|org-x|Ashlr Verse/);
     expect(screen.getByText('3.1 ACUs consumed')).toBeInTheDocument();
-    expect(screen.getByText('tracked budget')).toBeInTheDocument();
+    expect(screen.getByText('local limits')).toBeInTheDocument();
     expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toEqual(['/api/verse/devin']);
     expect(posts).toHaveLength(0);
   });
@@ -289,7 +289,7 @@ describe('DevinResource', () => {
       unconfirmedAcuExposure: 18, estimatedUsdUsed: 4.5,
     }) };
     mount();
-    expect(await screen.findByText('Local budget · 30 ACUs of 50 ACUs available')).toBeTruthy();
+    expect(await screen.findByText('Local safety budget · 30 ACUs of 50 ACUs available')).toBeTruthy();
     expect(screen.getByRole('img', { name: /2 ACUs reported usage plus adjustment, 18 ACUs held exposure, 30 ACUs available/ })).toBeTruthy();
     expect(screen.getByText(/2 ACUs reported usage \+ adjustment · 18 ACUs held exposure · about \$4.5 for recorded usage/)).toBeTruthy();
     expect(screen.queryByText(/Recorded cost coverage is unavailable/)).toBeNull();
@@ -307,12 +307,31 @@ describe('DevinResource', () => {
 
   it('explains legacy held exposure without claiming provider quota or spending', async () => {
     overview = { generatedAt: 'x', status: status(), tasks: [], budget: budget({ reportedAcuUsed: 0, unconfirmedAcuExposure: 40,
-      acuUsed: 40, acuRemaining: 10, estimatedUsdUsed: 0, accountingState: 'ready' }),
+      acuUsed: 40, acuRemaining: 10, acuInFlight: 0, acuToday: 40, running: 0, sessionsToday: 0,
+      estimatedUsdUsed: 0, accountingState: 'ready', paused: false,
+      canLaunch: { ok: false, reason: 'Another session could take today past the 30 ACUs daily cap (40 ACUs used or held).' } }),
       taskDiagnostics: { sourceState: 'ready', legacyUnboundCount: 4, legacyUnboundAcu: 40 } };
     mount();
     expect(await screen.findByText('4 old launches need account evidence · 40 ACUs held')).toBeTruthy();
-    expect(screen.getByText('Local budget · 10 ACUs of 50 ACUs available')).toBeTruthy();
+    expect(screen.getByText('Local safety budget · 10 ACUs of 50 ACUs available')).toBeTruthy();
+    expect(screen.getByText('Local limits · 30 ACUs/day · 10 ACUs/session')).toBeTruthy();
+    expect(screen.getByText('0 running · 0 new sessions today · 40 ACUs counted toward the daily limit')).toBeTruthy();
+    expect(screen.getByText('Another session could take today past the 30 ACUs daily cap (40 ACUs used or held).')).toBeTruthy();
+    expect(screen.getByRole('img', { name: /0 ACUs reported usage plus adjustment, 40 ACUs held exposure, 10 ACUs available/ })).toBeTruthy();
+    expect(screen.getByTitle('Local defaults or limits set here, minus reported usage and unresolved exposure; not your provider credit balance or subscription allowance.')).toBeTruthy();
+    expect(screen.queryByText('paused')).toBeNull();
     expect(within(screen.getByRole('region', { name: 'Devin subscription and purchased credits' })).getAllByText('not reported')).toHaveLength(2);
+    expect(posts).toEqual([]);
+  });
+
+  it('keeps missing or invalid local limits unknown without hiding a measured zero', async () => {
+    overview = { generatedAt: 'x', status: status(), tasks: [], budget: budget({
+      budget: { maxAcuPerDay: Number.NaN }, reportedAcuUsed: 0, unconfirmedAcuExposure: 0,
+    }) };
+    mount();
+    expect(await screen.findByText('Local session and daily limits not reported.')).toBeTruthy();
+    expect(screen.queryByText(/Local limits ·/)).toBeNull();
+    expect(screen.getByRole('img', { name: /0 ACUs reported usage plus adjustment, 0 ACUs held exposure/ })).toBeTruthy();
     expect(posts).toEqual([]);
   });
 
@@ -384,7 +403,7 @@ describe('DevinResource', () => {
   it('no Devin CLI installed (or an older server): no CLI line', async () => {
     overview = { generatedAt: 'x', status: status(), budget: budget(), tasks: [], cli: { state: 'missing', usage: 'not-reported' } };
     mount();
-    await screen.findByText('Local budget · 34 ACUs of 50 ACUs left');
+    await screen.findByText('Local safety budget · 34 ACUs of 50 ACUs left');
     expect(screen.queryByText(/Phantom has not imported CLI session usage/)).toBeNull();
   });
 
