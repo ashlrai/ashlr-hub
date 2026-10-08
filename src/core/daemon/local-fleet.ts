@@ -1628,7 +1628,7 @@ export function localFleetOutcomeOf(result: {
   const production = text(result.dispatch?.production?.outcome ?? '');
   if (production === 'proposal-created') return { outcome: 'proposed', detail: production };
   if (production === 'cancelled') return { outcome: 'cancelled', detail: production };
-  if (production === 'producer-failed' || production === 'gate-blocked') {
+  if (production === 'engine-failed' || production === 'producer-failed' || production === 'gate-blocked') {
     return { outcome: 'failed', detail: production };
   }
   return { outcome: 'no-proposal', detail: production || 'no proposal produced' };
