@@ -87,7 +87,7 @@ export async function readFinalizedDesktopArtifacts(path, primitives) {
   const identity=directory(path), ancestors=parents(path), files=new Map();
   const read=(name,max)=>{const privateMode=!name.endsWith('.sig');const row=ownedBytes(join(path,name),max,privateMode);files.set(name,{...row,privateMode});return row.data;};
   const manifestText=text(read('manifest.json',64*1024)), signature=text(read('manifest.json.sig',8192));
-  const verified=boundary('manifest-signature',()=>primitives.verifyUpdateManifest({manifestText,signature},primitives.trust)), m=verified.manifest;
+  const verified=boundary('manifest-signature',()=>primitives.verifyCompatibleUpdateManifest({manifestText,signature},primitives.trust)), m=verified.manifest;
   boundary('app-signature',()=>assert.equal(m.app.signer,primitives.appleSigner,'uncommissioned Apple signer'));
   for (const a of [m.app,m.cli]) {
     const data=read(a.filename,a.bytes);
@@ -106,7 +106,7 @@ export async function readFinalizedDesktopArtifacts(path, primitives) {
   const entries=primitives.inspectSignedAppArchive(files.get(m.app.filename).data);
   const marker=entries.find(e=>e.path==='Phantom.app/Contents/Resources/phantom-release.json' && !e.directory);
   boundary('app-record',()=>{assert.ok(marker,'app source record missing');primitives.verifyUpdateBundleRecord(text(marker.data),m);});
-  const archive=await boundary('package-archive',()=>primitives.readPinnedRuntimeArchive({artifactPath:join(path,m.cli.filename),sha256:m.cli.sha256,revision:m.source.revision,version:m.version}));
+  const archive=await boundary('package-archive',()=>primitives.readPinnedRuntimeArchive({artifactPath:join(path,m.cli.filename),sha256:m.cli.sha256,revision:m.source.revision,version:m.version,identityProfile:primitives.desktopUpdateProfileForPackage(m.cli.packageName).name}));
   assert.equal(archive.pins.size,m.cli.bytes,'original archive size differs');
   assert.ok(same(identity,directory(path)),'finalizer directory changed');assert.deepEqual(parents(path),ancestors,'artifact ancestor changed');
   return {path,identity,ancestors,files,manifest:m,digest:verified.digest};
@@ -176,7 +176,8 @@ function newerCurrent(previous,manifest,io) {
   assert.ok(previous,'a verified existing current release is required');
   const identity=JSON.parse(io.readBoundedFile(join(previous.target,'dist/build-identity.json'),65536));
   const pkg=JSON.parse(io.readBoundedFile(join(previous.target,'package.json'),65536));
-  assert.ok(identity.schemaVersion===1 && identity.provenance==='git' && identity.dirty===false && /^[a-f0-9]{40}$/.test(identity.revision) && identity.packageVersion===pkg.version && pkg.name==='@ashlr/hub','current build identity unavailable');
+  assert.ok(identity.schemaVersion===1 && identity.provenance==='git' && identity.dirty===false && /^[a-f0-9]{40}$/.test(identity.revision) && identity.packageVersion===pkg.version && ['@ashlr/hub','@ashlr/phantom'].includes(pkg.name),'current build identity unavailable');
+  assert.ok(pkg.name!=='@ashlr/phantom' || manifest.cli.packageName==='@ashlr/phantom','candidate identity regresses');
   assert.match(pkg.version,/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
   const old=pkg.version.split('.').map(BigInt),next=manifest.version.split('.').map(BigInt),i=next.findIndex((n,j)=>n!==old[j]);
   assert.ok(i>=0 && next[i]>old[i],'candidate is not newer');
@@ -228,7 +229,7 @@ export async function applyInspectedDesktopArtifacts(result) {
   const createdDestination=boundary('destination',()=>{
     try {fs.mkdirSync(destination,{mode:0o700});return true;} catch(error) {if(error.code!=='EEXIST')throw error;return false;}
   });
-  const archivePins={artifactPath:join(input.artifacts,m.cli.filename),sha256:m.cli.sha256,revision:m.source.revision,version:m.version};
+  const archivePins={artifactPath:join(input.artifacts,m.cli.filename),sha256:m.cli.sha256,revision:m.source.revision,version:m.version,identityProfile:d.primitives.desktopUpdateProfileForPackage(m.cli.packageName).name};
   if(createdDestination) {
     const archive=await boundary('package-archive',()=>d.primitives.readPinnedRuntimeArchive(archivePins));
     boundary('staging',()=>d.primitives.extractPinnedRuntimeArchive(archive,destination));

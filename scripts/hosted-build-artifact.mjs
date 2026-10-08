@@ -8,7 +8,7 @@ import * as fs from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
-import { observeBuild, validateBuild } from '../.github/scripts/ci-pack-smoke.mjs';
+import { observeBuild, validateBuild, sourceDesktopUpdateProfile } from '../.github/scripts/ci-pack-smoke.mjs';
 import { requireProducerEnvironment, requireManifestProducer, requireRepositoryMetadata, requireRepositoryReference } from '../.github/scripts/github-repository-binding.mjs';
 import { readBoundedJson } from './verify-npm-release-provenance.mjs';
 
@@ -200,9 +200,13 @@ export function captureArtifact({ root, sha: revision, out, snapshot, packageTar
   assert.ok(!fs.existsSync(out), 'artifact output already exists');
   const binding = sourceBinding(root, revision);
   const observed = validateBuild({ root, eventSha: revision, snapshotPath: snapshot });
+  const packageSource = boundedBytes(join(root, 'package.json'), 1024 * 1024);
+  assert.equal(sha(packageSource), observed.source.packageSha256, 'source package changed');
+  const profile = sourceDesktopUpdateProfile(JSON.parse(packageSource).name);
   const producer = { ...requireProducerEnvironment(process.env), runId: process.env.GITHUB_RUN_ID,
     runAttempt: process.env.GITHUB_RUN_ATTEMPT, job: process.env.GITHUB_JOB,
     eventSha: process.env.ASHLR_CI_EVENT_SHA ?? process.env.GITHUB_SHA };
+  assert.equal(producer.repository, profile.repository, 'source package and producer repository differ');
   for (const field of ['runId', 'runAttempt']) assert.match(producer[field] ?? '', /^[1-9][0-9]*$/);
   assert.match(producer.repository ?? '', /^[\w.-]+\/[\w.-]+$/); assert.match(producer.eventSha ?? '', SHA);
   assert.ok(producer.job && (process.env.ASHLR_CI_SOURCE_SHA ?? process.env.GITHUB_SHA) === revision, 'capture requires exact CI checkout identity');
@@ -233,7 +237,7 @@ export function captureArtifact({ root, sha: revision, out, snapshot, packageTar
   assert.equal(new Set(coverageFiles.map((file) => file.path)).size, coverageFiles.length, 'duplicate coverage files');
   const manifest = { schemaVersion: 2, source: binding, producer, tools: tools(root),
     buildIdentity: observed.source.identity, archive: { filename: 'dist.tar', bytes: archive.length, sha256: sha(archive), entries },
-    package: { filename: `ashlr-hub-${observed.source.identity.packageVersion}.tgz`, bytes: packageBytes.length,
+    package: { filename: `${profile.archivePrefix}-${observed.source.identity.packageVersion}.tgz`, bytes: packageBytes.length,
       sha256: sha(packageBytes), entries: packageEntries },
     coverage: coverageFiles.map((file) => ({ path: file.path, sha256: sha(file.data), bytes: file.data.length })) };
   assert.deepEqual(observeBuild(root, revision), observed); assert.deepEqual(sourceBinding(root, revision), binding);

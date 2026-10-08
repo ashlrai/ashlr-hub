@@ -930,6 +930,8 @@ describe('current release pointer observation', () => {
       readLink: () => target, readBoundedFile: (file: string) => file.endsWith('package.json') ? JSON.stringify({name: '@ashlr/hub', version: '3.25.0'}) : 'canonical launcher'};
     expect(inspectCurrentPointer(path, {...io, lstat: () => null})).toBeNull();
     expect(inspectCurrentPointer(path, io)).toEqual({target, dev: 1, ino: 80, ctimeMs: 10, birthtimeMs: 1});
+    for (const name of ['@ashlr/hub', '@ashlr/phantom']) expect(inspectCurrentPointer(path, {...io, readBoundedFile: (file: string) => file.endsWith('package.json') ? JSON.stringify({name, version: '3.25.0'}) : io.readBoundedFile(file)})).toEqual({target, dev: 1, ino: 80, ctimeMs: 10, birthtimeMs: 1});
+    for (const name of ['@other/phantom', '@ashlr/phantom-beta', 'ashlr']) expect(() => inspectCurrentPointer(path, {...io, readBoundedFile: (file: string) => file.endsWith('package.json') ? JSON.stringify({name, version: '3.25.0'}) : io.readBoundedFile(file)})).toThrow(/present current release/);
     for (const suffix of ['package.json', '/bin/ashlr']) {
       expect(() => inspectCurrentPointer(path, {...io, readBoundedFile: (file: string) => {
         if (file.startsWith(target) && file.endsWith(suffix)) throw Object.assign(new Error('missing'), {code: 'ENOENT'});

@@ -103,7 +103,7 @@ async function defaults(root) {
   const configured = getDesktopReleaseToolchain();
   const toolchain = {...configured, cargoHome: join(configured.root, 'cargo-home'), rustupHome: join(configured.root, 'rustup'), rustupToolchain: '1.97.1-aarch64-apple-darwin'};
   for (const [name, pin] of Object.entries(DESKTOP_RELEASE_TOOL_PINS)) toolchain[name] = {path: configured[name], sha256: pin.sha256, version: pin.version};
-  return {...manifest, canonicalJson, trust: trust.getDesktopUpdateTrust(), surface: surface.verifyAuthoritySurfaceAt, readArchive: archive.readPinnedRuntimeArchive, toolchain};
+  return {...manifest, canonicalJson, trustForProfile: trust.getDesktopUpdateTrustForProfile, surface: surface.verifyAuthoritySurfaceAt, readArchive: archive.readPinnedRuntimeArchive, toolchain};
 }
 function validateTools(tools, root) {
   assert.equal(process.platform, 'darwin'); assert.equal(process.arch, 'arm64');
@@ -239,17 +239,23 @@ export async function finalizeDesktopUpdate(input, dependencies = {}) {
   // Import executable compiled helpers only after the fresh signed archive was admitted.
   if (fs.existsSync(join(root, 'dist'))) hooks.validate(observed);
   else hooks.adopt(observed);
-  const d = {...await (dependencies.defaults ?? defaults)(root), ...hooks}; const trust = d.trust;
+  const d = {...await (dependencies.defaults ?? defaults)(root), ...hooks};
+  const pkg = JSON.parse(bytes(join(root, 'package.json'), 1024 * 1024));
+  const profile = d.desktopUpdateProfileForPackage(pkg.name);
+  const trust = d.trustForProfile(profile.name);
+  assert.equal(trust.repository.fullName, profile.repository);
   assert.equal(hosted.producer.repository, trust.repository.fullName); assert.equal(hosted.package.sha256, observed.packageSha256);
   assert.equal(hosted.source.tree, source.tree); assert.equal(hosted.buildIdentity.revision, input.revision); assert.equal(hosted.buildIdentity.dirty, false);
-  const version = hosted.buildIdentity.packageVersion; const keyBefore = d.validateTools(d.toolchain, root);
+  const version = hosted.buildIdentity.packageVersion;
+  assert.equal(pkg.version, version, 'source package version differs');
+  const appName = `Phantom_${version}_aarch64.app.tar.gz`, cliName = `${profile.archivePrefix}-${version}.tgz`;
+  assert.equal(hosted.package.filename, cliName, 'source package and hosted filename differ');
+  const keyBefore = d.validateTools(d.toolchain, root);
   ownerDirectory(input.outputParent); const output = fs.mkdtempSync(join(input.outputParent, 'phantom-paired-release-'));
   // Nothing externally discovers this private directory until all final checks succeed.
   const surface = d.surface(root, 'running', {fresh: true}); assert.equal(surface.ok, true, 'candidate surface is not verified');
-  await d.readArchive({artifactPath: join(input.bundle, hosted.package.filename), sha256: observed.packageSha256, revision: input.revision, version});
+  await d.readArchive({artifactPath: join(input.bundle, hosted.package.filename), sha256: observed.packageSha256, revision: input.revision, version, identityProfile: profile.name});
   const native = await d.build({root, bundle: input.bundle, policy: input.policy, source, version, surfaceDigest: surface.digest, packageSha256: observed.packageSha256, output, tools: d.toolchain});
-  const appName = `Phantom_${version}_aarch64.app.tar.gz`, cliName = `ashlr-hub-${version}.tgz`;
-  assert.equal(hosted.package.filename, cliName);
   fs.writeFileSync(join(output, appName), native.bytes, {flag: 'wx', mode: 0o600});
   const cliBytes = bytes(join(input.bundle, cliName), 128 * 1024 * 1024); assert.equal(digest(cliBytes), observed.packageSha256);
   fs.writeFileSync(join(output, cliName), cliBytes, {flag: 'wx', mode: 0o600});
@@ -260,16 +266,16 @@ export async function finalizeDesktopUpdate(input, dependencies = {}) {
   const appSignature = d.sign(join(output, appName), d.toolchain, d.verifyMinisign, trust.publicKey);
   const cliSignature = d.sign(join(output, cliName), d.toolchain, d.verifyMinisign, trust.publicKey);
   const url = name => `https://github.com/${trust.repository.fullName}/releases/download/v${version}/${name}`;
-  const manifest = {schemaVersion: 1, kind: 'phantom-paired-release', channel: trust.channel, platform: trust.platform, version,
+  const manifest = {schemaVersion: profile.schemaVersion, kind: 'phantom-paired-release', channel: trust.channel, platform: trust.platform, version,
     repository: requireRepositoryMetadata(trust.repository.fullName, d.read(`repos/${trust.repository.fullName}`)), source: {revision: source.revision, tree: source.tree}, authoritySurfaceDigest: surface.digest,
     app: {filename: appName, url: url(appName), bytes: native.bytes.length, sha256: digest(native.bytes), signature: appSignature, bundleIdentifier: 'ai.ashlr.desktop', executable: 'ashlr-desktop', inventorySha256: native.inventorySha256, signer: native.signer},
-    cli: {filename: cliName, url: url(cliName), bytes: cliBytes.length, sha256: observed.packageSha256, signature: cliSignature, packageName: '@ashlr/hub', binName: 'ashlr'},
+    cli: {filename: cliName, url: url(cliName), bytes: cliBytes.length, sha256: observed.packageSha256, signature: cliSignature, packageName: profile.packageName, binName: profile.binName},
     qualification: {manifestSha256: observed.manifestSha256, archiveSha256: observed.archiveSha256, packageSha256: observed.packageSha256, qualificationSha256: observed.qualificationSha256,
       producer: {runId: observed.official.runId, runAttempt: observed.official.runAttempt, eventSha: observed.official.eventSha}, attestor: observed.attestor, audit}};
-  const manifestText = d.canonicalJson(manifest); d.parseUpdateManifest(manifestText, trust);
+  const manifestText = d.canonicalJson(manifest); d.parseCompatibleUpdateManifest(manifestText, trust);
   const manifestPath = join(output, 'manifest.json'); fs.writeFileSync(manifestPath, manifestText, {flag: 'wx', mode: 0o600});
   const signature = d.sign(manifestPath, d.toolchain, d.verifyMinisign, trust.publicKey);
-  const checked = d.verifyUpdateManifest({manifestText, signature}, trust);
+  const checked = d.verifyCompatibleUpdateManifest({manifestText, signature}, trust);
   // Signing subprocesses cannot replace any bytes/policy between proof and the exported feed.
   assert.deepEqual(d.verify(verifyInput), observed); assert.deepEqual(d.audit(auditInput), audit); assert.deepEqual(d.source(root, input.revision), source);
   const finalApp = bytes(join(output, appName)), finalCli = bytes(join(output, cliName));

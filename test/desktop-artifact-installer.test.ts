@@ -9,10 +9,10 @@ import {Header} from 'tar';
 import {canonicalJson} from '../src/core/authority/canonical-json.js';
 import {authoritySurfaceDigest,verifyAuthoritySurfaceAt} from '../src/core/authority/surface.js';
 import {readPinnedRuntimeArchive,extractPinnedRuntimeArchive} from '../src/core/local-runtime/archive.js';
-import {verifyUpdateManifest,verifyMinisign,verifyUpdateBundleRecord} from '../src/core/desktop/update-manifest.js';
+import {verifyUpdateManifest,verifyCompatibleUpdateManifest,desktopUpdateProfileForPackage,getDesktopUpdateProfile,verifyMinisign,verifyUpdateBundleRecord} from '../src/core/desktop/update-manifest.js';
 import {inspectSignedAppArchive,extractSignedAppArchive,verifyInstalledRuntimeArchive} from '../src/core/desktop/qualified-update.js';
 import {artifactInstallFailure,applyInspectedDesktopArtifacts,assertPairedHostedProof,inspectDesktopArtifactInstall,parseArtifactInstallArguments,readFinalizedDesktopArtifacts,verifyManualDesktopSource} from '../scripts/install-desktop-artifacts.mjs';
-import type {UpdateManifest,UpdateTrust} from '../src/core/desktop/update-manifest.js';
+import type {CompatibleUpdateManifest,DesktopUpdateProfileName,UpdateTrust} from '../src/core/desktop/update-manifest.js';
 
 const ports=vi.hoisted(()=>({verify:vi.fn(),audit:vi.fn(),source:vi.fn(),createIo:vi.fn(),spawn:vi.fn()}));
 vi.mock('../scripts/hosted-build-artifact.mjs',async actual=>({...await actual<any>(),verifyArtifact:ports.verify,sourceBinding:ports.source}));
@@ -43,7 +43,8 @@ function fileIdentity(path:string) {const s=fs.lstatSync(path);return {dev:s.dev
 beforeEach(()=>{for(const spy of Object.values(ports))spy.mockReset();});
 afterEach(()=>{for(const root of roots.splice(0))fs.rmSync(root,{recursive:true,force:true});});
 
-function fixture() {
+function fixture(profileName:DesktopUpdateProfileName='legacy-v1',currentPackageName='@ashlr/hub',archivePackageName?:string) {
+  const profile=getDesktopUpdateProfile(profileName);
   const root=fs.realpathSync(fs.mkdtempSync(join(tmpdir(),'artifact-installer-')));fs.chmodSync(root,0o700);roots.push(root);
   const home=join(root,'home'),artifacts=join(root,'paired'),candidateRoot=join(root,'candidate'),bundle=join(root,'bundle');
   for(const path of [home,artifacts,candidateRoot,bundle])fs.mkdirSync(path,{mode:0o700});
@@ -53,18 +54,18 @@ function fixture() {
   const surface={...core,digest:authoritySurfaceDigest(core)};
   const launcher=fs.readFileSync(resolve(import.meta.dirname,'../bin/ashlr'));
   const cli=tar([
-    {path:'package/package.json',data:JSON.stringify({name:'@ashlr/hub',version,type:'module',bin:{ashlr:'bin/ashlr',phm:'bin/ashlr'}})},
+    {path:'package/package.json',data:JSON.stringify({name:archivePackageName??profile.packageName,version,type:'module',bin:{ashlr:'bin/ashlr',phm:'bin/ashlr'}})},
     {path:'package/bin/ashlr',data:launcher,mode:0o755},
     {path:'package/dist/build-identity.json',data:JSON.stringify({schemaVersion:1,packageVersion:version,revision,dirty:false,provenance:'git'})},
     {path:'package/dist/cli/index.js',data:code},{path:'package/dist/core/universe/index.js',data:code},
     {path:'package/dist/core/authority/fixture.js',data:code},{path:'package/dist/authority-surface.json',data:JSON.stringify(surface)},
   ]);
-  const make=(filename:string,data:Buffer)=>({filename,url:`https://github.com/ashlrai/ashlr-hub/releases/download/v${version}/${filename}`,bytes:data.length,sha256:hash(data),signature:signature(data)});
-  const m:UpdateManifest={schemaVersion:1,kind:'phantom-paired-release',channel:'stable',platform:'darwin-aarch64',version,
-    repository:{nameWithOwner:'ashlrai/ashlr-hub',repositoryId:1263526319,repositoryNodeId:'R_kgDOS0_hrw',ownerId:258113726,ownerLogin:'ashlrai',defaultBranch:'master'},source:{revision,tree},authoritySurfaceDigest:surface.digest,
-    cli:{...make(`ashlr-hub-${version}.tgz`,cli),packageName:'@ashlr/hub',binName:'ashlr'},
+  const make=(filename:string,data:Buffer)=>({filename,url:`https://github.com/${profile.repository}/releases/download/v${version}/${filename}`,bytes:data.length,sha256:hash(data),signature:signature(data)});
+  const m={schemaVersion:profile.schemaVersion,kind:'phantom-paired-release',channel:'stable',platform:'darwin-aarch64',version,
+    repository:{nameWithOwner:profile.repository,repositoryId:1263526319,repositoryNodeId:'R_kgDOS0_hrw',ownerId:258113726,ownerLogin:'ashlrai',defaultBranch:'master'},source:{revision,tree},authoritySurfaceDigest:surface.digest,
+    cli:{...make(`${profile.archivePrefix}-${version}.tgz`,cli),packageName:profile.packageName,binName:'ashlr'},
     app:{...make(`Phantom_${version}_aarch64.app.tar.gz`,Buffer.from('pending')),bundleIdentifier:'ai.ashlr.desktop',executable:'ashlr-desktop',inventorySha256:'e'.repeat(64),signer:'F'.repeat(40)},
-    qualification:{manifestSha256:'0'.repeat(64),archiveSha256:'1'.repeat(64),packageSha256:hash(cli),qualificationSha256:'2'.repeat(64),producer:{runId:10,runAttempt:1,eventSha:revision},attestor:{revision:'a'.repeat(40),runId:20,runAttempt:1},audit:{revision,runId:30,runAttempt:1}}};
+    qualification:{manifestSha256:'0'.repeat(64),archiveSha256:'1'.repeat(64),packageSha256:hash(cli),qualificationSha256:'2'.repeat(64),producer:{runId:10,runAttempt:1,eventSha:revision},attestor:{revision:'a'.repeat(40),runId:20,runAttempt:1},audit:{revision,runId:30,runAttempt:1}}} as CompatibleUpdateManifest;
   const marker=canonicalJson({schemaVersion:1,version,source:m.source,authoritySurfaceDigest:m.authoritySurfaceDigest,packageSha256:m.cli.sha256});
   const appRows=[...['Phantom.app','Phantom.app/Contents','Phantom.app/Contents/MacOS','Phantom.app/Contents/Resources'].map(path=>({path,data:'',mode:0o755,directory:true})),
     {path:'Phantom.app/Contents/Info.plist',data:JSON.stringify({CFBundleName:'Phantom',CFBundleDisplayName:'Phantom',CFBundleIdentifier:'ai.ashlr.desktop',CFBundleExecutable:'ashlr-desktop',CFBundleShortVersionString:version,CFBundleVersion:version})},
@@ -89,11 +90,11 @@ function fixture() {
   ports.source.mockImplementation(()=>({revision,tree,tracked:[],inputs:[]}));
   const initialImplementation={source:'exact independently qualified installer',build:'fixed compiled snapshot'};
   const implementationSnapshot=vi.fn(async()=>structuredClone(initialImplementation));
-  const primitives={verifyUpdateManifest,verifyMinisign,verifyUpdateBundleRecord,inspectSignedAppArchive,extractSignedAppArchive,verifyInstalledRuntimeArchive,readPinnedRuntimeArchive,extractPinnedRuntimeArchive,verifyAuthoritySurfaceAt,trust,appleSigner:m.app.signer};
+  const primitives={verifyUpdateManifest,verifyCompatibleUpdateManifest,desktopUpdateProfileForPackage,verifyMinisign,verifyUpdateBundleRecord,inspectSignedAppArchive,extractSignedAppArchive,verifyInstalledRuntimeArchive,readPinnedRuntimeArchive,extractPinnedRuntimeArchive,verifyAuthoritySurfaceAt,trust,appleSigner:m.app.signer};
   const deps={home,environment:{HOME:home,PATH:'/usr/bin:/bin',LANG:'C',LC_ALL:'C'},primitives,implementationSnapshot,initialImplementation,
     transport:{githubRead:vi.fn(()=>{throw new Error('live network forbidden');}),attestRun:vi.fn(()=>{throw new Error('live network forbidden');})}};
   const oldRevision='a'.repeat(40),old=join(home,'.local/share/ashlr/releases',oldRevision),current=join(home,'.local/share/ashlr/current');
-  write(join(old,'package.json'),JSON.stringify({name:'@ashlr/hub',version:'3.25.1'}),0o644);write(join(old,'bin/ashlr'),launcher,0o755);
+  write(join(old,'package.json'),JSON.stringify({name:currentPackageName,version:'3.25.1'}),0o644);write(join(old,'bin/ashlr'),launcher,0o755);
   write(join(old,'dist/build-identity.json'),JSON.stringify({schemaVersion:1,provenance:'git',dirty:false,revision:oldRevision,packageVersion:'3.25.1'}),0o644);
   fs.symlinkSync(old,current);write(join(home,'.ashlr/KILL'),'');
   const applications=join(root,'Applications');fs.mkdirSync(applications,{mode:0o700});fs.cpSync(appRoot,join(applications,'Phantom.app'),{recursive:true,preserveTimestamps:true});
@@ -328,5 +329,39 @@ describe.skipIf(process.platform==='win32')('manual original paired artifact ins
     fs.chmodSync(join(pkg,'bin/ashlr'),0o600);await expect(verifyInstalledRuntimeArchive(pkg,pins)).rejects.toThrow();
     expect(()=>assertPairedHostedProof(f.m,JSON.parse(JSON.stringify({...f.proof,source:{revision:'e'.repeat(40),tree:f.m.source.tree}})),f.m.qualification.audit)).toThrow();
     await readFinalizedDesktopArtifacts(f.artifacts,f.deps.primitives);
+  });
+});
+
+
+describe.skipIf(process.platform==='win32')('manual closed identity bridge',()=> {
+  it.each(['@ashlr/hub','@ashlr/phantom'])('admits genuine signed canonical originals from current %s without candidate execution',async currentName=> {
+    const f=fixture('canonical-v2',currentName);
+    const inspected=await inspectDesktopArtifactInstall(f.input,f.deps);
+    expect(f.io.executionLeaseCensus).not.toHaveBeenCalled();expect(ports.spawn).not.toHaveBeenCalled();
+    expect(await applyInspectedDesktopArtifacts(inspected)).toMatchObject({state:'installed',authorityResumed:false});
+    const destination=join(f.home,'.local/share/ashlr/releases',f.m.source.revision);
+    expect(JSON.parse(fs.readFileSync(join(destination,'package.json'),'utf8')).name).toBe('@ashlr/phantom');
+    await verifyInstalledRuntimeArchive(destination,{artifactPath:join(f.artifacts,f.m.cli.filename),sha256:f.m.cli.sha256,revision:f.m.source.revision,version:f.m.version,identityProfile:'canonical-v2'});
+    expect(ports.verify).toHaveBeenCalledTimes(4);expect(fs.readFileSync(join(f.retained,'transaction.json'),'utf8')).toBe('old HELD evidence');
+  });
+  it('holds canonical current to newer legacy candidate before staging or quiescence',async()=> {
+    const f=fixture('legacy-v1','@ashlr/phantom'),inspected=await inspectDesktopArtifactInstall(f.input,f.deps);
+    await expect(applyInspectedDesktopArtifacts(inspected)).rejects.toThrow(/candidate identity regresses/);
+    expect(f.stages.size).toBe(0);expect(f.io.executionLeaseCensus).not.toHaveBeenCalled();expect(fs.readlinkSync(f.current)).toBe(f.old);
+    expect(fs.readFileSync(join(f.retained,'transaction.json'),'utf8')).toBe('old HELD evidence');
+  });
+  it.each(['schema','repository','package','filename'])('refuses a signed canonical %s mixed tuple before any hosted proof',async kind=> {
+    const f=fixture('canonical-v2');
+    if(kind==='schema')f.m.schemaVersion=1;
+    if(kind==='repository')f.m.repository.nameWithOwner='ashlrai/ashlr-hub';
+    if(kind==='package')f.m.cli.packageName='@ashlr/hub';
+    if(kind==='filename')f.m.cli.filename=`ashlr-hub-${f.m.version}.tgz`;
+    f.publish();await expect(inspectDesktopArtifactInstall(f.input,f.deps)).rejects.toThrow();
+    expect(ports.verify).not.toHaveBeenCalled();expect(ports.createIo).not.toHaveBeenCalled();
+  });
+  it('signed V2 metadata cannot admit a legacy package inside the canonical archive',async()=> {
+    const f=fixture('canonical-v2','@ashlr/hub','@ashlr/hub');
+    await expect(inspectDesktopArtifactInstall(f.input,f.deps)).rejects.toThrow(/local runtime archive: package name,/);
+    expect(ports.verify).not.toHaveBeenCalled();expect(ports.createIo).not.toHaveBeenCalled();
   });
 });

@@ -10,11 +10,11 @@ import { basename, delimiter, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL, URL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { Header } from 'tar';
-import { captureBuild, cleanupSnapshot, observeBuild, packBuild, preparePack, reusePack, validateBuild, validatePackReport } from '../scripts/ci-pack-smoke.mjs';
+import { captureBuild, cleanupSnapshot, observeBuild, packBuild, preparePack, reusePack, validateBuild, validatePackReport, sourceDesktopUpdateProfile } from '../scripts/ci-pack-smoke.mjs';
 
 const hash = (bytes, algorithm, encoding = 'hex') => createHash(algorithm).update(bytes).digest(encoding);
 const VERSION = '3.24.2';
-function fixture(t) {
+function fixture(t, packageName = '@ashlr/hub') {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-pack-fixture-')));
   t.after(() => rmSync(parent, { recursive: true, force: true }));
   const home = join(parent, 'home'); mkdirSync(home);
@@ -36,7 +36,7 @@ function fixture(t) {
   const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   git('init', '--quiet');
   writeFileSync(join(root, '.gitignore'), 'dist/\n');
-  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@ashlr/hub', version: VERSION }));
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ name: packageName, version: VERSION }));
   git('add', '.');
   git('-c', 'user.name=Pack fixture', '-c', 'user.email=pack@example.invalid', '-c', 'commit.gpgsign=false',
     'commit', '--quiet', '-m', 'fixture');
@@ -191,10 +191,10 @@ function realTar(rows) {
   }), Buffer.alloc(1024)]));
 }
 
-function runtimeFixture(t, behavior = '') {
-  const f = fixture(t);
+function runtimeFixture(t, behavior = '', packageName = '@ashlr/hub') {
+  const f = fixture(t, packageName);
   cleanupSnapshot(f.snapshotPath);
-  const pkg = { name: '@ashlr/hub', version: VERSION, type: 'module', bin: { ashlr: 'bin/ashlr' }, files: ['bin', 'dist'] };
+  const pkg = { name: packageName, version: VERSION, type: 'module', bin: { ashlr: 'bin/ashlr' }, files: ['bin', 'dist'] };
   writeFileSync(join(f.root, 'package.json'), JSON.stringify(pkg));
   mkdirSync(join(f.root, 'bin'));
   writeFileSync(join(f.root, 'bin/ashlr'), '#!/usr/bin/env node\nthrow new Error("Inert archive launcher must never execute");\n', { mode: 0o755 });
@@ -230,14 +230,15 @@ export async function readPinnedRuntimeArchive(pins) {
     { path: 'package/dist/cli/index.js', bytes: Buffer.from('export const inert = true;\n') },
     { path: 'package/dist/core/universe/index.js', bytes: Buffer.from('export const inert = true;\n') },
   ];
-  return { ...f, eventSha, identity, snapshotPath, recordPath, rows, calls, trigger };
+  return { ...f, eventSha, identity, snapshotPath, recordPath, rows, calls, trigger, profile: sourceDesktopUpdateProfile(packageName) };
 }
 
-function realReport(destination, rows) {
+function realReport(destination, rows, packageName = '@ashlr/hub') {
+  const profile = sourceDesktopUpdateProfile(packageName);
   const bytes = realTar(rows);
-  const filename = `ashlr-hub-${VERSION}.tgz`;
+  const filename = `${profile.archivePrefix}-${VERSION}.tgz`;
   writeFileSync(join(destination, filename), bytes);
-  return JSON.stringify([{ name: '@ashlr/hub', version: VERSION, filename, size: bytes.length,
+  return JSON.stringify([{ name: profile.packageName, version: VERSION, filename, size: bytes.length,
     shasum: hash(bytes, 'sha1'), integrity: `sha512-${hash(bytes, 'sha512', 'base64')}` }]);
 }
 
@@ -408,4 +409,32 @@ test('workflow packs once before complete suites and retains exact late consumer
   for (const contract of ['npm install "$TARBALL"', './node_modules/.bin/ashlr help', "import('@ashlr/hub/types')",
     "import('@ashlr/hub/core')", 'ci-pack-smoke.mjs verify "$ASHLR_PACK_SMOKE_SNAPSHOT"',
     '--package-tarball "$TARBALL"', '--reports "${{ steps.web.outputs.lane_dir }}"']) assert.ok(late.includes(contract));
+});
+
+
+test('source bootstrap profiles exactly match the qualified compiled descriptor and reject other identities', async () => {
+  const core = await import(new URL('../../dist/core/desktop/update-manifest.js', import.meta.url));
+  for (const name of ['@ashlr/hub', '@ashlr/phantom']) {
+    assert.deepEqual(sourceDesktopUpdateProfile(name), core.desktopUpdateProfileForPackage(name));
+    assert.equal(Object.isFrozen(sourceDesktopUpdateProfile(name)), true);
+  }
+  for (const name of [undefined, null, {}, 'constructor', '@other/phantom', '@ashlr/phantom-beta']) assert.throws(() => sourceDesktopUpdateProfile(name));
+});
+
+test('canonical clean source prepares and reuses the same real archive with the canonical compiled reader profile', async t => {
+  const f = runtimeFixture(t, '', '@ashlr/phantom'); let calls = 0;
+  const recordSha256 = await preparePack({...f, runNpm: (_bin, args) => {calls++; return realReport(args[4], f.rows, '@ashlr/phantom');}});
+  const record = JSON.parse(readFileSync(f.recordPath)), original = readFileSync(join(dirname(f.snapshotPath), record.directory, record.filename));
+  assert.equal(record.filename, `ashlr-phantom-${VERSION}.tgz`);
+  assert.equal(record.source.packageSha256, hash(readFileSync(join(f.root, 'package.json')), 'sha256'));
+  assert.deepEqual(Object.keys(record.source).sort(), ['identity', 'packageSha256']);
+  const path = await reusePack({...f, recordSha256});
+  assert.deepEqual(readFileSync(path), original); assert.equal(calls, 1); assert.equal(readFileSync(f.calls, 'utf8'), 'read\nread\n');
+});
+
+for (const packageName of ['@ashlr/hub', '@ashlr/phantom']) test(`pack refuses the other identity tuple for source ${packageName} without sealing/repacking`, async t => {
+  const f = runtimeFixture(t, '', packageName); let calls = 0;
+  const other = packageName === '@ashlr/hub' ? '@ashlr/phantom' : '@ashlr/hub';
+  await assert.rejects(preparePack({...f, runNpm: (_bin, args) => {calls++; return realReport(args[4], f.rows, other);}}));
+  assert.equal(calls, 1); assert.equal(existsSync(f.recordPath), false); assert.equal(existsSync(f.calls), false);
 });

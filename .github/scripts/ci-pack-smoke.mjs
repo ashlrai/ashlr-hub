@@ -11,6 +11,17 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createBuildIdentity } from '../../scripts/build-identity.mjs';
 
+// Bootstrap capture cannot execute compiled helpers before source admission.
+// Keep this closed descriptor identical to the qualified core profile API.
+const PROFILES = Object.freeze({
+  '@ashlr/hub': Object.freeze({name: 'legacy-v1', schemaVersion: 1, repository: 'ashlrai/ashlr-hub', packageName: '@ashlr/hub', archivePrefix: 'ashlr-hub', binName: 'ashlr'}),
+  '@ashlr/phantom': Object.freeze({name: 'canonical-v2', schemaVersion: 2, repository: 'ashlrai/phantom', packageName: '@ashlr/phantom', archivePrefix: 'ashlr-phantom', binName: 'ashlr'}),
+});
+export function sourceDesktopUpdateProfile(packageName) {
+  assert.ok(typeof packageName === 'string' && Object.hasOwn(PROFILES, packageName), 'unreviewed source package identity');
+  return PROFILES[packageName];
+}
+
 const REQUIRED = [
   'build-identity.json', 'authority-surface.json', 'release-dependency-inventory.json',
   'cli/index.js', 'api/core.js', 'api/types.js',
@@ -34,7 +45,7 @@ function source(root, eventSha) {
   assert.equal(identity.dirty, false, 'source changed after build');
   regular(join(root, 'package.json'), 1024 * 1024);
   const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-  assert.equal(pkg.name, '@ashlr/hub');
+  sourceDesktopUpdateProfile(pkg.name);
   assert.equal(identity.packageVersion, pkg.version);
   regular(join(root, 'dist/build-identity.json'), 1024 * 1024);
   assert.deepEqual(JSON.parse(readFileSync(join(root, 'dist/build-identity.json'), 'utf8')),
@@ -115,15 +126,17 @@ export function validateBuild({ root, eventSha, snapshotPath }) {
   return observed;
 }
 
-export function validatePackReport({ reportText, destination, version }) {
+export function validatePackReport({ reportText, destination, version, identityProfile = 'legacy-v1' }) {
+  const profile = Object.values(PROFILES).find(row => row.name === identityProfile);
+  assert.ok(profile, 'unreviewed pack identity profile');
   const report = JSON.parse(reportText);
   assert.ok(Array.isArray(report) && report.length === 1, 'expected one npm pack result');
   const row = report[0];
   assert.ok(row && typeof row === 'object' && !Array.isArray(row), 'invalid npm pack record');
-  assert.equal(row.name, '@ashlr/hub');
+  assert.equal(row.name, profile.packageName);
   assert.equal(row.version, version);
   assert.equal(typeof row.filename, 'string');
-  assert.equal(row.filename, `ashlr-hub-${version}.tgz`);
+  assert.equal(row.filename, `${profile.archivePrefix}-${version}.tgz`);
   assert.equal(basename(row.filename), row.filename, 'tarball filename must be a basename');
   assert.ok(!row.filename.includes('/') && !row.filename.includes('\\') && !row.filename.includes('\0'));
   destination = realpathSync(destination);
@@ -139,10 +152,18 @@ export function validatePackReport({ reportText, destination, version }) {
   return path;
 }
 
+function observedProfile(root, observed) {
+  regular(join(root, 'package.json'), 1024 * 1024);
+  const bytes = readFileSync(join(root, 'package.json'));
+  assert.equal(digest(bytes), observed.source.packageSha256, 'source package changed');
+  return sourceDesktopUpdateProfile(JSON.parse(bytes).name);
+}
+
 function packObserved({ root, eventSha, snapshotPath, runNpm = execFileSync }, observed, destination) {
+  const profile = observedProfile(root, observed);
   const reportText = runNpm('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', destination],
     { cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
-  const path = validatePackReport({ reportText, destination, version: observed.source.identity.packageVersion });
+  const path = validatePackReport({ reportText, destination, version: observed.source.identity.packageVersion, identityProfile: profile.name });
   validateBuild({ root, eventSha, snapshotPath });
   return path;
 }
@@ -218,7 +239,7 @@ function readPackRecord(snapshotPath, expectedSha256) {
   assert.equal(record.snapshotSha256, digest(snapshot.bytes), 'original build snapshot changed');
   assert.match(record.sha256, HASH);
   assert.ok(Number.isSafeInteger(record.size) && record.size > 0 && record.size <= 64 * 1024 * 1024);
-  assert.equal(record.filename, `ashlr-hub-${record.source.identity.packageVersion}.tgz`);
+  assert.ok(Object.values(PROFILES).some(profile => record.filename === `${profile.archivePrefix}-${record.source.identity.packageVersion}.tgz`), 'unreviewed original package filename');
   assert.equal(basename(record.filename), record.filename);
   assert.deepEqual(readdirSync(parent).sort(), [record.directory, 'original-pack.json', 'snapshot.json'].sort());
   return { parent, record };
@@ -241,7 +262,8 @@ async function validateRuntimePackage(options, observed, path, captured) {
   validateBuild(options);
   assert.equal(typeof module.readPinnedRuntimeArchive, 'function', 'compiled runtime archive reader export is missing');
   const pins = { artifactPath: path, sha256: digest(captured.bytes),
-    revision: observed.source.identity.revision, version: observed.source.identity.packageVersion };
+    revision: observed.source.identity.revision, version: observed.source.identity.packageVersion,
+    identityProfile: observedProfile(options.root, observed).name };
   const archive = await module.readPinnedRuntimeArchive(pins);
   assert.equal(archive.pins.sha256, pins.sha256);
   assert.equal(archive.pins.size, captured.bytes.length);
@@ -279,7 +301,7 @@ export async function preparePack({ root, eventSha, snapshotPath, runNpm = execF
     // Remove only this still-owned exact directory, never a substituted path.
     const current = privateDirectory(destination);
     assert.ok(current.dev === owned.dev && current.ino === owned.ino, 'failed pack directory was replaced');
-    assert.ok(readdirSync(destination).every((name) => name === `ashlr-hub-${observed.source.identity.packageVersion}.tgz`),
+    assert.ok(readdirSync(destination).every((name) => name === `${observedProfile(root, observed).archivePrefix}-${observed.source.identity.packageVersion}.tgz`),
       'failed pack directory contains unrelated files');
     rmSync(destination, { recursive: true });
     throw error;
@@ -295,6 +317,7 @@ export async function reusePack({ root, eventSha, snapshotPath, recordSha256 }) 
   assert.ok(parent !== root && !parent.startsWith(`${root}${sep}`), 'pack destination must be outside source');
   assert.equal(record.root, root);
   assert.deepEqual(record.source, observed.source, 'original pack source differs');
+  assert.equal(record.filename, `${observedProfile(root, observed).archivePrefix}-${observed.source.identity.packageVersion}.tgz`, 'original package profile differs');
   const destination = packDirectory(parent, record.directory);
   assert.deepEqual(directoryIdentity(privateDirectory(destination)), record.directoryIdentity, 'original pack directory changed');
   assert.deepEqual(readdirSync(destination), [record.filename]);
