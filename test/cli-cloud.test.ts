@@ -356,7 +356,7 @@ describe('budget', () => {
     expect(out).toContain('Claude doesn\'t expose the credit balance');
     expect(out).toContain('Real balance: https://claude.ai/settings/usage');
     expect(out).toContain('Sessions today: 4 of 20 · running now: 1 of 4 at once');
-    expect(out).toContain('Self-improvement: on · 2 of 4 today · ashlrai/ashlr-hub · pauses below $40.00 left');
+    expect(out).toContain('Self-improvement: on · 2 of 4 today · ashlrai/phantom · pauses below $40.00 left');
     expect(out).toContain('Launch now: allowed');
     expect(out).toContain('Self-improve now: blocked — 4 of 4 self-improvement launches used today.');
   });
