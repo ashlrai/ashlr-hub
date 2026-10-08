@@ -41,17 +41,45 @@ export const cloudCreditsQuery: QueryDef<CloudCreditsRead> = {
 
 export const RESOURCES_READINESS_KEY = 'verse-resources-readiness';
 
-export interface ReadinessRead {
-  /** False when this server has no readiness route (404) or it could not answer. */
-  available: boolean;
-  /** Null when absent, or when the body was not a readiness response. */
-  value: ResourceReadinessResponse | null;
+export type ReadinessRead =
+  | { state: 'ready'; available: true; value: ResourceReadinessResponse }
+  | { state: 'unsupported'; available: false; value: null };
+
+function record(raw: unknown): raw is Record<string, unknown> {
+  return raw !== null && typeof raw === 'object' && !Array.isArray(raw);
+}
+
+function nullableText(raw: unknown): boolean { return raw === null || typeof raw === 'string'; }
+function instant(raw: unknown): boolean { return typeof raw === 'string' && Number.isFinite(Date.parse(raw)); }
+
+function isVerdict(raw: unknown): boolean {
+  if (!record(raw) || typeof raw['ready'] !== 'boolean' || typeof raw['word'] !== 'string'
+    || typeof raw['detail'] !== 'string' || (typeof raw['tone'] !== 'string' || !['ok', 'warn', 'off', 'blocked'].includes(raw['tone']))) return false;
+  const fix = raw['fix'];
+  return fix === null || (record(fix) && typeof fix['kind'] === 'string' && ['reconnect', 'check-again', 'command'].includes(fix['kind'])
+    && typeof fix['label'] === 'string' && (fix['command'] === undefined || typeof fix['command'] === 'string')
+    && (fix['seatId'] === undefined || typeof fix['seatId'] === 'string'));
 }
 
 function isReadiness(raw: unknown): raw is ResourceReadinessResponse {
-  if (raw === null || typeof raw !== 'object') return false;
-  const r = raw as Record<string, unknown>;
-  return r['v'] === 1 && Array.isArray(r['resources']) && typeof r['autonomy'] === 'object' && r['autonomy'] !== null;
+  if (!record(raw) || raw['v'] !== 1 || !instant(raw['checkedAt']) || !Array.isArray(raw['resources'])
+    || !(raw['capacitySnapshotAt'] === null || instant(raw['capacitySnapshotAt']))) return false;
+  const autonomy = raw['autonomy'];
+  if (!record(autonomy) || typeof autonomy['active'] !== 'boolean' || !nullableText(autonomy['stage'])
+    || typeof autonomy['detail'] !== 'string') return false;
+  const ids = new Set<string>();
+  return raw['resources'].every((row: unknown) => {
+    if (!record(row) || typeof row['id'] !== 'string' || !row['id'] || ids.has(row['id'])
+      || typeof row['label'] !== 'string' || (typeof row['engine'] !== 'string' || !['claude', 'codex', 'grok', 'local', 'devin'].includes(row['engine']))
+      || (typeof row['kind'] !== 'string' || !['subscription', 'local', 'cloud'].includes(row['kind'])) || !isVerdict(row['chat']) || !isVerdict(row['fleet'])) return false;
+    ids.add(row['id']);
+    const reading = row['reading']; const fleet = row['fleet'];
+    return record(reading) && typeof reading['state'] === 'string' && ['live', 'last', 'none'].includes(reading['state'])
+      && (reading['at'] === null || instant(reading['at'])) && nullableText(reading['note'])
+      && record(fleet) && Array.isArray(fleet['roles']) && fleet['roles'].every((role: unknown) => typeof role === 'string')
+      && (fleet['reservePercent'] === null || (typeof fleet['reservePercent'] === 'number'
+        && Number.isFinite(fleet['reservePercent']) && fleet['reservePercent'] >= 0 && fleet['reservePercent'] <= 100));
+  });
 }
 
 /**
@@ -64,11 +92,15 @@ export const resourceReadinessQuery: QueryDef<ReadinessRead> = {
   fetch: async (signal) => {
     try {
       const raw = await apiGet<unknown>(VERSE_RESOURCE_READINESS_PATH, signal);
-      return { available: true, value: isReadiness(raw) ? raw : null };
+      if (!isReadiness(raw)) throw new Error('Readiness response unavailable.');
+      return { state: 'ready', available: true, value: raw };
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) throw err;
-      if (err instanceof DOMException && err.name === 'AbortError') throw err;
-      return { available: false, value: null };
+      if (err instanceof ApiError && err.status === 404 && err.code === null) {
+        return { state: 'unsupported', available: false, value: null };
+      }
+      // Failures retain the cache's last result and error; they are not a new
+      // successful observation. Session expiry and cancellation also propagate.
+      throw err;
     }
   },
 };
