@@ -448,6 +448,11 @@ describe.skipIf(process.platform==='win32')('commissioned public historical manu
     expect(()=>realHosted.verifyPublishedManualArtifact(p.hosted.options,cap)).toThrow(/fresh commissioned capability/);
     expect(()=>realHosted.verifyArtifact({...p.hosted.options,githubRead:p.read})).toThrow(/not current trusted master/);
     expect(p.hosted.calls).toHaveLength(6);
+  });
+  it('retains the same immutable public proof after a fresh descendant anchor',async()=> {
+    const p=publishedFixture();
+    const cap=await realHosted.inspectCommissionedManualPublication(p.envelope());
+    const proof=realHosted.verifyPublishedManualArtifact({...p.hosted.options,githubRead:p.read},cap);
     // A fresh descendant anchor changes diagnostics, not immutable public proof.
     p.setMaster('e'.repeat(40));const fresh=await realHosted.inspectCommissionedManualPublication(p.envelope());
     expect(realHosted.verifyPublishedManualArtifact({...p.hosted.options,githubRead:p.read},fresh)).toEqual(proof);
