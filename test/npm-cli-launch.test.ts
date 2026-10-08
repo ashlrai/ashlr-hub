@@ -18,7 +18,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   resolveNpmCliLaunch,
   removeExactEmptySnapshotContainer,
@@ -46,75 +46,6 @@ afterEach(() => {
 });
 
 describe('shell-free npm CLI launch', () => {
-  function nativePathFixture() {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-npm-native-path-')));
-    tempDirs.push(root);
-    const fakeNode = join(root, 'bin', 'node');
-    const npmRoot = join(root, 'lib', 'node_modules', 'npm');
-    const cli = join(npmRoot, 'bin', 'npm-cli.js');
-    write(fakeNode, 'fixture node identity\n');
-    write(cli, "process.stdout.write('fixture');\n");
-    write(join(npmRoot, 'package.json'), '{"name":"npm","version":"10.0.0"}\n');
-    write(join(npmRoot, 'lib', 'nested', 'runtime.js'), 'module.exports = 1;\n');
-    return { root, npmRoot, run: () => resolveNpmCliLaunch({ npm_execpath: cli }, {
-      command: process.execPath, execPath: fakeNode, platform: 'linux',
-    }) };
-  }
-
-  function useProcessPlatform(platform: string): void {
-    const simulated = Object.create(process) as NodeJS.Process;
-    Object.defineProperty(simulated, 'platform', { value: platform });
-    vi.stubGlobal('process', simulated);
-  }
-
-  it('retains fresh closure digest parity between ordinary and native directory resolution', () => {
-    const f = nativePathFixture();
-    const native = vi.spyOn(realpathSync, 'native'); // Genuine call-through, not a canonical-path answer.
-    let ordinary: ReturnType<typeof resolveNpmCliLaunch> | undefined;
-    let windows: ReturnType<typeof resolveNpmCliLaunch> | undefined;
-    try {
-      useProcessPlatform('darwin');
-      ordinary = f.run();
-      expect(native).not.toHaveBeenCalled();
-      useProcessPlatform('win32');
-      windows = f.run();
-      expect(windows.npmRuntimeClosureSha256).toBe(ordinary.npmRuntimeClosureSha256);
-      expect(native.mock.calls.filter(([path]) => path === f.npmRoot)).toHaveLength(2);
-      expect(native.mock.calls.some(([path]) => path === join(f.npmRoot, 'lib', 'nested'))).toBe(true);
-    } finally {
-      if (ordinary) closeLaunch(ordinary);
-      if (windows) closeLaunch(windows);
-      native.mockRestore();
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it('still refuses a directory replaced between genuine native pre/post resolution', () => {
-    const f = nativePathFixture();
-    const realNative = realpathSync.native;
-    let replaced = false;
-    const native = vi.spyOn(realpathSync, 'native').mockImplementation((path, options) => {
-      const canonical = realNative(path, options);
-      if (path === f.npmRoot && !replaced) {
-        replaced = true;
-        renameSync(f.npmRoot, join(f.root, 'retired-npm'));
-        mkdirSync(f.npmRoot);
-        write(join(f.npmRoot, 'replacement.txt'), 'replacement');
-      }
-      return canonical;
-    });
-    try {
-      useProcessPlatform('win32');
-      expect(() => f.run()).toThrow('npm runtime closure changed during validation');
-      expect(replaced).toBe(true);
-      // Identity drift refuses before the short-circuited post-resolution call.
-      expect(native.mock.calls.filter(([path]) => path === f.npmRoot)).toHaveLength(1);
-    } finally {
-      native.mockRestore();
-      vi.unstubAllGlobals();
-    }
-  });
-
   it('uses only the npm CLI rooted in the active Node toolchain', () => {
     const launch = resolveNpmCliLaunch();
     expect(launch.command).toBe(process.execPath);

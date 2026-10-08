@@ -130,12 +130,6 @@ function assertOpenFileIsCurrent(opened) {
   }
 }
 
-// Native Windows resolution avoids the JavaScript API's repeated ancestor
-// walk. Every pre/post resolution remains fresh; canonical equality is unchanged.
-function canonicalNpmRuntimeDirectory(path) {
-  return process.platform === 'win32' ? realpathSync.native(path) : realpathSync(path);
-}
-
 function observeNpmRuntimeClosure(npmRoot, snapshotRoot) {
   const records = [];
   const deadline = process.hrtime.bigint() + BigInt(MAX_NPM_RUNTIME_SCAN_MS) * 1_000_000n;
@@ -160,7 +154,7 @@ function observeNpmRuntimeClosure(npmRoot, snapshotRoot) {
       throw new Error('npm runtime closure exceeds directory limit');
     }
     const before = lstatSync(directory);
-    if (!before.isDirectory() || before.isSymbolicLink() || canonicalNpmRuntimeDirectory(directory) !== directory) {
+    if (!before.isDirectory() || before.isSymbolicLink() || realpathSync(directory) !== directory) {
       throw new Error('npm runtime closure contains an unsafe directory');
     }
     const logicalDirectory = relative(npmRoot, directory);
@@ -271,7 +265,7 @@ function observeNpmRuntimeClosure(npmRoot, snapshotRoot) {
       }
     }
     const after = lstatSync(directory);
-    if (!sameFileIdentity(before, after) || canonicalNpmRuntimeDirectory(directory) !== directory) {
+    if (!sameFileIdentity(before, after) || realpathSync(directory) !== directory) {
       throw new Error('npm runtime closure changed during validation');
     }
     records.push({
