@@ -123,7 +123,7 @@ async function handleVisionaryBriefing(req: CommsRequest, cfg: AshlrConfig): Pro
   // Legacy Strategist briefing: retired (3.14). Never adopt a stale briefing.
   if (idx === 1) return; // Hold — recorded via resolution.
   await sendReply(
-    '[Phantom] That Strategist briefing is retired; nothing was adopted. The Leader is the one brain now: reply here to talk to it, or see its latest memo with `ashlr leader show`.',
+    '[Phantom] That Strategist briefing is retired; nothing was adopted. The Leader is the one brain now: reply here to talk to it, or see its latest memo with `phm leader show`.',
     cfg,
   );
 }

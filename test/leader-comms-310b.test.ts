@@ -144,6 +144,6 @@ describe('Leader memo replies (the \'elon-vision\' wire kind, meta.source leader
     await handler(legacy);
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatch(/^\[Phantom\] That Strategist briefing is retired; nothing was adopted\./);
-    expect(sent[0]).toContain('`ashlr leader show`');
+    expect(sent[0]).toContain('`phm leader show`');
   });
 });

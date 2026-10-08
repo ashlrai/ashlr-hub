@@ -89,7 +89,7 @@ describe('ashlr vision review → Leader tick', () => {
 
   it('points a missing-briefing approve at Leader memos, not at review', async () => {
     expect(await cmdVision(['approve'])).toBe(1);
-    expect(err.join('\n')).toContain('ashlr leader show');
+    expect(err.join('\n')).toContain('phm leader show');
     expect(err.join('\n')).not.toContain('vision review');
   });
 });

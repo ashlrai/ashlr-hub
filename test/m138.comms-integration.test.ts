@@ -397,7 +397,7 @@ describe('elon-vision handler', () => {
     expect(mockSendIMessage).toHaveBeenCalledOnce();
     const [sentText] = mockSendIMessage.mock.calls[0] as [string, unknown];
     expect(sentText).not.toContain(briefing.currentState);
-    expect(sentText).toContain('ashlr leader show');
+    expect(sentText).toContain('phm leader show');
   });
 
   it('handler never throws even when adoptBriefing rejects', async () => {
@@ -432,7 +432,7 @@ describe('comms digest', () => {
     await cmdComms(['digest']);
     const [r] = listRequests({ kind: 'fleet-digest' });
     expect(r!.text).toMatch(/^Fleet idle/);
-    expect(r!.text).toMatch(/autonomy is off — next step: `ashlr authority setup`/);
+    expect(r!.text).toMatch(/autonomy is off — next step: `phm authority setup`/);
     expect(r!.text).not.toMatch(/nominal|κ|kappa|Vision progress|0 proposals/i);
     // The old digest read the oversight snapshot; the change-driven one does not.
     expect(mockBuildOversightSnapshot).not.toHaveBeenCalled();
@@ -574,6 +574,12 @@ describe('comms telegram-brand explicit operator command', () => {
     const calls = setup(); const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
       mockLoadConfig.mockClear(); mockRunCommsCycle.mockClear();
+      expect(await cmdComms(['--help'])).toBe(0);
+      expect(log.mock.calls.flat().join('\n')).toContain('Phantom comms');
+      expect(log.mock.calls.flat().join('\n')).toContain('Usage: phm comms');
+      expect(log.mock.calls.flat().join('\n')).toContain('Compatible alias: ashlr comms <command>');
+      expect(mockLoadConfigReadOnlyStrict).not.toHaveBeenCalled();
+      expect(calls).toEqual([]);
       expect(await cmdComms(['telegram-brand', '--json'])).toBe(0);
       const result = JSON.parse(log.mock.calls.at(-1)![0] as string);
       expect(result).toMatchObject({ mode: 'preview', status: 'preview', botId });
@@ -589,6 +595,7 @@ describe('comms telegram-brand explicit operator command', () => {
     const calls = setup(); const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       expect(await cmdComms(['telegram-brand', ...flags])).toBe(2);
+      expect(error.mock.calls.flat().join('\n')).toContain('usage: phm comms telegram-brand');
       expect(mockLoadConfigReadOnlyStrict).not.toHaveBeenCalled(); expect(calls).toEqual([]);
       expect(JSON.stringify(error.mock.calls)).not.toContain('fake-private');
     } finally { error.mockRestore(); }

@@ -396,6 +396,10 @@ describe('ashlr leader say / thread / answer / approve / directives', () => {
 
   it('say prints the reply; thread lists the conversation', async () => {
     const io = capture();
+    expect(await runLeaderCli(['--help'])).toBe(0);
+    expect(io.out.join('\n')).toContain('Phantom Leader');
+    expect(io.out.join('\n')).toContain('phm leader show [--json]');
+    expect(io.out.join('\n')).toContain('Compatible alias: ashlr leader <command>');
     replies.push(JSON.stringify({ reply: 'Cut scope.' }));
     expect(await runLeaderCli(['say', 'What', 'now?'])).toBe(0);
     expect(io.out).toContain('Cut scope.');

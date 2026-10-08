@@ -34,22 +34,24 @@ import { isAbsolute, join } from 'node:path';
 import { loadConfig } from '../core/config.js';
 import type { LeaderAction, LeaderMemo, LeaderStateV1 } from '../core/vision/leader-types.js';
 
-const USAGE = `ashlr leader — the Leader (Visionary): memo, actions, veto
+const USAGE = `Phantom Leader — memo, actions and veto
+
+Compatible alias: ashlr leader <command>
 
 Usage:
-  ashlr leader show [--json]
-  ashlr leader run [--force]
-  ashlr leader tick [--wait]
-  ashlr leader veto <actionId> [--note "why"]
-  ashlr leader veto --memo <memoId> [--note "why"]
-  ashlr leader oversight-plist --print [--bin /path/to/ashlr]
-  ashlr leader say "<text>"
-  ashlr leader thread [--limit n] [--json]
-  ashlr leader answer <questionId> "<text>"
-  ashlr leader approve <actionId>
-  ashlr leader directives [list] [--all] [--json]
-  ashlr leader directives add "<text>" [--kind focus|stop|priority|guidance]
-  ashlr leader directives retire <directiveId>`;
+  phm leader show [--json]
+  phm leader run [--force]
+  phm leader tick [--wait]
+  phm leader veto <actionId> [--note "why"]
+  phm leader veto --memo <memoId> [--note "why"]
+  phm leader oversight-plist --print [--bin /path/to/phm]
+  phm leader say "<text>"
+  phm leader thread [--limit n] [--json]
+  phm leader answer <questionId> "<text>"
+  phm leader approve <actionId>
+  phm leader directives [list] [--all] [--json]
+  phm leader directives add "<text>" [--kind focus|stop|priority|guidance]
+  phm leader directives retire <directiveId>`;
 
 function flag(args: string[], name: string): boolean {
   const i = args.indexOf(name);
@@ -377,7 +379,7 @@ async function runThreadCli(sub: string, args: string[]): Promise<number> {
     return threadCall(thread, () => {
       const messages = thread.listThread(limitOpt === null ? {} : { limit: Number(limitOpt) });
       if (json) console.log(JSON.stringify({ messages }, null, 2));
-      else if (messages.length === 0) console.log('No messages yet. Say something: ashlr leader say "…"');
+      else if (messages.length === 0) console.log('No messages yet. Say something: phm leader say "…"');
       else for (const m of messages) printThreadMessage(m);
       return 0;
     });
@@ -423,7 +425,7 @@ async function runDirectivesCli(args: string[]): Promise<number> {
     }
     const directives = operator.listOperatorDirectives({ includeRetired: all });
     if (json) console.log(JSON.stringify({ directives }, null, 2));
-    else if (directives.length === 0) console.log('No standing directives. Add one: ashlr leader directives add "focus on …"');
+    else if (directives.length === 0) console.log('No standing directives. Add one: phm leader directives add "focus on …"');
     else for (const d of directives) console.log(`  ${d.id} [${d.kind}]${d.retiredAt ? ` (retired ${d.retiredAt.slice(0, 10)})` : ''} ${d.text}`);
     return 0;
   }

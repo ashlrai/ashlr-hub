@@ -574,7 +574,7 @@ describe('slash commands and keywords', () => {
     expect(texts()[0]).not.toContain('&amp;lt;');
     expect(texts()[0]).toContain('within the grant');
     expect(texts()[0]!.length).toBeLessThanOrEqual(TELEGRAM_MAX_MESSAGE);
-    expect(texts()[1]).toMatch(/Autonomy: off — next step: `ashlr authority setup`/);
+    expect(texts()[1]).toMatch(/Autonomy: off — next step: `phm authority setup`/);
     expect(texts()[2]).toMatch(/No standing directives/);
     expect(texts()[3]).toMatch(/^Leader memo — /);
     expect(texts()[3]).not.toContain(MEMO_ID);
@@ -742,7 +742,7 @@ describe('change-driven digest', () => {
   it('idle > 24h: exactly one honest line per idle stretch, naming the next setup step', () => {
     const idle: DigestFacts = { events: [], seats: null, autonomy: { on: false, mode: null } };
     const first = planChangeDigest(null, idle, NOW);
-    expect(first.text).toBe('Fleet idle 24h+: autonomy is off — next step: `ashlr authority setup`.');
+    expect(first.text).toBe('Fleet idle 24h+: autonomy is off — next step: `phm authority setup`.');
     const later = planChangeDigest(first.next, idle, NOW + 30 * 3_600_000);
     expect(later.text).toBeNull();
 
