@@ -1,8 +1,8 @@
 # Releasing locally
 
-Current source prepares the unpublished 3.26.0 canonical candidate:
-`ashlrai/phantom`, `@ashlr/phantom` and `phm`. The published 3.25.3
-compatibility artifacts retain their original legacy identity. Canonical release
+The published canonical 3.26.0 release uses `ashlrai/phantom`,
+`@ashlr/phantom` and `phm`. The earlier published 3.25.3 compatibility
+artifacts retain their original legacy identity. Canonical release
 admission requires complete exact-source hosted CI, independent Audit and
 trusted attestation, followed by the normal finalizer and artifact installer.
 The legacy local-production policy runners and their receipts do not admit the
@@ -60,7 +60,7 @@ the previous candidate's results cannot qualify changed source.
 
 ## Local qualification fallback
 
-For the canonical candidate, these commands provide local feedback only. They
+For canonical releases, these commands provide local feedback only. They
 do not replace mandatory exact-source hosted CI, Audit and attestor admission.
 
 Run these commands in order from the final clean release commit. Each stops on
@@ -151,7 +151,8 @@ and remove an entry when its cause is fixed.
 
 The published 3.25.1 DMG contains `Phantom.app` and is named
 `Phantom_3.25.1_aarch64.dmg`; the historical 3.25.0 DMG retains `Ashlr.app`.
-Source 3.25.2 remains a candidate, including its signed idle updater. Both names present refuse rather
+The published 3.26.0 release includes the signed idle updater; publication does
+not enable automatic adoption. Both names present refuse rather
 than choosing one. A first native install requires a verified signed prebuilt
 `desktop/src-tauri/target/release/bundle/macos/Phantom.app`.
 
@@ -280,7 +281,7 @@ Two defects made `npm run build` fail for everyone, both fixed:
 
 ## Publishing
 
-For the canonical candidate, publish only the original `ashlr-phantom-<version>.tgz`
+For a canonical release, publish only the original `ashlr-phantom-<version>.tgz`
 from the freshly verified CI handoff, with the pinned release tools and exact
 recorded digest. Do not run `npm pack` again on the adopted or installed tree.
 Public exact-version byte/SRI readback and an isolated consumer installation

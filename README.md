@@ -11,26 +11,25 @@
 [Install](#install) · [See the workbench](#what-it-is) · [Benchmarks](#benchmarks-and-traces) · [Read the guide](https://github.com/ashlrai/phantom/blob/master/docs/VERSE.md) · [Explore the ecosystem](https://verse.ashlr.ai/ecosystem) · [Star Phantom on GitHub](https://github.com/ashlrai/phantom)
 
 [![CI](https://github.com/ashlrai/phantom/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/phantom/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
-[![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
+[![npm](https://img.shields.io/npm/v/@ashlr/phantom.svg?logo=npm&label=%40ashlr%2Fphantom&color=cb3837)](https://www.npmjs.com/package/@ashlr/phantom)
+[![npm downloads](https://img.shields.io/npm/dm/@ashlr/phantom.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/phantom)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.15-339933.svg?logo=node.js&logoColor=white)](https://nodejs.org)
 
 ## Install
 
-The 3.26.0 source candidate uses `ashlrai/phantom` and `@ashlr/phantom`.
-It is not published yet. Until its original release artifacts are verified,
-install the published compatibility release, Phantom 3.25.3:
+Phantom 3.26.0 is published as `@ashlr/phantom` from `ashlrai/phantom`.
+Install the version-pinned canonical release:
 
 ```sh
-npm install -g @ashlr/hub@3.25.3   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
+npm install -g @ashlr/phantom@3.26.0   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
 phm verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 On an Apple silicon Mac, download the
-[v3.25.3 desktop DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.3/Phantom_3.25.3_aarch64.dmg).
-It is locally signed, not Apple notarized; macOS may require **Open Anyway** on
-first launch. The CLI includes the browser console on macOS, Linux and Windows.
+[v3.26.0 desktop DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.0/Phantom_3.26.0_aarch64.dmg).
+The app inside the DMG is locally signed; the DMG is unsigned. Neither is Apple
+notarized; macOS may require **Open Anyway** on first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
 [first-run guide](docs/QUICKSTART.md#open-verse).
 
@@ -62,14 +61,14 @@ your enrolled repositories only inside a standing grant you sign with Touch ID:
 it starts in shadow, recording what it would merge, and climbs a rollout ladder
 from there.
 
-It ships as a macOS desktop app and as the `phm` CLI (canonical source package
+It ships as a macOS desktop app and as the `phm` CLI (canonical package
 `@ashlr/phantom`, also available as `ashlr`), which
 serves the same console in a browser on macOS, Linux and Windows. Under the
-console is the Hub kernel: the CLI, the Universe experiment runtime and
+console is the Phantom kernel: the CLI, the Universe experiment runtime and
 account-aware resource pools.
 
 Phantom was formerly Ashlr Verse. The current source repository is `ashlrai/phantom`;
-the 3.26.0 candidate package is `@ashlr/phantom`. `phm` and compatible `ashlr`
+the published 3.26.0 package is `@ashlr/phantom`. `phm` and compatible `ashlr`
 share the same entrypoint. Published 3.25.3 remains `@ashlr/hub`; its existing
 SDK imports, including `@ashlr/hub/universe`, retain their original identity.
 The canonical package provides the same five SDK surfaces under `@ashlr/phantom`.
@@ -220,9 +219,9 @@ separate Node.js install to run.
 
 ### Install
 
-Use the [v3.25.3 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.3)
-for the versioned arm64 DMG. It is locally signed, not Apple Developer ID notarized,
-so macOS may require **Open Anyway** on first launch. To build from source on a
+Use the [v3.26.0 release](https://github.com/ashlrai/phantom/releases/tag/v3.26.0)
+for the versioned arm64 DMG. The app inside is locally signed; the DMG is unsigned.
+Neither is Apple Developer ID notarized, so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
 "Ashlr Local" code-signing identity. The prerequisites, exact build order and
 verification steps are in [Releasing without CI](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md)
@@ -308,17 +307,19 @@ check identity and quota, are in
 The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
-Published 3.25.3 provides `phm` as the primary CLI command. Both `phm` and
+Published 3.26.0 provides `phm` as the primary CLI command. Both `phm` and
 `ashlr` use the same workbench entrypoint; existing `ashlr` scripts keep working.
 When building from source, `./install.sh` installs both aliases and refuses
 unrelated files or links. The separate Phantom Secrets command remains `phantom`.
 
 ```sh
-npm install -g @ashlr/hub@3.25.3
+npm install -g @ashlr/phantom@3.26.0
 phm --version
 phm verse                 # start the server and open http://127.0.0.1:7777/verse/
 ```
 
+The canonical 3.26.0 package exposes `@ashlr/phantom`, `@ashlr/phantom/core`,
+`@ashlr/phantom/types`, `@ashlr/phantom/plugin` and `@ashlr/phantom/universe`.
 The published 3.25.3 compatibility package preserves the public SDK entrypoints `@ashlr/hub`,
 `@ashlr/hub/core`, `@ashlr/hub/types`, `@ashlr/hub/plugin` and `@ashlr/hub/universe`.
 
@@ -455,11 +456,11 @@ for offline and online boundaries, trace privacy and comparison details.
 
 ## Reference
 
-The Hub underneath the console (the Universe experiment kernel, resource pools,
+The Phantom kernel underneath the console (the Universe experiment kernel, resource pools,
 the legacy enrolled-repository fleet and its activation runbook, the kill
 switch, backends, sandboxing, the command reference, the safety model, the
 `~/.ashlr/` layout and configuration) is documented in
-[Hub reference](https://github.com/ashlrai/phantom/blob/master/docs/HUB-REFERENCE.md). Start with the
+[Phantom reference](https://github.com/ashlrai/phantom/blob/master/docs/HUB-REFERENCE.md). Start with the
 [executable Universe demo](https://github.com/ashlrai/phantom/blob/master/docs/DEMO.md), which needs no model account.
 
 ---
@@ -493,10 +494,10 @@ switch, backends, sandboxing, the command reference, the safety model, the
 | **3.17** | Local module map, scalable account/model rosters, portable efficiency-plugin connection and phone reliability | [3.17.2 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.2) |
 | **3.16** | Native Agents workbench and guarded computer tools; optional authenticated phone gateway; reviewable learning evidence; Devin CLI SWE-2 High default; local signing and release fixes | [3.16.1 published](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.1) |
 
-Release artifacts are built and published locally; the source also runs GitHub
-CI and dependency audit checks. The local build procedure is in [Releasing without CI](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md).
+CLI archives are built by hosted CI; the macOS app is finalized and publication is performed locally.
+The source also runs GitHub CI and dependency audit checks. The local build procedure is in [Releasing without CI](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md).
 npm publication is confirmed separately for the selected package and version.
-The 3.26.0 canonical candidate requires `@ashlr/phantom` public-byte readback;
+The 3.26.0 canonical release was verified through `@ashlr/phantom` public-byte readback;
 a legacy `@ashlr/hub` response does not prove canonical publication.
 GitHub release assets require their own public download and checksum verification;
 repository or changelog state alone is not publication evidence.
@@ -532,7 +533,7 @@ Star and source-maintainer references. Start with these canonical guides:
 | Doc | What it covers |
 |-----|----------------|
 | [`docs/VERSE.md`](https://github.com/ashlrai/phantom/blob/master/docs/VERSE.md) | The Phantom user guide: every surface and shortcut, chat workbench, seats, Resources, Lessons, the repo wiki, autonomy, the cloud and Devin lanes, the desktop app |
-| [`docs/HUB-REFERENCE.md`](https://github.com/ashlrai/phantom/blob/master/docs/HUB-REFERENCE.md) | The Hub underneath the console: Universe experiments, resource pools, the legacy fleet and its activation runbook, kill switch, backends, sandboxing, command reference, safety model, configuration |
+| [`docs/HUB-REFERENCE.md`](https://github.com/ashlrai/phantom/blob/master/docs/HUB-REFERENCE.md) | The Phantom kernel underneath the console: Universe experiments, resource pools, the legacy fleet and its activation runbook, kill switch, backends, sandboxing, command reference, safety model, configuration |
 | [`docs/AUTONOMY-SETUP.md`](https://github.com/ashlrai/phantom/blob/master/docs/AUTONOMY-SETUP.md) | The autonomy commissioning path, what a grant allows, and budget modes |
 | [`docs/CLOUD-LANES.md`](https://github.com/ashlrai/phantom/blob/master/docs/CLOUD-LANES.md) | Overview of the Claude Code cloud lane and the Devin lane |
 | [`docs/REMOTE-PHONE.md`](https://github.com/ashlrai/phantom/blob/master/docs/REMOTE-PHONE.md) | Optional phone gateway, Access enrollment, and local setup; remote access remains off until configured |
@@ -550,7 +551,7 @@ Star and source-maintainer references. Start with these canonical guides:
 | [`docs/ARCHITECTURE.md`](https://github.com/ashlrai/phantom/blob/master/docs/ARCHITECTURE.md) | Module map, the autonomous loop, engine tiers, safety gates, the `~/.ashlr/` layout |
 | [`docs/MILESTONE-INDEX.md`](https://github.com/ashlrai/phantom/blob/master/docs/MILESTONE-INDEX.md) | Historical milestone ID → subject → status lookup, including confirmed ID collisions; not runtime activation evidence |
 | [`docs/MISSION-OS.md`](https://github.com/ashlrai/phantom/blob/master/docs/MISSION-OS.md) | Mission DAG, receipts, shadow workflow, Cortex/Locus boundaries, privacy, and troubleshooting |
-| [`docs/ELITE-AGENT-EFFICIENCY.md`](https://github.com/ashlrai/phantom/blob/master/docs/ELITE-AGENT-EFFICIENCY.md) | Current primary-source research translated into Hub efficiency priorities and measurable autonomy gates |
+| [`docs/ELITE-AGENT-EFFICIENCY.md`](https://github.com/ashlrai/phantom/blob/master/docs/ELITE-AGENT-EFFICIENCY.md) | Current primary-source research translated into Phantom efficiency priorities and measurable autonomy gates |
 | [`docs/RUNTIME_ACTIVATION_AUTHORITY.md`](https://github.com/ashlrai/phantom/blob/master/docs/RUNTIME_ACTIVATION_AUTHORITY.md) | Signed read-only resident activation admission, explicit mutation refusal, and native launchd v2 requirements |
 | [`docs/ECOSYSTEM-MAP.md`](https://github.com/ashlrai/phantom/blob/master/docs/ECOSYSTEM-MAP.md) | Independent product capabilities and composition bets |
 | [`docs/LOCUS-FIRM-FLEET.md`](https://github.com/ashlrai/phantom/blob/master/docs/LOCUS-FIRM-FLEET.md) | Production fleet checklist — `locus.firm`, `LOCUS_ENFORCE`, `LOCUS_CI_BINDING` (default off) |

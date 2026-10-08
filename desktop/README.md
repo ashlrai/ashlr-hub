@@ -4,48 +4,50 @@ A Tauri v2 desktop app that wraps **Phantom** (the operator console at
 `/verse/`, see `../docs/VERSE.md`) in a native macOS window. Opening it starts
 the console; resident autonomy requires its separate local setup and grant.
 
-The 3.25.3 compatibility release installs `/Applications/Phantom.app`, with
-`Phantom_3.25.3_aarch64.dmg` downloads and the stable `Ashlr Local` signing
+The published canonical 3.26.0 release includes `Phantom.app`, with
+`Phantom_3.26.0_aarch64.dmg` downloads and the stable `Ashlr Local` signing
 identity. The guarded installer migrates a single verified legacy installation;
 3.25.0 retains its historical `Ashlr.app` filename. Updated custody prompt
 wording requires its separately qualified helper release; installing the app
 does not replace the helper. Automatic updating is not activated by this filename change.
 
-The versioned [v3.25.3 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.3/Phantom_3.25.3_aarch64.dmg)
-is the verified published compatibility installer. Check the release artifacts
+The versioned [v3.26.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.0/Phantom_3.26.0_aarch64.dmg)
+is the verified published canonical download. Check the release artifacts
 and installed startup separately before granting resident authority.
-It is locally signed, not Apple Developer ID notarized. macOS may require **Open
-Anyway** on first launch. The desktop CI workflow remains disabled during the
+The app inside the DMG is locally signed, not Apple Developer ID notarized;
+the DMG is unsigned and not notarized. macOS may require **Open Anyway** on first launch. The desktop CI workflow remains disabled during the
 Linux quarantine; its retained draft-only policy is separate from this local
 macOS release. The Linux CLI and web dashboard remain supported.
-Installed size: ~141 MiB, including the bundled Bun `ashlr`
+The historical 3.25.3 installed size was ~141 MiB, including the bundled Bun `ashlr`
 sidecar (~100 MiB), Rust executable and web assets.
 
 The 3.25.2 archives were published and verified, but its macOS updater client reproduced a startup abort; installation rolled back to 3.25.1. Version 3.25.3 fixes that constructor and adds the compatibility bridge. Verify the selected release artifacts and installed health separately. Publication does not update an existing app or activate its fleet.
 
 ---
 
-## Canonical source candidate
+<a id="canonical-source-candidate"></a>
 
-The 3.26.0 source candidate uses `ashlrai/phantom` and `@ashlr/phantom`.
+## Canonical release
+
+The published 3.26.0 release uses `ashlrai/phantom` and `@ashlr/phantom`.
 Its fixed discovery endpoint is
 `https://github.com/ashlrai/phantom/releases/latest/download/latest.json`.
 The commissioned public key, `ai.ashlr.desktop` bundle identifier, signer,
 sidecar and saved-data identities stay unchanged. The signed legacy and
 canonical profiles remain distinct; transport redirects do not choose a profile.
-The [candidate v3.26.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.0/Phantom_3.26.0_aarch64.dmg)
-is not published yet. Use the verified compatibility download below until the
-canonical release has its own qualification, publication and startup evidence.
+The [v3.26.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.0/Phantom_3.26.0_aarch64.dmg)
+has its own qualified original app and public-download evidence. Installed
+startup, automatic adoption and resident authority remain separate gates.
 
 ## Install
 
-Download the versioned [3.25.3 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.3/Phantom_3.25.3_aarch64.dmg)
+Download the versioned [3.26.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.0/Phantom_3.26.0_aarch64.dmg)
 or use the [npm/CLI quickstart](../docs/QUICKSTART.md) on macOS, Linux and Windows.
 Other desktop formats remain subject to the draft artifact policy below.
 
 | Platform | Availability |
 |----------|-----------------------|
-| macOS arm64 | Published compatibility v3.25.3 `.dmg` |
+| macOS arm64 | Published canonical v3.26.0 `.dmg` |
 | Windows | `.msi` / `.exe` draft only |
 | Linux | Not produced while quarantined |
 

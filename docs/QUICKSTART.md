@@ -8,8 +8,8 @@ Installing Phantom, enrolling a repo, starting a resident fleet and publishing
 its work are distinct steps.
 
 The primary CLI is `phm`; `ashlr` remains compatible. Current source uses
-`@ashlr/phantom` in `ashlrai/phantom`; the 3.26.0 canonical candidate is not
-published yet. The verified 3.25.3 compatibility release remains `@ashlr/hub`.
+`@ashlr/phantom` in `ashlrai/phantom`; the canonical 3.26.0 release is published.
+The verified 3.25.3 compatibility release remains `@ashlr/hub`.
 Local routes remain `/verse/`, and the published macOS app is `Phantom.app`. See
 [the product naming guide](PHANTOM-BRAND.md).
 
@@ -19,29 +19,30 @@ Local routes remain `/verse/`, and the published macOS app is `Phantom.app`. See
 
 ### CLI on macOS, Linux or Windows
 
-Install Node.js 22.15+ and Git, then install published compatibility release Phantom 3.25.3:
+Install Node.js 22.15+ and Git, then install the published canonical release, Phantom 3.26.0:
 
 ```sh
-npm install -g @ashlr/hub@3.25.3
-phm --version   # should print 3.25.3
+npm install -g @ashlr/phantom@3.26.0
+phm --version   # should print 3.26.0
 phm verse
 ```
 
 Phantom opens at `http://127.0.0.1:7777/verse/` and binds to loopback. The CLI
 prints a read token for the browser and asks for a separate mutation token
 before your first chat or other change. Keep both tokens private. Confirm
-`phm --version` reports `3.25.3`; the
-[versioned GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.3) is the
+`phm --version` reports `3.26.0`; the
+[versioned GitHub release](https://github.com/ashlrai/phantom/releases/tag/v3.26.0) is the
 source for versioned installers. Use the explicit package version above and inspect the selected release artifacts before installing.
 
 ### Desktop app on Apple silicon Mac
 
-Use the published [v3.25.3 Phantom macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.3/Phantom_3.25.3_aarch64.dmg)
-from its [versioned release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.3).
+Use the published [v3.26.0 Phantom macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.0/Phantom_3.26.0_aarch64.dmg)
+from its [versioned release](https://github.com/ashlrai/phantom/releases/tag/v3.26.0).
 It fixes the reproduced 3.25.2 updater-client startup issue. Publication and
 installed startup acceptance remain separate; do not install the old 3.25.2 DMG.
-The desktop includes the CLI and the same console. This DMG is locally signed, not
-Apple Developer ID notarized; macOS may require **Open Anyway** on first launch.
+The desktop includes the CLI and the same console. The app inside the DMG is
+locally signed; the DMG is unsigned. Neither is Apple Developer ID notarized;
+macOS may require **Open Anyway** on first launch.
 For a source build and local signing, follow [Releasing locally](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md).
 There is no Linux or Windows desktop package in this release; use the CLI above.
 

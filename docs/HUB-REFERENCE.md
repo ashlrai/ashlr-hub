@@ -111,7 +111,7 @@ No successful test, model verdict, or proposal record grants deployment or servi
 
 ## The legacy autonomous loop
 
-Most AI coding tools are request-response: you ask, the model answers. Ashlr's source architecture defines a **continuous autonomous loop**. Without a signed standing grant, the current production entrypoints keep its non-dry daemon and conductor effects dormant because their compiled trust roots are empty:
+Most AI coding tools are request-response: you ask, the model answers. Phantom's source architecture defines a **continuous autonomous loop**. Without a signed standing grant, the current production entrypoints keep its non-dry daemon and conductor effects dormant because their compiled trust roots are empty:
 
 ```
 End-State Spec (your vision)
@@ -419,7 +419,7 @@ Generates N candidate diffs for a backlog item, scores each with the Manager jud
 
 Nemotron Phase 0 supports an explicit, default-off `local-coder` shadow entry
 with a full SHA-256 artifact pin when `local-coder` is also explicitly listed
-in `foundry.allowedBackends`. Ashlr first verifies the already-installed
+in `foundry.allowedBackends`. Phantom first verifies the already-installed
 model through a bounded numeric-loopback-only Ollama inventory read; it never
 pulls or installs a model and never starts the Ollama server. Shadow inference
 may cause an already-running Ollama server to load the configured artifact.
@@ -428,7 +428,7 @@ excluded from winner selection and durable proposal capture, so they acquire no
 proposal, branch-apply, or main-merge authority. Candidate isolation may create
 a temporary scratch worktree branch; normal cleanup removes it, while a cleanup
 failure can retain it as bounded diagnostic evidence. The current exercised
-local context ceiling remains 32K; Ashlr
+local context ceiling remains 32K; Phantom
 does not claim 1M-token operation from a model-card value alone. See
 `docs/FOUNDRY-CONFIG.md` for the exact shape and refusal rules.
 
