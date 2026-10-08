@@ -146,8 +146,8 @@ describe('cloud ends', () => {
     expect(r.doDifferently.some((d) => d.includes('No tests'))).toBe(true);
   });
 
-  it('closed with the fixed Verse reason and no report: recorded, nothing taught', () => {
-    const r = retroFromCloud(cloud({}), NOW);
+  it.each(['Closed in Verse without landing.', 'Closed in Phantom without landing.', 'Closed from Ashlr Verse (Needs you) without landing.', 'Closed from Phantom (Needs you) without landing.', 'Dismissed in Verse.', 'Dismissed in Phantom.'])('generic close %s: recorded, nothing taught', stateReason => {
+    const r = retroFromCloud(cloud({ stateReason }), NOW);
     expect(r.rootCause!.code).toBe('closed:unreviewed');
     expect(r.candidates).toEqual([]);
   });
@@ -174,21 +174,25 @@ describe('cloud ends', () => {
 });
 
 describe('3.15: Mason’s close reason and the Devin lane', () => {
-  it('`Closed in Verse: <reason>` is closed:by-mason with the reason itself as the lesson', () => {
-    const r = retroFromCloud(cloud({ stateReason: 'Closed in Verse: Duplicates the retry already on main.' }), NOW);
+  it.each(['Verse', 'Phantom'])('`Closed in %s: <reason>` retains the human reason as the lesson', brand => {
+    const r = retroFromCloud(cloud({ stateReason: `Closed in ${brand}: Duplicates the retry already on main.` }), NOW);
     expect(r.rootCause).toMatchObject({ code: 'closed:by-mason', detail: 'Duplicates the retry already on main.', evidence: 'Mason’s close reason' });
     expect(r.doDifferently[0]).toBe('Address the close reason before retrying: Duplicates the retry already on main.');
     expect(r.candidates).toHaveLength(1);
     expect(r.candidates[0]!.text).toBe('Mason closed a cloud feature change in ashlrai/widget without landing: Duplicates the retry already on main.');
     expect(r.betterPrompt).toContain('Mason closed the last attempt because: Duplicates the retry already on main.');
+    const multiline = retroFromCloud(cloud({ stateReason: `Closed in ${brand}: First line.\nSecond line.` }), NOW);
+    expect(multiline.rootCause).toMatchObject({ code: 'closed:by-mason', detail: 'First line.\nSecond line.', evidence: 'Mason’s close reason' });
   });
 
-  it('Mason’s reason outranks a blocked report (the one human judgement about the attempt)', () => {
+  it.each(['Verse', 'Phantom'])('%s human reason outranks blocked and no-change reports', brand => {
     const r = retroFromCloud(cloud({
-      stateReason: 'Closed in Verse: wrong module, the uploader lives in src/io',
+      stateReason: `Closed in ${brand}: wrong module, the uploader lives in src/io`,
       report: { status: 'blocked', summary: 'No harness.', testsRun: [], risks: [] },
     }), NOW);
     expect(r.rootCause).toMatchObject({ code: 'closed:by-mason', detail: 'wrong module, the uploader lives in src/io' });
+    const noChange = retroFromCloud(cloud({ stateReason: `Closed in ${brand}: wrong module`, report: { status: 'no-change', summary: 'Already done.', testsRun: [], risks: [] } }), NOW);
+    expect(noChange.rootCause).toMatchObject({ code: 'closed:by-mason', detail: 'wrong module' });
   });
 
   it('a Devin end has its own key, its own words and its own failure codes; source stays cloud', () => {

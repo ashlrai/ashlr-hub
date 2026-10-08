@@ -1,14 +1,14 @@
 # The cloud lane (3.11)
 
-The cloud lane lets Ashlr Verse start **Claude Code cloud sessions**
+The cloud lane lets Phantom start **Claude Code cloud sessions**
 (claude.ai/code) and follow what they deliver. You can start one from chat, from
-Command or from the CLI. Verse can also start them itself, to work through its
+Command or from the CLI. Phantom can also start them itself, to work through its
 own improvement backlog. Sessions run on your Claude account. That includes its
 cloud credits, so work continues after the subscription's weekly window is
 spent.
 
 The lane never merges anything on its own. Each task is instructed to open a
-**draft pull request** on GitHub. Verse tracks a matching PR if one arrives;
+**draft pull request** on GitHub. Phantom tracks a matching PR if one arrives;
 failed launches and missing deliveries remain distinct states. Under a
 standing grant, a cloud PR on a granted repo is taken in by the standing merge
 pass and lands only through its gates, from the fleet App's own PR (see
@@ -17,7 +17,7 @@ Everything else is triaged in **Needs you**: each row shows what the merge
 gates would say about its diff, and you land, close or update it there (see
 [Triage in Needs you](#triage-in-needs-you)).
 
-The contracts live in `src/core/cloud/types.ts`. The user guide in Verse is
+The contracts live in `src/core/cloud/types.ts`. The user guide in Phantom is
 [the Cloud lane section of VERSE.md](VERSE.md#cloud-lane-311).
 
 **A second lane: Devin (3.15).** Devin sessions follow the same pattern: a
@@ -36,7 +36,7 @@ These mechanics were checked against Claude Code 2.1.280 on 2026-09-24. They
 decide the shape of everything else.
 
 - **Only the interactive CLI can create a session.** The command is
-  `claude --cloud "<task>"`, and with `-p` it is refused. Verse therefore runs
+  `claude --cloud "<task>"`, and with `-p` it is refused. Phantom therefore runs
   the CLI under a pseudo-terminal: `script -q /dev/null <argv…>` on macOS and
   `script -qec "<quoted argv>" /dev/null` on Linux. On success the CLI prints
   three lines and exits 0:
@@ -47,25 +47,25 @@ decide the shape of everything else.
   Resume with: claude --teleport session_<id>
   ```
 
-  Verse strips ANSI and OSC sequences from the output and reads the session id,
+  Phantom strips ANSI and OSC sequences from the output and reads the session id,
   link and title from those lines. Anything else is classified as a failure
   (see [Failure codes](#failure-codes)).
 - **It runs as the `claude-a` seat.** The launcher is the argv array in that
   seat's native profile (`~/.ashlr/native-profiles/claude-a/command.json`),
-  which is signed in with a claude.ai account. Verse never uses the `claude`
+  which is signed in with a claude.ai account. Phantom never uses the `claude`
   on your `PATH`, which may be API-key authenticated: cloud sessions refuse API
   keys. The prompt is passed as a single argv element, never through a shell
   on macOS.
 - **The session clones the working directory's GitHub `origin` at its current
-  branch,** and that branch must already be pushed. So Verse never launches
+  branch,** and that branch must already be pushed. So Phantom never launches
   from your own clones. It keeps a separate shallow checkout per repository
   under `~/.ashlr/cloud/checkouts/<owner>__<name>`, fetches the base branch
   into it, checks it out with its upstream set, and launches from there. It
   uses your normal git credentials. Launches in one checkout run one at a time,
   because two `--cloud` runs in the same folder conflict.
-- **Verse cannot read a session back.** Attaching to an existing session is not
+- **Phantom cannot read a session back.** Attaching to an existing session is not
   enabled for this account, so every task is told to deliver to GitHub
-  instead (the [delivery contract](#the-delivery-contract)), and Verse tracks
+  instead (the [delivery contract](#the-delivery-contract)), and Phantom tracks
   it with `gh`.
 - **A launch times out after 90 seconds.** If no session has appeared by then,
   the process group is killed and the task fails with `timeout`.
@@ -75,7 +75,9 @@ the task as `queued`, wait for the repository's launch slot, prepare the
 checkout, build the prompt, launch, then save `running` with the session link,
 or `failed` with a plain reason.
 
-### What Verse checks before launching
+<a id="what-verse-checks-before-launching"></a>
+
+### What Phantom checks before launching
 
 - The repository must look like `owner/name` (letters, digits, `.`, `_`,
   `-`).
@@ -83,7 +85,7 @@ or `failed` with a plain reason.
   most 80 characters, unless one is given.
 - **Seat status is read from disk only.** The seat is ready when the `claude-a`
   profile's `command.json` exists and parses to an argv array. Otherwise
-  Verse says "The Claude seat isn't set up on this Mac." It does not run the
+  Phantom says "The Claude seat isn't set up on this Mac." It does not run the
   CLI to check sign-in, because that would cost a process on every page load.
   A signed-out seat shows up at launch time as an `auth` failure.
 
@@ -91,7 +93,7 @@ or `failed` with a plain reason.
 
 ## The delivery contract
 
-Every prompt Verse sends is your task text followed by a fixed contract. The
+Every prompt Phantom sends is your task text followed by a fixed contract. The
 stored task keeps only your text. The contract tells the session to:
 
 1. create and work on the branch `ashlr-cloud/<taskId>`, starting from the
@@ -117,12 +119,12 @@ stored task keeps only your text. The contract tells the session to:
    `status` is one of `done`, `partial`, `blocked` or `no-change`.
    `filesChanged` is optional.
 6. If nothing needs changing, still push an empty commit and open the PR with
-   status `no-change`, so Verse sees that the task finished.
+   status `no-change`, so Phantom sees that the task finished.
 
 Task ids look like `ct_20260924T2331_k3f9q2`: sortable, and safe to use in a
 branch name.
 
-Verse reads the **last tagged** report block in the PR body and validates it.
+Phantom reads the **last tagged** report block in the PR body and validates it.
 A missing, malformed, oversized or unfinished final block leaves the task's
 report empty, even if an older block was valid; the PR is still tracked.
 
@@ -140,11 +142,11 @@ delivery when its repository, base branch and head branch match the task.
 | `running` | The session exists. No PR yet. |
 | `pr-open` | A draft or ready PR exists on `ashlr-cloud/<id>`, or the cloud PR was superseded by a fleet App PR that is still open (`supersededBy`). |
 | `merged` | The PR was merged by you, or the fleet App PR that superseded it was merged by the standing gates. |
-| `closed` | The PR was closed without merging, or you dismissed the task in Verse. Dismissing never touches GitHub. |
+| `closed` | The PR was closed without merging, or you dismissed the task in Phantom. Dismissing never touches GitHub. |
 | `failed` | The launch failed. The failure code and a plain reason are recorded. |
 | `expired` | No PR appeared within 6 hours. The session link still works. |
 
-**Tracking.** For each task that is not finished, Verse asks GitHub for a PR
+**Tracking.** For each task that is not finished, Phantom asks GitHub for a PR
 whose head is the task's branch (`gh pr list --head ashlr-cloud/<id>`). A task
 moves from `running` to `pr-open`, and from `pr-open` to `merged` or
 `closed`. A `running` task with no PR after 6 hours becomes `expired`. If `gh`
@@ -156,13 +158,13 @@ scheduler.
 ## The budget, and why it is an estimate
 
 Claude does not expose the credit balance. Neither `/usage` nor the CLI shows
-it. So every spend figure in the lane is an **estimate**, and Verse labels it
+it. So every spend figure in the lane is an **estimate**, and Phantom labels it
 as one everywhere it appears:
 
 > Estimated at $3 per session — Claude doesn't expose the credit balance.
 > Check it on claude.ai and adjust here.
 
-The real balance is at <https://claude.ai/settings/usage>, and Verse links to
+The real balance is at <https://claude.ai/settings/usage>, and Phantom links to
 it next to every figure.
 
 **How the estimate is built.** Estimated spend is your adjustment plus the
@@ -170,7 +172,7 @@ per-session estimate of every task that reached `running` or later. A failed
 launch costs nothing. Estimated remaining is the total minus that. The
 estimate for a task is fixed when it launches, so changing the per-session
 figure later does not rewrite history. Use the adjustment to correct the
-estimate after checking claude.ai, or to count credits spent before Verse
+estimate after checking claude.ai, or to count credits spent before Phantom
 started tracking.
 
 | Setting | Default | What it does |
@@ -180,7 +182,7 @@ started tracking.
 | Estimate per session | $3 | The flat figure charged to each launched session. |
 | Max concurrent | 4 | Sessions launching or running at once, from any origin. |
 | Max sessions per day | 20 | Launches per local calendar day, from any origin. |
-| Self-improvement | on | Whether Verse may launch backlog items without a click. |
+| Self-improvement | on | Whether Phantom may launch backlog items without a click. |
 | Self-improvement repo | `ashlrai/ashlr-hub` | Where self-improvement tasks go. |
 | Self-improvement per day | 4 | Self-improvement launches per local day. |
 | Open self-improvement PRs | 3 | Self-improvement waits while this many of its PRs are open for review. |
@@ -195,11 +197,11 @@ questions, each with a plain sentence when the answer is no:
 
 - **Can launch?** Checked for every launch. It holds the concurrency limit, the
   daily session cap and the credit estimate.
-- **Can self-improve?** Checked additionally for launches Verse starts on its
+- **Can self-improve?** Checked additionally for launches Phantom starts on its
   own. It adds the self-improvement switch, review backpressure ("3
   self-improvement PRs are waiting for review."), the self-improvement daily
   cap ("4 of 4 self-improvement launches used today.") and the reserve.
-  Backpressure lifts as you land or close those PRs; the **Improve Verse**
+  Backpressure lifts as you land or close those PRs; the **Improve Phantom**
   button and manual launches are not held by it.
 
 A refused launch is recorded nowhere and costs nothing. It comes back with the
@@ -209,7 +211,7 @@ A refused launch is recorded nowhere and costs nothing. It comes back with the
 
 ## Self-improvement
 
-Verse keeps a backlog of work on itself and can hand items to cloud sessions.
+Phantom keeps a backlog of work on itself and can hand items to cloud sessions.
 
 - **Built-in items** live in `src/core/cloud/improvement-backlog.ts`. Each is
   a complete brief for a session working in `ashlrai/ashlr-hub`: long-failing
@@ -228,15 +230,15 @@ Verse keeps a backlog of work on itself and can hand items to cloud sessions.
 
 There are two ways to launch backlog items:
 
-- **Improve Verse** (the button on Command, `ashlr cloud improve`, or
+- **Improve Phantom** (the button on Command, `ashlr cloud improve`, or
   `POST /api/verse/cloud/improve`) launches up to `count` items now: one by
   default, five at most. It checks only the launch gate, because you asked.
-- **The scheduler** runs inside the Verse server. It starts when the cloud
+- **The scheduler** runs inside the Phantom server. It starts when the cloud
   module first loads, never under a test runner. Every 10 minutes it refreshes
   task states from GitHub. Two minutes after start, and then every 60 minutes,
   it launches the next backlog item. Scheduled launches need self-improvement
   switched on **and** the self-improvement gate open. So with the defaults
-  Verse starts at most 4 sessions a day on its own, and stops when the estimate
+  Phantom starts at most 4 sessions a day on its own, and stops when the estimate
   reaches the $40 reserve. The two jobs never overlap themselves, and each
   distinct error is logged once.
 
@@ -244,13 +246,13 @@ There are two ways to launch backlog items:
 
 ## Using it
 
-**In Verse.**
+**In Phantom.**
 
 - **Command** has a Cloud card beside the burn-downs. It shows estimated
   credits remaining as a meter ("$X of $250 · estimate") with a link to
   claude.ai usage, and sessions today. Each task has a state chip, **Open in
   Claude** for the session and a link to its PR. The card also has **New cloud
-  task**, **Improve Verse**, the self-improvement switch with its daily cap,
+  task**, **Improve Phantom**, the self-improvement switch with its daily cap,
   and **Edit budget**.
 - In **Chat**, the composer's ⋯ sheet has **Run in cloud**. It sends the typed
   prompt as a cloud task for the chat's project. It is available only when the
@@ -279,7 +281,7 @@ ashlr cloud backlog
 
 ### Triage in Needs you
 
-Every few minutes Verse reads each open cloud PR from GitHub and checks the
+Every few minutes Phantom reads each open cloud PR from GitHub and checks the
 diff, pinned to its head commit, with the merge gates' own functions:
 protected paths (G1), test tampering (G1b), risk and size against your grant's
 caps, or the compiled ceilings when no grant covers the repo (G2), and the
@@ -294,7 +296,7 @@ the preview. They run only in the standing merge pass.
 | A | **Land** | Marks the draft ready and squash-merges exactly the commit that was checked. Refused if the diff touches a protected path, conflicts, or the branch moved. |
 | R | **Close** | Closes the PR on GitHub with a short comment. The branch is kept. |
 | — | **Update branch** | Shown when the branch is behind. GitHub merges the base into it, and checks run again. |
-| E | **Dismiss** | Stops tracking the task in Verse. GitHub is not touched. |
+| E | **Dismiss** | Stops tracking the task in Phantom. GitHub is not touched. |
 
 X or Shift-click picks rows, and A / R / E then act on every pick after one
 confirmation. **Land all clean** lands every Clean PR the same way. Each
@@ -304,7 +306,7 @@ refused, not landed. Every action asks for the mutation token.
 The same actions are routes: `POST /api/verse/cloud/tasks/<id>/land`,
 `/close` and `/update-branch`, each with `{"headSha": "<40 hex>"}` (Close
 also takes an optional `reason`, up to 200 characters, recorded as "Closed in
-Verse: <reason>" and included in the GitHub comment), and
+Phantom: <reason>" and included in the GitHub comment), and
 `GET /api/verse/cloud/previews` for the verdicts.
 
 ### Intake into the standing gates (3.13)
@@ -339,7 +341,7 @@ pinned delivery and, for each, decides:
    codex or Grok judge because the producer is Claude; the verified-tree App
    PR; G7 with the App's `ashlr/verify`; the SHA-pinned merge; the post-merge
    watch and auto-revert; and KILL. G1 still sends a diff touching an
-   ashlr-hub protected path to the owner lane. When the rollout stage does
+   ashlr-Phantom protected path to the owner lane. When the rollout stage does
    not allow merging, the pass's would-merge record is the dry run.
 
 One proposal is filed per task and head SHA (the task's `intake` memo). A new
@@ -356,7 +358,7 @@ tracker follows the App PR: open stays `pr-open`, merged makes the task
 KILL stops the intake before it reads anything. It never runs outside a
 standing tick and never merges.
 
-**Over HTTP** (the Verse server). `GET /api/verse/cloud` needs the read session.
+**Over HTTP** (the Phantom server). `GET /api/verse/cloud` needs the read session.
 POST routes need the mutation token, a JSON content type and a bounded body:
 
 | Route | What it does |
@@ -366,7 +368,7 @@ POST routes need the mutation token, a JSON content type and a bounded body:
 | `POST /api/verse/cloud/budget` | Change any subset of the budget. |
 | `POST /api/verse/cloud/refresh` | Refresh task states from GitHub. |
 | `POST /api/verse/cloud/improve` | Launch up to `count` backlog items. |
-| `POST /api/verse/cloud/tasks/<id>/dismiss` | Mark a task `closed` ("Dismissed in Verse."). Does not touch GitHub. |
+| `POST /api/verse/cloud/tasks/<id>/dismiss` | Mark a task `closed` ("Dismissed in Phantom."). Does not touch GitHub. |
 
 Responses carry no absolute paths and no secrets.
 
@@ -381,7 +383,7 @@ Devin is the second lane with this shape. Its setup, budget and limits are in
 |---|---|---|
 | Runs on | Claude Code cloud sessions, your Claude credits | Devin sessions, your Devin ACUs |
 | Started from | Command's Cloud card, Run in cloud, `ashlr cloud launch`, self-improvement | Run in Devin, `ashlr devin launch`, a Devin (cloud) chat |
-| Started by Verse on its own | Yes, self-improvement under a daily cap | Only under a grant that names Devin, with `ashlr devin fleet on`: the fleet launcher (default 1 at a time, 3 a day), the Leader's `devin.launch`, and automations on the `devin` lane |
+| Started by Phantom on its own | Yes, self-improvement under a daily cap | Only under a grant that names Devin, with `ashlr devin fleet on`: the fleet launcher (default 1 at a time, 3 a day), the Leader's `devin.launch`, and automations on the `devin` lane |
 | Branch and report | `ashlr-cloud/<taskId>`, `ashlr-cloud-report` | `ashlr-devin/<taskId>`, `ashlr-devin-report` |
 | Budget | Dollars, estimated per session | ACUs from Devin, with a per-session hard cap; dollars are an estimate |
 | Needs you | Clean/Held verdict, Land, Close, Update branch, Land all clean, Evidence | The same |
@@ -395,7 +397,7 @@ head-pinned routes as the cloud lane's, under `/api/verse/devin/tasks/<id>/`
 waiting session), `GET /api/verse/devin/tasks/<id>/timeline` for Evidence, and
 `GET /api/verse/devin/previews` for the verdicts. Close, on both lanes, takes
 an optional one-line reason (up to 200 characters) that the task records as
-"Closed in Verse: <reason>" and the GitHub close comment includes. PRs that a
+"Closed in Phantom: <reason>" and the GitHub close comment includes. PRs that a
 Devin (CLI) chat opened are listed with Dismiss only
 (`POST /api/verse/devin/cli-prs/<chat>/<n>/dismiss`).
 
@@ -418,10 +420,10 @@ A failed launch records one of these codes and a plain sentence.
 |---|---|---|
 | `seat-unavailable` | The `claude-a` launcher is missing or is not a native profile. | Prepare the seat (`ashlr resources profile prepare --provider claude`) and sign it in. |
 | `auth` | The CLI said cloud sessions need a claude.ai account ("requires authentication with a Claude.ai account"). | Sign the `claude-a` seat in with its claude.ai login, not an API key. |
-| `not-enabled` | Cloud sessions are not enabled for the account. | Enable them on claude.ai; Verse cannot. |
+| `not-enabled` | Cloud sessions are not enabled for the account. | Enable them on claude.ai; Phantom cannot. |
 | `rate-limited` | The provider refused: rate limit, usage limit or out of credits. | Check the balance on claude.ai and correct the budget. |
 | `no-remote` | No GitHub origin, not a git repository, or the branch is not pushed. | Push the base branch; check the repo name. |
-| `checkout-failed` | Verse could not prepare its checkout. | Check your git credentials for that repository. |
+| `checkout-failed` | Phantom could not prepare its checkout. | Check your git credentials for that repository. |
 | `budget` | A budget gate refused before anything launched. | Read the gate's sentence; raise the limit or wait for tomorrow. |
 | `timeout` | No session appeared within 90 seconds. | Retry; if it repeats, run `claude --cloud` by hand from the checkout to see why. |
 | `unparsed` | The CLI exited without printing a recognisable session. | Same as `timeout`. |
@@ -432,7 +434,7 @@ A failed launch records one of these codes and a plain sentence.
 ## Where things are stored
 
 Everything lives under `~/.ashlr/cloud/` (the same Ashlr home the rest of the
-hub uses). Directories are `0700` and files `0600`. Files are written
+Phantom uses). Directories are `0700` and files `0600`. Files are written
 atomically and opened without following symlinks.
 
 ```text
@@ -447,11 +449,11 @@ atomically and opened without following symlinks.
 
 ## Turning it off
 
-- **Stop Verse launching on its own.** Switch self-improvement off: the toggle
+- **Stop Phantom launching on its own.** Switch self-improvement off: the toggle
   on the Cloud card, **Settings ▸ Usage**, or
   `ashlr cloud budget --self-improve off`. Tracking continues; nothing launches
   unless you ask.
-- **Stop the scheduler entirely.** Start the Verse server with
+- **Stop the scheduler entirely.** Start the Phantom server with
   `ASHLR_CLOUD_AUTO=0` in its environment. Neither the 10-minute refresh nor
   the hourly self-improvement runs. Manual launches and **Refresh** still work.
 - **Nothing launches without the seat.** With no `claude-a` native profile the
@@ -465,7 +467,7 @@ there, and close their PRs on GitHub.
 ## Limits
 
 - Spend is an estimate. Only claude.ai knows the balance.
-- Verse cannot read a session back, so it knows what a task did only from its
+- Phantom cannot read a session back, so it knows what a task did only from its
   PR and report block. A session that ignores the contract shows as `running`
   and then `expired`. Its link still works.
 - The lane launches only through the `claude-a` seat. Other seats cannot start

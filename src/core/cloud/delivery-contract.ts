@@ -29,7 +29,7 @@ const STATUSES: readonly CloudTaskReport['status'][] = ['done', 'partial', 'bloc
  * `${CLOUD_PR_TITLE_PREFIX} <title>`; the PR body ends with a fenced
  * `${CLOUD_REPORT_FENCE}` JSON block matching CloudTaskReport. If nothing
  * needs changing, still push an empty commit on the branch and open the PR
- * with status "no-change" so Verse sees completion.
+ * with status "no-change" so Phantom sees completion.
  *
  * `knowledge` (3.15) is the approved-lessons block for this task; it sits
  * between the task text and the contract. Empty ⇒ the prompt is unchanged.
@@ -52,7 +52,7 @@ export function buildCloudPrompt(task: CloudTaskV1, knowledge = '', playbook = '
     ...(knowledge.trim() ? ['', knowledge.trim()] : []),
     '',
     '---',
-    `DELIVERY CONTRACT (Ashlr Verse cloud task ${task.id}) — follow it exactly; Verse only sees what arrives on GitHub.`,
+    `DELIVERY CONTRACT (Phantom cloud task ${task.id}) — follow it exactly; Phantom only sees what arrives on GitHub.`,
     '',
     `1. Create branch \`${task.branch}\` from \`${task.baseBranch}\` and do all work on it.`,
     `2. Never push to any other branch. Never push to \`${task.baseBranch}\`, master or main. Never merge anything, and never enable auto-merge.`,
@@ -71,7 +71,7 @@ export function buildCloudPrompt(task: CloudTaskV1, knowledge = '', playbook = '
     example,
     '```',
     '',
-    `7. If nothing needs changing, still push an empty commit on \`${task.branch}\` (git commit --allow-empty) and open the draft pull request with status "no-change", so Verse sees the task finish.`,
+    `7. If nothing needs changing, still push an empty commit on \`${task.branch}\` (git commit --allow-empty) and open the draft pull request with status "no-change", so Phantom sees the task finish.`,
     '8. If you are blocked, push what you have and open the draft pull request with status "blocked" and the reason in the summary.',
   ].join('\n');
 }

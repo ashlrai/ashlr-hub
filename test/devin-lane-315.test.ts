@@ -927,6 +927,7 @@ describe('delivery contract and secret hygiene', () => {
   it('the prompt names the branch, the base, the report fence and forbids merging and secrets', () => {
     const t = task();
     const prompt = buildDevinPrompt(t);
+    expect(prompt).toContain('DELIVERY CONTRACT (Phantom Devin task');
     expect(prompt).toContain(`\`${t.branch}\``);
     expect(prompt).toContain('```ashlr-devin-report');
     expect(prompt).toMatch(/Never merge anything/);

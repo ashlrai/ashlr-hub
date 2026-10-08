@@ -26,7 +26,7 @@ export function buildDevinChatPrompt(
     task.prompt.trim(),
     '',
     '---',
-    `(Ashlr Verse chat — Devin session ${task.id}. The operator is chatting with you from Verse; reply in plain markdown.)`,
+    `(Phantom chat — Devin session ${task.id}. The operator is chatting with you from Phantom; reply in plain markdown.)`,
     '',
   ];
   const playbook = opts.playbook?.trim() ?? '';

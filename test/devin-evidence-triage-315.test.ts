@@ -166,13 +166,13 @@ describe('Devin PR previews (Needs-you parity)', () => {
 });
 
 describe('POST /api/verse/devin/tasks/<id>/close with a reason', () => {
-  it('records `Closed in Verse: <reason>` on the Devin task and puts the reason in the GitHub comment', async () => {
+  it('records `Closed in Phantom: <reason>` on the Devin task and puts the reason in the GitHub comment', async () => {
     const { status, body } = await post<{ ok: boolean; task: DevinTaskV1 }>(`/api/verse/devin/tasks/${ID}/close`, { headSha: HEAD, reason: 'Wrong file:\nhelpers go in src/lib' });
     expect(status).toBe(200);
-    expect(body.task.stateReason).toBe('Closed in Verse: Wrong file: helpers go in src/lib');
-    expect(readDevinTask(ID)).toMatchObject({ state: 'closed', stateReason: 'Closed in Verse: Wrong file: helpers go in src/lib' });
+    expect(body.task.stateReason).toBe('Closed in Phantom: Wrong file: helpers go in src/lib');
+    expect(readDevinTask(ID)).toMatchObject({ state: 'closed', stateReason: 'Closed in Phantom: Wrong file: helpers go in src/lib' });
     expect(gh.calls.filter((c) => c[1] === 'close')).toEqual([
-      ['pr', 'close', '9', '--repo', REPO, '--comment', 'Closed from Ashlr Verse (Needs you) without landing. Reason: Wrong file: helpers go in src/lib'],
+      ['pr', 'close', '9', '--repo', REPO, '--comment', 'Closed from Phantom (Needs you) without landing. Reason: Wrong file: helpers go in src/lib'],
     ]);
   });
 
@@ -186,7 +186,7 @@ describe('POST /api/verse/devin/tasks/<id>/close with a reason', () => {
     expect(gh.calls).toEqual([]);
     const plain = await post<{ task: DevinTaskV1 }>(`/api/verse/devin/tasks/${ID}/close`, { headSha: HEAD });
     expect(plain.status).toBe(200);
-    expect(plain.body.task.stateReason).toBe('Closed in Verse without landing.');
+    expect(plain.body.task.stateReason).toBe('Closed in Phantom without landing.');
   });
 });
 
@@ -224,7 +224,7 @@ describe('buildDevinTimeline', () => {
 
     const worker = stepOf(tl.steps, 'worker');
     expect(worker).toMatchObject({ title: 'Devin session · exit (finished)', source: 'Devin API (session status)', verified: true, at: '2026-09-27T05:00:00.000Z' });
-    expect(worker.detail).toContain('2 messages sent from Verse.');
+    expect(worker.detail).toContain('2 messages sent from Phantom.');
     expect(worker.detail).toContain('Model: unknown');
     // 3.15: the playbook version the prompt carried, only when there was one.
     expect(worker.detail).not.toContain('Playbook:');
@@ -245,16 +245,16 @@ describe('buildDevinTimeline', () => {
   it('a PR without the report block names the Devin fence; merge / closed words say Devin', () => {
     const noReport = buildDevinTimeline(sources(task({ report: null })), 2, NOW);
     expect(stepOf(noReport.steps, 'report').detail).toBe('The pull request carries no ashlr-devin-report block.');
-    const closed = buildDevinTimeline(sources(task({ state: 'closed', stateReason: 'Closed in Verse: wrong file', pr: { ...task().pr!, state: 'closed' } })), 2, NOW);
-    expect(stepOf(closed.steps, 'merge')).toMatchObject({ title: 'Closed without merging', detail: 'Closed in Verse: wrong file', source: 'Devin task record' });
+    const closed = buildDevinTimeline(sources(task({ state: 'closed', stateReason: 'Closed in Phantom: wrong file', pr: { ...task().pr!, state: 'closed' } })), 2, NOW);
+    expect(stepOf(closed.steps, 'merge')).toMatchObject({ title: 'Closed without merging', detail: 'Closed in Phantom: wrong file', source: 'Devin task record' });
   });
 
   it('messages: counted, zero, not recorded, or unreadable — never invented', () => {
-    expect(devinMessagesLine(task({ messagesSent: 1 } as Partial<DevinTaskV1>))).toBe('1 message sent from Verse.');
-    expect(devinMessagesLine(task({ messagesSent: 0 } as Partial<DevinTaskV1>))).toBe('No messages sent from Verse.');
-    expect(devinMessagesLine(task())).toBe('No messages recorded as sent from Verse.');
-    expect(devinMessagesLine(task({ messagesSent: -1 } as Partial<DevinTaskV1>))).toBe('Messages sent from Verse: unknown.');
-    expect(devinMessagesLine(task({ messagesSent: 'lots' } as unknown as Partial<DevinTaskV1>))).toBe('Messages sent from Verse: unknown.');
+    expect(devinMessagesLine(task({ messagesSent: 1 } as Partial<DevinTaskV1>))).toBe('1 message sent from Phantom.');
+    expect(devinMessagesLine(task({ messagesSent: 0 } as Partial<DevinTaskV1>))).toBe('No messages sent from Phantom.');
+    expect(devinMessagesLine(task())).toBe('No messages recorded as sent from Phantom.');
+    expect(devinMessagesLine(task({ messagesSent: -1 } as Partial<DevinTaskV1>))).toBe('Messages sent from Phantom: unknown.');
+    expect(devinMessagesLine(task({ messagesSent: 'lots' } as unknown as Partial<DevinTaskV1>))).toBe('Messages sent from Phantom: unknown.');
   });
 
   it('ACUs not reported: the cap is named and the budget’s fail-closed rule explained; no $/ACU means no dollar figure', () => {

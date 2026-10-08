@@ -76,7 +76,7 @@ insights, lessons, its own hit-rate) and writes **memos**: the bottleneck, one
 move with an expected result and a date, goals, standards and questions for
 you. Since 3.14 it is also something you talk to.
 
-There is **one Leader and one conversation**. Verse's Mind surface (⌘4),
+There is **one Leader and one conversation**. Phantom's Mind surface (⌘4),
 Telegram and the `ashlr leader` CLI all read and write the same thread. The
 legacy "Elon mode" dialogue and the Director are retired into it; free text from
 Telegram reaches the real Leader.
@@ -94,7 +94,7 @@ conversation. Directives steer its judgement; they never widen the grant. See
   0600, one scrubbed message per line). Above 1 MiB it is archived to
   `thread.1.jsonl`, keeping the newest 1,000 lines. Secrets, home paths and
   emails are scrubbed from your text and from the Leader's.
-- **Channels:** Verse, Telegram, CLI and System, shown as a badge on every
+- **Channels:** Phantom, Telegram, CLI and System, shown as a badge on every
   message.
 - **Replies** go through the Leader's own seat routing and budget, with no
   tools: Grok first, then local models (see [Reliability](#reliability)).
@@ -137,7 +137,7 @@ ashlr leader directives add "ship binshield's retry fix first" --kind priority
 ashlr leader directives retire <directiveId>
 ```
 
-In Verse, the Directives strip at the top of Mind shows each as a chip: ×
+In Phantom, the Directives strip at the top of Mind shows each as a chip: ×
 retires it, **+ Add directive** adds one, with a live counter against the
 300-character limit. ⌘K "Add Leader directive…" opens the same box. On
 Telegram, `/directives` lists them.
@@ -187,9 +187,11 @@ Questions without structured choices keep their existing answer box.
 
 ---
 
-## In Verse: Mind (⌘4)
+<a id="in-verse-mind-4"></a>
 
-Mind opens on the conversation: "One thread · Verse, Telegram, CLI".
+## In Phantom: Mind (⌘4)
+
+Mind opens on the conversation: "One thread · Phantom, Telegram, CLI".
 
 - The Directives strip, then the thread: messages with channel badges, memo
   cards with the class chip, the veto countdown and **Approve** / **Veto** (a
@@ -220,7 +222,7 @@ Configuration: `comms.enabled: true`, `comms.channel: "telegram"`,
 `comms.telegram.botToken` (or `TELEGRAM_BOT_TOKEN` in the environment) and
 `comms.telegram.chatId`. Messages from any other chat are dropped. The poller
 runs as the launchd job `ai.ashlr.comms-poll` every 3 minutes (see the
-[Comms channel](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md#comms-channel) in the Hub reference for the config
+[Comms channel](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md#comms-channel) in the Phantom reference for the config
 example).
 
 **Talking.** Send plain text and it joins the thread; the Leader's reply comes
@@ -325,7 +327,7 @@ action, with the same dry-run rule, veto windows and ledger:
 Every paid lane still applies its own budget gate at launch.
 
 **Self-improvement.** Once a day, from 09:00 local time, the Leader ranks
-Ashlr Verse improvements from recurring retro causes, its own failures,
+Phantom improvements from recurring retro causes, its own failures,
 Needs-you friction, usage and the open gates in
 `docs/VERSE-COMPETITIVE-ACCEPTANCE.md`, and routes each pick to the cheapest
 capable lane: no fixed daily launch ceiling, a 7-day cooldown per idea, no
@@ -390,4 +392,4 @@ the daemon and the comms poller from running the same slot twice.
 `healthy` (the first seat wrote the memo), `degraded` (a fallback did, a retry
 is pending, or the last memo is over 36 hours old), `down` (no seat, or the
 retries are spent) or `unknown` (never run), with the seats tried and when the
-next run is due. Verse does not show the health state yet.
+next run is due. Phantom does not show the health state yet.

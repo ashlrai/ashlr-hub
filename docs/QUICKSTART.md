@@ -7,8 +7,9 @@ The Universe experiment kernel is a separate, bounded source-checkout path below
 Installing Phantom, enrolling a repo, starting a resident fleet and publishing
 its work are distinct steps.
 
-The CLI remains `ashlr`, the package remains `@ashlr/hub`, and local routes remain
-`/verse/`. The compatible macOS installation is still `Ashlr.app`. See
+The primary CLI is `phm`; `ashlr` remains compatible. The package remains
+`@ashlr/hub`, local routes remain `/verse/`, and the published macOS app is
+`Phantom.app`. See
 [the product naming guide](PHANTOM-BRAND.md).
 
 <a id="open-verse"></a>
@@ -17,26 +18,25 @@ The CLI remains `ashlr`, the package remains `@ashlr/hub`, and local routes rema
 
 ### CLI on macOS, Linux or Windows
 
-Install Node.js 22.15+ and Git, then install Phantom 3.24.3 from its versioned
-GitHub release after its artifacts are published:
+Install Node.js 22.15+ and Git, then install published Phantom 3.25.2:
 
 ```sh
-npm install -g https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.3/ashlr-hub-3.24.3.tgz
-ashlr --version   # should print 3.24.3
-ashlr verse
+npm install -g @ashlr/hub@3.25.2
+phm --version   # should print 3.25.2
+phm verse
 ```
 
 Phantom opens at `http://127.0.0.1:7777/verse/` and binds to loopback. The CLI
 prints a read token for the browser and asks for a separate mutation token
 before your first chat or other change. Keep both tokens private. Confirm
-`ashlr --version` reports `3.24.3`; the
-[versioned GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.24.3) is the
-source for versioned installers. Check its artifacts before installing; the unversioned npm package may be an older release.
+`phm --version` reports `3.25.2`; the
+[versioned GitHub release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.2) is the
+source for versioned installers. Use the explicit package version above and inspect the selected release artifacts before installing.
 
 ### Desktop app on Apple silicon Mac
 
-Download the [v3.24.3 macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.24.3/Ashlr_3.24.3_aarch64_locally-signed.dmg)
-after publication from the [versioned release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.24.3).
+Download the [v3.25.2 Phantom macOS arm64 DMG](https://github.com/ashlrai/ashlr-hub/releases/download/v3.25.2/Phantom_3.25.2_aarch64.dmg)
+from the published [versioned release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.25.2).
 It includes the CLI and the same console. This DMG is locally signed, not
 Apple Developer ID notarized; macOS may require **Open Anyway** on first launch.
 For a source build and local signing, follow [Releasing locally](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING-LOCALLY.md).
@@ -83,7 +83,7 @@ Several available seats can receive the same task, each in its own workspace.
 There is no preset six-seat fan-out ceiling. Workspace retention defaults to
 25; `ASHLR_VERSE_AGENT_CAP=none` disables retention-driven automatic archiving,
 or use a positive safe-integer count. Capacity and provider quotas still govern
-execution. This environment setting applies when the Hub process starts and
+execution. This environment setting applies when the Phantom process starts and
 does not widen fleet authority.
 
 The optional phone gateway is a separate, Access-protected and Mac-approved
@@ -164,11 +164,13 @@ an explicit private runtime binding, fresh observations and resource limits
 before dispatch. The fleet map does not create accounts or evidence. Follow the
 commissioning guide above before authorizing generation.
 
-## General Hub and legacy fleet setup
+<a id="general-hub-and-legacy-fleet-setup"></a>
+
+## General Phantom and legacy fleet setup
 
 `ashlr init`, `ashlr serve`, `ashlr enroll` and `ashlr daemon` remain compatibility
 surfaces beneath the workbench. For their command and safety contracts, use the
-[Hub reference](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md). The current first-run console is
+[Phantom reference](https://github.com/ashlrai/ashlr-hub/blob/master/docs/HUB-REFERENCE.md). The current first-run console is
 `ashlr verse` at `/verse/`; older `/` and `/next/` dashboard guidance should not
 be used as a Phantom onboarding path.
 
@@ -186,4 +188,4 @@ verification. The [autonomy setup guide](https://github.com/ashlrai/ashlr-hub/bl
 starting, stopping and scope. The [phone guide](REMOTE-PHONE.md) covers the
 separate protected gateway. Neither path makes the main loopback server public.
 
-Workspace retention does not reserve infinite hardware. Creation refuses an exhausted dedicated-port range before archiving or creating a workspace; restore refuses an occupied original range. Create and restore admissions serialize across repositories in the owning Hub process. Separate Hub processes do not share that reservation lock. A repository needing no dedicated ports may configure `ports: 0` in `.ashlr/verse/workspace.json`.
+Workspace retention does not reserve infinite hardware. Creation refuses an exhausted dedicated-port range before archiving or creating a workspace; restore refuses an occupied original range. Create and restore admissions serialize across repositories in the owning Phantom process. Separate Phantom processes do not share that reservation lock. A repository needing no dedicated ports may configure `ports: 0` in `.ashlr/verse/workspace.json`.

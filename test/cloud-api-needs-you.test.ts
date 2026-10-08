@@ -103,7 +103,7 @@ describe('cloudNeedsYouItems — PR ready for review', () => {
       kind: 'done',
       label: 'Dismiss',
       request: { method: 'POST', path: `/api/verse/cloud/tasks/${t.id}/dismiss`, body: {} },
-      confirm: { title: 'Stop tracking this cloud task?', body: 'Verse marks it closed. The pull request on GitHub is not touched.', confirmLabel: 'Dismiss' },
+      confirm: { title: 'Stop tracking this cloud task?', body: 'Phantom marks it closed. The pull request on GitHub is not touched.', confirmLabel: 'Dismiss' },
       destructive: false,
     }]);
   });

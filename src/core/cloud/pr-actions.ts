@@ -99,23 +99,23 @@ const CLOUD_STORE: CloudDeliveryStore<CloudTaskV1> = { read: readCloudTask, writ
 
 export const HEAD_SHA_PATTERN = /^[0-9a-f]{40}$/;
 /** The comment `close` leaves on the PR. */
-export const CLOUD_CLOSE_COMMENT = 'Closed from Ashlr Verse (Needs you) without landing.';
-export const CLOUD_LANDED_REASON = (n: number): string => `Landed from Verse (#${n}).`;
-export const CLOUD_CLOSED_REASON = 'Closed in Verse without landing.';
+export const CLOUD_CLOSE_COMMENT = 'Closed from Phantom (Needs you) without landing.';
+export const CLOUD_LANDED_REASON = (n: number): string => `Landed from Phantom (#${n}).`;
+export const CLOUD_CLOSED_REASON = 'Closed in Phantom without landing.';
 
 /**
  * 3.15 — Mason's own words on a close. Without them every Verse close was
  * recorded as the generic sentence above, which the retro sweep
  * (learn/retro/extract.ts GENERIC_CLOSE) rightly treats as "no lesson". With
- * them the stateReason is `Closed in Verse: <reason>` — deliberately NOT
+ * them the stateReason is `Closed in Phantom: <reason>` — deliberately NOT
  * matched by GENERIC_CLOSE, so the retro is `closed:by-mason` with the reason
  * as its lesson — and the GitHub comment carries the same reason.
  */
 export const CLOUD_CLOSE_REASON_MAX = 200;
-export const CLOUD_CLOSED_WITH_REASON_PREFIX = 'Closed in Verse: ';
+export const CLOUD_CLOSED_WITH_REASON_PREFIX = 'Closed in Phantom: ';
 export const CLOUD_CLOSED_WITH_REASON = (reason: string): string => `${CLOUD_CLOSED_WITH_REASON_PREFIX}${reason}`;
 export const CLOUD_CLOSE_COMMENT_WITH_REASON = (reason: string): string =>
-  `Closed from Ashlr Verse (Needs you) without landing. Reason: ${reason}`;
+  `Closed from Phantom (Needs you) without landing. Reason: ${reason}`;
 
 /**
  * A close reason, normalised: one line (control and line-separator characters
@@ -215,7 +215,7 @@ function actionablePr(task: CloudDeliveryTask): { number: number; url: string } 
   if (task.state !== 'pr-open') return 'This cloud task has no open pull request.';
   // 3.13: the standing-pass intake closed this PR in favour of the fleet's App PR.
   if (task.supersededBy) return `This pull request was superseded by fleet PR #${task.supersededBy.number}; it lands through the standing gates.`;
-  if (!task.pr) return "Verse can't verify this pull request right now. Refresh and try again.";
+  if (!task.pr) return "Phantom can't verify this pull request right now. Refresh and try again.";
   const pin = task.deliveryPin ?? { number: task.pr.number, url: task.pr.url };
   if (pin.number !== task.pr.number || pin.url.toLowerCase() !== task.pr.url.toLowerCase()) {
     return "This task's pull request changed identity; review it on GitHub.";
@@ -427,7 +427,7 @@ async function withTask<T extends CloudDeliveryTask>(
     const read = await readCloudPrGithub(task, gh);
     if (!read.ok) return read;
     if (read.github.state !== 'OPEN') {
-      return { ok: false, status: 409, error: `The pull request is ${read.github.state === 'MERGED' ? 'already merged' : 'closed'}. Refresh to update Verse.` };
+      return { ok: false, status: 409, error: `The pull request is ${read.github.state === 'MERGED' ? 'already merged' : 'closed'}. Refresh to update Phantom.` };
     }
     if (read.github.headSha !== headSha) {
       return { ok: false, status: 409, error: `The branch moved since you looked (now ${read.github.headSha.slice(0, 7)}). Review it again.` };

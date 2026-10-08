@@ -68,10 +68,10 @@ type Step = TimelineStep;
  */
 export function devinMessagesLine(task: DevinTaskV1): string {
   const raw = (task as DevinTaskV1 & { messagesSent?: unknown }).messagesSent;
-  if (raw === undefined || raw === null) return 'No messages recorded as sent from Verse.';
-  if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < 0) return 'Messages sent from Verse: unknown.';
-  if (raw === 0) return 'No messages sent from Verse.';
-  return `${raw} ${raw === 1 ? 'message' : 'messages'} sent from Verse.`;
+  if (raw === undefined || raw === null) return 'No messages recorded as sent from Phantom.';
+  if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < 0) return 'Messages sent from Phantom: unknown.';
+  if (raw === 0) return 'No messages sent from Phantom.';
+  return `${raw} ${raw === 1 ? 'message' : 'messages'} sent from Phantom.`;
 }
 
 function launched(task: DevinTaskV1): boolean {

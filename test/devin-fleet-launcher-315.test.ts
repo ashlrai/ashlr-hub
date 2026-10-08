@@ -270,7 +270,7 @@ describe('runDevinFleetTick', () => {
     expect(creates()).toHaveLength(1);
     const body = creates()[0]!.body as Record<string, unknown>;
     expect(body['max_acu_limit']).toBe(10);
-    expect(String(body['prompt'])).toContain('chosen by the Ashlr fleet from its backlog (item leader-memo-1-0');
+    expect(String(body['prompt'])).toContain('chosen by the Phantom fleet from its backlog (item leader-memo-1-0');
     const [launched] = listDevinTasks();
     expect(launched).toMatchObject({ origin: 'fleet', requestedBy: 'fleet', backlogItemId: 'leader-memo-1-0', state: 'running' });
     expect(rows.map((r) => r.data.topic)).toEqual(['devin:fleet-launch', 'devin:fleet-launched']);

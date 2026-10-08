@@ -398,7 +398,7 @@ export function retroFromExecutionFailure(input: ExecutionFeedbackCase, createdA
 }
 
 /** Generic close reasons that say nothing about the work (no lesson in them). */
-const GENERIC_CLOSE = /^(closed (in verse|on github)( without landing)?\.?|closed from ashlr verse.*|dismissed in verse\.?|superseded.*)$/i;
+const GENERIC_CLOSE = /^(closed (in (verse|phantom)|on github)( without landing)?\.?|closed from (ashlr verse|phantom).*|dismissed in (verse|phantom)\.?|superseded.*)$/i;
 
 export function retroFromFleet(input: FleetEndInput, createdAt: string): RetroV1 {
   const asked = firstLines([input.title, input.summary].filter(Boolean).join('\n'), 400) || '(no request recorded)';
@@ -542,7 +542,7 @@ const CLOUD_FAILURES: Readonly<Record<string, { label: string; infra: boolean; a
   budget: { label: 'Cloud budget refused', infra: true, advice: 'The cloud budget refused the launch; raise it or wait for the window.' },
   timeout: { label: 'Cloud launch timed out', infra: true, advice: 'The CLI produced no session in time; retry.' },
   unparsed: { label: 'Cloud launch unreadable', infra: true, advice: 'The CLI output was not recognised; retry or update the CLI.' },
-  unknown: { label: 'Cloud launch failed', infra: true, advice: 'The launch failed for an unknown reason; check the Verse log.' },
+  unknown: { label: 'Cloud launch failed', infra: true, advice: 'The launch failed for an unknown reason; check the Phantom log.' },
 };
 
 /** Devin launch / session failure codes (devin/types.ts DevinFailureCode). Every one is setup, not the task. */
@@ -556,19 +556,19 @@ const DEVIN_FAILURES: Readonly<Record<string, { label: string; infra: boolean; a
   'invalid-request': { label: 'Devin refused the request', infra: true, advice: 'Devin refused the session request; check the repo is connected to Devin.' },
   server: { label: 'Devin API error', infra: true, advice: 'Devin answered with a server error; retry.' },
   network: { label: 'Devin unreachable', infra: true, advice: 'Devin could not be reached; retry when the network is back.' },
-  unparsed: { label: 'Devin answer unreadable', infra: true, advice: 'Devin answered in a shape Verse does not recognise; update Ashlr.' },
+  unparsed: { label: 'Devin answer unreadable', infra: true, advice: 'Devin answered in a shape Phantom does not recognise; update Phantom.' },
   'session-error': { label: 'Devin session errored', infra: true, advice: 'The Devin session ended in an error; open it in Devin to see why.' },
-  unknown: { label: 'Devin launch failed', infra: true, advice: 'The Devin launch failed for an unknown reason; check the Verse log.' },
+  unknown: { label: 'Devin launch failed', infra: true, advice: 'The Devin launch failed for an unknown reason; check the Phantom log.' },
 };
 
 /**
- * Mason's own close reason, when Verse recorded one (cloud/pr-actions.ts
- * CLOUD_CLOSED_WITH_REASON: `Closed in Verse: <reason>`). A literal here so
+ * Mason's own close reason, including historical Verse records (cloud/pr-actions.ts
+ * CLOUD_CLOSED_WITH_REASON: `Closed in Phantom: <reason>`). A literal here so
  * this module stays pure and import-light. GENERIC_CLOSE never matches it
- * (it needs "Closed in Verse" to END the sentence, optionally with
+ * (it needs the generic closure to END the sentence, optionally with
  * " without landing."), and this regex never matches the generic sentence.
  */
-const VERSE_CLOSE_REASON = /^Closed in Verse: (.+)$/s;
+const VERSE_CLOSE_REASON = /^Closed in (?:Verse|Phantom): (.+)$/s;
 
 export function retroFromCloud(input: CloudEndInput, createdAt: string): RetroV1 {
   const devin = input.lane === 'devin';

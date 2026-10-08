@@ -170,7 +170,7 @@ export function planDevinFleetLaunch(input: DevinFleetPlanInput): DevinFleetDeci
 export function devinFleetPrompt(item: CloudBacklogItem): string {
   return [
     item.prompt.trim(),
-    `This task was chosen by the Ashlr fleet from its backlog (item ${item.id}, area ${item.area}). `
+    `This task was chosen by the Phantom fleet from its backlog (item ${item.id}, area ${item.area}). `
       + 'Keep the change focused on exactly this; if the premise is wrong or it is already done, report no-change instead of forcing a diff.',
   ].join('\n\n');
 }

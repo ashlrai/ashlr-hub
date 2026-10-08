@@ -51,7 +51,7 @@ export function buildDevinPrompt(task: Pick<DevinTaskV1, 'id' | 'prompt' | 'repo
     ...(playbook.trim() ? ['', playbook.trim()] : []),
     '',
     '---',
-    `DELIVERY CONTRACT (Ashlr Verse Devin task ${task.id}) — follow it exactly; Verse only sees what arrives on GitHub.`,
+    `DELIVERY CONTRACT (Phantom Devin task ${task.id}) — follow it exactly; Phantom only sees what arrives on GitHub.`,
     '',
     `Repository: ${task.repo}. Base branch: \`${task.baseBranch}\`.`,
     `1. Create branch \`${task.branch}\` from \`${task.baseBranch}\` and do all work on it. Never use any other branch name.`,
@@ -72,7 +72,7 @@ export function buildDevinPrompt(task: Pick<DevinTaskV1, 'id' | 'prompt' | 'repo
     '```',
     '',
     '7. Also provide the same JSON object as your structured output.',
-    `8. If nothing needs changing, still push an empty commit on \`${task.branch}\` and open the pull request with status "no-change", so Verse sees the task finish.`,
+    `8. If nothing needs changing, still push an empty commit on \`${task.branch}\` and open the pull request with status "no-change", so Phantom sees the task finish.`,
     '9. If you are blocked, push what you have and open the pull request with status "blocked" and the reason in the summary.',
     '10. Never put secrets, API keys or tokens in commits, the pull request, or your messages.',
   ].join('\n');

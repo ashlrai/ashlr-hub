@@ -1,10 +1,12 @@
 <a id="ashlr-universe"></a>
 
-# Ashlrverse operator guide
+<a id="ashlrverse-operator-guide"></a>
 
-Ashlrverse is the public product vision for a self-improving engineering fleet:
+# Phantom operator guide
+
+Phantom is the public product vision for a self-improving engineering fleet:
 turn an objective and a resource budget into a continuing search for better
-products, tools, and ways of working. Hub supplies execution, integration, and
+products, tools, and ways of working. Phantom supplies execution, integration, and
 observation. A universe supplies the objective, candidate population, experiments,
 and accumulated evidence. The [North Star](NORTH-STAR.md) describes the ambition;
 this guide documents the implemented interfaces and their operational boundaries.
@@ -21,7 +23,7 @@ enrollment, store migration or runtime activation follows from the name change.
 
 The Universe kernel runs a complete local experiment: a manifest describes candidates and a fixed evaluator; a bounded run executes operator commands or requests candidate edits from an explicitly configured local model, records observations, and selects elites within defined niches. A later run can select parents from the archive. The bundled deterministic demonstration provides a reproducible way to inspect this behavior without model credentials or a running model service.
 
-This is a development feature in Hub. Its evidence establishes local candidate generation, evaluation, selection, bounded multi-generation campaigns, foreground orchestration across campaigns, and delivery of a retained artifact to a new local Git branch. Explicit resource pools support native subscription-backed and local generation; that does not automatically enroll accounts or commission a fleet. Resident execution, multi-repository product delivery, customer feedback, and external payments are later integrations. Existing fleet activation and release behavior is documented in the [Hub architecture](ARCHITECTURE.md).
+This is a development feature in Phantom. Its evidence establishes local candidate generation, evaluation, selection, bounded multi-generation campaigns, foreground orchestration across campaigns, and delivery of a retained artifact to a new local Git branch. Explicit resource pools support native subscription-backed and local generation; that does not automatically enroll accounts or commission a fleet. Resident execution, multi-repository product delivery, customer feedback, and external payments are later integrations. Existing fleet activation and release behavior is documented in the [Phantom architecture](ARCHITECTURE.md).
 
 The command surface is `ashlr universe`. From a source checkout with dependencies installed, build locally with `npm run build`, then run:
 
@@ -48,7 +50,7 @@ const overview = readUniverseOverview({ root });
 Each `run` creates one generation. When the trial budget is smaller than the
 variant population, successive generations rotate through that population.
 
-Local execution currently requires macOS `sandbox-exec`. Linux execution awaits a verified isolation profile; Windows execution is unsupported. The general Hub console at `/next#/universe` reads the default store. Use the [scoped foreground console](#observe-one-universe-store) or CLI inspection with the same `--root` for experiments in a custom store.
+Local execution currently requires macOS `sandbox-exec`. Linux execution awaits a verified isolation profile; Windows execution is unsupported. The general Phantom console at `/next#/universe` reads the default store. Use the [scoped foreground console](#observe-one-universe-store) or CLI inspection with the same `--root` for experiments in a custom store.
 
 The local web server moves its expensive global dashboard, fleet, control,
 history, and proposal reads to one bounded background thread. Universe reads and
@@ -62,7 +64,7 @@ change the authority of the existing readers or enable fleet dispatch.
 
 ## Install a pinned local runtime
 
-Use `ashlr runtime` to install a trusted, locally built Hub package independently
+Use `ashlr runtime` to install a trusted, locally built Phantom package independently
 of its source checkout. This is an **unsigned local candidate**, not a registry
 publication or a production-qualified resident service. Obtain the archive's
 SHA256, clean Git revision and package version from your trusted build handoff;
@@ -138,7 +140,7 @@ verified current package. If neither verifies, preserve the store and inspect
 the installation evidence; no automatic repair or deletion occurs.
 
 Only Universe commands are accepted by `runtime run`. Ordinary `update`,
-general Hub commands and `serve` are not forwarded. Use `universe console` below
+general Phantom commands and `serve` are not forwarded. Use `universe console` below
 for scoped observation through the managed runtime; the general `serve` command
 still reads shared configuration and performs stream maintenance.
 The versioned package's absolute `binPath` is also returned for trusted direct
@@ -255,7 +257,7 @@ probe accounts, measure fresh quota, establish worker capacity or acquire an
 execution lease. Internal admission identities and record digests are omitted
 from the browser response. Use the CLI recovery check for its full local report.
 
-The dedicated server does not initialize the default Hub configuration, clean
+The dedicated server does not initialize the default Phantom configuration, clean
 streams, discover providers, or start the general dashboard's event channel.
 Its bounded worker reads Universe records from the startup-selected store and
 checks recorded repository-delivery references. A missing store is reported
@@ -271,7 +273,7 @@ The protected read surface consists of `/api/universe/console` (scope metadata),
 `/api/universe` (overview), `/api/universe/graph?universeId=ID` (graph),
 `/api/universe/campaign-readiness?campaignId=ID` (recorded recovery check), and
 `/api/universe/controller-status?controllerId=ID` (recorded controller evidence).
-Browser-supplied roots, unknown parameters, unrelated Hub APIs and data mutations
+Browser-supplied roots, unknown parameters, unrelated Phantom APIs and data mutations
 are rejected. Session exchange/logout use `/api/session`. The public `/health`
 route establishes listener liveness only; it does not attest store health.
 Browser requests must match the advertised loopback origin when an Origin header
@@ -745,7 +747,7 @@ hard provider-start timestamp. The UI continues to show campaign state and settl
 trial evidence; it does not report live queue position or separately measured wait
 duration. Generation duration includes waiting, not additional provider requests.
 
-From the built Hub checkout, after explicitly authorizing the selected workers
+From the built Phantom checkout, after explicitly authorizing the selected workers
 to receive the declared files and generation context:
 
 ```sh
@@ -825,7 +827,7 @@ manifest such as this, replacing `my-experiment` with that universe's ID:
 }
 ```
 
-From the built Hub checkout:
+From the built Phantom checkout:
 
 1. Register the local definition:
 
@@ -980,7 +982,7 @@ The pause prevents an unavailable local service from consuming every remaining
 generation; it does not retry, restart the model service, or refund work.
 
 Use `--root <private directory>` consistently on every campaign command when the
-universe is in a custom store. The general Hub console reads the default store;
+universe is in a custom store. The general Phantom console reads the default store;
 the dedicated `universe console --root ABS` observes its explicit store. `status`
 without an ID lists recorded campaigns, and `--json` returns one result document
 for agents. Successful command handling or campaign termination is not a claim
