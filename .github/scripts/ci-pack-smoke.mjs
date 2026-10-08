@@ -3,11 +3,12 @@
 // Same-job pack smoke only: observe the successful build before tests, then
 // refuse stale/mutated output rather than invoke prepack's second whole build.
 import assert from 'node:assert/strict';
+import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { closeSync, constants, fstatSync, lstatSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createBuildIdentity } from '../../scripts/build-identity.mjs';
 
 const REQUIRED = [
@@ -89,7 +90,15 @@ export function cleanupSnapshot(snapshotPath) {
   assert.ok(basename(parent).startsWith('ashlr-pack-build-'));
   assert.equal(realpathSync(parent), parent);
   assert.equal(basename(snapshotPath), 'snapshot.json');
-  assert.deepEqual(readdirSync(parent), ['snapshot.json']);
+  const names = readdirSync(parent).sort();
+  if (names.includes('original-pack.json')) {
+    const { record } = readPackRecord(snapshotPath, process.env.ASHLR_PACK_SMOKE_RECORD_SHA256);
+    const destination = packDirectory(parent, record.directory);
+    assert.deepEqual(directoryIdentity(privateDirectory(destination)), record.directoryIdentity, 'original pack directory changed');
+    assert.deepEqual(names, [record.directory, 'original-pack.json', 'snapshot.json'].sort());
+    assert.deepEqual(readdirSync(destination), [record.filename]);
+    readRecordedPack(join(destination, record.filename), record);
+  } else assert.deepEqual(names, ['snapshot.json']);
   regular(snapshotPath, 32 * 1024 * 1024);
   const after = lstatSync(parent);
   assert.ok(before.dev === after.dev && before.ino === after.ino && before.uid === after.uid);
@@ -130,6 +139,14 @@ export function validatePackReport({ reportText, destination, version }) {
   return path;
 }
 
+function packObserved({ root, eventSha, snapshotPath, runNpm = execFileSync }, observed, destination) {
+  const reportText = runNpm('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', destination],
+    { cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  const path = validatePackReport({ reportText, destination, version: observed.source.identity.packageVersion });
+  validateBuild({ root, eventSha, snapshotPath });
+  return path;
+}
+
 export function packBuild({ root, eventSha, snapshotPath, parent, runNpm = execFileSync }) {
   root = realpathSync(root);
   const observed = validateBuild({ root, eventSha, snapshotPath });
@@ -137,10 +154,155 @@ export function packBuild({ root, eventSha, snapshotPath, parent, runNpm = execF
   // old tarball, user-provided report path or lifecycle execution is admitted.
   const destination = mkdtempSync(join(realpathSync(parent), 'ashlr-pack-tarball-'));
   assert.ok(!destination.startsWith(`${root}${sep}`), 'pack destination must be outside source');
-  const reportText = runNpm('npm', ['pack', '--ignore-scripts', '--json', '--pack-destination', destination],
-    { cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
-  const path = validatePackReport({ reportText, destination, version: observed.source.identity.packageVersion });
-  validateBuild({ root, eventSha, snapshotPath });
+  return packObserved({ root, eventSha, snapshotPath, runNpm }, observed, destination);
+}
+
+const HASH = /^[a-f0-9]{64}$/;
+const sameFile = (a, b) => ['dev', 'ino', 'uid', 'gid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs']
+  .every((key) => a[key] === b[key]);
+const fileIdentity = (stat) => Object.fromEntries(['dev', 'ino', 'uid', 'gid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs']
+  .map((key) => [key, stat[key].toString()]));
+const directoryIdentity = (stat) => Object.fromEntries(['dev', 'ino', 'uid', 'mode']
+  .map((key) => [key, stat[key].toString()]));
+
+function privateDirectory(path) {
+  const stat = lstatSync(path, { bigint: true });
+  assert.ok(stat.isDirectory() && !stat.isSymbolicLink() && typeof process.getuid === 'function' &&
+    stat.uid === BigInt(process.getuid()) && (stat.mode & 0o7777n) === 0o700n, 'expected owned private directory');
+  assert.equal(realpathSync(path), path, 'private directory is not canonical');
+  return stat;
+}
+
+function readStable(path, limit, mode) {
+  assert.equal(realpathSync(path), path, 'file path is not canonical');
+  const before = lstatSync(path, { bigint: true });
+  assert.ok(before.isFile() && before.nlink === 1n && typeof process.getuid === 'function' &&
+    before.uid === BigInt(process.getuid()) && before.size > 0n && before.size <= BigInt(limit), 'unsafe original pack file');
+  if (mode !== undefined) assert.equal(before.mode & 0o7777n, BigInt(mode), 'private file mode differs');
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    assert.ok(sameFile(before, fstatSync(fd, { bigint: true })), 'file changed before opened');
+    const bytes = readFileSync(fd);
+    assert.equal(BigInt(bytes.length), before.size);
+    assert.ok(sameFile(before, fstatSync(fd, { bigint: true })) && sameFile(before, lstatSync(path, { bigint: true })),
+      'file changed while read');
+    return { bytes, identity: fileIdentity(before) };
+  } finally { closeSync(fd); }
+}
+
+function ownedSnapshot(snapshotPath) {
+  assert.equal(basename(snapshotPath), 'snapshot.json');
+  const parent = dirname(snapshotPath);
+  assert.ok(basename(parent).startsWith('ashlr-pack-build-'));
+  privateDirectory(parent);
+  return { parent, identity: directoryIdentity(privateDirectory(parent)), snapshot: readStable(snapshotPath, 32 * 1024 * 1024, 0o400) };
+}
+
+function packDirectory(parent, name) {
+  assert.match(name, /^ashlr-pack-tarball-[a-zA-Z0-9]{6}$/);
+  const path = join(parent, name);
+  privateDirectory(path);
+  return path;
+}
+
+function readPackRecord(snapshotPath, expectedSha256) {
+  assert.match(expectedSha256 ?? '', HASH, 'missing original pack record digest');
+  const { parent, identity, snapshot } = ownedSnapshot(snapshotPath);
+  const { bytes } = readStable(join(parent, 'original-pack.json'), 64 * 1024, 0o400);
+  assert.equal(digest(bytes), expectedSha256, 'original pack record changed');
+  const record = JSON.parse(bytes.toString('utf8'));
+  assert.deepEqual(Object.keys(record).sort(), ['directory', 'directoryIdentity', 'fileIdentity', 'filename', 'integrity', 'root',
+    'schemaVersion', 'sha256', 'size', 'snapshotDirectoryIdentity', 'snapshotSha256', 'source'].sort());
+  assert.equal(record.schemaVersion, 1);
+  assert.deepEqual(record.snapshotDirectoryIdentity, identity, 'original snapshot directory changed');
+  assert.equal(record.snapshotSha256, digest(snapshot.bytes), 'original build snapshot changed');
+  assert.match(record.sha256, HASH);
+  assert.ok(Number.isSafeInteger(record.size) && record.size > 0 && record.size <= 64 * 1024 * 1024);
+  assert.equal(record.filename, `ashlr-hub-${record.source.identity.packageVersion}.tgz`);
+  assert.equal(basename(record.filename), record.filename);
+  assert.deepEqual(readdirSync(parent).sort(), [record.directory, 'original-pack.json', 'snapshot.json'].sort());
+  return { parent, record };
+}
+
+function readRecordedPack(path, record) {
+  const captured = readStable(path, 64 * 1024 * 1024);
+  assert.deepEqual(captured.identity, record.fileIdentity, 'original tarball identity changed');
+  assert.equal(captured.bytes.length, record.size);
+  assert.equal(digest(captured.bytes), record.sha256, 'original tarball bytes changed');
+  assert.equal(`sha512-${digest(captured.bytes, 'sha512', 'base64')}`, record.integrity);
+  return captured;
+}
+
+async function validateRuntimePackage(options, observed, path, captured) {
+  const readerPath = 'core/local-runtime/archive.js';
+  assert.ok(observed.dist.some((entry) => entry.path === readerPath && entry.type === 'file'), 'compiled runtime archive reader is missing');
+  // This is the already-built producer checkout, never an attestor/candidate-package import.
+  const module = await import(pathToFileURL(join(options.root, 'dist', readerPath)).href);
+  validateBuild(options);
+  assert.equal(typeof module.readPinnedRuntimeArchive, 'function', 'compiled runtime archive reader export is missing');
+  const pins = { artifactPath: path, sha256: digest(captured.bytes),
+    revision: observed.source.identity.revision, version: observed.source.identity.packageVersion };
+  const archive = await module.readPinnedRuntimeArchive(pins);
+  assert.equal(archive.pins.sha256, pins.sha256);
+  assert.equal(archive.pins.size, captured.bytes.length);
+  assert.equal(archive.pins.revision, pins.revision);
+  assert.equal(archive.pins.version, pins.version);
+  validateBuild(options);
+  assert.deepEqual(readStable(path, 64 * 1024 * 1024), captured, 'original tarball changed during archive preflight');
+}
+
+/** One lifecycle-off original pack before expensive tests; no serialized authority proof. */
+export async function preparePack({ root, eventSha, snapshotPath, runNpm = execFileSync }) {
+  root = realpathSync(root);
+  const options = { root, eventSha, snapshotPath };
+  const observed = validateBuild(options);
+  const { parent, identity, snapshot } = ownedSnapshot(snapshotPath);
+  assert.ok(parent !== root && !parent.startsWith(`${root}${sep}`), 'pack destination must be outside source');
+  assert.deepEqual(readdirSync(parent), ['snapshot.json'], 'original pack already exists or snapshot directory changed');
+  const destination = mkdtempSync(join(parent, 'ashlr-pack-tarball-'));
+  const owned = privateDirectory(destination);
+  try {
+    const path = packObserved({ ...options, runNpm }, observed, destination);
+    const captured = readStable(path, 64 * 1024 * 1024);
+    await validateRuntimePackage(options, observed, path, captured);
+    assert.deepEqual(readStable(snapshotPath, 32 * 1024 * 1024, 0o400), snapshot, 'snapshot changed during preflight');
+    assert.deepEqual(directoryIdentity(privateDirectory(parent)), identity, 'snapshot directory changed during preflight');
+    assert.deepEqual(directoryIdentity(privateDirectory(destination)), directoryIdentity(owned), 'pack directory changed during preflight');
+    const record = { schemaVersion: 1, root, snapshotDirectoryIdentity: identity, snapshotSha256: digest(snapshot.bytes), source: observed.source,
+      directory: basename(destination), directoryIdentity: directoryIdentity(owned), filename: basename(path), size: captured.bytes.length,
+      sha256: digest(captured.bytes), integrity: `sha512-${digest(captured.bytes, 'sha512', 'base64')}`,
+      fileIdentity: captured.identity };
+    const bytes = Buffer.from(`${JSON.stringify(record)}\n`);
+    writeFileSync(join(parent, 'original-pack.json'), bytes, { flag: 'wx', mode: 0o400 });
+    return digest(bytes);
+  } catch (error) {
+    // Remove only this still-owned exact directory, never a substituted path.
+    const current = privateDirectory(destination);
+    assert.ok(current.dev === owned.dev && current.ino === owned.ino, 'failed pack directory was replaced');
+    assert.ok(readdirSync(destination).every((name) => name === `ashlr-hub-${observed.source.identity.packageVersion}.tgz`),
+      'failed pack directory contains unrelated files');
+    rmSync(destination, { recursive: true });
+    throw error;
+  }
+}
+
+/** Fresh same-job validation; never repack or substitute another archive on refusal. */
+export async function reusePack({ root, eventSha, snapshotPath, recordSha256 }) {
+  root = realpathSync(root);
+  const options = { root, eventSha, snapshotPath };
+  const observed = validateBuild(options);
+  const { parent, record } = readPackRecord(snapshotPath, recordSha256);
+  assert.ok(parent !== root && !parent.startsWith(`${root}${sep}`), 'pack destination must be outside source');
+  assert.equal(record.root, root);
+  assert.deepEqual(record.source, observed.source, 'original pack source differs');
+  const destination = packDirectory(parent, record.directory);
+  assert.deepEqual(directoryIdentity(privateDirectory(destination)), record.directoryIdentity, 'original pack directory changed');
+  assert.deepEqual(readdirSync(destination), [record.filename]);
+  const path = join(destination, record.filename);
+  const captured = readRecordedPack(path, record);
+  await validateRuntimePackage(options, observed, path, captured);
+  readPackRecord(snapshotPath, recordSha256);
+  assert.deepEqual(directoryIdentity(privateDirectory(destination)), record.directoryIdentity, 'original pack directory changed during preflight');
   return path;
 }
 
@@ -153,13 +315,16 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     let path;
     if (command === 'capture') path = captureBuild({ ...options, parent: operand });
     else if (command === 'pack') path = packBuild({ ...options, snapshotPath: operand, parent: process.env.RUNNER_TEMP });
+    else if (command === 'prepare') path = await preparePack({ ...options, snapshotPath: operand });
+    else if (command === 'reuse') path = await reusePack({ ...options, snapshotPath: operand,
+      recordSha256: process.env.ASHLR_PACK_SMOKE_RECORD_SHA256 });
     else if (command === 'verify') {
       validateBuild({ ...options, snapshotPath: operand });
       path = 'same-job build unchanged';
     } else if (command === 'cleanup') {
       cleanupSnapshot(operand);
       path = 'owned build snapshot removed';
-    } else assert.fail('expected capture, pack, verify or cleanup');
+    } else assert.fail('expected capture, prepare, reuse, pack, verify or cleanup');
     console.log(path);
   } catch (error) {
     console.error(`pack smoke refused: ${error.message}`);

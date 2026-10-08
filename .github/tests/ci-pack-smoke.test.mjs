@@ -3,11 +3,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync,
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync,
   symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { captureBuild, cleanupSnapshot, observeBuild, packBuild, validateBuild, validatePackReport } from '../scripts/ci-pack-smoke.mjs';
+import { basename, delimiter, dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL, URL } from 'node:url';
+import { gzipSync } from 'node:zlib';
+import { Header } from 'tar';
+import { captureBuild, cleanupSnapshot, observeBuild, packBuild, preparePack, reusePack, validateBuild, validatePackReport } from '../scripts/ci-pack-smoke.mjs';
 
 const hash = (bytes, algorithm, encoding = 'hex') => createHash(algorithm).update(bytes).digest(encoding);
 const VERSION = '3.24.2';
@@ -178,4 +181,231 @@ test('rejects missing, empty or multiply linked tarballs', (t) => {
   const linked = join(parent, '..', `${parent.split(/[\\/]/).at(-1)}-hardlink`);
   t.after(() => rmSync(linked, { force: true }));
   assert.throws(() => validatePackReport({ destination: parent, version: VERSION, reportText }), /singly linked/);
+});
+
+function realTar(rows) {
+  return gzipSync(Buffer.concat([...rows.flatMap(({ path, bytes = Buffer.alloc(0), mode = 0o644, type = 'File' }) => {
+    const block = Buffer.alloc(512);
+    new Header({ path, size: bytes.length, mode, uid: 0, gid: 0, mtime: new Date(0), type }).encode(block);
+    return [block, bytes, Buffer.alloc((512 - bytes.length % 512) % 512)];
+  }), Buffer.alloc(1024)]));
+}
+
+function runtimeFixture(t, behavior = '') {
+  const f = fixture(t);
+  cleanupSnapshot(f.snapshotPath);
+  const pkg = { name: '@ashlr/hub', version: VERSION, type: 'module', bin: { ashlr: 'bin/ashlr' }, files: ['bin', 'dist'] };
+  writeFileSync(join(f.root, 'package.json'), JSON.stringify(pkg));
+  mkdirSync(join(f.root, 'bin'));
+  writeFileSync(join(f.root, 'bin/ashlr'), '#!/usr/bin/env node\nthrow new Error("Inert archive launcher must never execute");\n', { mode: 0o755 });
+  f.git('add', '.');
+  f.git('-c', 'user.name=Pack fixture', '-c', 'user.email=pack@example.invalid', '-c', 'commit.gpgsign=false',
+    'commit', '--quiet', '-m', 'runtime fixture');
+  const eventSha = f.git('rev-parse', 'HEAD');
+  const identity = { ...f.identity, revision: eventSha };
+  f.write('build-identity.json', JSON.stringify(identity));
+  const reader = fileURLToPath(new URL('../../dist/core/local-runtime/archive.js', import.meta.url));
+  assert.ok(existsSync(reader), 'build the actual core source before the pack-smoke module');
+  const trigger = join(f.parent, 'trigger');
+  const calls = join(f.parent, 'reader-calls');
+  f.write('core/local-runtime/archive.js', `import {readPinnedRuntimeArchive as read} from ${JSON.stringify(pathToFileURL(reader).href)};
+import {appendFileSync,existsSync,writeFileSync} from 'node:fs';
+export async function readPinnedRuntimeArchive(pins) {
+  const result = await read(pins);
+  appendFileSync(${JSON.stringify(calls)}, 'read\\n');
+  if (existsSync(${JSON.stringify(trigger)})) {
+    ${behavior === 'source' ? `writeFileSync(${JSON.stringify(join(f.root, 'dist/api/core.js'))}, 'changed while preflight awaited');` : ''}
+    ${behavior === 'archive' ? "appendFileSync(pins.artifactPath, 'changed while preflight awaited');" : ''}
+  }
+  return result;
+}
+`);
+  f.write('core/universe/index.js', 'export const inert = true;\n');
+  const snapshotPath = captureBuild({ ...f, eventSha });
+  const recordPath = join(dirname(snapshotPath), 'original-pack.json');
+  const rows = [
+    { path: 'package/package.json', bytes: Buffer.from(JSON.stringify(pkg)) },
+    { path: 'package/dist/build-identity.json', bytes: Buffer.from(JSON.stringify(identity)) },
+    { path: 'package/bin/ashlr', bytes: readFileSync(join(f.root, 'bin/ashlr')), mode: 0o755 },
+    { path: 'package/dist/cli/index.js', bytes: Buffer.from('export const inert = true;\n') },
+    { path: 'package/dist/core/universe/index.js', bytes: Buffer.from('export const inert = true;\n') },
+  ];
+  return { ...f, eventSha, identity, snapshotPath, recordPath, rows, calls, trigger };
+}
+
+function realReport(destination, rows) {
+  const bytes = realTar(rows);
+  const filename = `ashlr-hub-${VERSION}.tgz`;
+  writeFileSync(join(destination, filename), bytes);
+  return JSON.stringify([{ name: '@ashlr/hub', version: VERSION, filename, size: bytes.length,
+    shasum: hash(bytes, 'sha1'), integrity: `sha512-${hash(bytes, 'sha512', 'base64')}` }]);
+}
+
+async function prepared(t, behavior) {
+  const f = runtimeFixture(t, behavior);
+  let npmCalls = 0;
+  const recordSha256 = await preparePack({ ...f, runNpm: (_bin, args) => {
+    npmCalls++; return realReport(args[4], f.rows);
+  } });
+  const record = JSON.parse(readFileSync(f.recordPath));
+  const path = join(dirname(f.snapshotPath), record.directory, record.filename);
+  return { ...f, recordSha256, record, path, npmCalls };
+}
+
+test('early pack refuses an owned snapshot inside source before invoking npm', async (t) => {
+  const f = runtimeFixture(t);
+  const destination = join(f.root, '.git', basename(dirname(f.snapshotPath)));
+  renameSync(dirname(f.snapshotPath), destination);
+  let npmCalls = 0;
+  await assert.rejects(preparePack({ ...f, snapshotPath: join(destination, 'snapshot.json'),
+    runNpm: () => { npmCalls++; throw new Error('must not pack inside source'); } }), /outside source/);
+  assert.equal(npmCalls, 0);
+  assert.deepEqual(readdirSync(destination), ['snapshot.json']);
+});
+
+test('early original npm pack uses the actual compiled reader and late reuse never repacks', async (t) => {
+  const f = runtimeFixture(t); let npmCalls = 0;
+  const userConfig = join(f.parent, 'empty-user-npmrc'); writeFileSync(userConfig, '');
+  const globalConfig = join(f.parent, 'empty-global-npmrc'); writeFileSync(globalConfig, '');
+  const recordSha256 = await preparePack({ ...f, runNpm: (bin, args, options) => {
+    npmCalls++;
+    // Real local npm pack with lifecycle/network off and empty task-owned config.
+    return execFileSync(bin, args, { ...options, env: { PATH: `${dirname(process.execPath)}${delimiter}${process.env.PATH}`,
+      HOME: join(f.parent, 'home'), USERPROFILE: join(f.parent, 'home'), LANG: 'C', LC_ALL: 'C',
+      NPM_CONFIG_USERCONFIG: userConfig, NPM_CONFIG_GLOBALCONFIG: globalConfig,
+      NPM_CONFIG_CACHE: join(f.parent, 'npm-cache'), NPM_CONFIG_OFFLINE: 'true' } });
+  } });
+  const path = await reusePack({ ...f, recordSha256 }); const before = readFileSync(path);
+  assert.equal(await reusePack({ ...f, recordSha256 }), path);
+  assert.deepEqual(readFileSync(path), before);
+  assert.equal(npmCalls, 1);
+  assert.equal(readFileSync(f.calls, 'utf8').split('\n').filter(Boolean).length, 3);
+  assert.equal(lstatSync(f.recordPath).mode & 0o777, 0o400);
+  await assert.rejects(preparePack({ ...f, runNpm: () => { npmCalls++; throw new Error('must never pack twice'); } }), /already exists/);
+  assert.equal(npmCalls, 1);
+  const prior = process.env.ASHLR_PACK_SMOKE_RECORD_SHA256;
+  process.env.ASHLR_PACK_SMOKE_RECORD_SHA256 = recordSha256;
+  try { cleanupSnapshot(f.snapshotPath); } finally {
+    if (prior === undefined) delete process.env.ASHLR_PACK_SMOKE_RECORD_SHA256;
+    else process.env.ASHLR_PACK_SMOKE_RECORD_SHA256 = prior;
+  }
+  assert.equal(existsSync(dirname(f.snapshotPath)), false);
+});
+
+test('sealed cleanup refuses a replaced tarball and preserves its bytes', async (t) => {
+  const f = await prepared(t);
+  const replacement = join(f.parent, 'replacement');
+  const bytes = readFileSync(f.path); writeFileSync(replacement, bytes); renameSync(replacement, f.path);
+  const identity = lstatSync(f.path).ino;
+  const prior = process.env.ASHLR_PACK_SMOKE_RECORD_SHA256;
+  process.env.ASHLR_PACK_SMOKE_RECORD_SHA256 = f.recordSha256;
+  try { assert.throws(() => cleanupSnapshot(f.snapshotPath), /identity changed/); } finally {
+    if (prior === undefined) delete process.env.ASHLR_PACK_SMOKE_RECORD_SHA256;
+    else process.env.ASHLR_PACK_SMOKE_RECORD_SHA256 = prior;
+  }
+  assert.equal(lstatSync(f.path).ino, identity);
+  assert.deepEqual(readFileSync(f.path), bytes);
+  assert.equal(existsSync(f.snapshotPath), true);
+  assert.equal(existsSync(f.recordPath), true);
+});
+
+for (const kind of ['changed', 'truncated', 'missing', 'new inode', 'symlink', 'hardlink', 'mode', 'directory swap']) {
+  test(`late reuse refuses ${kind} original tarball without fallback`, async (t) => {
+    const f = await prepared(t);
+    if (kind === 'changed') writeFileSync(f.path, Buffer.concat([readFileSync(f.path), Buffer.from('changed')]));
+    if (kind === 'truncated') writeFileSync(f.path, readFileSync(f.path).subarray(0, 32));
+    if (kind === 'missing') rmSync(f.path);
+    if (kind === 'new inode') { const copy = join(f.parent, 'replacement'); writeFileSync(copy, readFileSync(f.path)); renameSync(copy, f.path); }
+    if (kind === 'symlink') { const copy = join(f.parent, 'original'); renameSync(f.path, copy); symlinkSync(copy, f.path); }
+    if (kind === 'hardlink') linkSync(f.path, join(f.parent, 'linked'));
+    if (kind === 'mode') chmodSync(f.path, 0o700);
+    if (kind === 'directory swap') {
+      const before = lstatSync(f.path).ino; const old = join(f.parent, 'old-pack');
+      renameSync(dirname(f.path), old); mkdirSync(dirname(f.path), { mode: 0o700 });
+      renameSync(join(old, f.record.filename), f.path); assert.equal(lstatSync(f.path).ino, before);
+    }
+    await assert.rejects(reusePack(f), kind === 'directory swap' ? /pack directory changed/ : undefined);
+    assert.equal(f.npmCalls, 1);
+    assert.equal(readFileSync(f.calls, 'utf8'), 'read\n');
+  });
+}
+
+for (const kind of ['record digest', 'record path', 'record root', 'extra field', 'missing digest', 'source', 'snapshot', 'snapshot directory']) {
+  test(`late reuse refuses ${kind} binding changes`, async (t) => {
+    const f = await prepared(t);
+    if (['record digest', 'record path', 'record root', 'extra field'].includes(kind)) {
+      const record = { ...f.record };
+      if (kind === 'record digest') record.size++;
+      if (kind === 'record path') record.directory = '../source';
+      if (kind === 'record root') record.root = f.parent;
+      if (kind === 'extra field') record.unbound = true;
+      chmodSync(f.recordPath, 0o600); const bytes = Buffer.from(JSON.stringify(record));
+      writeFileSync(f.recordPath, bytes); chmodSync(f.recordPath, 0o400);
+      if (kind !== 'record digest') f.recordSha256 = hash(bytes, 'sha256');
+    }
+    if (kind === 'missing digest') f.recordSha256 = undefined;
+    if (kind === 'source') writeFileSync(join(f.root, 'package.json'), '{}');
+    if (kind === 'snapshot') { chmodSync(f.snapshotPath, 0o600); writeFileSync(f.snapshotPath, '{}'); chmodSync(f.snapshotPath, 0o400); }
+    if (kind === 'snapshot directory') {
+      const directory = dirname(f.snapshotPath), old = join(f.parent, 'old-snapshot');
+      renameSync(directory, old); mkdirSync(directory, { mode: 0o700 });
+      for (const name of readdirSync(old)) renameSync(join(old, name), join(directory, name));
+    }
+    await assert.rejects(reusePack(f));
+    assert.equal(f.npmCalls, 1);
+    assert.deepEqual(readFileSync(f.path), realTar(f.rows));
+  });
+}
+
+for (const when of ['early', 'late']) for (const behavior of ['source', 'archive']) {
+  test(`${when} preflight refuses ${behavior} drift across the actual reader await`, async (t) => {
+    if (when === 'late') {
+      const f = await prepared(t, behavior); writeFileSync(f.trigger, 'drift');
+      await assert.rejects(reusePack(f)); assert.equal(f.npmCalls, 1);
+    } else {
+      const f = runtimeFixture(t, behavior); writeFileSync(f.trigger, 'drift'); let calls = 0;
+      await assert.rejects(preparePack({ ...f, runNpm: (_bin, args) => { calls++; return realReport(args[4], f.rows); } }));
+      assert.equal(calls, 1); assert.equal(existsSync(f.recordPath), false);
+      assert.deepEqual(readdirSync(dirname(f.snapshotPath)), ['snapshot.json']);
+    }
+  });
+}
+
+for (const kind of ['too many entries', 'non-file', 'reader export', 'missing record']) {
+  test(`real early preflight refuses ${kind} without publishing a record or retry`, async (t) => {
+    const f = runtimeFixture(t); let calls = 0;
+    if (kind === 'missing record') {
+      await assert.rejects(reusePack({ ...f, recordSha256: 'a'.repeat(64) }));
+    } else {
+      if (kind === 'reader export') {
+        f.write('core/local-runtime/archive.js', 'export const wrong = true;');
+        cleanupSnapshot(f.snapshotPath); f.snapshotPath = captureBuild(f);
+        f.recordPath = join(dirname(f.snapshotPath), 'original-pack.json');
+      }
+      const rows = [...f.rows];
+      if (kind === 'too many entries') for (let i = rows.length; i <= 20_000; i++) rows.push({ path: `package/files/${i}.bin` });
+      if (kind === 'non-file') rows[0] = { ...rows[0], type: 'Directory' };
+      await assert.rejects(preparePack({ ...f, runNpm: (_bin, args) => {
+        calls++; return realReport(args[4], rows);
+      } }), kind === 'too many entries' ? /entry count/ : undefined);
+      assert.equal(calls, 1);
+    }
+    assert.equal(existsSync(f.recordPath), false);
+  });
+}
+
+test('workflow packs once before complete suites and retains exact late consumer/capture gates', () => {
+  const workflow = readFileSync(new URL('../workflows/ci.yml', import.meta.url), 'utf8');
+  const early = workflow.match(/- name: Capture pack smoke build snapshot[\s\S]*?(?=\n {6}- name:)/)[0];
+  const late = workflow.match(/- name: Pack smoke \(exports map\)[\s\S]*?(?=\n {6}- name:)/)[0];
+  assert.ok(early.includes("if: matrix.label == 'ubuntu, authority 1/3'"));
+  assert.ok(early.includes('ci-pack-smoke.mjs prepare "$snapshot"'));
+  assert.ok(early.includes('ASHLR_PACK_SMOKE_RECORD_SHA256'));
+  assert.ok(workflow.indexOf('ci-pack-smoke.mjs prepare') < workflow.indexOf('- name: Test web operator console'));
+  assert.ok(workflow.indexOf('ci-pack-smoke.mjs prepare') < workflow.indexOf('- name: Test (hermetic)'));
+  assert.ok(!/ci-pack-smoke\.mjs pack\b|npm pack/.test(late.replace(/#.*/g, '')));
+  assert.equal((late.match(/ci-pack-smoke\.mjs reuse/g) ?? []).length, 2);
+  for (const contract of ['npm install "$TARBALL"', './node_modules/.bin/ashlr help', "import('@ashlr/hub/types')",
+    "import('@ashlr/hub/core')", 'ci-pack-smoke.mjs verify "$ASHLR_PACK_SMOKE_SNAPSHOT"',
+    '--package-tarball "$TARBALL"', '--reports "${{ steps.web.outputs.lane_dir }}"']) assert.ok(late.includes(contract));
 });
