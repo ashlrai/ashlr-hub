@@ -204,6 +204,7 @@ const DISPATCH_TAIL_MAX_LOOSE_FILES = 3;
 interface TailedStart {
   runId: string;
   ms: number;
+  causalKey: string | null;
   dispatch: InFlightDispatch;
 }
 
@@ -214,6 +215,7 @@ interface PartitionTail {
   offset: number;
   starts: Map<string, TailedStart>;
   ended: Set<string>;
+  causalEnds: Map<string, number>;
   rows: number;
   /** A dispatch row here could not be read: the answer stays unknown until the file is replaced. */
   unreadable: boolean;
@@ -250,9 +252,20 @@ function yieldToLoop(): Promise<void> {
 
 type DispatchRow =
   | { kind: 'start'; start: TailedStart }
-  | { kind: 'end'; runId: string }
+  | { kind: 'end'; runId: string; ms: number; causalKey: string | null }
   | null
   | 'unreadable';
+
+/** An explicit relation cannot be established by truncated or scrubbed identities. */
+function dispatchCausalKey(row: Record<string, unknown>, runId: string): string | null {
+  if (row['actor'] !== 'daemon' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,155}$/.test(runId) ||
+    row['trajectoryId'] !== `run:${runId}`) return null;
+  const item = row['itemId'];
+  const repo = row['repo'];
+  if (typeof item !== 'string' || item.trim() !== item || tailText(item, 240) !== item ||
+    typeof repo !== 'string' || repo.trim() !== repo || tailText(repo, 500) !== repo) return null;
+  return JSON.stringify([runId, item, repo]);
+}
 
 /** One candidate line → a start, a terminal row, nothing of interest (null), or unreadable. */
 function dispatchRowOf(line: string, partitionDate: string | null): DispatchRow {
@@ -277,13 +290,18 @@ function dispatchRowOf(line: string, partitionDate: string | null): DispatchRow 
   const runId = tailText(row['runId'], 160);
   // The ledger's reader skipped a dispatch row without a run id too.
   if (runId === null) return null;
-  if (action !== DISPATCH_START) return { kind: 'end', runId };
+  if (action !== DISPATCH_START) {
+    const trajectory = row['trajectoryId'];
+    const outer = typeof trajectory === 'string' && trajectory.startsWith('run:') ? trajectory.slice(4) : null;
+    return { kind: 'end', runId, ms, causalKey: row['runId'] === runId && outer && outer !== runId ? dispatchCausalKey(row, outer) : null };
+  }
   const backend = typeof row['backend'] === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(row['backend']) ? row['backend'] : null;
   return {
     kind: 'start',
     start: {
       runId,
       ms,
+      causalKey: row['runId'] === runId ? dispatchCausalKey(row, runId) : null,
       dispatch: {
         runId,
         itemId: tailText(row['itemId'], 240),
@@ -320,6 +338,7 @@ export function createDispatchTail(opts: DispatchTailOptions = {}): DispatchTail
     }
     if (row.kind === 'end') {
       p.ended.add(row.runId);
+      if (row.causalKey !== null) p.causalEnds.set(row.causalKey, Math.max(row.ms, p.causalEnds.get(row.causalKey) ?? -Infinity));
       p.starts.delete(row.runId);
     } else if (!p.ended.has(row.start.runId)) {
       p.starts.set(row.start.runId, row.start);
@@ -345,7 +364,7 @@ export function createDispatchTail(opts: DispatchTailOptions = {}): DispatchTail
     // Replaced (new inode) or truncated: its cursor means nothing — start over.
     if (p && (p.dev !== st.dev || p.ino !== st.ino || st.size < p.offset)) p = undefined;
     if (!p) {
-      p = { dev: st.dev, ino: st.ino, offset: 0, starts: new Map(), ended: new Set(), rows: 0, unreadable: false };
+      p = { dev: st.dev, ino: st.ino, offset: 0, starts: new Map(), ended: new Set(), causalEnds: new Map(), rows: 0, unreadable: false };
       partitions.set(name, p);
     }
     if (p.unreadable) return false;
@@ -461,11 +480,16 @@ export function createDispatchTail(opts: DispatchTailOptions = {}): DispatchTail
     }
     // A terminal row can land in a later partition than its start (a run across UTC midnight).
     const ended = new Set<string>();
-    for (const name of keep) for (const runId of partitions.get(name)?.ended ?? []) ended.add(runId);
+    const causalEnds = new Map<string, number>();
+    for (const name of keep) {
+      for (const runId of partitions.get(name)?.ended ?? []) ended.add(runId);
+      for (const [key, ms] of partitions.get(name)?.causalEnds ?? []) causalEnds.set(key, Math.max(ms, causalEnds.get(key) ?? -Infinity));
+    }
     const out: TailedStart[] = [];
     for (const name of keep) {
       for (const start of partitions.get(name)?.starts.values() ?? []) {
-        if (start.ms >= sinceMs && !ended.has(start.runId)) out.push(start);
+        const causalEnd = start.causalKey === null ? undefined : causalEnds.get(start.causalKey);
+        if (start.ms >= sinceMs && !ended.has(start.runId) && (causalEnd === undefined || causalEnd < start.ms)) out.push(start);
       }
     }
     return out.sort((a, b) => b.ms - a.ms).map((s) => ({ ...s.dispatch }));
