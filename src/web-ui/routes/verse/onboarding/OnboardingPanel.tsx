@@ -15,6 +15,7 @@ import { Panel, SettingRow } from '../sections/SettingRow.js';
 import { relativePhrase } from '../context/context-model.js';
 import { replayOnboarding } from './onboarding-store.js';
 import { useOnboarding } from './useOnboarding.js';
+import styles from './onboarding.module.css';
 
 /**
  * What the stored answer says, in the app's one relative wording ("5m ago",
@@ -43,6 +44,50 @@ export function OnboardingPanel() {
           {open ? 'Showing' : 'Replay'}
         </Button>
       </SettingRow>
+      <details className={styles.guide}>
+        <summary>How Phantom works</summary>
+        <dl>
+          <dt>Connect your resources</dt>
+          <dd>
+            Bring supported Claude Code, Codex, Grok and Devin accounts, configured API providers and local models into one
+            workbench. Each account has separate usage readings when reported; subscription allowance and credits are separate.
+          </dd>
+          <dt>Work with me</dt>
+          <dd>
+            Talk, ask questions and guide a chat. Choose a resource yourself, or let Automatic choose an eligible account
+            and model for the task.
+          </dd>
+          <dt>Work for me</dt>
+          <dd>
+            Describe an outcome and manage the fleet. The Leader helps plan priorities and briefs you; independent ready
+            tasks can run in parallel once the fleet is enabled.
+          </dd>
+          <dt>Route and coordinate work</dt>
+          <dd>
+            Routing matches work to eligible resources and available capacity. Jev can advise task classification when
+            configured. Choose Manager for planning, delegation and review across connected resources.
+          </dd>
+          <dt>See what happened</dt>
+          <dd>
+            Inspect reported actions, tools, sources and context use in chats; follow tasks, proposals and verification in
+            Fleet. Usage and speed are shown when reported, with estimates and missing readings identified.
+          </dd>
+          <dt>Add tools and companions</dt>
+          <dd>
+            Connect MCP servers and CLIs. Phantom Secrets manages credentials, and configured Locus checks account and
+            session readiness; protection depends on the setup and execution path. Meta Muse is an opt-in API provider.
+            Dots and Grok Bot are separate products, not connected execution resources here.
+          </dd>
+        </dl>
+        <p>Connections, model capabilities and current permissions determine which resources can run each task.</p>
+        <a
+          href="https://github.com/ashlrai/phantom/blob/master/docs/AUTOMATIC-OUTCOMES.md"
+          target="_blank"
+          rel="noreferrer noopener"
+        >
+          Read the work modes guide
+        </a>
+      </details>
     </Panel>
   );
 }

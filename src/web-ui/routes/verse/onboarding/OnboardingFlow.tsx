@@ -49,6 +49,7 @@ import {
 import { useQuery } from '../../../data/hooks.js';
 import { SECTION_ICON } from '../verse-icons.js';
 import { SECTION_BLURBS } from '../section-blurbs.js';
+import { WORK_MODES } from '../shell/work-mode.js';
 import { RAIL_SECTIONS, requestVerseCommand, setVerseSection } from '../verse-ui-store.js';
 import { LiveCapacityStrip } from '../usage/CapacityStrip.js';
 import { tidyProse } from '../autonomy/format.js';
@@ -106,7 +107,12 @@ function StepBody({ children }: { children: ReactNode }) {
 function WelcomeStep() {
   return (
     <StepBody>
-      <p className={styles.lead}>{PRODUCT_NAME} runs your chats and this machine’s agent fleet from one local server.</p>
+      <p className={styles.lead}>{PRODUCT_NAME} runs your chats and agent fleet in one workbench for connected accounts, API providers and local models.</p>
+      <p className={styles.aside}>
+        {WORK_MODES.map((mode) => (
+          <span key={mode.id}><strong>{mode.label}</strong>: {mode.description} </span>
+        ))}
+      </p>
       {/*
         The five rail surfaces, in ⌘1–⌘5 order, with the same one-line blurbs
         the missing-section fallback uses — one description per surface, not
@@ -171,7 +177,7 @@ function AccountsStep() {
         }
       />
       <p className={styles.aside}>
-        Every window, reset and reserve lives in Apps &amp; Accounts, under the gear.
+        Check each account’s subscription windows, credits and resets in Resources. Connect and manage supported accounts in Apps &amp; Accounts, under the gear.
       </p>
     </StepBody>
   );

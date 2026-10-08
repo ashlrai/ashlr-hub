@@ -39,12 +39,12 @@ export const ONBOARDING_STEPS: readonly OnboardingStepMeta[] = [
   {
     id: 'welcome',
     title: `Welcome to ${PRODUCT_NAME}`,
-    subtitle: 'Five sections, one rail.',
+    subtitle: 'Chats, delegated work and your connected resources.',
   },
   {
     id: 'accounts',
     title: 'Your seats',
-    subtitle: 'Which provider accounts this machine can actually dispatch to right now.',
+    subtitle: 'Your connected accounts and their reported availability.',
   },
   {
     id: 'local',
@@ -110,9 +110,9 @@ export interface LocalInput {
 }
 
 const LOCAL_MEANING_AVAILABLE =
-  'Local seats cost nothing and consume no provider quota, so the autonomous loop can keep working after a cloud window is used up.';
+  'Local models consume no provider quota for inference and use this machine’s hardware. Tasks still need a capable model and may require a hosted review step.';
 const LOCAL_MEANING_ABSENT =
-  'Without one, every turn and every autonomous tick spends a provider account, and a used-up window stops the work.';
+  'Hosted work needs an eligible connected account. Some tasks or review steps may wait when no suitable resource is available.';
 
 export function buildLocalFinding(input: LocalInput): LocalFinding {
   if (input.loading) {
@@ -154,7 +154,7 @@ export function buildLocalFinding(input: LocalInput): LocalFinding {
       summary:
         'No local runtime answered. Phantom cannot tell whether one is not running or not installed — the probe only knows it got no answer.',
       meaning: LOCAL_MEANING_ABSENT,
-      fix: 'Start Ollama (or LM Studio) and press Refresh in Usage. If neither is installed, everything still works — it all runs on the cloud seats.',
+      fix: 'Start Ollama or LM Studio and press Refresh in Usage, or connect an eligible hosted account.',
       modelCount: 0,
       toolCapableCount: 0,
       stale,

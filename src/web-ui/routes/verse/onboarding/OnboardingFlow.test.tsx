@@ -449,6 +449,18 @@ describe('OnboardingPanel — replay from Settings', () => {
         <OnboardingFlow />
       </>,
     );
+    const guide = screen.getByText('How Phantom works');
+    expect(guide.closest('details')!.open).toBe(false);
+    guide.focus();
+    expect(guide).toHaveFocus();
+    const setupState = getOnboardingState();
+    await user.click(guide);
+    expect(guide.closest('details')!.open).toBe(true);
+    expect(screen.getByText('Route and coordinate work')).toBeVisible();
+    expect(getOnboardingState()).toEqual(setupState);
+    expect(fetch).not.toHaveBeenCalled();
+    await user.click(guide);
+    expect(guide.closest('details')!.open).toBe(false);
     await user.click(screen.getByRole('button', { name: 'Dismiss getting started' }));
     expect(screen.getByText(/Skipped\./)).toBeInTheDocument();
 
