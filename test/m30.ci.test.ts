@@ -146,7 +146,7 @@ describe('M30 CI workflow', () => {
     expect(qualificationLane).toContain('length: 14');
   });
 
-  it('runs whole release and source contracts before the existing Mac builds', () => {
+  it('runs whole release and source contracts once before the producer build', () => {
     expect(pkg.scripts?.['check:release']).toBe([
       'npm run test:ci -- --maxWorkers=1 --fileParallelism=false',
       'test/m515.release-publish-authority-split.test.ts',
@@ -157,10 +157,9 @@ describe('M30 CI workflow', () => {
       'test/authority-tier1-closure-310b.test.ts',
       'test/sidecar-literal-imports-315.test.ts',
     ].join(' '));
-    expect(ciYml.match(/run: npm run check:release/g)).toHaveLength(2);
+    expect(ciYml.match(/run: npm run check:release/g)).toHaveLength(1);
     for (const [id, condition] of [
-      ['ci', "matrix.os == 'macos-latest'"],
-      ['mac-general', 'matrix.shard == 2'],
+      ['ci', "matrix.label == 'ubuntu, authority 1/3'"],
     ] as const) {
       const job = workflowJob(id);
       const step = job.match(
@@ -274,7 +273,15 @@ describe('M30 CI workflow', () => {
   });
 
   it('keeps the typecheck / lint / build / test steps (hermetic invocation)', () => {
-    expect(ciYml).toContain('npm run typecheck');
+    const types = ciYml.match(/^ {6}- name: Typecheck[\s\S]*?(?=^ {6}- name:)/gm) ?? [];
+    expect(types).toHaveLength(1);
+    expect(types[0]).toContain("if: matrix.label == 'ubuntu, authority 3/3'");
+    expect(types[0]).toContain('run: npm run typecheck:web');
+    // The emitted core build checks the same config instead of repeating it
+    // in a no-emit step. Neither a transpile-only build nor a masked failure
+    // can stand in for that compiler invocation.
+    expect(pkg.scripts?.build?.split(' && ')[0]).toBe('tsc -p tsconfig.json');
+    expect(pkg.scripts?.['typecheck:web']).toBe('tsc --noEmit -p src/web-ui/tsconfig.json');
     expect(ciYml).toContain('npm run lint');
     const docs = ciYml.match(/^ {6}- name: Check documentation[\s\S]*?(?=^ {6}- name:)/gm) ?? [];
     expect(docs).toHaveLength(1);
@@ -674,13 +681,13 @@ describe('M30 CI workflow', () => {
     expect([...declaredFiles].sort()).toEqual([
       ...expectedFiles,
       'test/authority-codeowners-310b.test.ts',
-      ...Array<string>(2).fill('test/m515.release-publish-authority-split.test.ts'),
-      ...Array<string>(2).fill('test/documentation-navigation.test.ts'),
-      ...Array<string>(2).fill('test/authority-release-truth.test.ts'),
-      ...Array<string>(2).fill('test/m33.release-meta.test.ts'),
-      ...Array<string>(2).fill('test/cli-registry-drift.test.ts'),
-      ...Array<string>(2).fill('test/authority-tier1-closure-310b.test.ts'),
-      ...Array<string>(2).fill('test/sidecar-literal-imports-315.test.ts'),
+      'test/m515.release-publish-authority-split.test.ts',
+      'test/documentation-navigation.test.ts',
+      'test/authority-release-truth.test.ts',
+      'test/m33.release-meta.test.ts',
+      'test/cli-registry-drift.test.ts',
+      'test/authority-tier1-closure-310b.test.ts',
+      'test/sidecar-literal-imports-315.test.ts',
       ...Array<string>(4).fill('test/m342.dispatch-production-ledger.test.ts'),
     ].sort());
     expect(windowsPortabilityThree).toContain('--reporter=dot');
@@ -708,13 +715,6 @@ describe('M30 CI workflow', () => {
       detachedPostMergeVerificationTest,
       'test/npm-cli-launch.test.ts',
       'test/npm-cli-launch.test.ts',
-      'test/m515.release-publish-authority-split.test.ts',
-      'test/documentation-navigation.test.ts',
-      'test/authority-release-truth.test.ts',
-      'test/m33.release-meta.test.ts',
-      'test/cli-registry-drift.test.ts',
-      'test/authority-tier1-closure-310b.test.ts',
-      'test/sidecar-literal-imports-315.test.ts',
     ].sort());
     expect(windowsEntries.match(/test\/m395\.effect-terminal-retention\.test\.ts/g)).toHaveLength(
       1,

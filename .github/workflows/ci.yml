@@ -186,10 +186,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Catch publication and curated documentation drift before the Mac build.
-      # The complete assigned qualification still runs below.
+      # Check publication contracts once, before the producer's build. Every
+      # module still runs in the exhaustive Ubuntu and Mac qualification.
       - name: Check publication contracts (hermetic)
-        if: matrix.os == 'macos-latest'
+        if: matrix.label == 'ubuntu, authority 1/3'
         run: npm run check:release
 
       # Reject generated ownership drift before expensive builds and tests.
@@ -199,11 +199,12 @@ jobs:
           npm run test:ci -- --maxWorkers=1 --fileParallelism=false
           test/authority-codeowners-310b.test.ts
 
-      # Whole-project static checks run once in the required minimum-Node job.
-      # Every platform still builds and runs its complete assigned tests.
+      # Web types run once at the minimum Node version. Every full Build starts
+      # with the core TypeScript compiler, so a preceding core no-emit pass
+      # would repeat the same check. All assigned tests still run below.
       - name: Typecheck
         if: matrix.label == 'ubuntu, authority 3/3'
-        run: npm run typecheck
+        run: npm run typecheck:web
 
       - name: Lint
         if: matrix.label == 'ubuntu, authority 3/3'
@@ -368,10 +369,6 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      # Preserve every assigned whole-file check after this quick publication preflight.
-      - name: Check publication contracts (hermetic)
-        if: matrix.shard == 2
-        run: npm run check:release
       - name: Build
         run: npm run build
       - name: Test complete Mac general partition

@@ -260,7 +260,7 @@ describe('release workflow', () => {
     }
     const smoke = JSON.parse(readFileSync(join(REPO_ROOT, 'scripts/gate-smoke.json'), 'utf8')) as { backend: Array<{ file: string }> };
     expect(smoke.backend.filter((entry) => entry.file === 'test/authority-codeowners-310b.test.ts')).toHaveLength(1);
-    expect(ciSteps.find((step) => step.name === 'Typecheck')?.run).toBe('npm run typecheck');
+    expect(ciSteps.find((step) => step.name === 'Typecheck')?.run).toBe('npm run typecheck:web');
     expect(ciSteps.find((step) => step.name === 'Typecheck')?.if)
       .toBe(`matrix.label == '${sharedChecksLabel}'`);
     expect(ciSteps.find((step) => step.name === 'Lint')?.run).toBe('npm run lint');
