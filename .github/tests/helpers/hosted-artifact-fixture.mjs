@@ -135,4 +135,3 @@ export function qualifiedFixture(t, { repository = hub.legacyName, schemaVersion
     policy: { runId: 100, runAttempt: 1, attestorSha, attestorRun: 300, attestorAttempt: 1 } };
   return { ...f, options, qualification, jobs, calls, api };
 }
-
