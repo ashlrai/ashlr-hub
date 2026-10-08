@@ -158,6 +158,7 @@ describe('M30 CI workflow', () => {
       'test/sidecar-literal-imports-315.test.ts',
       'test/m93.service-authority-docs.test.ts',
       'test/m479.release-workflow-policy.test.ts',
+      'test/m522.production-promotion-docs.test.ts',
     ].join(' '));
     expect(ciYml.match(/run: npm run check:release/g)).toHaveLength(1);
     for (const [id, condition] of [
@@ -717,6 +718,7 @@ describe('M30 CI workflow', () => {
       ...Array<string>(4).fill('test/m342.dispatch-production-ledger.test.ts'),
       'test/m93.service-authority-docs.test.ts',
       'test/m479.release-workflow-policy.test.ts',
+      'test/m522.production-promotion-docs.test.ts',
     ].sort());
     expect(windowsPortabilityThree).toContain('--reporter=dot');
     expect(windowsPortabilityOverflow).toContain('--reporter=dot');
