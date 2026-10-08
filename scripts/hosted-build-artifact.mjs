@@ -485,7 +485,7 @@ export function validateCoverage({ root, bundle, source, producer, lanes }) {
 
 /** Verification returns an in-process capability; serialized receipts cannot
  * authorize adoption. The committed caller owns the required-job policy. */
-export function verifyArtifact({ root, revision, bundle, policy, githubRead, attestRun }) {
+function verifyArtifactBody({ root, revision, bundle, policy, githubRead, attestRun }, checkMaster) {
   root = fs.realpathSync(root); bundle = fs.realpathSync(bundle);
   const manifestPath = join(bundle, 'manifest.json'); const manifestBytes = boundedBytes(manifestPath, 32 * 1024 * 1024);
   const qualificationPath = join(bundle, 'qualification.json'); const qualificationBytes = boundedBytes(qualificationPath, 32 * 1024 * 1024);
@@ -531,7 +531,7 @@ export function verifyArtifact({ root, revision, bundle, policy, githubRead, att
     const name = lane.role === 'web' ? `ashlr-build-${policy.runId}-${policy.runAttempt}` : `ashlr-qualification-${lane.role}-${policy.runId}-${policy.runAttempt}`;
     officialArtifact(read, producer.repository, policy.runId, revision, name, { id: lane.artifactId, name, digest: lane.artifactDigest });
   }
-  const master = read(`${base}/branches/master`); assert.equal(master.commit?.sha, policy.attestorSha, 'attestor is not current trusted master');
+  const master = read(`${base}/branches/master`); checkMaster(master, policy);
   const attestorCommit = read(`${base}/git/commits/${policy.attestorSha}`);
   assert.equal(attestorCommit.tree?.sha, source.tree, 'master/candidate tree differs');
   const attestor = read(`${base}/actions/runs/${policy.attestorRun}/attempts/${policy.attestorAttempt}`);
@@ -556,8 +556,157 @@ export function verifyArtifact({ root, revision, bundle, policy, githubRead, att
     archiveSha256: verified[0][1], manifestSha256: verified[1][1], qualificationSha256: verified[2][1], packageSha256: manifest.package.sha256,
     attestor: { revision: policy.attestorSha, runId: policy.attestorRun, runAttempt: policy.attestorAttempt } };
   const expected = { manifest: receipt.manifestSha256, qualification: receipt.qualificationSha256, package: receipt.packageSha256 };
-  admissions.set(receipt, { root, source, archive, entries, revision, bundle, manifest, expected });
-  return freeze(receipt);
+  return { receipt: freeze(receipt), admission: { root, source, archive, entries, revision, bundle, manifest, expected } };
+}
+
+
+export function verifyArtifact(input) {
+  const { receipt, admission } = verifyArtifactBody(input, (master, policy) => assert.equal(master.commit?.sha, policy.attestorSha, 'attestor is not current trusted master'));
+  admissions.set(receipt, admission); return receipt;
+}
+
+// Published-manual admission is intentionally separate from hosted adoption.
+// Only this fixed implementation can turn a verified public envelope into the
+// one-use input below; neither a receipt nor a caller-provided verifier can.
+const publications = new WeakMap();
+const IMPLEMENTATION_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+function pagedPublicationRead(read, endpoint) {
+  const rows = [];
+  for (let page = 1; page <= 10; page++) {
+    const next = read(`${endpoint}?per_page=100&page=${page}`);
+    assert.ok(Array.isArray(next) && next.length <= 100, 'incomplete bounded publication metadata');
+    rows.push(...next);
+    if (next.length < 100) return rows;
+  }
+  assert.fail('publication metadata pagination limit');
+}
+
+/** These pure assertions do not issue an admission capability. */
+export function assertEffectiveManualProtection(repository, branch, rules) {
+  assert.equal(branch?.name, 'master'); assert.equal(branch.protected, true);
+  assert.match(branch.commit?.sha ?? '', SHA);
+  assert.ok(Array.isArray(rules) && rules.length > 0 && rules.length <= 1000, 'effective protection unavailable');
+  const required = new Set(['pull_request', 'non_fast_forward', 'deletion']);
+  const known = new Set(['creation', 'update', 'deletion', 'required_linear_history', 'required_deployments', 'required_signatures', 'pull_request', 'required_status_checks', 'non_fast_forward', 'commit_message_pattern', 'commit_author_email_pattern', 'committer_email_pattern', 'branch_name_pattern', 'tag_name_pattern', 'file_path_restriction', 'max_file_path_length', 'file_extension_restriction', 'max_file_size', 'required_code_scanning', 'required_workflows', 'merge_queue']);
+  const byType = new Map();
+  for (const row of rules) {
+    assert.ok(row && known.has(row.type) && Number.isSafeInteger(row.ruleset_id) && row.ruleset_id > 0, 'malformed effective rule');
+    assert.ok((row.ruleset_source_type === 'Repository' && row.ruleset_source === repository) ||
+      (row.ruleset_source_type === 'Organization' && row.ruleset_source === repository.split('/')[0]), 'foreign effective rule');
+    if (row.type === 'pull_request') {
+      const p = row.parameters;
+      assert.ok(p && Number.isSafeInteger(p.required_approving_review_count) && p.required_approving_review_count >= 0 && p.required_approving_review_count <= 100, 'malformed pull request rule');
+      for (const key of ['dismiss_stale_reviews_on_push', 'require_code_owner_review', 'require_last_push_approval', 'required_review_thread_resolution']) assert.equal(typeof p[key], 'boolean', 'malformed pull request rule');
+      if (p.allowed_merge_methods !== undefined) assert.ok(Array.isArray(p.allowed_merge_methods) && p.allowed_merge_methods.length > 0 &&
+        new Set(p.allowed_merge_methods).size === p.allowed_merge_methods.length && p.allowed_merge_methods.every(v => ['merge', 'squash', 'rebase'].includes(v)), 'malformed merge methods');
+    }
+    if (byType.has(row.type)) assert.deepEqual(row.parameters ?? {}, byType.get(row.type), 'conflicting effective rules');
+    else byType.set(row.type, row.parameters ?? {});
+    required.delete(row.type);
+  }
+  assert.equal(required.size, 0, 'insufficient effective protection');
+  return branch.commit.sha;
+}
+
+export function assertManualAttestorAncestry(attestor, master, comparison) {
+  assert.match(attestor, SHA); assert.match(master, SHA);
+  assert.equal(comparison?.base_commit?.sha, attestor, 'comparison base differs');
+  assert.equal(comparison.merge_base_commit?.sha, attestor, 'attestor is not an ancestor');
+  assert.equal(comparison.behind_by, 0, 'master behind attestor');
+  assert.ok(Number.isSafeInteger(comparison.ahead_by) && comparison.ahead_by >= 0 && comparison.total_commits === comparison.ahead_by, 'malformed comparison counts');
+  if (attestor === master) assert.ok(comparison.status === 'identical' && comparison.ahead_by === 0, 'nonidentical comparison');
+  else assert.ok(comparison.status === 'ahead' && comparison.ahead_by > 0, 'nonancestor master');
+}
+
+function publicationObservation(manifest, read) {
+  const repository = manifest.repository.nameWithOwner, base = `repos/${repository}`, version = manifest.version;
+  const identity = requireRepositoryMetadata(repository, read(base));
+  const branch = read(`${base}/branches/master`);
+  const rules = pagedPublicationRead(read, `${base}/rules/branches/master`);
+  const master = assertEffectiveManualProtection(repository, branch, rules);
+  const current = read(`${base}/git/commits/${master}`);
+  assert.equal(current.sha, master); assert.match(current.tree?.sha ?? '', SHA);
+  assertManualAttestorAncestry(manifest.qualification.attestor.revision, master,
+    read(`${base}/compare/${manifest.qualification.attestor.revision}...${master}`));
+  const release = read(`${base}/releases/tags/v${version}`);
+  assert.ok(Number.isSafeInteger(release.id) && release.id > 0 && release.draft === false && release.prerelease === false &&
+    release.tag_name === `v${version}` && typeof release.published_at === 'string' && Number.isFinite(Date.parse(release.published_at)), 'release is not published stable');
+  const allAssets = pagedPublicationRead(read, `${base}/releases/${release.id}/assets`);
+  assert.ok(allAssets.every(a => a && Number.isSafeInteger(a.id) && a.id > 0) && new Set(allAssets.map(a => a.id)).size === allAssets.length, 'invalid or duplicate public asset identities');
+  const assets = ['manifest.json', 'manifest.json.sig', manifest.app.filename, manifest.cli.filename].map(name => {
+    const matches = allAssets.filter(a => a.name === name); assert.equal(matches.length, 1, 'public asset absent or ambiguous');
+    const a = matches[0];
+    assert.ok(Number.isSafeInteger(a.id) && a.id > 0 && a.state === 'uploaded' && Number.isSafeInteger(a.size) && a.size > 0, 'invalid uploaded asset');
+    assert.match(a.digest ?? '', /^sha256:[a-f0-9]{64}$/);
+    assert.equal(a.browser_download_url, `https://github.com/${repository}/releases/download/v${version}/${name}`, 'public asset URL differs');
+    const artifact = name === manifest.app.filename ? manifest.app : name === manifest.cli.filename ? manifest.cli : null;
+    if (artifact) { assert.equal(a.size, artifact.bytes); assert.equal(a.digest, `sha256:${artifact.sha256}`); }
+    return { id: a.id, name, size: a.size, digest: a.digest, url: a.browser_download_url };
+  });
+  const ref = read(`${base}/git/ref/tags/v${version}`); assert.equal(ref.ref, `refs/tags/v${version}`);
+  let object = ref.object; const seen = new Set();
+  for (let depth = 0; object?.type === 'tag'; depth++) {
+    assert.ok(depth < 4 && SHA.test(object.sha) && !seen.has(object.sha), 'invalid release tag chain'); seen.add(object.sha);
+    const tag = read(`${base}/git/tags/${object.sha}`); assert.equal(tag.sha, object.sha); object = tag.object;
+  }
+  assert.ok(object?.type === 'commit' && object.sha === manifest.source.revision, 'published tag differs from signed candidate');
+  const commit = read(`${base}/git/commits/${object.sha}`);
+  assert.equal(commit.sha, object.sha); assert.equal(commit.tree?.sha, manifest.source.tree, 'published candidate tree differs');
+  return JSON.parse(JSON.stringify({ identity, branch, rules, current, release: { id: release.id, tag: release.tag_name, publishedAt: release.published_at }, assets, tag: object.sha }));
+}
+
+async function publicationImplementation() {
+  const revision = git(IMPLEMENTATION_ROOT, ['rev-parse', 'HEAD']);
+  const snapshot = () => ({ source: sourceBinding(IMPLEMENTATION_ROOT, revision), build: observeBuild(IMPLEMENTATION_ROOT, revision) });
+  const initial = snapshot();
+  const { computeAuthoritySurface } = await import('./authority-surface.mjs');
+  const surface = await computeAuthoritySurface({ packageRoot: IMPLEMENTATION_ROOT });
+  assert.deepEqual(JSON.parse(boundedBytes(join(IMPLEMENTATION_ROOT, 'dist/authority-surface.json'), 32 * 1024 * 1024)), surface, 'manual verifier compiled authority closure differs');
+  const [parser, trust, download] = await Promise.all([
+    import('../dist/core/desktop/update-manifest.js'), import('../dist/core/desktop/update-trust.js'), import('../dist/core/desktop/qualified-update.js')]);
+  const unchanged = () => assert.deepEqual(snapshot(), initial, 'manual verifier implementation changed');
+  unchanged(); return { parser, trust: trust.getDesktopUpdateTrust(), download: download.downloadQualifiedUpdateArtifact, unchanged };
+}
+
+/** Fixed own-code loader; only transport reads can be inert in tests. Keys,
+ * parsers, profile selection and closure admission are never caller inputs. */
+export async function inspectCommissionedManualPublication({ manifestText, signature, githubRead, downloadRead }) {
+  assert.ok(typeof manifestText === 'string' && Buffer.byteLength(manifestText) <= 65536 && typeof signature === 'string' && Buffer.byteLength(signature) <= 8192, 'invalid publication envelope');
+  const own = await publicationImplementation();
+  const verified = own.parser.verifyCompatibleUpdateManifest({ manifestText, signature }, own.trust), manifest = verified.manifest;
+  const read = githubRead ?? ((endpoint) => JSON.parse(command('gh', ['api', '--hostname', 'github.com', endpoint])));
+  const before = publicationObservation(manifest, read);
+  const download = downloadRead ?? own.download;
+  for (const [name, expected, maximum] of [['manifest.json', manifestText, 65536], ['manifest.json.sig', signature, 8192]]) {
+    const asset = before.assets.find(a => a.name === name), bytes = Buffer.from(await download(asset.url, maximum)); own.unchanged();
+    assert.ok(bytes.length <= maximum && bytes.equals(Buffer.from(expected)), 'public envelope differs from local original');
+    assert.equal(bytes.length, asset.size); assert.equal(`sha256:${sha(bytes)}`, asset.digest);
+  }
+  own.parser.verifyCompatibleUpdateManifest({ manifestText, signature }, own.trust);
+  assert.deepEqual(publicationObservation(manifest, read), before, 'publication or protection changed during observation'); own.unchanged();
+  const capability = Object.freeze({});
+  publications.set(capability, { manifest, digest: verified.digest, before, read, unchanged: own.unchanged });
+  return capability;
+}
+
+export function verifyPublishedManualArtifact(input, capability) {
+  const publication = publications.get(capability);
+  assert.ok(publication, 'published manual verification requires fresh commissioned capability'); publications.delete(capability);
+  const { manifest, before, read, unchanged } = publication, q = manifest.qualification;
+  assert.equal(input.revision, manifest.source.revision);
+  assert.deepEqual(input.policy, { runId: q.producer.runId, runAttempt: q.producer.runAttempt, attestorSha: q.attestor.revision, attestorRun: q.attestor.runId, attestorAttempt: q.attestor.runAttempt });
+  // All original coverage, artifact expiry, attempt and attestation checks run.
+  // The sole changed check is the current-master historical relation above.
+  const { receipt, admission } = verifyArtifactBody({ ...input, githubRead: read }, master => assert.deepEqual(master, before.branch, 'master moved before original proof'));
+  assert.deepEqual(receipt.source, manifest.source);
+  for (const key of ['manifestSha256', 'qualificationSha256', 'archiveSha256', 'packageSha256']) assert.equal(receipt[key], q[key], 'published qualification subject differs');
+  assert.deepEqual({ runId: receipt.official.runId, runAttempt: receipt.official.runAttempt, eventSha: receipt.official.eventSha }, q.producer);
+  assert.equal(admission.manifest.producer.repository, manifest.repository.nameWithOwner);
+  assert.deepEqual(publicationObservation(manifest, read), before, 'publication or protection changed during original proof'); unchanged();
+  // No hosted admission is registered. Mutable master anchors stay out of the
+  // comparable proof so a later coherent descendant observation can succeed.
+  return freeze({ ...receipt, publication: { digest: publication.digest, release: before.release, assets: before.assets, tag: before.tag } });
 }
 
 function unchangedBundle(admitted) {
