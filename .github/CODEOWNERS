@@ -100,6 +100,7 @@
 /scripts/hosted-build-artifact.mjs @masonwyatt23
 /scripts/ship-local.mjs @masonwyatt23
 /scripts/local-app-transaction.mjs @masonwyatt23
+/scripts/install-desktop-artifacts.mjs @masonwyatt23
 /tools/custody/** @masonwyatt23
 **/*.plist @masonwyatt23
 **/*.entitlements @masonwyatt23
@@ -258,6 +259,7 @@
 /test/decide-critics-315.test.ts @masonwyatt23
 /test/decide-judge-manager-315.test.ts @masonwyatt23
 /test/decide-resource-choice.test.ts @masonwyatt23
+/test/desktop-artifact-installer.test.ts @masonwyatt23
 /test/desktop-qualified-update.test.ts @masonwyatt23
 /test/desktop-update-cli.test.ts @masonwyatt23
 /test/desktop-update-manifest.test.ts @masonwyatt23

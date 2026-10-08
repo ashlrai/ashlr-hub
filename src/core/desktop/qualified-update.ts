@@ -11,7 +11,7 @@ import { Header } from 'tar';
 import { evaluateStandingAuthority } from '../authority/effective-config.js';
 import { runningPackageRoot, verifyAuthoritySurfaceAt } from '../authority/surface.js';
 import { censusExecutionLeases } from '../sandbox/execution-leases.js';
-import { readPinnedRuntimeArchive, extractPinnedRuntimeArchive } from '../local-runtime/archive.js';
+import { readPinnedRuntimeArchive, extractPinnedRuntimeArchive, type PinnedRuntimeArchiveOptions } from '../local-runtime/archive.js';
 import { parseBuildIdentity } from '../build-identity.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { verifyUpdateManifest, verifyMinisign, verifyUpdateBundleRecord, type UpdateTrust, type UpdateManifest, type UpdateArtifact } from './update-manifest.js';
@@ -209,6 +209,13 @@ function extractApp(entries: readonly AppEntry[], dest: string): string {
   return join(dest, 'Phantom.app');
 }
 
+/** Manual maintainer staging shares the installed parser; caller entry arrays are never trusted. */
+export function extractSignedAppArchive(compressed: Buffer, destination: string): string {
+  directory(destination);
+  if (fs.realpathSync(destination) !== destination || fs.readdirSync(destination).length !== 0) hold('unsafe-app-destination');
+  return extractApp(inspectSignedAppArchive(compressed), destination);
+}
+
 export async function downloadQualifiedUpdateArtifact(url: string, maximum: number): Promise<Buffer> {
   let next = new URL(url);
   for (let redirects = 0; redirects <= 3; redirects++) {
@@ -361,8 +368,13 @@ async function installPairedUpdate(stageId: string, staged: ReturnType<typeof re
 async function verifyInstalledPackage(root: string, staged: ReturnType<typeof readStage>, deps: DesktopUpdateDependencies): Promise<void> {
   const original = join(staged.stage, 'package.tgz');
   validateArtifact(bytes(original, staged.manifest.cli.bytes), staged.manifest.cli, deps.trust!);
-  const archive = await readPinnedRuntimeArchive({artifactPath: original, sha256: staged.manifest.cli.sha256,
-    revision: staged.manifest.source.revision, version: staged.manifest.version}).catch(() => hold('package-archive-refused'));
+  await verifyInstalledRuntimeArchive(root, {artifactPath: original, sha256: staged.manifest.cli.sha256,
+    revision: staged.manifest.source.revision, version: staged.manifest.version});
+}
+
+/** Original archive membership, bytes and executable modes; this is data proof, never installation authority. */
+export async function verifyInstalledRuntimeArchive(root: string, pins: PinnedRuntimeArchiveOptions): Promise<void> {
+  const archive = await readPinnedRuntimeArchive(pins).catch(() => hold('package-archive-refused'));
   const expected = new Set<string>();
   const parents = new Set<string>(['']);
   for (const entry of archive.entries) {
