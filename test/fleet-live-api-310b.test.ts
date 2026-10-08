@@ -569,6 +569,81 @@ describe('in-flight dispatches: incremental async ledger tail (review c11)', () 
     expect((await tail.read(Date.parse(at(3))))?.map((f) => f.runId)).toEqual(['d']);
   });
 
+  it('closes only an explicitly related outer start, retaining newer and unrelated attempts', async () => {
+    const name = `${DAY}.jsonl`;
+    append(name, [
+      dispatchRow('daemon:dispatch-start', 'outer', at(1), { itemId: 'shared', trajectoryId: 'run:outer' }),
+      dispatchRow('daemon:dispatch-start', 'newer', at(2), { itemId: 'shared', trajectoryId: 'run:newer' }),
+      dispatchRow('daemon:dispatch-start', 'other', at(2), { trajectoryId: 'run:other' }),
+      dispatchRow('daemon:dispatch', 'inner', at(1, 30), { itemId: 'shared', trajectoryId: 'run:outer' }),
+    ]);
+    const tail = createDispatchTail({ dir: () => dir });
+    expect((await tail.read(T0))?.map(f => f.runId).sort()).toEqual(['newer', 'other']);
+    expect((await tail.read(T0))?.map(f => f.runId).sort()).toEqual(['newer', 'other']);
+    // Replacement removes the terminal evidence; no cached inferred completion survives.
+    fs.renameSync(file(name), `${file(name)}.replaced`);
+    append(name, [dispatchRow('daemon:dispatch-start', 'outer', at(1), { itemId: 'shared', trajectoryId: 'run:outer' })]);
+    fs.rmSync(`${file(name)}.replaced`);
+    expect((await tail.read(T0))?.map(f => f.runId)).toEqual(['outer']);
+  });
+
+  it('joins explicit causal terminals across UTC midnight and terminal-before-start file order', async () => {
+    append(`${DAY}.jsonl`, [dispatchRow('daemon:dispatch-start', 'outer', at(23, 50), { itemId: 'shared', trajectoryId: 'run:outer' })]);
+    append('2026-09-21.jsonl', [dispatchRow('daemon:dispatch', 'inner', '2026-09-21T00:03:00.000Z', { itemId: 'shared', trajectoryId: 'run:outer' })]);
+    const tail = createDispatchTail({ dir: () => dir });
+    expect(await tail.read(T0)).toEqual([]);
+    // The parser must match evidence timestamps, not append order.
+    fs.rmSync(file('2026-09-21.jsonl'));
+    fs.rmSync(file(`${DAY}.jsonl`));
+    append(`${DAY}.jsonl`, [
+      dispatchRow('daemon:dispatch', 'inner', at(2), { itemId: 'shared', trajectoryId: 'run:outer' }),
+      dispatchRow('daemon:dispatch-start', 'outer', at(1), { itemId: 'shared', trajectoryId: 'run:outer' }),
+    ]);
+    tail.reset();
+    expect(await tail.read(T0)).toEqual([]);
+  });
+
+  it.each(['legacy-terminal', 'legacy-start', 'wrong-repo', 'missing-item', 'malformed', 'earlier', 'winner-child', 'scrubbed-item', 'wrong-item', 'non-daemon', 'blank-repo'])(
+    'keeps outer start when explicit causal proof is absent or unrelated: %s', async shape => {
+      const start: Record<string, unknown> = { itemId: 'shared', trajectoryId: 'run:outer' };
+      const end: Record<string, unknown> = { itemId: 'shared', trajectoryId: 'run:outer' };
+      if (shape === 'legacy-terminal') delete end.trajectoryId;
+      if (shape === 'legacy-start') delete start.trajectoryId;
+      if (shape === 'wrong-repo') end.repo = '/r/other';
+      if (shape === 'missing-item') end.itemId = null;
+      if (shape === 'wrong-item') end.itemId = 'other';
+      if (shape === 'non-daemon') end.actor = 'session';
+      if (shape === 'blank-repo') end.repo = '';
+      if (shape === 'malformed') end.trajectoryId = 'work:outer';
+      if (shape === 'winner-child') end.trajectoryId = 'run:inner';
+      if (shape === 'scrubbed-item') {
+        start.itemId = `shared-${'x'.repeat(250)}a`;
+        end.itemId = `shared-${'x'.repeat(250)}b`;
+      }
+      append(`${DAY}.jsonl`, [
+        dispatchRow('daemon:dispatch-start', 'outer', at(1), start),
+        dispatchRow('daemon:dispatch', 'inner', shape === 'earlier' ? at(0, 30) : at(2), end),
+      ]);
+      expect((await createDispatchTail({ dir: () => dir }).read(T0))?.map(f => f.runId)).toEqual(['outer']);
+    });
+
+  it('applies newly appended causal evidence to snapshot producing and busy counts', async () => {
+    const name = `${iso(0).slice(0, 10)}.jsonl`;
+    append(name, [
+      dispatchRow('daemon:dispatch-start', 'outer', iso(2 * MIN), { itemId: 'shared', trajectoryId: 'run:outer' }),
+      dispatchRow('daemon:dispatch-start', 'newer', iso(MIN), { itemId: 'shared', trajectoryId: 'run:newer' }),
+    ]);
+    const tail = createDispatchTail({ dir: () => dir });
+    alive = true;
+    let built = await buildFleetLiveSnapshot({ ...(deps() as FleetLiveDeps), inFlight: since => tail.read(since) });
+    expect(built.snapshot.summary.building).toBe(2);
+    append(name, [dispatchRow('daemon:dispatch', 'inner', iso(90_000), { itemId: 'shared', trajectoryId: 'run:outer' })]);
+    built = await buildFleetLiveSnapshot({ ...(deps() as FleetLiveDeps), inFlight: since => tail.read(since) });
+    expect(built.snapshot.runs.filter(run => run.phase === 'producing').map(run => run.id)).toEqual(['newer']);
+    expect(built.snapshot.summary.building).toBe(1);
+    expect(built.snapshot.lanes.find(lane => lane.lane === 'codex')?.busy).toBe(1);
+  });
+
   it('parses ONLY the bytes appended since the last read, and waits for a half-written row', async () => {
     const name = `${DAY}.jsonl`;
     append(name, [dispatchRow('daemon:dispatch-start', 'a', at(1))]);
