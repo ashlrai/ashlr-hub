@@ -536,6 +536,7 @@
 /test/m322.model-roi.test.ts @masonwyatt23
 /test/m323.model-granular-routing.test.ts @masonwyatt23
 /test/m324.claude5-safety.test.ts @masonwyatt23
+/test/m33.update-channel.test.ts @masonwyatt23
 /test/m331.verify-to-green.test.ts @masonwyatt23
 /test/m332.outcome-watcher.test.ts @masonwyatt23
 /test/m333.best-of-n-multimodel.test.ts @masonwyatt23
