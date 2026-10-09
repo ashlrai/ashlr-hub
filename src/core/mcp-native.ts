@@ -188,6 +188,24 @@ const TOOLS: NativeToolImpl[] = [
     safety: 'append', handler: async args => (await import('./proactive/tools.js')).deleteProactiveProfile(args),
   },
   {
+    name: 'phm_task_context',
+    description: 'Read private evidence for one saved Phantom outcome task, including source references, event/observation times, conflicts and missing history. Uses exact current task and repository scope; does not import an inbox or dispatch work.',
+    inputSchema: { type: 'object', properties: {
+      outcomeId: { type: 'string' }, taskId: { type: 'string', description: 'The stable task ID returned by the saved outcome.' },
+      asOf: { type: 'string', description: 'Optional event-time view with an explicit timezone offset.' },
+      observedThrough: { type: 'string', description: 'Optional knowledge-time cutoff with an explicit timezone offset.' },
+      maxEvents: { type: 'number', description: 'Positive retrieval size. Partial context remains visible.' },
+    }, required: ['outcomeId', 'taskId'], additionalProperties: false },
+    safety: 'read',
+    handler: async args => {
+      const { parseOutcomeTaskPublicId, validOutcomeTaskContextRequest } = await import('./verse/outcome-task-context.js');
+      const taskId = parseOutcomeTaskPublicId(args.taskId);
+      const input = { ...args, taskId };
+      if (!validOutcomeTaskContextRequest(input)) throw new Error('Use an exact saved outcome/task ID and valid context query fields.');
+      return (await import('./verse/outcomes-io.js')).runOutcomeTaskContext(input);
+    },
+  },
+  {
     name: 'ashlr_website_publish', description: 'Request publication of the exact normally merged Phantom website revision. The host verifies signed scope, source, build and production aliases independently. Does not change settings or obtain credentials.',
     inputSchema: { type: 'object', properties: { profile: { type: 'string', enum: ['phantom-public-web'] }, expectedMerge: { type: 'string', pattern: '^[a-f0-9]{40}$' } }, required: ['profile','expectedMerge'], additionalProperties: false },
     safety: 'append', handler: async (args) => (await import('./website/host-release.js')).requestWebsitePublication(args),

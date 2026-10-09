@@ -171,6 +171,10 @@ memory, or establish a connection to a personal proactive agent. Those sources
 need a qualified account-specific adapter. Missing and partial sources remain
 unknown; a dispatch receipt does not prove completion.
 
+Connected engineering agents can retrieve the same evidence with the read-only
+native MCP tool `phm_task_context`, using the saved `outcomeId` and task `id`.
+The tool validates the same scope and remains readable while work is stopped.
+
 Outcome revisions and task bindings are durable, private records. A replayed
 command does not launch another producer. Parallel candidates register their
 actual run identities before contact, and only the selected proposal can

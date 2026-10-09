@@ -86,6 +86,7 @@ describe('native tool registry', () => {
         'phm_proactive_agents_create',
         'phm_proactive_agents_update',
         'phm_proactive_agents_delete',
+        'phm_task_context',
       ].sort(),
     );
   });
