@@ -81,6 +81,7 @@ import {
   type VerseUsage,
 } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
+import { localHarnessInvocation } from '../local-harness.js';
 import { claudeEffortArgs, claudePermissionArgs } from '../session-controls.js';
 import type { VerseAdapter, VerseParsedEvent, VerseTurnParser } from './index.js';
 import { turnAttachmentDirs } from './turn-extras.js';
@@ -1413,7 +1414,8 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
     throw new Error('claude session is missing its native session id');
   }
   const isLocal = session.engine === 'local';
-  const prefix = isLocal || !launch.launcher ? ['claude'] : [...launch.launcher];
+  const harness = isLocal ? localHarnessInvocation() : null;
+  const prefix = harness?.executable ? [harness.executable] : isLocal || !launch.launcher ? ['claude'] : [...launch.launcher];
   // Workspace roots beyond the primary. `verseSessionRoots` puts the primary
   // first and it is already the cwd, so only the tail needs a flag.
   const extraRoots = verseSessionRoots(session).slice(1);
@@ -1486,6 +1488,7 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
   ];
   const env: Record<string, string> = isLocal
     ? {
+      PATH: harness!.path,
       // The launch record's dispatch address wins; `ollamaBaseUrl` is the
       // default lane and the fallback for records written before lanes existed.
       ANTHROPIC_BASE_URL: anthropicEnvBaseUrl(launch.anthropicBaseUrl ?? launch.ollamaBaseUrl),

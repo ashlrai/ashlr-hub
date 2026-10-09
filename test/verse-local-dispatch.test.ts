@@ -31,7 +31,7 @@
  * llama ownership record). Nothing here dispatches a turn, and no llama-server
  * is started or stopped.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as os from 'node:os';
@@ -40,6 +40,7 @@ import * as path from 'node:path';
 import type { AshlrConfig } from '../src/core/types.js';
 import { discoverSeats, resolveVerseLocalDispatch } from '../src/core/verse/seats.js';
 import { claudeAdapter, anthropicEnvBaseUrl } from '../src/core/verse/adapters/claude.js';
+import * as localHarness from '../src/core/verse/local-harness.js';
 import type { VerseSeatLaunch } from '../src/core/verse/session-engine.js';
 import type { VerseSeat, VerseSession } from '../src/core/verse/types.js';
 
@@ -203,9 +204,11 @@ beforeEach(() => {
   for (const k of ENV_KEYS) delete process.env[k];
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-verse-local-dispatch-home-'));
   process.env.HOME = tmpHome;
+  vi.spyOn(localHarness, 'discoverLocalHarness').mockResolvedValue({ executable: '/inert/claude', path: '/inert' });
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const [k, v] of Object.entries(savedEnv)) {
     if (v === undefined) delete process.env[k]; else process.env[k] = v;
   }
@@ -348,6 +351,29 @@ describe('discoverSeats — the llama-server lane', () => {
 });
 
 describe('claude adapter — engine=local', () => {
+  it('marks local models unavailable when the same-context tool harness is missing', async () => {
+    ollama = await startFakeOllama();
+    const discovery = await discoverSeats(makeConfig(), {
+      ollamaBaseUrl: ollama.baseUrl,
+      accountsRoot: path.join(tmpHome, 'accounts'),
+      localHarness: async () => ({ executable: null, path: '/empty' }),
+    });
+    const local = discovery.seats.filter(seat => seat.engine === 'local');
+    expect(local).not.toHaveLength(0);
+    for (const seat of local) {
+      expect(seat.health).toMatchObject({ state: 'unavailable', summary: localHarness.LOCAL_HARNESS_UNAVAILABLE });
+      expect(seat.models[0]?.unavailableReason).toBe(localHarness.LOCAL_HARNESS_UNAVAILABLE);
+      expect(discovery.launches.get(seat.id)?.launcher).toBeNull();
+    }
+  });
+
+  it('preserves argv construction for missing-harness fixtures; the engine owns admission', () => {
+    const probe = vi.spyOn(localHarness, 'localHarnessInvocation').mockReturnValue({ executable: null, path: '/empty' });
+    try {
+      expect(claudeAdapter.buildLaunch(localSession(), 'hi', launch()).argv[0]).toBe('claude');
+    } finally { probe.mockRestore(); }
+  });
+
   it('points ANTHROPIC_BASE_URL at the launch record’s dispatch address', () => {
     const l = claudeAdapter.buildLaunch(localSession(), 'hi', launch({ anthropicBaseUrl: PROXY_BASE }));
     // The origin, not the `/v1` URL: Claude Code appends `/v1/messages` itself.

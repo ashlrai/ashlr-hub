@@ -14,7 +14,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+// Argument/parser tests do not discover or execute a host installation.
+vi.mock('../src/core/verse/local-harness.js', () => ({
+  LOCAL_HARNESS_UNAVAILABLE: 'Claude Code is required to run local tool sessions.',
+  localHarnessInvocation: () => ({ executable: '/inert/claude', path: '/inert/tools:/usr/bin' }),
+  discoverLocalHarness: async () => ({ executable: '/inert/claude', path: '/inert/tools:/usr/bin' }),
+}));
 
 import { adapterFor, type VerseParsedEvent } from '../src/core/verse/adapters/index.js';
 import { createAnthropicStreamParser, anthropicEnvBaseUrl, runtimeContextWindow } from '../src/core/verse/adapters/claude.js';
@@ -264,8 +271,9 @@ describe('claude adapter — buildLaunch', () => {
       'hi',
       launch({ launcher: null, ollamaBaseUrl: 'http://127.0.0.1:11434/v1/' }),
     );
-    expect(l.argv[0]).toBe('claude');
+    expect(l.argv[0]).toBe('/inert/claude');
     expect(l.env).toEqual({
+      PATH: '/inert/tools:/usr/bin',
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:11434',
       ANTHROPIC_AUTH_TOKEN: 'ollama',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',

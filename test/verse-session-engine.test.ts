@@ -9,11 +9,11 @@
  * explicit tmp root so nothing here can reach the real ~/.ashlr.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawn as spawnProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { adapterFor, type VerseAdapter, type VerseAdapterTurnContext, type VerseParsedEvent } from '../src/core/verse/adapters/index.js';
@@ -398,6 +398,40 @@ describe('sendTurn — claude via account launcher', () => {
 });
 
 describe('sendTurn — local via plain claude on PATH', () => {
+  it.skipIf(process.platform === 'win32')('reports missing local harness before spawning a process or consuming tokens', async () => {
+    process.env.PATH = '/no-local-tools';
+    const created = engine.createSession({ projectPath: project, seatId: LOCAL_SEAT.id }, { seat: LOCAL_SEAT, launcher: null, ollamaBaseUrl: 'http://127.0.0.1:11434/v1' });
+    engine.sendTurn(created.id, 'unavailable harness fixture');
+    const events = engine.getEvents(created.id);
+    expect(events.find(event => event.type === 'error')).toMatchObject({ message: expect.stringContaining('Claude Code is required') });
+    expect(events[events.length - 1]).toMatchObject({ type: 'turn-done', ok: false, durationMs: 0 });
+    expect(readCalls(side)).toEqual([]);
+    expect(engine.getSession(created.id)?.usage.outputTokens).toBe(0);
+  });
+  it.skipIf(process.platform === 'win32')('finds the installed local harness outside the desktop GUI PATH without importing credentials', async () => {
+    const installDir = join(homedir(), '.local', 'bin');
+    mkdirSync(installDir, { recursive: true });
+    const installed = join(installDir, 'claude');
+    const fixture = join(binDir, 'claude');
+    writeFileSync(fixture, fakeCliSource(side).replace('#!/usr/bin/env node', `#!${process.execPath}`), { mode: 0o700 });
+    symlinkSync(fixture, installed);
+    process.env.PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
+    try {
+      const created = engine.createSession({ projectPath: project, seatId: LOCAL_SEAT.id }, { seat: LOCAL_SEAT, launcher: null, ollamaBaseUrl: 'http://127.0.0.1:11434/v1' });
+      engine.sendTurn(created.id, 'local GUI path fixture');
+      const events = await untilTurnDone(engine, created.id);
+      expect(events[events.length - 1]).toMatchObject({ type: 'turn-done', ok: true });
+      const [call] = readCalls(side);
+      expect(call.env.PATH?.split(':')).toContain(installDir);
+      expect(call.env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:11434');
+      expect(call.env.ANTHROPIC_AUTH_TOKEN).toBe('ollama');
+      expect(call.env.GITHUB_TOKEN).toBeUndefined();
+      expect(call.env.DB_PASSWORD).toBeUndefined();
+      expect(JSON.parse(readFileSync(join(root, 'sessions', `${created.id}.launch.json`), 'utf8')).launcher).toBeNull();
+    } finally {
+      rmSync(installed);
+    }
+  });
   it('spawns `claude` with the Ollama env and no launcher', async () => {
     const created = engine.createSession({ projectPath: project, seatId: 'local:qwen3-coder' }, { seat: LOCAL_SEAT, launcher: null, ollamaBaseUrl: 'http://127.0.0.1:11434/v1' });
     engine.sendTurn(created.id, 'local hello');

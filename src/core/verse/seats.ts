@@ -33,6 +33,7 @@ import { join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
 import { readClaudeUsage, type ClaudeUsageResult } from '../fabric/claude-usage.js';
 import type { VerseSeatLaunch } from './session-engine.js';
+import { discoverLocalHarness, LOCAL_HARNESS_UNAVAILABLE, type LocalHarness } from './local-harness.js';
 import { modelDisplayName, modelDisplayText } from './model-display-name.js';
 import {
   buildVerseAccountsSnapshot,
@@ -143,6 +144,8 @@ const localDetailCaches = new WeakMap<typeof fetch, Map<string, Map<string, Loca
 // ---------------------------------------------------------------------------
 
 export interface VerseSeatDiscoveryOptions {
+  /** Host-only local CLI metadata reader; tests inject an inert harness. */
+  localHarness?: () => Promise<LocalHarness>;
   /** Directory holding connections.json and the account ledger. */
   accountsRoot?: string;
   /** Ollama base URL (no trailing slash, no /v1). DISCOVERY and, by default, dispatch. */
@@ -967,6 +970,7 @@ async function discoverLocalSeats(
     llamaSlot: Promise<number | null> | null;
     /** Ollama's unpinned-request default; read lazily, only if a tag needs it. */
     serverDefault: () => VerseOllamaServerDefault | null;
+    harness: () => Promise<LocalHarness>;
   },
 ): Promise<{ seats: VerseSeat[]; launches: Map<string, VerseSeatLaunch>; localRuntime: VerseBootstrap['localRuntime'] }> {
   // DISCOVERY IS OLLAMA'S, ALWAYS. `/api/tags` names the installed models and
@@ -989,9 +993,10 @@ async function discoverLocalSeats(
   // One /api/show per installed tag: it carries BOTH the context facts and the
   // tool capability that decides whether this can be a seat. The llama-server
   // slot probe (if any) runs concurrently.
-  const [inspection, slotWindow] = await Promise.all([
+  const [inspection, slotWindow, harness] = await Promise.all([
     probeLocalDetails(fetchImpl, baseUrl, probe.tags, preferred),
     windows.llamaSlot ?? Promise.resolve(null),
+    windows.harness(),
   ]);
   const { details, inspected } = inspection;
   const pending = inspected.filter((done) => !done).length;
@@ -1034,7 +1039,7 @@ async function discoverLocalSeats(
     const notes = localWindowNotes(resolved, dispatch.lane, slotWindow !== null);
     const withDetail = needDetail.has(tag);
     const label = localSeatLabel(tag, withDetail);
-    const unavailableReason = inspectionPending
+    const unavailableReason = harness.executable === null ? LOCAL_HARNESS_UNAVAILABLE : inspectionPending
       ? 'Capability inspection pending; refresh to continue local model discovery.'
       : localWindowUnusableReason(resolved.window);
     if (inspectionPending) notes.push('Installed model; tool capability has not been inspected in this discovery budget.');
@@ -1047,7 +1052,7 @@ async function discoverLocalSeats(
       // Present only when set, so a usable seat's wire shape is unchanged.
       models: [unavailableReason !== null ? { ...option, unavailableReason } : option],
       contextWindow: resolved.window,
-      health: { state: 'ready', summary: null, windows: [], observedAt },
+      health: { state: harness.executable === null ? 'unavailable' : 'ready', summary: harness.executable === null ? LOCAL_HARNESS_UNAVAILABLE : null, windows: [], observedAt },
       ...(notes.length > 0 ? { notes } : {}),
     };
     return { tag, seat, usable: unavailableReason === null };
@@ -1144,6 +1149,7 @@ export async function discoverSeats(cfg: AshlrConfig, opts: VerseSeatDiscoveryOp
       {
         llamaSlot: dispatchLane === 'llama-server' ? llamaSlotWindow(cfg, fetchImpl, opts.llamaServerOrigin) : null,
         serverDefault: () => (opts.ollamaServerDefault !== undefined ? opts.ollamaServerDefault : readOllamaServerDefault()),
+        harness: opts.localHarness ?? discoverLocalHarness,
       },
     );
     localRuntime = local.localRuntime;
