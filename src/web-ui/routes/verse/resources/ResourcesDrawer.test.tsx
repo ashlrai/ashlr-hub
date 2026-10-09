@@ -229,7 +229,8 @@ afterEach(() => {
 const cardOf = (label: string) => screen.getByRole('heading', { name: new RegExp(`^${label}`) }).closest('li')!;
 
 describe('ResourcesDrawer — usage collection', () => {
-  const HELD = 'Usage collection is held. Readings may be historical; Chat sign-in and Fleet permission are separate.';
+  const HELD = 'Usage collection is unavailable. Readings may be historical.';
+  const GENERIC_HELD = 'Usage collection is held. Readings may be historical; Chat sign-in and Fleet permission are separate.';
   const blocked = { sampledAt: CHECKED, collector: {
     mode: 'owned', state: 'blocked', owner: 'this-server', reasonCode: 'collector-unavailable',
     note: 'Waiting for cleanup', lastPolledAt: CHECKED,
@@ -245,6 +246,45 @@ describe('ResourcesDrawer — usage collection', () => {
     expect(within(status).getByText('Not in this stage')).toBeInTheDocument();
     expect(calls.every(call => call.method === 'GET')).toBe(true);
     expect(screen.queryByText('collector-unavailable')).toBeNull();
+  });
+
+  it('distinguishes unconfirmed cleanup from a review hold without exposing private diagnostics or adding actions', async () => {
+    const collector = { ...blocked.collector, reasonCode: 'cleanup-unconfirmed',
+      note: '/private/account/profile: sensitive diagnostic', holderPid: 43210 };
+    accountsResponse = async () => json({ collector });
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    expect(await screen.findByText('Previous usage collection could not be confirmed stopped. Readings may be historical.')).toBeInTheDocument();
+    expect(screen.queryByText(/sensitive diagnostic|43210|private\/account|cleanup-unconfirmed/)).toBeNull();
+    accountsResponse = async () => json({ collector: { ...collector, reasonCode: 'reconciliation-required' } });
+    await act(async () => { await runQuery(verseAccountsQuery.key, () => verseAccountsQuery.fetch()); });
+    expect(screen.getByText('Earlier usage collection needs review before it can restart. Readings may be historical.')).toBeInTheDocument();
+    expect(screen.queryByText(/sensitive diagnostic|43210|private\/account|reconciliation-required/)).toBeNull();
+    expect(calls.every(call => call.method === 'GET')).toBe(true);
+  });
+
+  it('explains missing collection setup independently of native Chat and Fleet readiness', async () => {
+    accountsResponse = async () => json({ collector: {
+      ...blocked.collector, mode: 'unconfigured', state: 'stopped', owner: 'none', reasonCode: 'accounts-collection-not-configured',
+    } });
+    readiness = READINESS;
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    expect(await screen.findByText('Usage collection is not configured for these accounts. Readings may be historical.')).toBeInTheDocument();
+    const status = await screen.findByRole('group', { name: 'Cash Margin Partners: readiness' });
+    expect(within(status).getByText('Ready')).toBeInTheDocument();
+    expect(within(status).getByText('Not in this stage')).toBeInTheDocument();
+    expect(screen.queryByText('accounts-collection-not-configured')).toBeNull();
+    expect(calls.every(call => call.method === 'GET')).toBe(true);
+  });
+
+  it.each(['new-private-reason:/private/account', '__proto__'])('keeps unknown held reason %s generic', async reasonCode => {
+    accountsResponse = async () => json({ collector: {
+      ...blocked.collector, reasonCode, note: 'sensitive diagnostic',
+    } });
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    expect(await screen.findByText(GENERIC_HELD)).toBeInTheDocument();
+    expect(screen.queryByText(reasonCode)).toBeNull();
+    expect(screen.queryByText('sensitive diagnostic')).toBeNull();
+    expect(calls.every(call => call.method === 'GET')).toBe(true);
   });
 
   it('labels retained collection as last during refresh and never presents failed evidence as current', async () => {
