@@ -14,6 +14,8 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { probeServer } from '../src/core/mcp-gateway.js';
 import { listNativeTools } from '../src/core/mcp-native.js';
 import type { McpServerSpec } from '../src/core/types.js';
@@ -55,6 +57,33 @@ function gatewaySpec(): McpServerSpec {
 }
 
 describe('gateway serves native tools', () => {
+  it('persists private proactive profiles through the built CLI protocol without provider calls', async () => {
+    const client = new Client({ name: 'proactive-profile-test', version: '1.0.0' });
+    const transport = new StdioClientTransport({ command: process.execPath, args: [cliEntry, 'mcp'],
+      cwd: repoRoot, stderr: 'pipe', env: { HOME: fx.home, USERPROFILE: fx.home,
+        ASHLR_HOME: fx.ashlrDir, PATH: process.env.PATH ?? '' } });
+    transport.stderr?.on('data', () => undefined);
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const reply = await client.callTool({ name, arguments: args });
+      expect(reply.isError).not.toBe(true);
+      const content = reply.content as Array<{ type: string; text?: string }>;
+      return JSON.parse(content.filter(item => item.type === 'text').map(item => item.text).join('\n'));
+    };
+    try {
+      await client.connect(transport, { timeout: 30_000 });
+      const created = await call('phm_proactive_agents_create', { profile: {
+        identity: { provider: 'openai-dot', accountId: 'isolated-account', agentId: 'isolated-dot' }, displayName: 'Scout' } });
+      expect(created.profile.operations.dispatch.state).toBe('unverified');
+      const page = await call('phm_proactive_agents_list', { accountId: 'isolated-account' });
+      expect(page.profiles.map((profile: { id: string }) => profile.id)).toEqual([created.profile.id]);
+      const updated = await call('phm_proactive_agents_update', { id: created.profile.id,
+        patch: { expectedVersion: 1, displayName: 'Research Scout' } });
+      expect(updated.profile).toMatchObject({ version: 2, displayName: 'Research Scout' });
+      await call('phm_proactive_agents_delete', { id: created.profile.id, expectedVersion: 2 });
+      expect((await call('phm_proactive_agents_list', {})).profiles).toEqual([]);
+    } finally { await client.close(); await transport.close(); }
+  }, 60_000);
+
   it('advertises all native tools with zero downstreams', async () => {
     const health = await probeServer(gatewaySpec(), 20_000);
     expect(health.ok).toBe(true);
