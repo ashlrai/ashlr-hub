@@ -68,7 +68,7 @@ function runFixture(
   }
   writeFileSync(join(root, 'node_modules', 'vitest', 'vitest.mjs'), `
 const shard = process.argv.find((arg) => arg.startsWith('--shard='));
-console.log(JSON.stringify({ pid: process.pid, wrapperPid: process.ppid, shard, file: process.argv.find((arg) => arg.endsWith('.test.ts') && !arg.startsWith('--exclude=')), filter: process.argv.includes('-t') ? process.argv[process.argv.indexOf('-t') + 1] : undefined, excludes: process.argv.filter((arg) => arg.startsWith('--exclude=')), reporters: process.argv.filter((arg) => arg.startsWith('--reporter=')), outputFiles: process.argv.filter((arg) => arg.startsWith('--outputFile')), reportDirectory: process.env.ASHLR_TEST_CI_REPORT_DIRECTORY, workers: process.argv.find((arg) => arg.startsWith('--maxWorkers=')), parallelism: process.argv.filter((arg) => arg.startsWith('--fileParallelism=')), bail: process.argv.find((arg) => arg.startsWith('--bail=')), home: process.env.HOME, tmp: process.env.TMPDIR, setupTiming: process.env.ASHLR_ENGINEERING_SETUP_PHASE_TIMING, successorTiming: process.env.ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING, admissionTiming: process.env.ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING, hardTimeout: process.env.ASHLR_TEST_CI_TIMEOUT_MS, idleTimeout: process.env.ASHLR_TEST_CI_IDLE_TIMEOUT_MS }));
+console.log(JSON.stringify({ pid: process.pid, wrapperPid: process.ppid, shard, file: process.argv.find((arg) => arg.endsWith('.test.ts') && !arg.startsWith('--exclude=')), filter: process.argv.includes('-t') ? process.argv[process.argv.indexOf('-t') + 1] : undefined, excludes: process.argv.filter((arg) => arg.startsWith('--exclude=')), reporters: process.argv.filter((arg) => arg.startsWith('--reporter=')), outputFiles: process.argv.filter((arg) => arg.startsWith('--outputFile')), reportDirectory: process.env.ASHLR_TEST_CI_REPORT_DIRECTORY, workers: process.argv.find((arg) => arg.startsWith('--maxWorkers=')), parallelism: process.argv.filter((arg) => arg.startsWith('--fileParallelism=')), bail: process.argv.find((arg) => arg.startsWith('--bail=')), home: process.env.HOME, tmp: process.env.TMPDIR, setupTiming: process.env.ASHLR_ENGINEERING_SETUP_PHASE_TIMING, successorTiming: process.env.ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING, admissionTiming: process.env.ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING, acceptanceTiming: process.env.ASHLR_ACCEPTANCE_PHASE_TIMING, hardTimeout: process.env.ASHLR_TEST_CI_TIMEOUT_MS, idleTimeout: process.env.ASHLR_TEST_CI_IDLE_TIMEOUT_MS }));
 if (process.env.ASHLR_FAKE_FAILURE === 'signal') {
   if (shard === '--shard=3/4') setTimeout(() => {
     process.kill(Number(process.env.ASHLR_FAKE_COORDINATOR_PID), 'SIGTERM');
@@ -92,6 +92,7 @@ if (process.env.ASHLR_FAKE_FAILURE === 'signal') {
   delete environment.ASHLR_ENGINEERING_SETUP_PHASE_TIMING;
   delete environment.ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING;
   delete environment.ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING;
+  delete environment.ASHLR_ACCEPTANCE_PHASE_TIMING;
   delete environment.ASHLR_TEST_CI_REPORT_DIRECTORY;
   if (reportDirectory !== undefined) environment.ASHLR_TEST_CI_REPORT_DIRECTORY = reportDirectory;
   return spawnSync(process.execPath, [join(root, 'scripts', 'test-ci-sharded.mjs'), ...args], {
@@ -107,7 +108,7 @@ describe('local exhaustive prepublish shards', () => {
     const result = runFixture('none');
     expect(result.error).toBeUndefined(); expect(result.status).toBe(0);
     const rows = result.stdout.trim().split('\n').map((line) => JSON.parse(line) as {
-      shard?: string; file?: string; filter?: string; excludes: string[]; workers: string; parallelism: string[]; bail: string; home: string; tmp: string; setupTiming: string; successorTiming: string; admissionTiming: string; hardTimeout: string; idleTimeout: string; outputFiles: string[]; reporters: string[]; reportDirectory?: string;
+      shard?: string; file?: string; filter?: string; excludes: string[]; workers: string; parallelism: string[]; bail: string; home: string; tmp: string; setupTiming: string; successorTiming: string; admissionTiming: string; acceptanceTiming: string; hardTimeout: string; idleTimeout: string; outputFiles: string[]; reporters: string[]; reportDirectory?: string;
     });
     expect(rows.filter((row) => row.shard).map((row) => row.shard).sort()).toEqual(['--shard=1/4', '--shard=2/4', '--shard=3/4', '--shard=4/4']);
     // Observe actual coordinator launches, independent of child log ordering.
@@ -135,6 +136,7 @@ describe('local exhaustive prepublish shards', () => {
     expect(isolatedStarts).toBe(14);
     expect(rows).toHaveLength(18);
     expect(rows.every((row) => row.setupTiming === '1' && row.successorTiming === '1' && row.admissionTiming === '1')).toBe(true);
+    expect(rows.every((row) => row.acceptanceTiming === '1')).toBe(true);
     expect(rows.every((row) => row.hardTimeout === '4000' && row.idleTimeout === '4000')).toBe(true);
     expect(rows.filter((row) => row.shard).every((row) => row.excludes.length === 13 &&
       [...isolatedFiles, 'test/universe-hub-marker-campaign.test.ts'].every((file) =>
@@ -280,21 +282,25 @@ describe('local exhaustive prepublish shards', () => {
   });
 
   it.each([
-    { setup: '0', successor: '0', admission: '0' },
-    { setup: '', successor: 'custom', admission: '' },
-    { setup: 'custom', successor: '', admission: 'custom' },
-  ])('preserves explicit phase-output choices $setup/$successor/$admission for every child', ({ setup, successor, admission }) => {
+    { setup: '0', successor: '0', admission: '0', acceptance: '0' },
+    { setup: '', successor: 'custom', admission: '', acceptance: '' },
+    { setup: 'custom', successor: '', admission: 'custom', acceptance: 'custom' },
+  ])('preserves explicit phase-output choices $setup/$successor/$admission/$acceptance for every child', ({ setup, successor, admission, acceptance }) => {
+    const parentAcceptance = process.env.ASHLR_ACCEPTANCE_PHASE_TIMING;
     const result = runFixture('none', {
       ASHLR_ENGINEERING_SETUP_PHASE_TIMING: setup,
       ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING: successor,
       ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING: admission,
+      ASHLR_ACCEPTANCE_PHASE_TIMING: acceptance,
     });
     expect(result.error).toBeUndefined(); expect(result.status).toBe(0);
     const rows = result.stdout.trim().split('\n').map((line) => JSON.parse(line) as {
-      setupTiming: string; successorTiming: string; admissionTiming: string; hardTimeout: string; idleTimeout: string;
+      setupTiming: string; successorTiming: string; admissionTiming: string; acceptanceTiming: string; hardTimeout: string; idleTimeout: string;
     });
     expect(rows).toHaveLength(18);
     expect(rows.every((row) => row.setupTiming === setup && row.successorTiming === successor && row.admissionTiming === admission)).toBe(true);
+    expect(rows.every((row) => row.acceptanceTiming === acceptance)).toBe(true);
+    expect(process.env.ASHLR_ACCEPTANCE_PHASE_TIMING).toBe(parentAcceptance);
     expect(rows.every((row) => row.hardTimeout === '4000' && row.idleTimeout === '4000')).toBe(true);
     expect(result.stderr).toContain('[test-ci:sharded] PASS');
   });
