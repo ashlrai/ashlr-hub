@@ -6,7 +6,7 @@
 
 **Work with agents. Let agents work for you. One open-source workbench for your accounts, local models, chats and engineering fleet.**
 
-**[phm.dev](https://phm.dev)**
+**[Get Phantom](https://github.com/ashlrai/phantom/releases/tag/v3.26.1) · [First-run guide](docs/QUICKSTART.md#open-verse)**
 
 [Install](#install) · [See the workbench](#what-it-is) · [Benchmarks](#benchmarks-and-traces) · [Read the guide](https://github.com/ashlrai/phantom/blob/master/docs/VERSE.md) · [Explore the ecosystem](https://verse.ashlr.ai/ecosystem) · [Star Phantom on GitHub](https://github.com/ashlrai/phantom)
 
@@ -18,20 +18,24 @@
 
 ## Install
 
-Phantom 3.26.0 is published as `@ashlr/phantom` from `ashlrai/phantom`.
+Phantom 3.26.1 is published as `@ashlr/phantom` from `ashlrai/phantom`.
 Install the version-pinned canonical release:
 
 ```sh
-npm install -g @ashlr/phantom@3.26.0   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
+npm install -g @ashlr/phantom@3.26.1   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
 phm verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 On an Apple silicon Mac, download the
-[v3.26.0 desktop DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.0/Phantom_3.26.0_aarch64.dmg).
+[v3.26.1 desktop DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.1/Phantom_3.26.1_aarch64.dmg).
 The app inside the DMG is locally signed; the DMG is unsigned. Neither is Apple
 notarized; macOS may require **Open Anyway** on first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
 [first-run guide](docs/QUICKSTART.md#open-verse).
+
+As checked on 2026-10-09, [phm.dev](https://phm.dev) presents the separate
+[Phantom Secrets](https://github.com/ashlrai/phantom-secrets) credential tool.
+Use this repository and its versioned releases to install the Phantom workbench.
 
 ![Phantom 3.24.3 Work with me: read-only Demo chat with labeled sample accounts and provider-inactive conversation.](https://raw.githubusercontent.com/ashlrai/phantom/master/docs/images/verse-work-with-me-3.24.3-demo.jpg)
 
@@ -70,7 +74,7 @@ console is the Phantom kernel: the CLI, the Universe experiment runtime and
 account-aware resource pools.
 
 Phantom was formerly Ashlr Verse. The current source repository is `ashlrai/phantom`;
-the published 3.26.0 package is `@ashlr/phantom`. `phm` and compatible `ashlr`
+the published 3.26.1 package is `@ashlr/phantom`. `phm` and compatible `ashlr`
 share the same entrypoint. Published 3.25.3 remains `@ashlr/hub`; its existing
 SDK imports, including `@ashlr/hub/universe`, retain their original identity.
 The canonical package provides the same five SDK surfaces under `@ashlr/phantom`.
@@ -258,7 +262,7 @@ separate Node.js install to run.
 
 ### Install
 
-Use the [v3.26.0 release](https://github.com/ashlrai/phantom/releases/tag/v3.26.0)
+Use the [v3.26.1 release](https://github.com/ashlrai/phantom/releases/tag/v3.26.1)
 for the versioned arm64 DMG. The app inside is locally signed; the DMG is unsigned.
 Neither is Apple Developer ID notarized, so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
@@ -346,18 +350,18 @@ check identity and quota, are in
 The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
-Published 3.26.0 provides `phm` as the primary CLI command. Both `phm` and
+Published 3.26.1 provides `phm` as the primary CLI command. Both `phm` and
 `ashlr` use the same workbench entrypoint; existing `ashlr` scripts keep working.
 When building from source, `./install.sh` installs both aliases and refuses
 unrelated files or links. The separate Phantom Secrets command remains `phantom`.
 
 ```sh
-npm install -g @ashlr/phantom@3.26.0
+npm install -g @ashlr/phantom@3.26.1
 phm --version
 phm verse                 # start the server and open http://127.0.0.1:7777/verse/
 ```
 
-The canonical 3.26.0 package exposes `@ashlr/phantom`, `@ashlr/phantom/core`,
+The canonical 3.26.1 package exposes `@ashlr/phantom`, `@ashlr/phantom/core`,
 `@ashlr/phantom/types`, `@ashlr/phantom/plugin` and `@ashlr/phantom/universe`.
 The published 3.25.3 compatibility package preserves the public SDK entrypoints `@ashlr/hub`,
 `@ashlr/hub/core`, `@ashlr/hub/types`, `@ashlr/hub/plugin` and `@ashlr/hub/universe`.
