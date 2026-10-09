@@ -7,7 +7,8 @@
  * models, and the cloud credits — so capacity is visible on every surface
  * without opening anything. Hover (or keyboard focus) shows the detail: every
  * window with its reset, the reserve kept for Mason, the account's state.
- * Clicking a row opens the Resources drawer. The whole bar can be switched
+ * Native and credit rows open the Resources drawer; saved Bot profiles open
+ * Proactive agents and report no inferred allowance. The whole bar can be switched
  * off ("Hide resource bar" in ⌘K or the drawer), which brings back the rail's
  * single capacity ring.
  *
@@ -35,8 +36,10 @@ import { creditPoolsQuery } from './credit-pools-query.js';
 import { apiGrantDisplay, apiGrantUsdDecimal } from './credit-pool-model.js';
 import { devinConsumptionEvidence, devinUsageEvidence, formatAcu } from '../devin/devin-model.js';
 import { DEVIN_POLL_MS, devinQuery } from '../devin/devin-queries.js';
-import { openResources, useResourcesUi } from './resources-store.js';
+import { closeResources, openResources, useResourcesUi } from './resources-store.js';
 import { moveResource, orderedResources, useResourceOrder } from './resource-order.js';
+import { proactiveProfilesQuery } from '../proactive/proactive-queries.js';
+import { setVerseSection } from '../verse-ui-store.js';
 import styles from './ResourcesBar.module.css';
 
 type Level = 'ok' | 'low' | 'out' | 'idle' | 'unknown';
@@ -226,6 +229,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   const devinRead = useQuery(devinQuery);
   const refreshDevin = useRefetch(devinQuery);
   const resources = useResourcesUi();
+  const proactiveRead = useQuery(proactiveProfilesQuery, { enabled: resources.bar });
   const creditRead = useQuery(creditPoolsQuery, { enabled: resources.bar, freshMs: 15_000 });
   const refreshCredits = useRefetch(creditPoolsQuery);
   const devin = devinRead.data?.value ?? null;
@@ -310,6 +314,35 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
         </Tooltip>
     ),
   }));
+  // Saved Bot identities are metadata, never native seats or allowance readings.
+  // Keep each profile distinct: matching declared accounts do not prove billing binding.
+  for (const profile of proactiveRead.error === undefined ? proactiveRead.data?.profiles ?? [] : []) {
+    if (profile.identity.provider !== 'grok-bot') continue;
+    const name = `${profile.displayName} · Grok Bot`;
+    const preference = profile.enabled ? 'Configured' : 'Preference off';
+    entries.push({ key: `proactive:${profile.id}`, name, content: (
+      <Tooltip placement="right" content={
+        <div className={styles.tip}>
+          <div className={styles.tipHead}><ProviderLogo engine="grok" size={14} /><strong>{name}</strong></div>
+          <div className={styles.tipSummary}>{preference} · usage unknown</div>
+          <div className={styles.tipLine}>Weekly Bot allowance and reset unknown. Separate from Grok Build and xAI API credits.</div>
+          <div className={styles.tipLine}>Saved account: {profile.identity.accountId} · agent: {profile.identity.agentId}. Provider binding unverified.</div>
+          <div className={styles.tipLine}>Bots may share their account's allowance. Dispatch not verified.</div>
+          <div className={styles.tipHint}>Open Proactive agents</div>
+        </div>
+      }>
+        <button type="button" className={styles.row} data-level="unknown"
+          aria-label={`${name}: ${preference.toLowerCase()}, usage and reset unknown. Open Proactive agents`}
+          onClick={() => { closeResources(); setVerseSection('agents', 'proactive-agents'); }}>
+          <span className={styles.line}>
+            <ProviderLogo engine="grok" size={14} className={styles.logo} />
+            {expanded ? <span className={styles.name}>{name}</span> : null}
+          </span>
+          {expanded ? <span className={styles.credits}>{preference} · usage unknown</span> : null}
+        </button>
+      </Tooltip>
+    ) });
+  }
   // Recorded API money is not subscription capacity, a seat, or permission to spend.
   const apiGrants = creditValue?.v === 2 && creditValue.apiGrants.state === 'healthy'
     ? creditValue.apiGrants.rows : [];

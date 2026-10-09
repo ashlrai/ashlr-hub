@@ -22,6 +22,10 @@ import { creditPoolsQuery } from './CreditPools.js';
 import type { CreditPoolsRead, CreditPoolsReadV2 } from '../../../../core/verse/credit-pools-api-types.js';
 import { getResourcesUi, reloadResourcesUiForTest, RESOURCES_STORAGE_KEY, setResourcesBar, openResources, closeResources } from './resources-store.js';
 import { reloadResourceOrderForTest, RESOURCE_ORDER_KEY } from './resource-order.js';
+import { proactiveProfilesQuery } from '../proactive/proactive-queries.js';
+import type { ProactiveProfile } from '../../../../core/proactive/types.js';
+import { VERSE_ANCHOR_EVENT, type VerseAnchorRequest } from '../verse-ui-store.js';
+import { installFetch, json } from '../context/context-fixtures.test-support.js';
 
 const NOW = Date.parse('2026-09-25T02:00:00Z');
 
@@ -42,6 +46,106 @@ describe('Grok Build display identity', () => {
 
 beforeEach(() => { localStorage.removeItem(RESOURCE_ORDER_KEY); reloadResourceOrderForTest(); });
 afterEach(() => { localStorage.removeItem(RESOURCE_ORDER_KEY); reloadResourceOrderForTest(); });
+
+describe('saved Grok Bot resource metadata', () => {
+  const grokSeat = () => {
+    const window = seatWindow({ id: 'grok_unified_weekly', usedPercent: 28, resetsAt: '2026-10-03T12:43:50.367Z' });
+    return nativeSeat(capacity({ planType: 'SuperGrok', windows: [window], binding: window,
+      usability: 'ready', observedAt: new Date(NOW - 30_000).toISOString() }),
+    { id: 'grok', engine: 'grok', label: 'Grok', accountId: 'grok' });
+  };
+  const profile = (id: string, accountId: string, enabled = true): ProactiveProfile => ({
+    id, version: 1, identity: { provider: 'grok-bot', accountId, agentId: id }, displayName: id,
+    responsibility: '', avatar: { color: '#6554ff', variant: 'classic' }, computer: { kind: 'unknown', label: '', providerComputerId: null },
+    services: [], fundingReference: null, enabled, connection: 'configured', lastRun: null,
+    createdAt: new Date(NOW).toISOString(), updatedAt: new Date(NOW).toISOString(),
+    operations: { dispatch: { state: 'unverified', verifiedAt: null, note: 'No qualified connection.' },
+      status: { state: 'unsupported', verifiedAt: null, note: '' }, cancel: { state: 'unsupported', verifiedAt: null, note: '' },
+      result: { state: 'unsupported', verifiedAt: null, note: '' } },
+  });
+  let profiles: ProactiveProfile[];
+  beforeEach(() => {
+    vi.spyOn(Date, 'now').mockReturnValue(NOW);
+    localStorage.removeItem(RESOURCES_STORAGE_KEY); reloadResourcesUiForTest();
+    profiles = [profile('bot-one', 'saved-account-a'), profile('bot-two', 'saved-account-a', false), profile('bot-three', 'saved-account-b')];
+    vi.mocked(useCapacityData).mockReturnValue({ seats: [grokSeat()], health: null, budget: null,
+      loading: false, refreshing: false, readFailed: false, rosterUnavailable: false, pendingSeatIds: [] });
+    vi.mocked(useQuery).mockImplementation(query => ({ data: query.key === proactiveProfilesQuery.key ? { schemaVersion: 1, profiles } : undefined } as never));
+  });
+  afterEach(() => { cleanup(); evictAll(); vi.restoreAllMocks(); vi.unstubAllGlobals();
+    vi.mocked(useQuery).mockReturnValue({ data: undefined } as never); localStorage.removeItem(RESOURCES_STORAGE_KEY); reloadResourcesUiForTest(); });
+  const ids = (container: HTMLElement) => [...container.querySelectorAll('[data-resource-id]')].map(row => row.getAttribute('data-resource-id'));
+
+  it('keeps each declared Bot identity unknown beside the unchanged native Build meter and opens its management surface', () => {
+    const native = barRows(buildCapacityRows([grokSeat()], { now: NOW }), { healthRead: false, now: NOW })[0]!;
+    const view = render(<ResourcesBar expanded />);
+    const build = screen.getByRole('button', { name: `${native.summary}. Open Resources` });
+    expect(build).toHaveTextContent('72% left');
+    expect(view.container.querySelectorAll('[data-resource-id^="account:"]')).toHaveLength(1);
+    expect(view.container.querySelectorAll('[data-resource-id^="proactive:"]')).toHaveLength(3);
+    for (const saved of profiles) {
+      const entry = view.container.querySelector(`[data-resource-id="proactive:${saved.id}"]`)!;
+      expect(entry).toHaveTextContent(saved.enabled ? 'Configured · usage unknown' : 'Preference off · usage unknown');
+      expect(entry.querySelector('[data-unknown]')).toBeNull(); // No fabricated quota battery.
+      expect(entry.textContent).not.toMatch(/%|Ready|Connected/);
+      const button = within(entry as HTMLElement).getByRole('button', { name: /Open Proactive agents/ });
+      fireEvent.focus(button);
+      const tip = screen.getByRole('tooltip');
+      expect(tip).toHaveTextContent(`Saved account: ${saved.identity.accountId} · agent: ${saved.identity.agentId}`);
+      expect(tip).toHaveTextContent('Weekly Bot allowance and reset unknown. Separate from Grok Build and xAI API credits.');
+      expect(tip).toHaveTextContent('Provider binding unverified.');
+      expect(tip).toHaveTextContent('Dispatch not verified.');
+      fireEvent.blur(button);
+    }
+    const reveal = vi.fn(); window.addEventListener(VERSE_ANCHOR_EVENT, reveal);
+    try {
+      openResources();
+      fireEvent.click(screen.getByRole('button', { name: /bot-one · Grok Bot: configured, usage and reset unknown/ }));
+      expect((reveal.mock.calls[0]![0] as CustomEvent<VerseAnchorRequest>).detail).toEqual({ section: 'agents', anchor: 'proactive-agents' });
+      expect(getResourcesUi().open).toBe(false);
+      expect(build).toHaveTextContent(native.value);
+    } finally { window.removeEventListener(VERSE_ANCHOR_EVENT, reveal); }
+  });
+
+  it('preserves namespaced order across rename/deletion and isolates failed profile reads from native capacity', () => {
+    const view = render(<ResourcesBar expanded />);
+    fireEvent.click(screen.getByRole('button', { name: 'Move bot-three · Grok Bot up' }));
+    const expected = ids(view.container);
+    profiles = profiles.filter(saved => saved.id !== 'bot-two').map(saved => saved.id === 'bot-three' ? { ...saved, displayName: 'Renamed Bot' } : saved);
+    view.rerender(<ResourcesBar expanded={false} />);
+    expect(ids(view.container)).toEqual(expected.filter(id => id !== 'proactive:bot-two'));
+    expect(screen.getByRole('button', { name: /Renamed Bot · Grok Bot: configured, usage and reset unknown/ })).toBeInTheDocument();
+    vi.mocked(useQuery).mockImplementation(query => ({ data: query.key === proactiveProfilesQuery.key ? { schemaVersion: 1, profiles } : undefined,
+      error: query.key === proactiveProfilesQuery.key ? new Error('Metadata unavailable') : undefined } as never));
+    view.rerender(<ResourcesBar expanded />);
+    expect(ids(view.container)).toEqual(expected.filter(id => id?.startsWith('account:')));
+    expect(screen.getByText('72% left')).toBeVisible();
+  });
+
+  it('uses only the shared local metadata GET and edit invalidation, with no hidden-bar fetch', async () => {
+    evictAll();
+    const hooks = await vi.importActual<typeof import('../../../data/hooks.js')>('../../../data/hooks.js');
+    vi.mocked(useQuery).mockImplementation((query, options) => query.key === proactiveProfilesQuery.key
+      ? hooks.useQuery(query, options) : { data: undefined } as never);
+    const { calls } = installFetch(call => call.path === '/api/verse/proactive-agents' && call.method === 'GET'
+      ? json({ schemaVersion: 1, profiles }) : json({ error: 'Unexpected request' }, 500));
+    setResourcesBar(false);
+    const view = render(<ResourcesBar expanded />);
+    await act(async () => { await Promise.resolve(); });
+    expect(calls).toHaveLength(0);
+    act(() => setResourcesBar(true));
+    await screen.findByText('bot-one · Grok Bot');
+    expect(calls.map(call => [call.path, call.method])).toEqual([['/api/verse/proactive-agents', 'GET']]);
+    const second = render(<ResourcesBar expanded={false} />);
+    expect(calls).toHaveLength(1);
+    profiles = [{ ...profiles[0]!, version: 2, displayName: 'Edited Bot' }];
+    const { invalidate } = await import('../../../data/cache.js');
+    act(() => invalidate(proactiveProfilesQuery.key));
+    await screen.findByText('Edited Bot · Grok Bot');
+    expect(calls.map(call => [call.path, call.method])).toEqual(Array.from({ length: 2 }, () => ['/api/verse/proactive-agents', 'GET']));
+    second.unmount(); view.unmount();
+  });
+});
 
 vi.mock('../usage/CapacityStrip.js', async (original) => ({
   ...await original<typeof import('../usage/CapacityStrip.js')>(),
