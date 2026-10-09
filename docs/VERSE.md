@@ -1300,6 +1300,22 @@ picker and the Resources drawer all read it.
 - The rail head and public site use the first-party Phantom ghost. Published 3.26.0 provides
   `Phantom.app`; the existing native bundle identity and saved data stay compatible. See [the naming guide](PHANTOM-BRAND.md).
 
+### Local capacity and speed
+
+Open the Local card in Resources to see host RAM, CPU load and model residency.
+RAM shows the computer's total and OS free memory. CPU shows the measured load
+across all cores and its sampling interval; the first reading can be unavailable.
+Ollama and LM Studio report model residency separately. llama-server does not
+report resident memory here. These observations describe host capacity, not a
+model's GPU utilization or a guarantee that another task will fit.
+
+Expand **Measured local speed** for historical readings bound to the resource,
+model and context window. Warm decode speed and end-to-end turn speed measure
+different work; the latter includes prompt processing and other turn overhead.
+Each reading shows its age. Opening Resources reads observations without
+warming a model or starting inference. Missing or conflicting measurements
+remain unavailable rather than being borrowed from another model.
+
 ## Cloud lane (3.11)
 
 Phantom can start **Claude Code cloud sessions** (claude.ai/code) and follow what
