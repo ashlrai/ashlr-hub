@@ -1,7 +1,7 @@
 /** Real inert native process + HTTP + OS jail seams. No vendor executable or credential is used. */
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -45,7 +45,7 @@ let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',x=>promp
  const server=JSON.parse(fs.readFileSync(args[args.indexOf('--mcp-config')+1],'utf8')).mcpServers['ashlr-fleet-broker'];
  const call=async(method,params)=>{const res=await fetch(server.url,{method:'POST',headers:{...server.headers,'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});if(res.status!==200)throw Error('refused');return res.json();};
  await call('initialize',{protocolVersion:'2025-03-26'});await call('tools/list',{});
- if(body.localMetadata){fs.writeFileSync(path.join(state,'.claude.json'),JSON.stringify({oauthAccount:{emailAddress:body.localMetadata.email,organizationUuid:body.localMetadata.orgId}}),{mode:0o600});}
+ if(body.partialMetadata){fs.writeFileSync(path.join(state,'.claude.json'),'{',{mode:0o600});}
  if(body.stall){console.log(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'started'}]}}));setInterval(()=>{},1000);return;}
  const response=await call('tools/call',{name:'write_file',arguments:{path:'written.txt',text:body.text}});
  if(response.result.content[0].text!=='Written')process.exit(14);
@@ -66,6 +66,11 @@ let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',x=>promp
 }
 const report = (patch: Partial<ClaudeAccountUsageResult> = {}):ClaudeAccountUsageResult => ({scope:'claude-native-auth-status',status:'observed',reason:'usage-native-current',startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),loggedIn:true,authMethod:'claude.ai',subscriptionType:'max',accountHint:accountDigest,windows:[],quotaFresh:true,extraUsageEnabled:false,...patch});
 function readyWatch() {setKernelEvidenceWatcherForTest(tag=>({tag,ready:true,finish:()=>({source:'kernel-log',state:'complete',reason:null,denials:[]}),abort() {}}));}
+function publishLocalMetadata(nativeStatePath: string) {
+  const temporary=join(nativeStatePath,'.claude.json.fixture-tmp');
+  writeFileSync(temporary,JSON.stringify({oauthAccount:{emailAddress:identity.email,organizationUuid:identity.orgId}}),{mode:0o600});
+  renameSync(temporary,join(nativeStatePath,'.claude.json'));
+}
 
 describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'function')('native principal and immutable launch binding',()=>{
   it('admits authoritative same-principal native before/after metadata without a local OAuth file',async()=>{
@@ -136,12 +141,27 @@ describe.runIf(process.platform === 'darwin' && typeof process.execve === 'funct
   });
   it.each([null,{email:'changed@example.invalid'},{orgId:'changed-org'},{credits:true}])('rechecks settled partial failures before capture: %j',async afterIdentity=>{
     const f=fixture();readyWatch();
+    // Isolate the post-edit identity/billing recheck. Publishing metadata during
+    // admission polling can correctly hold a partial read before any tool edit.
+    publishLocalMetadata(f.profile.nativeStatePath);
     const result=await runClaudeNativeAdapter({...f,runId:'native-fixture',seatId:'claude-a',model:'claude-sonnet-4-5',
-      prompt:JSON.stringify({text:'partial edit',fail:true,afterIdentity,localMetadata:identity}),signal:new AbortController().signal,admission:()=>true,
+      prompt:JSON.stringify({text:'partial edit',fail:true,afterIdentity}),signal:new AbortController().signal,admission:()=>true,
       timeoutMs:4000,recordEvidence() {},retainCleanupFailure(){throw Error('unexpected retention');}});
+    const diagnostic=JSON.stringify({ok:result.ok,providerContacted:result.providerContacted,captureDenied:result.captureDenied,error:result.error,terminationReason:result.terminationReason});
+    expect(existsSync(join(f.worktree,'written.txt')),diagnostic).toBe(true);
     expect(readFileSync(join(f.worktree,'written.txt'),'utf8')).toBe('partial edit');expect(result.ok).toBe(false);expect(result.providerContacted).toBe(true);
     if(afterIdentity===null)expect(result.captureDenied).not.toBe(true);
     else expect(result).toMatchObject({captureDenied:true,error:expect.stringContaining('identity or billing boundary changed')});
+  });
+  it('holds malformed metadata published before a real tool mutation',async()=>{
+    const f=fixture();readyWatch();
+    const result=await runClaudeNativeAdapter({...f,runId:'native-fixture',seatId:'claude-a',model:'claude-sonnet-4-5',
+      prompt:JSON.stringify({text:'must not write',partialMetadata:true}),signal:new AbortController().signal,admission:()=>true,
+      timeoutMs:4000,recordEvidence() {},retainCleanupFailure(){throw Error('unexpected retention');}});
+    expect(result).toMatchObject({ok:false,providerContacted:true,captureDenied:true});
+    expect(readFileSync(join(f.profile.nativeStatePath,'.claude.json'),'utf8')).toBe('{');
+    expect(readClaudeNativeBinding(f.cfg,'claude-a')).toBeNull();
+    expect(existsSync(join(f.worktree,'written.txt'))).toBe(false);
   });
   it('the native outer jail denies other IPv4 and IPv6 loopback listeners while retaining only its broker exception',async()=>{
     const f=fixture();const servers=[createServer((_q,r)=>r.end('unexpected')),createServer((_q,r)=>r.end('unexpected'))];
