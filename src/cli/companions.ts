@@ -2,6 +2,8 @@ import { isAbsolute, join } from 'node:path';
 import { inventoryCompanions, type CompanionId, type CompanionInventoryOptions } from '../core/companion-inventory.js';
 import { planCompanionProvisioning } from '../core/companion-provisioning.js';
 import { installCompanionArtifact } from '../core/companion-installation.js';
+import { inspectCompanionCatalog, resolveCompanionCatalog } from '../core/companion-catalog.js';
+import { planCompanionClient } from '../core/companion-client-plan.js';
 
 const HELP = `Usage: phm companions [--json] [--root <absolute-install-root>] [--bin-dir <absolute-dir>]\n  [--secrets-bin <absolute-file>] [--locus-bin <absolute-file>] [--lexicon-bin <absolute-file>]
 
@@ -13,20 +15,132 @@ No configuration, vault, provider, trust, MCP or service state is inspected.
 Nothing is bundled, installed, registered or enabled. Exit 0: inventory completed;
 missing/incompatible companions are reported individually. Exit 2: bad usage.\n`;
 
-const PLAN_HELP = `Usage: phm companions plan --artifacts <absolute-directory> --manifest <relative-file>\n  --sha256 <independently-verified-manifest-digest> --root <absolute-destination> [--json]
+const PLAN_HELP = `Usage: phm companions plan --artifacts <absolute-directory> --root <absolute-destination>\n  (--catalog <id> [--manifest <relative-file>] | --manifest <relative-file> --sha256 <verified-digest>) [--json]
 
 Verify an expanded local artifact file set against an independently reviewed manifest digest.
+--catalog uses shipped component pins for this host; its manifest defaults to manifest.json.
+Catalog selection does not generate a manifest. --catalog and --sha256 are mutually exclusive.
 No download, extraction, executable probe, installation, configuration, trust or service changes.
 The destination before images are observations, not backups or permission to apply changes.
 Exit 0: verified plan; exit 1: blocked; exit 2: bad usage.\n`;
 
-const INSTALL_HELP = `Usage: phm companions install --artifacts <absolute-directory> --manifest <relative-file>\n  --sha256 <independently-verified-manifest-digest> --root <absolute-private-destination>\n  --python <absolute-reviewed-python-runtime> [--json]
+const INSTALL_HELP = `Usage: phm companions install --artifacts <absolute-directory> --root <absolute-private-destination>\n  --python <absolute-reviewed-python-runtime>\n  (--catalog <id> [--manifest <relative-file>] | --manifest <relative-file> --sha256 <verified-digest>) [--json]
 
 Install verified expanded local files into a fresh immutable companion directory.
+--catalog uses shipped component pins for this host; its manifest defaults to manifest.json.
+Catalog selection does not generate a manifest. --catalog and --sha256 are mutually exclusive.
 Requires an existing private destination root and descriptor-relative macOS/Linux support.
 No download, extraction, source fallback, executable probe, registration, trust or service changes.
 Existing installations are never overwritten. Review the manifest digest and Python runtime first.
 Exit 0: installed; exit 1: blocked; exit 2: bad usage; exit 3: indeterminate, inspect the destination.\n`;
+
+const CLIENT_PLAN_HELP = `Usage: phm companions client-plan --installation <absolute-private-parent>\n  --project <absolute-project-root> --client <id> --registry <absolute-project-registry.json>\n  --config <absolute-project-client.json> [--json]
+
+Verify the installed Lexicon MCP component against shipped host catalog pins.
+Plan separate internal Lexicon and client Phantom-gateway entries; preserve unrelated configuration.
+Requires the current Node host, packaged CLI and a project-root Git marker.
+No files are written, processes started, vocabulary trusted or providers accessed.
+Exit 0: verified client plan; exit 1: blocked; exit 2: bad usage.\n`;
+
+function cmdCompanionClientPlan(args: string[]): number {
+  if (args.length === 1 && ['--help', '-h'].includes(args[0]!)) {
+    process.stdout.write(CLIENT_PLAN_HELP);
+    return 0;
+  }
+  const values = new Map<string, string>();
+  let json = false;
+  for (let index = 0; index < args.length; index++) {
+    const flag = args[index]!;
+    if (flag === '--json' && !json) { json = true; continue; }
+    if (!['--installation', '--project', '--client', '--registry', '--config'].includes(flag) || values.has(flag)) {
+      process.stderr.write('Invalid or duplicate companion client-plan option.\n');
+      return 2;
+    }
+    const value = args[++index];
+    if (!value || value.startsWith('--')) {
+      process.stderr.write(`${flag} requires a value.\n`);
+      return 2;
+    }
+    values.set(flag, value);
+  }
+  if (values.size !== 5 || !['--installation', '--project', '--registry', '--config'].every(flag => isAbsolute(values.get(flag)!))) {
+    process.stderr.write('Client-plan requires an installation parent, project, client and two explicit absolute JSON config paths.\n');
+    return 2;
+  }
+  const plan = planCompanionClient({ installationRoot: values.get('--installation')!, projectRoot: values.get('--project')!,
+    client: values.get('--client')!, registryPath: values.get('--registry')!, clientConfigPath: values.get('--config')! });
+  if (json) process.stdout.write(JSON.stringify(plan, null, 2) + '\n');
+  else {
+    process.stdout.write(`Phantom companion client plan: ${plan.status}; wiring: not applied; runtime: not inspected\n`);
+    for (const blocker of plan.blockers) process.stdout.write(`  Blocked: ${blocker}\n`);
+    for (const patch of plan.patches) process.stdout.write(`  ${patch.action}: ${patch.serverName} in ${patch.path}\n`);
+    process.stdout.write('Use --json to review the entry patches. Revalidate before merging or executing; preserve unrelated entries.\n');
+  }
+  return plan.status === 'verified-client-plan' ? 0 : 1;
+}
+
+type ManifestSelection =
+  | { status: 'selected'; manifestPath: string; trustedManifestSha256: string }
+  | { status: 'invalid'; message: string }
+  | { status: 'blocked'; blockers: string[] };
+
+function selectManifest(values: Map<string, string>): ManifestSelection {
+  const catalog = values.get('--catalog');
+  const digest = values.get('--sha256');
+  if (catalog !== undefined && digest !== undefined) {
+    return { status: 'invalid', message: '--catalog and --sha256 are mutually exclusive.' };
+  }
+  const manifestPath = values.get('--manifest') ?? (catalog !== undefined ? 'manifest.json' : undefined);
+  if (!manifestPath || isAbsolute(manifestPath)) {
+    return { status: 'invalid', message: 'A relative manifest is required; catalog selection defaults to manifest.json.' };
+  }
+  if (catalog !== undefined) {
+    const selection = resolveCompanionCatalog(catalog);
+    if (selection.status === 'blocked') {
+      if (selection.blockers.includes('unknown-catalog-id')) return { status: 'invalid', message: 'Unknown companion catalog ID.' };
+      return selection;
+    }
+    return { status: 'selected', manifestPath, trustedManifestSha256: selection.entry.manifestSha256 };
+  }
+  if (!digest || !/^[a-f0-9]{64}$/u.test(digest)) {
+    return { status: 'invalid', message: 'An independently verified SHA256 or reviewed --catalog selection is required.' };
+  }
+  return { status: 'selected', manifestPath, trustedManifestSha256: digest };
+}
+
+function selectionFailure(selection: Exclude<ManifestSelection, { status: 'selected' }>, json: boolean): number {
+  if (selection.status === 'invalid') {
+    process.stderr.write(selection.message + '\n');
+    return 2;
+  }
+  const report = { schemaVersion: 1, status: 'blocked', effects: [], installed: false,
+    runtimeCapability: 'not-inspected', blockers: selection.blockers };
+  if (json) process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+  else process.stdout.write(`Phantom companion artifact selection: blocked; no effects\n  Blocked: ${selection.blockers.join(', ')}\n`);
+  return 1;
+}
+
+function cmdCompanionCatalog(args: string[]): number {
+  if (args.length === 1 && ['--help', '-h'].includes(args[0]!)) {
+    process.stdout.write('Usage: phm companions catalog [--json]\nRead-only shipped artifact pins and narrow local test evidence. No payloads bundled or effects applied.\n');
+    return 0;
+  }
+  if (args.length > 1 || (args.length === 1 && args[0] !== '--json')) {
+    process.stderr.write('Companion catalog accepts only --json or --help.\n');
+    return 2;
+  }
+  const report = inspectCompanionCatalog();
+  if (args[0] === '--json') process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+  else {
+    process.stdout.write(`Phantom companion catalog: ${report.platform}; installed: no; runtime: not inspected; bundled: no\n`);
+    for (const entry of report.entries) {
+      process.stdout.write(`${entry.id}: ${entry.availability}; ${entry.component}\n  Manifest SHA256: ${entry.manifestSha256}\n`);
+    }
+    for (const entry of report.unavailable) process.stdout.write(`${entry.tool}: ${entry.status}; ${entry.reason}\n`);
+    process.stdout.write(report.qualificationBoundary + '\n');
+  }
+  return 0;
+}
 
 async function cmdCompanionInstall(args: string[]): Promise<number> {
   if (args.includes('--help') || args.includes('-h')) {
@@ -38,7 +152,7 @@ async function cmdCompanionInstall(args: string[]): Promise<number> {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     if (arg === '--json' && !json) { json = true; continue; }
-    if (!['--artifacts', '--manifest', '--sha256', '--root', '--python'].includes(arg) || values.has(arg)) {
+    if (!['--artifacts', '--manifest', '--sha256', '--catalog', '--root', '--python'].includes(arg) || values.has(arg)) {
       process.stderr.write('Invalid or duplicate companion install option.\n');
       return 2;
     }
@@ -49,15 +163,15 @@ async function cmdCompanionInstall(args: string[]): Promise<number> {
     }
     values.set(arg, value);
   }
-  if (values.size !== 5 || !isAbsolute(values.get('--artifacts')!) || !isAbsolute(values.get('--root')!) ||
-      !isAbsolute(values.get('--python')!) || isAbsolute(values.get('--manifest')!) ||
-      !/^[a-f0-9]{64}$/u.test(values.get('--sha256')!)) {
-    process.stderr.write('Companion install requires absolute artifact/destination/runtime paths, a relative manifest and verified SHA256.\n');
+  if (!['--artifacts', '--root', '--python'].every(option => values.has(option) && isAbsolute(values.get(option)!))) {
+    process.stderr.write('Companion install requires absolute artifact/destination/runtime paths.\n');
     return 2;
   }
+  const selection = selectManifest(values);
+  if (selection.status !== 'selected') return selectionFailure(selection, json);
   const result = await installCompanionArtifact({
     artifactRoot: values.get('--artifacts')!, destinationRoot: values.get('--root')!,
-    manifestPath: values.get('--manifest')!, trustedManifestSha256: values.get('--sha256')!,
+    manifestPath: selection.manifestPath, trustedManifestSha256: selection.trustedManifestSha256,
     pythonPath: values.get('--python')!,
   });
   if (json) process.stdout.write(JSON.stringify(result, null, 2) + '\n');
@@ -81,7 +195,7 @@ function cmdCompanionPlan(args: string[]): number {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     if (arg === '--json' && !json) { json = true; continue; }
-    if (!['--artifacts', '--manifest', '--sha256', '--root'].includes(arg) || values.has(arg)) {
+    if (!['--artifacts', '--manifest', '--sha256', '--catalog', '--root'].includes(arg) || values.has(arg)) {
       process.stderr.write('Invalid or duplicate companion plan option.\n');
       return 2;
     }
@@ -92,14 +206,15 @@ function cmdCompanionPlan(args: string[]): number {
     }
     values.set(arg, value);
   }
-  if (values.size !== 4 || !isAbsolute(values.get('--artifacts')!) || !isAbsolute(values.get('--root')!) ||
-      isAbsolute(values.get('--manifest')!) || !/^[a-f0-9]{64}$/u.test(values.get('--sha256')!)) {
-    process.stderr.write('Companion plan requires absolute artifact/destination roots, a relative manifest and verified SHA256.\n');
+  if (!['--artifacts', '--root'].every(option => values.has(option) && isAbsolute(values.get(option)!))) {
+    process.stderr.write('Companion plan requires absolute artifact/destination roots.\n');
     return 2;
   }
+  const selection = selectManifest(values);
+  if (selection.status !== 'selected') return selectionFailure(selection, json);
   const plan = planCompanionProvisioning({
     artifactRoot: values.get('--artifacts')!, destinationRoot: values.get('--root')!,
-    manifestPath: values.get('--manifest')!, trustedManifestSha256: values.get('--sha256')!,
+    manifestPath: selection.manifestPath, trustedManifestSha256: selection.trustedManifestSha256,
   });
   if (json) process.stdout.write(JSON.stringify(plan, null, 2) + '\n');
   else {
@@ -112,10 +227,12 @@ function cmdCompanionPlan(args: string[]): number {
 }
 
 export async function cmdCompanions(args: string[]): Promise<number> {
+  if (args[0] === 'client-plan') return cmdCompanionClientPlan(args.slice(1));
+  if (args[0] === 'catalog') return cmdCompanionCatalog(args.slice(1));
   if (args[0] === 'plan') return cmdCompanionPlan(args.slice(1));
   if (args[0] === 'install') return cmdCompanionInstall(args.slice(1));
   if (args.includes('--help') || args.includes('-h') || args[0] === 'help') {
-    process.stdout.write(HELP + '\nOffline artifact verification: phm companions plan --help\nExplicit local installation: phm companions install --help\n');
+    process.stdout.write(HELP + '\nShipped artifact pins: phm companions catalog --help\nOffline artifact verification: phm companions plan --help\nExplicit local installation: phm companions install --help\nExplicit client wiring plan: phm companions client-plan --help\n');
     return 0;
   }
   const options: CompanionInventoryOptions = { binaries: {} };

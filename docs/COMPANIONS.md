@@ -105,6 +105,42 @@ client setup below for its stdio MCP server. The desktop's native voice service
 has separate configuration and trust requirements; neither service is started
 by companion inventory.
 
+## Inspect shipped artifact pins
+
+```sh
+phm companions catalog --json
+```
+
+The package ships review records and exact manifest text for `secrets-native`
+(Secrets 0.7.9 native files) and `lexicon-mcp` (Lexicon 0.5.4 bundled MCP component).
+The records cover macOS arm64 only. They bind the original archive integrity,
+component mapping, expanded file hashes/modes and complete manifest digest.
+Catalog inspection performs no installation or runtime discovery. Companion
+binaries and a Python/Node runtime are not bundled by this catalog.
+
+Its evidence covers disposable installation and Secrets CLI identity or Lexicon
+MCP initialize/tools discovery. It does not establish signed companion build
+provenance, a complete Lexicon CLI, vocabulary trust or working provider access.
+Locus is explicitly unqualified; other platforms have no selectable record.
+
+Supply the reviewed expanded files and their exact manifest. `manifestText` in
+catalog JSON can be materialized explicitly after reviewing the package and
+record; formatting and the final newline are part of the pinned digest. Neither
+catalog selection nor the installer downloads or extracts the source archive.
+Use a shipped pin instead of manually supplying `--sha256`:
+
+```sh
+phm companions plan --catalog lexicon-mcp --artifacts /absolute/reviewed-files \
+  --root /absolute/existing-private-root --json
+phm companions install --catalog lexicon-mcp --artifacts /absolute/reviewed-files \
+  --root /absolute/existing-private-root --python /usr/bin/python3 --json
+```
+
+Catalog mode defaults to `manifest.json`; `--manifest` may select a different
+relative filename with the same exact contents. `--catalog` and `--sha256` are
+mutually exclusive. Unsupported hosts refuse without a fallback. An explicit
+manual digest remains available for separately reviewed artifact records.
+
 ## Verify a local provisioning plan
 
 An operator can review an expanded local artifact file set against an
@@ -241,3 +277,36 @@ This selects Lexicon's downstream binding. Native Phantom tools remain exposed
 by the gateway under their existing authority rules; the binding does not create
 an overall project authorization sandbox. A handshake or tools listing does not
 grant vocabulary trust or prove a correction/provider workflow.
+
+## Plan packaged client wiring explicitly
+
+After installing the catalog's Lexicon MCP component, plan two separate entries:
+
+```sh
+phm companions client-plan --installation /absolute/private-companions \
+  --project /absolute/project --client intended-client \
+  --registry /absolute/project/.phantom-mcp.json \
+  --config /absolute/project/.mcp.json --json
+```
+
+`--installation` is the private parent passed to the installer, not the version
+slot. The planner selects and rechecks the complete installed component against
+shipped catalog hashes and modes. Changed, missing, extra or linked payload
+files refuse. Both explicit JSON paths must be distinct, project-local and
+outside Lexicon state. A project-root Git marker is required.
+
+The internal registry patch contains the directly installed Lexicon server. The
+client patch contains only Phantom's gateway, with the current absolute Node
+runtime, this package's `bin/ashlr`, explicit scope arguments and a narrow PATH.
+Point the intended MCP client at the client config, keeping the internal registry
+separate. Existing matching entries are retained; conflicting or malformed
+configuration refuses. Output contains entry patches and before-image hashes,
+without printing unrelated configuration or environment values.
+
+This command is inert: it creates neither file and starts neither process.
+Review and merge each patch into its indicated file, preserving unrelated fields
+and entries. Revalidate the component and configurations before applying or
+executing. The wrapper requires the actual Node host; native/Bun launcher support
+is not qualified here. The external client's inherited environment is not
+sandboxed. Downstream Lexicon isolation and native Phantom authority retain the
+boundaries described above; no vocabulary trust or provider access is granted.

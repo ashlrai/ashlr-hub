@@ -167,7 +167,7 @@ function snapshot(root: string, path: string, limit: number, capture = false):
     if (bytes !== before.size || !after || !unchanged(before, after) || !unchanged(before, fstatSync(fd))) {
       refuse('file-changed-during-inspection');
     }
-    return { sha256: hash.digest('hex'), bytes, mode: before.mode & 0o777, contents: capture ? Buffer.concat(chunks) : null };
+    return { sha256: hash.digest('hex'), bytes, mode: before.mode & 0o7777, contents: capture ? Buffer.concat(chunks) : null };
   } finally { if (fd !== undefined) closeSync(fd); }
 }
 
@@ -193,6 +193,45 @@ function checkDestinationContents(destination: string, files: Set<string>): void
     } finally { handle.closeSync(); }
   }
   visit(destination, '');
+}
+
+export interface CompanionInstalledSnapshotOptions {
+  /** The actual installed slot, not its parent. No installed manifest is required or generated. */
+  installationRoot: string;
+  /** Caller must supply an independently reviewed record, such as the shipped catalog. */
+  trustedManifest: CompanionArtifactManifest;
+  /** SHA256 of the reviewed record's canonical JSON (two-space indentation, final newline). */
+  trustedManifestSha256: string;
+  platform?: string;
+}
+
+/** Fresh complete-tree verification against trusted pins; never derives trust from installed bytes. */
+export function verifyInstalledCompanionSnapshot(options: CompanionInstalledSnapshotOptions): {
+  status: 'verified-snapshot' | 'blocked'; blockers: string[]; effects: [];
+  requiresRevalidationBeforeExecution: true;
+} {
+  try {
+    if (!SHA256.test(options.trustedManifestSha256)) refuse('trusted-manifest-digest-required');
+    const digest = createHash('sha256').update(JSON.stringify(options.trustedManifest, null, 2) + '\n').digest('hex');
+    if (digest !== options.trustedManifestSha256) refuse('manifest-digest-mismatch');
+    const record = manifest(options.trustedManifest, options.platform ?? `${process.platform}-${process.arch}`);
+    safeDirectory(options.installationRoot, false);
+    const root = stat(options.installationRoot)!;
+    if ((root.mode & 0o077) !== 0 || (process.geteuid && root.uid !== process.geteuid())) refuse('installation-must-be-owned-and-private');
+    const expected = new Set(record.files.map(file => file.path));
+    checkDestinationContents(options.installationRoot, expected);
+    for (const file of record.files) {
+      const actual = snapshot(options.installationRoot, file.path, file.bytes);
+      if (!actual || actual.bytes !== file.bytes || actual.sha256 !== file.sha256) refuse('artifact-digest-mismatch');
+      if (actual.mode !== file.mode) refuse('installed-mode-mismatch');
+    }
+    checkDestinationContents(options.installationRoot, expected);
+    if (!unchanged(root, stat(options.installationRoot)!)) refuse('installation-changed-during-inspection');
+    return { status: 'verified-snapshot', blockers: [], effects: [], requiresRevalidationBeforeExecution: true };
+  } catch (error) {
+    return { status: 'blocked', blockers: [error instanceof Blocked ? error.message : 'filesystem-inspection-failed'],
+      effects: [], requiresRevalidationBeforeExecution: true };
+  }
 }
 
 export function planCompanionProvisioning(options: CompanionProvisioningOptions): CompanionProvisioningPlan {
