@@ -60,10 +60,16 @@ describe('JevResource', () => {
   });
 
   it('shows today\'s decisions, confidence and the estimate when on', async () => {
+    body = { generatedAt: '2026-09-27T00:00:00.000Z', status: status({ callsToday: 5912, dailyCallBudget: 129744,
+      byKind: [{ ...status().byKind[0], decisions: 129744, jev: 5912 }] }), kinds: [] };
+    const original = structuredClone(body);
     const { container } = render(<ul><JevResource /></ul>);
     expect(await screen.findByText('Configured')).toBeTruthy();
-    expect(container.querySelector('[data-jev-today]')?.textContent).toBe('7 decisions · 5 calls · 29% fell back');
-    expect(container.querySelector('[data-jev-kind="engine-error"]')?.textContent).toContain('3 by Jev');
+    expect(container.querySelector('[data-jev-today]')?.textContent).toBe('7 decisions · 5,900 calls · 29% fell back');
+    expect(container.querySelector('[data-jev-kind="engine-error"]')?.textContent).toBe('engine-error: 130K · 5.9K by Jev · conf 0.93');
+    expect(screen.getByText(/5.9K of 130K API call attempts today/)).toBeInTheDocument();
+    expect(screen.getByText('phm jev status')).toBeInTheDocument();
+    expect(body).toEqual(original);
     expect(screen.getByText('estimate')).toBeTruthy();
   });
 
@@ -84,9 +90,17 @@ describe('JevResource', () => {
 
 describe('JevPanel', () => {
   it('tabulates decisions by kind', async () => {
+    body = { generatedAt: '2026-09-27T00:00:00.000Z', status: status({
+      byKind: [status().byKind[0], { ...status().byKind[1], decisions: 129744, jev: 5912,
+        topFallbackReasons: [{ reason: 'escalate-only', count: 5912 }] }] }), kinds: [] };
+    const original = structuredClone(body);
     const { container } = render(<JevPanel />);
     await screen.findByText('Jev decisions');
     const row = container.querySelector('[data-jev-kind="operator-intent"]');
+    expect(row?.querySelectorAll('td')[1]?.textContent).toBe('130K');
+    expect(row?.querySelectorAll('td')[2]?.textContent).toBe('5.9K');
+    expect(row?.querySelector('td')?.title).toBe('escalate-only ×5.9K');
+    expect(body).toEqual(original);
     expect(row?.textContent).toContain('33%');
     expect(row?.textContent).toContain('0.86');
     expect(screen.getByRole('figure', { name: 'Jev response time today' })).toBeInTheDocument();
