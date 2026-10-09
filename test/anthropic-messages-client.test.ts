@@ -101,6 +101,17 @@ describe('guarded first-party Claude Messages', () => {
     expect(second.at(-1)?.content).toContainEqual({ type: 'tool_result', tool_use_id: 'toolu_Test1', content: 'owned fixture' });
     expect(ledger().map(row => row.state)).toEqual(['settled', 'settled']); expect(peer.fetch).toHaveBeenCalledTimes(2);
   });
+  it('retains exposure and refuses a response tool ID already completed in replay history', async () => {
+    const tool = { type: 'function', function: { name: 'read_fixture', parameters: { type: 'object', properties: {} } } };
+    const history: ChatMessage[] = [...messages,
+      { role: 'assistant', content: '', toolCalls: [{ id: 'toolu_Completed1', name: 'read_fixture', arguments: {} }] },
+      { role: 'tool', toolCallId: 'toolu_Completed1', content: 'completed fixture result' }];
+    const peer = await loopback(() => reply({ stop_reason: 'tool_use', content: [
+      { type: 'tool_use', id: 'toolu_Completed1', name: 'read_fixture', input: {} },
+    ] }));
+    await expect(buildAnthropicMessagesClient(cfg(), model, binding).chat(history, [tool], undefined, limits)).rejects.toThrow('contact-unconfirmed');
+    expect(peer.fetch).toHaveBeenCalledTimes(1); expect(ledger()[0]).toMatchObject({ state: 'unknown', heldUsdMicros: '3001920' });
+  });
   it.each(['constructor', 'claude-sonnet-5', 'claude-code'])('holds unpriced model %s without key or contact', name => {
     expect(() => buildAnthropicMessagesClient(cfg(), name, binding)).toThrow('pricing-unknown'); expect(secret.read).not.toHaveBeenCalled();
   });

@@ -47,7 +47,7 @@ export class ClaudeApiRequestError extends Error {
   }
 }
 
-function requestBody(model: string, messages: ChatMessage[], tools: unknown[] | undefined, limits: ModelCallLimits | undefined): { body: string; names: Set<string>; maxOutput: number } {
+function requestBody(model: string, messages: ChatMessage[], tools: unknown[] | undefined, limits: ModelCallLimits | undefined): { body: string; names: Set<string>; replayIds: Set<string>; maxOutput: number } {
   if (!limits || !integer(limits.maxOutputTokens) || limits.maxOutputTokens < 1 || limits.maxOutputTokens > MAX_GOVERNED_OUTPUT_TOKENS) refuse('output-limit-required');
   if (!Array.isArray(messages) || messages.length < 1 || messages.length > 128 || (tools?.length ?? 0) > 64) refuse('request-invalid');
   const names = new Set<string>();
@@ -96,7 +96,7 @@ function requestBody(model: string, messages: ChatMessage[], tools: unknown[] | 
   try { body = JSON.stringify({ model, max_tokens: limits.maxOutputTokens, messages: turns, ...(system.length ? { system: system.join('\n\n') } : {}), ...(definitions.length ? { tools: definitions } : {}), service_tier: 'standard_only', inference_geo: 'global', stream: false }); }
   catch { refuse('request-invalid'); }
   if (Buffer.byteLength(body, 'utf8') > MAX_REQUEST_BYTES) refuse('request-too-large');
-  return { body, names, maxOutput: limits.maxOutputTokens };
+  return { body, names, replayIds, maxOutput: limits.maxOutputTokens };
 }
 
 async function readResponse(response: Response, signal: AbortSignal): Promise<unknown> {
@@ -127,7 +127,7 @@ async function readResponse(response: Response, signal: AbortSignal): Promise<un
   }
 }
 
-function parseResponse(value: unknown, model: string, names: Set<string>, maxOutput: number, maxInput: number): Omit<ChatResult, 'billing'> & { requestId: string } {
+function parseResponse(value: unknown, model: string, names: Set<string>, replayIds: Set<string>, maxOutput: number, maxInput: number): Omit<ChatResult, 'billing'> & { requestId: string } {
   if (!record(value) || value.type !== 'message' || value.role !== 'assistant' || value.model !== model || typeof value.id !== 'string' || !/^msg_[A-Za-z0-9_-]{1,120}$/.test(value.id) || !Array.isArray(value.content) || value.content.length > 64 || !['end_turn', 'tool_use'].includes(value.stop_reason as string) || value.stop_sequence != null || value.container != null) throw new Error();
   const usage = value.usage;
   if (!record(usage) || !integer(usage.input_tokens) || usage.input_tokens > maxInput || !integer(usage.output_tokens) || usage.output_tokens > maxOutput) throw new Error();
@@ -146,7 +146,7 @@ function parseResponse(value: unknown, model: string, names: Set<string>, maxOut
   for (const block of value.content) {
     if (!record(block)) throw new Error();
     if (block.type === 'text' && typeof block.text === 'string' && Object.keys(block).every(key => ['type', 'text'].includes(key))) texts.push(block.text);
-    else if (block.type === 'tool_use' && typeof block.id === 'string' && ID.test(block.id) && typeof block.name === 'string' && names.has(block.name) && record(block.input) && !ids.has(block.id) && Object.keys(block).every(key => ['type', 'id', 'name', 'input'].includes(key))) {
+    else if (block.type === 'tool_use' && typeof block.id === 'string' && ID.test(block.id) && typeof block.name === 'string' && names.has(block.name) && record(block.input) && !ids.has(block.id) && !replayIds.has(block.id) && Object.keys(block).every(key => ['type', 'id', 'name', 'input'].includes(key))) {
       ids.add(block.id); calls.push({ id: block.id, name: block.name, arguments: block.input });
     } else throw new Error();
   }
@@ -203,7 +203,7 @@ export function buildAnthropicMessagesClient(cfg: AshlrConfig, model: string, bi
         void contacted.catch(() => {});
         hooks?.onRequestStart?.();
         const response = await contacted;
-        const parsed = parseResponse(await readResponse(response, controller.signal), model, request.names, request.maxOutput, price.maxInputTokens);
+        const parsed = parseResponse(await readResponse(response, controller.signal), model, request.names, request.replayIds, request.maxOutput, price.maxInputTokens);
         const actual = BigInt(parsed.usage.tokensIn) * price.input + BigInt(parsed.usage.tokensOut) * price.output;
         const result = settleClaudeApiGrantRequest(reservation, parsed.requestId, actual.toString());
         if (!result.ok) throw new Error();

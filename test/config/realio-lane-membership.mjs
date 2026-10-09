@@ -43,6 +43,8 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/anthropic-messages-client.test.ts', // actual loopback HTTP requests and durable private API reservations
+  'test/claude-api-grant.test.ts', // real child processes and private-store financial reservation races
   'test/m54.self-eval.test.ts', // real temporary Git repositories for source-bound legacy/canonical self-target discovery
   'test/authority-claude-native-adapter.test.ts', // real inert native profile, bounded stdin, metadata and separately jailed tools
   'test/authority-claude-native-broker.test.ts', // real authenticated loopback capability and cancellation lifecycle
