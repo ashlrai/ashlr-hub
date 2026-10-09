@@ -78,6 +78,40 @@ export function inventoryToolTree(root: string): string {
 import { readdirSync } from 'node:fs';
 function requireDirectoryEntries(path: string): string[] { return readdirSync(path).sort(); }
 
+/** Only browser-public, source-needed settings enter the credential-free builder. */
+export async function readWebsitePublicBuildEnv(api: (endpoint: string) => Promise<Record<string, unknown>>): Promise<Record<string, string>> {
+  const keys = ['NEXT_PUBLIC_SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_ANON_KEY', 'NEXT_PUBLIC_POSTHOG_KEY', 'NEXT_PUBLIC_POSTHOG_HOST'];
+  const metadata = await api(`/v10/projects/${WEBSITE_PROFILE.projectId}/env?decrypt=false`);
+  if (!Array.isArray(metadata['envs'])) throw new Error('Website public client configuration metadata is unavailable');
+  const values: Record<string, string> = { NEXT_PUBLIC_PHANTOM_SITE_URL: 'https://phm.dev' };
+  for (const key of keys) {
+    const selected = metadata['envs'].filter((entry) => {
+      const row = object(entry);
+      return row['key'] === key && Array.isArray(row['target']) && row['target'].includes('production') && !row['gitBranch'];
+    });
+    if (selected.length > 1) throw new Error('Website public client configuration is ambiguous');
+    if (selected.length === 0) continue;
+    const row = object(selected[0]); const id = string(row['id']);
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(id) || row['type'] === 'sensitive' || row['type'] === 'secret') throw new Error('Website public client configuration is not readable public Config');
+    // The single-variable endpoint cannot retrieve unrelated server credentials.
+    const observed = await api(`/v1/projects/${WEBSITE_PROFILE.projectId}/env/${id}`);
+    if (observed['id'] !== id || observed['key'] !== key) throw new Error('Website public client configuration identity changed');
+    const value = string(observed['value']);
+    if (value.length > 4096 || /[\r\n]/.test(value) || value.includes('\0')) throw new Error('Website public client configuration value is invalid');
+    values[key] = value;
+  }
+  const url = values['NEXT_PUBLIC_SUPABASE_URL']; const token = values['NEXT_PUBLIC_SUPABASE_ANON_KEY'];
+  const ref = url?.match(/^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/)?.[1];
+  if (!ref || !token || !/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) throw new Error('Configure the existing website production Supabase public URL and anon key before commissioning');
+  let claims: Record<string, unknown>;
+  try { claims = object(JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8'))); }
+  catch { throw new Error('Website public Supabase anon key is invalid'); }
+  if (claims['role'] !== 'anon' || claims['ref'] !== ref) throw new Error('Website Supabase key is not the matching public anon key');
+  if (values['NEXT_PUBLIC_POSTHOG_KEY'] && !/^phc_[A-Za-z0-9_-]+$/.test(values['NEXT_PUBLIC_POSTHOG_KEY'])) throw new Error('Website public analytics key is invalid');
+  if (values['NEXT_PUBLIC_POSTHOG_HOST'] && !/^https:\/\/(?:us|eu)\.i\.posthog\.com\/?$/.test(values['NEXT_PUBLIC_POSTHOG_HOST'])) throw new Error('Website public analytics host is invalid');
+  return values;
+}
+
 export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?: AbortSignal): WebsiteHostAdapter {
   const host = defaultHostMergeDeps();
   const assertRepositoryReadBuild = (): void => {
@@ -101,6 +135,7 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
     const project = await api(`/v9/projects/${WEBSITE_PROFILE.projectId}`);
     if (actor['id'] !== commission.actorId || project['id'] !== WEBSITE_PROFILE.projectId || project['accountId'] !== commission.teamId || project['name'] !== 'web' || project['rootDirectory'] !== WEBSITE_PROFILE.projectRootDirectory) throw new Error('Website Vercel account/project changed');
     for (const [key, value] of Object.entries(commission.projectSettings)) if (websiteDigest(project[key] ?? null) !== websiteDigest(value)) throw new Error('Website production build settings changed');
+    if (websiteDigest(await readWebsitePublicBuildEnv(api)) !== websiteDigest(commission.publicBuildEnv)) throw new Error('Website production public client configuration changed');
   };
   const aliases = async (): Promise<Record<string, string | null>> => {
     const result: Record<string, string | null> = {}; let until: number | null = null;
@@ -314,7 +349,7 @@ export async function prepareWebsiteCommission(input: { image: string }): Promis
   const image = object(JSON.parse(await run(docker, ['image', 'inspect', input.image, '--format', '{{json .}}'], { env: hostEnv() })));
   if (image['Id'] !== input.image || image['Os'] !== 'linux' || image['Architecture'] !== 'amd64') throw new Error('Website publisher image is not exact Linux x64');
   const payload = { v: 1 as const, profile: WEBSITE_PROFILE, actorId: string(user['id']), teamId: string(project['accountId']), domains: domains.sort(), projectSettings: settings,
-    publicBuildEnv: { NEXT_PUBLIC_PHANTOM_SITE_URL: 'https://phm.dev' },
+    publicBuildEnv: await readWebsitePublicBuildEnv((endpoint) => call(['api', endpoint, '--raw'])),
     toolchain: { node, nodeSha256: fileDigest(node), cli, treeSha256: inventoryToolTree(toolRoot), image: input.image, docker, dockerSha256: fileDigest(docker) } };
   const provisional = { ...payload, builderQualification: { source: { merge: '0'.repeat(40), head: '0'.repeat(40), base: '0'.repeat(40), tree: '0'.repeat(40), pr: 0, rulesDigest: '0'.repeat(64) }, outputDigest: '0'.repeat(64), image: input.image } };
   const result = { ...provisional, profileDigest: websiteDigest(provisional) };

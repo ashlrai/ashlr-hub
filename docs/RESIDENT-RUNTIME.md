@@ -350,6 +350,12 @@ settings and every production domain. It performs a real isolated build before
 saving commissioning metadata. No credentials are created, environment secrets
 pulled or provider resources changed by preparation. Missing tools, dependencies,
 identity or build qualification hold publication; there is no Mac-output fallback.
+Preparation preserves only the existing production Supabase public URL and
+matching public anon key, plus configured public PostHog settings. It reads
+metadata first and retrieves only those fixed public variables individually;
+server credentials stay in Vercel. Missing, ambiguous or privileged client
+configuration blocks commissioning rather than producing an app with broken
+sign-in. Changes to these public settings require renewed build qualification.
 Commissioning uses the existing custody signing prompt and preserves global Stop.
 This is not a general website-deployment permission or npm/desktop publication scope.
 
