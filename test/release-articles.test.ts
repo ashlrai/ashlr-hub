@@ -90,6 +90,14 @@ describe('fresh public facts are data, not saved release authority', () => {
     unavailable.npm = async () => { throw new Error('Registry visibility unavailable'); };
     await expect(verifyLatestWorkbenchRelease(unavailable, NOW)).rejects.toThrow('Registry visibility unavailable');
   });
+  it('catches replacement of the same latest tag or its asset set after full verification', async () => {
+    for (const mutation of [{ id: 999 }, { assets: [] }]) {
+      let latest = 0;
+      const reader = fixtureReader((endpoint, value) => endpoint.endsWith('/releases/latest') && ++latest === 2
+        ? { ...(value as object), ...mutation } : value, { repository: 'ashlrai/phantom', packageName: '@ashlr/phantom' });
+      await expect(verifyLatestWorkbenchRelease(reader, NOW)).rejects.toThrow('changed during verification');
+    }
+  });
   it('exports metadata through the existing CLI without enabling automation or enqueueing work', async () => {
     const ports = deps(); ports.reader = fixtureReader(undefined, { repository: 'ashlrai/phantom', packageName: '@ashlr/phantom' });
     const print = vi.fn();

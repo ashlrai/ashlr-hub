@@ -181,11 +181,14 @@ async function successfulRun(reader: ReleasePublicReader, base: string, reposito
   return { id, attempt };
 }
 
-export async function discoverLatestRelease(repository: HubRepositoryLabel, reader: ReleasePublicReader, signal?: AbortSignal): Promise<ProposedRelease> {
+async function latestReleaseObservation(repository: HubRepositoryLabel, reader: ReleasePublicReader, signal?: AbortSignal): Promise<{ proposed: ProposedRelease; release: Record<string, unknown> }> {
   requireHubRepositoryMetadata(repository, await reader.github(`repos/${repository}`, signal));
   const release = object(await reader.github(`repos/${repository}/releases/latest`, signal));
   if (typeof release['tag_name'] !== 'string' || !release['tag_name'].startsWith('v')) throw new Error('Stable release version missing');
-  return parseProposedRelease({ v: 1, repository, version: release['tag_name'].slice(1) });
+  return { proposed: parseProposedRelease({ v: 1, repository, version: release['tag_name'].slice(1) }), release };
+}
+export async function discoverLatestRelease(repository: HubRepositoryLabel, reader: ReleasePublicReader, signal?: AbortSignal): Promise<ProposedRelease> {
+  return (await latestReleaseObservation(repository, reader, signal)).proposed;
 }
 
 export function publicWorkbenchRelease(facts: PublishedReleaseFacts): PublicWorkbenchRelease {
@@ -206,11 +209,25 @@ export function publicWorkbenchRelease(facts: PublishedReleaseFacts): PublicWork
 
 /** Bracket the existing full verifier so candidate bumps or a moving latest pointer cannot become public latest claims. */
 export async function verifyLatestWorkbenchRelease(reader: ReleasePublicReader, nowMs: number, signal?: AbortSignal): Promise<PublicWorkbenchRelease> {
-  const before = await discoverLatestRelease('ashlrai/phantom', reader, signal);
-  const facts = await verifyPublishedRelease(before, reader, nowMs, signal);
-  const after = await discoverLatestRelease('ashlrai/phantom', reader, signal);
-  if (before.version !== after.version || signal?.aborted) throw new Error('Latest workbench release changed during verification');
+  const before = await latestReleaseObservation('ashlrai/phantom', reader, signal);
+  const facts = await verifyPublishedRelease(before.proposed, reader, nowMs, signal);
+  const after = await latestReleaseObservation('ashlrai/phantom', reader, signal);
+  const fingerprint = (release: Record<string, unknown>): string => {
+    if (release['draft'] !== false || release['prerelease'] !== false || !Array.isArray(release['assets'])) throw new Error('Latest public workbench release is incomplete');
+    const assets = release['assets'].map((raw) => { const asset = object(raw); return { name: stringAssetName(asset['name']), size: asset['size'], digest: asset['digest'] ?? null, state: asset['state'], url: asset['browser_download_url'] }; }).sort((a, b) => a.name.localeCompare(b.name));
+    return JSON.stringify({ id: positive(release['id']), tag: release['tag_name'], publishedAt: iso(release['published_at']), assets });
+  };
+  const latestAssets = Array.isArray(before.release['assets']) ? before.release['assets'].map((raw) => {
+    const asset = object(raw); return { name: stringAssetName(asset['name']), bytes: positive(asset['size']), digest: asset['digest'] ?? null };
+  }).sort((a, b) => a.name.localeCompare(b.name)) : null;
+  if (facts.releaseId !== positive(before.release['id']) || facts.publishedAt !== iso(before.release['published_at']) ||
+      JSON.stringify(latestAssets) !== JSON.stringify(facts.assets) ||
+      fingerprint(before.release) !== fingerprint(after.release) || signal?.aborted) throw new Error('Latest workbench release changed during verification');
   return publicWorkbenchRelease(facts);
+}
+function stringAssetName(value: unknown): string {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9._-]{1,200}$/.test(value)) throw new Error('Invalid latest release asset name');
+  return value;
 }
 
 /** A renamed repository does not identify an historical release's npm package. */
