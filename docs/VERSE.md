@@ -1312,8 +1312,14 @@ model's GPU utilization or a guarantee that another task will fit.
 Expand **Measured local speed** for historical readings bound to the resource,
 model and context window. Warm decode speed and end-to-end turn speed measure
 different work; the latter includes prompt processing and other turn overhead.
-Each reading shows its age. Opening Resources reads observations without
-warming a model or starting inference. Missing or conflicting measurements
+Each reading shows its age. Completed-turn details show recorded elapsed time
+and input, output, cache-read and cache-write token deltas from the same bound
+successful turn, with two significant figures. These details retain their own
+completion time even when a newer warm-up supplies the speed reading. Duration
+includes tools and other turn overhead; it is not time to first token. Missing
+recorded fields remain unknown, and stored zero counts do not prove that every
+provider originally reported that category. Older servers may omit these details.
+Opening Resources reads observations without warming a model or starting inference. Missing or conflicting measurements
 remain unavailable rather than being borrowed from another model.
 
 ## Cloud lane (3.11)

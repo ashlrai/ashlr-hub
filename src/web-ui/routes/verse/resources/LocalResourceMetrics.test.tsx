@@ -52,6 +52,29 @@ describe('local resource metric evidence', () => {
     expect(screen.getByText('speed not measured yet')).toBeInTheDocument();
     expect(screen.queryByText(/collision/)).not.toBeInTheDocument();
   });
+  it('shows bound recorded turn facts with two significant figures and their own historical age', () => {
+    const turn = { scope: 'turn-end-to-end' as const, observedAt: new Date(NOW - 86_400_000).toISOString(), contextWindow: 65_536,
+      durationMs: 12_345, inputTokens: 1256, outputTokens: 573, cacheReadTokens: 20, cacheCreationTokens: null };
+    render(<LocalResourceMetrics snapshot={null} view={null} now={NOW} local={[badge({ completedTurn: turn, tokPerSecScope: 'warm-decode', tokPerSecObservedAt: new Date(NOW).toISOString() })]} speedAvailable />);
+    expect(screen.getByText('41 tok/s · warm-up decode · just measured')).toBeInTheDocument();
+    expect(screen.getByText('Recorded turn · 12 s · 1 d ago')).toBeInTheDocument();
+    expect(screen.getByText('Tokens · 1,300 input · 570 output · 20 cache read · — cache write')).toBeInTheDocument();
+  });
+  it('does not invent turn facts for older, differently bound, future or malformed observations', () => {
+    const turn = { scope: 'turn-end-to-end' as const, observedAt: new Date(NOW - 1000).toISOString(), contextWindow: 65_536,
+      durationMs: 1000, inputTokens: 0, outputTokens: 20, cacheReadTokens: 0, cacheCreationTokens: 0 };
+    const readings = [badge({ seatId: 'older' }),
+      badge({ seatId: 'context', completedTurn: { ...turn, contextWindow: 32_768 } }),
+      badge({ seatId: 'future', completedTurn: { ...turn, observedAt: new Date(NOW + 1000).toISOString() } }),
+      badge({ seatId: 'invalid', completedTurn: { ...turn, durationMs: Infinity } }),
+      badge({ seatId: 'missing', completedTurn: { ...turn, inputTokens: undefined } as unknown as typeof turn }),
+      badge({ seatId: 'negative', completedTurn: { ...turn, cacheReadTokens: -1 } }),
+    ];
+    render(<LocalResourceMetrics snapshot={null} view={null} now={NOW} local={readings} speedAvailable />);
+    expect(screen.getAllByText('Completed-turn details unavailable.')).toHaveLength(readings.length);
+    expect(screen.queryByText(/Recorded turn ·/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Tokens ·/)).not.toBeInTheDocument();
+  });
   it('rejects invalid CPU percentages and intervals in backward-compatible projection', () => {
     for (const cpu of [{ usedPercent: -1, intervalMs: 100 }, { usedPercent: 101, intervalMs: 100 }, { usedPercent: 20, intervalMs: 0 }, { usedPercent: NaN, intervalMs: 100 }]) {
       expect(snapshot({ machine: { cpu } }).cpu).toBeNull();

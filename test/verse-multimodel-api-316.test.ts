@@ -20,7 +20,7 @@ import type { VerseSeatLaunch } from '../src/core/verse/session-engine.js';
 import { createMultimodelApi, foldRoiByEngine, listPriceOf, localBadges, type MultimodelApiDeps } from '../src/core/verse/multimodel-api.js';
 import { createMultimodelStore, type MultimodelStore } from '../src/core/verse/multimodel/store.js';
 import { isLoopbackUrl, lastThroughput, recordThroughput, resetThroughputForTest, warmLocalModel } from '../src/core/verse/multimodel/local-warm.js';
-import { localSpeedBinding, type LocalSpeedBinding } from '../src/core/verse/local-throughput.js';
+import { completedLocalTurnThroughput, localSpeedBinding, type LocalSpeedBinding } from '../src/core/verse/local-throughput.js';
 import { DEFAULT_CLAUDE_MODEL_ID, DEFAULT_CODEX_MODEL_ID, KNOWN_MODELS } from '../src/core/run/model-catalog.js';
 import type { ChatMeter, LocalWarmResult, MultimodelContext } from '../src/core/verse/multimodel/types.js';
 
@@ -344,6 +344,57 @@ describe('local speed attribution and measurement time', () => {
     events.q = turn(NOW - 5_000, 573);
     expect((await localBadges(deps, { seats: SEATS, launches: LAUNCHES }))[0]).toMatchObject({ tokPerSec: 57.3, tokPerSecObservedAt: new Date(NOW - 5_000).toISOString() });
   });
+  it('exposes exact completed-turn deltas and original time independently of newer warm speed without inference', async () => {
+    const at = NOW - 7_200_000;
+    const usage = { inputTokens: 1234, outputTokens: 400, cacheReadTokens: 0, cacheCreationTokens: 50, contextTokens: 1234, contextWindow: 65_536 };
+    sessions = [session('q', { engine: 'local', seatId: current().seatId, model: current().model })];
+    events.q = [
+      { seq: 1, at: new Date(at - 10_000).toISOString(), type: 'usage', turnId: 't', usage },
+      { seq: 2, at: new Date(at - 1000).toISOString(), type: 'usage', turnId: 't', usage: { ...usage, inputTokens: 22, outputTokens: 173, cacheReadTokens: 20, cacheCreationTokens: 0 } },
+      { seq: 3, at: new Date(at).toISOString(), type: 'turn-done', turnId: 't', ok: true, nativeSessionId: null, durationMs: 12_345 },
+    ];
+    recordThroughput(current(), { tokPerSec: 90, source: 'warm', scope: 'warm-decode', at: new Date(NOW).toISOString() });
+    const result = await get('/api/verse/multimodel/context');
+    const data = await result.json() as MultimodelContext;
+    expect(data.local[0]).toMatchObject({ tokPerSec: 90, tokPerSecScope: 'warm-decode', completedTurn: {
+      scope: 'turn-end-to-end', observedAt: new Date(at).toISOString(), contextWindow: 65_536,
+      durationMs: 12_345, inputTokens: 1256, outputTokens: 573, cacheReadTokens: 20, cacheCreationTokens: 50,
+    } });
+    expect(JSON.stringify(data.local[0]?.completedTurn)).not.toMatch(/endpoint|127\.0\.0\.1|nativeSessionId|projectPath/);
+    expect(warmed).toEqual([]);
+    expect(labelled).toEqual([]);
+  });
+  it('leaves absent or malformed recorded input/cache deltas unknown without losing valid output speed', () => {
+    const rows = turn(NOW);
+    const first = rows[0] as Extract<VerseEvent, { type: 'usage' }>;
+    const missing = { ...first.usage } as Partial<typeof first.usage>;
+    delete missing.inputTokens;
+    const reading = completedLocalTurnThroughput([
+      { ...first, usage: missing as typeof first.usage },
+      { ...first, seq: 2, usage: { ...first.usage, inputTokens: 5, outputTokens: 20, cacheReadTokens: -1, cacheCreationTokens: Number.MAX_SAFE_INTEGER } },
+      { ...first, seq: 3, usage: { ...first.usage, cacheCreationTokens: 1 } },
+      rows[1]!,
+    ]);
+    expect(reading).toMatchObject({ tokPerSec: 82, durationMs: 10_000, inputTokens: null, outputTokens: 820, cacheReadTokens: null, cacheCreationTokens: null });
+  });
+  it.each(['failed', 'canceled', 'missing-usage', 'future', 'window-conflict', 'fractional-output'])('does not fabricate completed-turn details from %s evidence', async reason => {
+    const at = reason === 'future' ? NOW + 1 : NOW;
+    let rows = turn(at);
+    if (reason === 'failed') rows = rows.map(event => event.type === 'turn-done' ? { ...event, ok: false } : event);
+    if (reason === 'canceled') rows.unshift({ seq: 0, at: new Date(at).toISOString(), type: 'cancelled', turnId: 't' });
+    if (reason === 'missing-usage') rows = rows.filter(event => event.type !== 'usage');
+    if (reason === 'fractional-output') {
+      const usage = rows[0] as Extract<VerseEvent, { type: 'usage' }>;
+      rows = [{ ...usage, usage: { ...usage.usage, outputTokens: 0.5 } }, { ...usage, seq: 2, usage: { ...usage.usage, outputTokens: 0.5 } }, { ...rows[1]!, seq: 3 }];
+    }
+    if (reason === 'window-conflict') {
+      const usage = rows[0] as Extract<VerseEvent, { type: 'usage' }>;
+      rows.unshift({ ...usage, seq: 0, usage: { ...usage.usage, contextWindow: 32_768 } });
+    }
+    sessions = [session('q', { engine: 'local', seatId: current().seatId, model: current().model })]; events.q = rows;
+    expect((await localBadges(deps, { seats: SEATS, launches: LAUNCHES }))[0]?.completedTurn).toBeNull();
+    expect(warmed).toEqual([]);
+  });
   it('keeps a newer warm-up reading when the only completed turn is older', async () => {
     const reading = { tokPerSec: 41.234567, source: 'warm' as const, scope: 'warm-decode' as const, at: new Date(NOW).toISOString() };
     recordThroughput(current(), reading);
@@ -358,11 +409,11 @@ describe('local speed attribution and measurement time', () => {
     recordThroughput(identity, { tokPerSec: 10, source: 'turn', scope: 'turn-end-to-end', at: new Date(NOW - 1).toISOString() });
     expect(lastThroughput(identity)?.tokPerSec).toBe(40);
   });
-  it.each(['missing', 'changed-endpoint', 'changed-context'])('keeps an unproved saved launch %s unknown instead of using current discovery as proof', async reason => {
+  it.each(['missing', 'changed-endpoint', 'changed-context', 'changed-model', 'changed-seat'])('keeps an unproved saved launch %s unknown instead of using current discovery as proof', async reason => {
     sessions = [session('q', { engine: 'local', seatId: current().seatId, model: current().model })]; events.q = turn(NOW);
-    const binding: LocalSpeedBinding | null = reason === 'missing' ? null : { ...current(), ...(reason === 'changed-endpoint' ? { endpoint: 'http://127.0.0.1:8099' } : { contextWindow: 32_768 }) };
+    const binding: LocalSpeedBinding | null = reason === 'missing' ? null : { ...current(), ...(reason === 'changed-endpoint' ? { endpoint: 'http://127.0.0.1:8099' } : reason === 'changed-model' ? { model: 'other-model' } : reason === 'changed-seat' ? { seatId: 'other-seat' } : { contextWindow: 32_768 }) };
     const result = await localBadges({ ...deps, getLocalBinding: async () => binding }, { seats: SEATS, launches: LAUNCHES });
-    expect(result[0]).toMatchObject({ tokPerSec: null, tokPerSecObservedAt: null, state: 'unknown' });
+    expect(result[0]).toMatchObject({ tokPerSec: null, tokPerSecObservedAt: null, state: 'unknown', completedTurn: null });
   });
   it('retains unknown when per-turn context is absent, and reads at most three matching sessions', async () => {
     sessions = Array.from({ length: 5 }, (_, i) => session(`q${i}`, { engine: 'local', seatId: current().seatId, model: current().model, updatedAt: new Date(NOW - i).toISOString() }));

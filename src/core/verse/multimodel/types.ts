@@ -217,6 +217,18 @@ export interface EngineRoi {
 // Local models
 // ---------------------------------------------------------------------------
 
+/** Historical recorded deltas from one successful, exactly bound local turn. */
+export interface LocalCompletedTurnMetrics {
+  scope: 'turn-end-to-end';
+  observedAt: string;
+  contextWindow: number;
+  durationMs: number;
+  inputTokens: number | null;
+  outputTokens: number;
+  cacheReadTokens: number | null;
+  cacheCreationTokens: number | null;
+}
+
 export interface LocalModelBadge {
   seatId: string;
   model: string;
@@ -230,6 +242,8 @@ export interface LocalModelBadge {
   /** Original measurement time and scope; absent on older servers. Never readiness evidence. */
   tokPerSecObservedAt?: string | null;
   tokPerSecScope?: 'warm-decode' | 'warm-end-to-end' | 'turn-end-to-end' | null;
+  /** Separate from the latest warm-up speed. Absent on older servers; never readiness evidence. */
+  completedTurn?: LocalCompletedTurnMetrics | null;
   /** The endpoint is loopback: nothing leaves this Mac. */
   private: boolean;
   /** Can drive an agentic session (edit files); null = the runtime did not say. */

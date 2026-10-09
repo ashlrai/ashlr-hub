@@ -54,6 +54,7 @@ import {
   type ChatMeterSeat,
   type EngineRoi,
   type LocalModelBadge,
+  type LocalCompletedTurnMetrics,
   type LocalWarmResult,
   type MultimodelContext,
   type OutcomeSignal,
@@ -362,8 +363,16 @@ export async function localBadges(deps: MultimodelApiDeps, discovery: Multimodel
     const endpoint = launch?.anthropicBaseUrl ?? launch?.ollamaBaseUrl ?? '';
     const binding = launch ? localSpeedBinding(seat, model, launch) : null;
     let reading = binding ? lastThroughput(binding) : null;
+    let completedTurn: LocalCompletedTurnMetrics | null = null;
     if (binding) {
       const latest = await turnThroughput(deps, sessions, binding);
+      // Keep completed-turn facts independent of newer warm speed. Original
+      // timestamps are historical evidence, not a fresh probe or TTFT.
+      if (latest && Date.parse(latest.at) <= deps.now() && typeof latest.outputTokens === 'number' && Number.isSafeInteger(latest.outputTokens)) {
+        completedTurn = { scope: 'turn-end-to-end', observedAt: latest.at, contextWindow: binding.contextWindow,
+          durationMs: latest.durationMs, inputTokens: latest.inputTokens, outputTokens: latest.outputTokens,
+          cacheReadTokens: latest.cacheReadTokens, cacheCreationTokens: latest.cacheCreationTokens };
+      }
       if (latest && (!reading || Date.parse(latest.at) > Date.parse(reading.at))) {
         reading = { tokPerSec: latest.tokPerSec, source: 'turn', scope: 'turn-end-to-end', at: latest.at };
         recordThroughput(binding, reading);
@@ -378,6 +387,7 @@ export async function localBadges(deps: MultimodelApiDeps, discovery: Multimodel
       tokPerSecSource: reading?.source ?? null,
       tokPerSecObservedAt: reading?.at ?? null,
       tokPerSecScope: reading?.scope ?? null,
+      completedTurn,
       private: endpoint !== '' && isLoopbackUrl(endpoint),
       supportsTools: null,
     };
