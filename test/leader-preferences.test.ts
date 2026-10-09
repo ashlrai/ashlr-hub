@@ -12,11 +12,11 @@ const cfg = (leaderPreferences: unknown, checkinHours = 2) => ({ foundry: { lead
 
 describe('operator Leader daily preferences', () => {
   it('preserves enabled/disabled cadence defaults, and only defaults omitted fields', () => {
-    expect(resolveLeaderPreferences()).toEqual({ maxFullRunsPerDay: 3, maxTotalRunsPerDay: 8, maxGrokLanes: 4,
+    expect(resolveLeaderPreferences()).toEqual({ maxFullRunsPerDay: null, maxTotalRunsPerDay: null, maxGrokLanes: null,
       defaulted: ['maxFullRunsPerDay', 'maxTotalRunsPerDay', 'maxGrokLanes'], sourceState: 'ready', errors: [] });
-    expect(resolveLeaderPreferences(undefined, { checkinsEnabled: false }).maxTotalRunsPerDay).toBe(3);
-    expect(resolveLeaderCadence(cfg({ maxFullRunsPerDay: null }, 0))).toMatchObject({ maxRunsPerDay: null, maxRunsPerDayTotal: 3 });
-    expect(resolveLeaderCadence(cfg({ maxTotalRunsPerDay: null }, 0))).toMatchObject({ maxRunsPerDay: 3, maxRunsPerDayTotal: null });
+    expect(resolveLeaderPreferences(undefined, { checkinsEnabled: false }).maxTotalRunsPerDay).toBeNull();
+    expect(resolveLeaderCadence(cfg({ maxFullRunsPerDay: null }, 0))).toMatchObject({ maxRunsPerDay: null, maxRunsPerDayTotal: null });
+    expect(resolveLeaderCadence(cfg({ maxTotalRunsPerDay: null }, 0))).toMatchObject({ maxRunsPerDay: null, maxRunsPerDayTotal: null });
     expect(resolveLeaderCadence(cfg({ maxFullRunsPerDay: 15, maxTotalRunsPerDay: 25 }))).toMatchObject({ maxRunsPerDay: 15, maxRunsPerDayTotal: 25 });
     expect(leaderCadenceReady(LEGACY_LEADER_CADENCE)).toBe(true);
   });
@@ -60,11 +60,11 @@ describe('operator Leader daily preferences', () => {
 
   it('keeps unavailable policy distinct from explicit null and rejects forged resolved values', () => {
     const unavailable = unavailableLeaderPreferences(false);
-    expect(unavailable).toMatchObject({ sourceState: 'unavailable', maxTotalRunsPerDay: 3 });
+    expect(unavailable).toMatchObject({ sourceState: 'unavailable', maxTotalRunsPerDay: null });
     expect(leaderPreferencesReady(unavailable)).toBe(false);
     expect(leaderCadenceReady(resolveLeaderCadence(undefined, unavailable))).toBe(false);
     expect(leaderCadenceReady({ ...LEGACY_LEADER_CADENCE, maxRunsPerDay: 0 })).toBe(false);
-    expect(leaderCadenceReady({ ...resolveLeaderCadence(undefined), maxRunsPerDay: null })).toBe(false);
+    expect(leaderCadenceReady({ ...resolveLeaderCadence(undefined), maxRunsPerDay: null })).toBe(true);
     expect(leaderPreferencesReady({ ...resolveLeaderPreferences(), maxFullRunsPerDay: Infinity })).toBe(false);
   });
 });

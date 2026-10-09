@@ -282,7 +282,7 @@ describe('drafts', () => {
 
   it('seats follow the budget decisions: Claude 40% reserve and 70% session ceiling, one local wildcard', () => {
     const { seats } = buildDefaultGrantPayload(draftInput).spend;
-    expect(seats['claude']).toEqual({ enabled: true, reserveFloorPercent: 40, maxSessionWindowPercent: 70, roles: ['judge', 'leader'] });
+    expect(seats['claude']).toEqual({ enabled: true, reserveFloorPercent: 40, maxSessionWindowPercent: 70, roles: ['producer', 'judge', 'leader'] });
     expect(seats['grok']).toMatchObject({ reserveFloorPercent: 0 });
     expect(seats['codex-personal']).toMatchObject({ enabled: true, reserveFloorPercent: 40 });
     expect(seats[LOCAL_SEAT_WILDCARD]).toMatchObject({ reserveFloorPercent: 0 });

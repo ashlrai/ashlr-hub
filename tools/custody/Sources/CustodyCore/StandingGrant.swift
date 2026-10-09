@@ -215,11 +215,11 @@ public enum StandingGrantValidator {
         if roles.contains(role) { throw GrantRefusal(path: "\(p).roles[\(j)]", reason: "\(role) is listed twice") }
         roles.append(role)
       }
-      // 3.15: a Devin seat may only produce — a third-party agent with
-      // undisclosed models never judges and never runs the Leader
-      // (standing-grant.ts parseSeat refuses the same).
-      if member.key.lowercased().hasPrefix(GrantContract.producerOnlySeatPrefix) && roles != ["producer"] {
-        throw GrantRefusal(path: "\(p).roles", reason: "a Devin seat may only be a producer")
+      // Provider-neutral planning is allowed when explicitly signed. Judge
+      // independence still requires model-family evidence, not a brand label.
+      // The historical contract prefix remains stable for old grant bytes.
+      if member.key.lowercased().hasPrefix(GrantContract.producerOnlySeatPrefix) && (roles.isEmpty || roles.contains("judge")) {
+        throw GrantRefusal(path: "\(p).roles", reason: "a Devin judge requires independent model-family evidence")
       }
       seats.append(GrantSeat(id: member.key, enabled: enabled, reserveFloorPercent: floor, maxSessionWindowPercent: ceiling, roles: roles))
     }

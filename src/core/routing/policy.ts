@@ -116,10 +116,10 @@ type EngineDefault = Omit<SeatBudgetPolicy, 'seatId'>;
  * mode at all": it has no windows, so `reservePercent` means nothing to it —
  * the operator's reserve for Devin is kept in ACUs (DevinBudgetV1.reserveAcu).
  *
- * Codex is `enabled: false` in every mode on purpose: on 2026-09-24 both Codex
- * accounts were at 100% with resets days away, and Mason turned Codex OFF for
- * autonomy "until usage returns". That is a standing choice, not a function of
- * the mode, so a mode switch must not silently turn it back on.
+ * Balanced mode treats included Codex allowance like other native resources.
+ * Stored per-account Off preferences still override the default, and current
+ * quota and subscription-only execution evidence remain separate requirements.
+ * Historical all-in/reserve defaults are retained by this compatibility change.
  */
 export const MODE_DEFAULTS: Readonly<Record<BudgetMode, Readonly<Record<BudgetEngine, Readonly<EngineDefault>>>>> =
   Object.freeze({
@@ -134,7 +134,7 @@ export const MODE_DEFAULTS: Readonly<Record<BudgetMode, Readonly<Record<BudgetEn
     balanced: Object.freeze({
       claude: Object.freeze({ enabled: true, reservePercent: 40, maxSessionWindowPercent: 70 }),
       'claude-api': Object.freeze({ enabled: false, reservePercent: 0 }),
-      codex: Object.freeze({ enabled: false, reservePercent: 40, maxSessionWindowPercent: 70 }),
+      codex: Object.freeze({ enabled: true, reservePercent: 40, maxSessionWindowPercent: 70 }),
       grok: Object.freeze({ enabled: true, reservePercent: 0 }),
       local: Object.freeze({ enabled: true, reservePercent: 0 }),
       devin: Object.freeze({ enabled: true, reservePercent: 0 }),

@@ -177,13 +177,11 @@ function parseSeat(value: unknown, seatId: string): StandingGrantSeat {
   if (Object.prototype.hasOwnProperty.call(seat, 'maxSessionWindowPercent')) {
     parsed.maxSessionWindowPercent = intIn(seat['maxSessionWindowPercent'], 1, 100, `${where}.maxSessionWindowPercent`);
   }
-  // 3.15: Devin is a PRODUCER only. A third-party hosted agent whose
-  // underlying models are undisclosed can never judge work (it may share a
-  // family with the producer it judges) and never runs the Leader. The Swift
-  // helper refuses the same (StandingGrant.swift parseSeat), so no signed
-  // grant can ever carry it.
-  if (engineOfSeatId(seatId) === 'devin' && (parsed.roles.length !== 1 || parsed.roles[0] !== 'producer')) {
-    fail(`${where}.roles: a Devin seat may only be a producer`);
+  // Leader is a planning role, independent of provider. Judging still needs
+  // a disclosed independent model family; do not infer it from a Devin label.
+  // Old producer-only grants keep their exact canonical bytes and role scope.
+  if (engineOfSeatId(seatId) === 'devin' && parsed.roles.includes('judge')) {
+    fail(`${where}.roles: a Devin judge requires independent model-family evidence`);
   }
   return parsed;
 }
@@ -701,19 +699,20 @@ function repoName(nameWithOwner: string): string {
 function defaultSeat(engine: BudgetEngine): StandingGrantSeat {
   switch (engine) {
     case 'claude':
-      return { enabled: true, reserveFloorPercent: 40, maxSessionWindowPercent: 70, roles: ['judge', 'leader'] };
+      return { enabled: true, reserveFloorPercent: 40, maxSessionWindowPercent: 70, roles: ['producer', 'judge', 'leader'] };
     case 'codex':
-      return { enabled: true, reserveFloorPercent: 40, maxSessionWindowPercent: 70, roles: ['producer', 'judge'] };
+      return { enabled: true, reserveFloorPercent: 40, maxSessionWindowPercent: 70, roles: ['producer', 'judge', 'leader'] };
     case 'grok':
       return { enabled: true, reserveFloorPercent: 0, roles: ['producer', 'judge', 'leader'] };
     case 'local':
       return { enabled: true, reserveFloorPercent: 0, roles: ['producer', 'leader'] };
     case 'devin':
-      // Producer ONLY — never judge, never Leader (parseSeat refuses more).
+      // Producer and Leader share the same observed native allowance. Judging
+      // remains separate until independent model-family evidence is supported.
       // No window to keep a percentage of: the operator's Devin reserve is
       // kept in ACUs by the Devin budget (DevinBudgetV1.reserveAcu), which
       // the fleet launcher checks before every launch.
-      return { enabled: true, reserveFloorPercent: 0, roles: ['producer'] };
+      return { enabled: true, reserveFloorPercent: 0, roles: ['producer', 'leader'] };
     default:
       return { enabled: false, reserveFloorPercent: 100, roles: ['producer'] };
   }

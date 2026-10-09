@@ -204,11 +204,11 @@ describe('GET /api/verse/budget', () => {
     expect(body.seats).toEqual({});
     expect(body.seatInfo.map((s) => s.seatId)).toEqual(['claude', 'codex-personal', 'grok', 'local:qwen3.8:27b-ctx64k']);
     expect(body.effective['claude']).toEqual({ seatId: 'claude', enabled: true, reservePercent: 40, maxSessionWindowPercent: 70 });
-    expect(body.effective['codex-personal']!.enabled).toBe(false);
+    expect(body.effective['codex-personal']!.enabled).toBe(true);
     const byId = Object.fromEntries(body.headroom.map((h) => [h.seatId, h]));
     expect(byId['claude']).toMatchObject({ eligibleForAutonomy: true, autonomyHeadroomPercent: 40, bindingWindow: 'weekly' });
     expect(byId['codex-personal']).toMatchObject({ eligibleForAutonomy: false });
-    expect(byId['codex-personal']!.reasons[0]).toBe('Autonomy is switched off for this seat.');
+    expect(byId['codex-personal']!.reasons[0]).toContain('weekly window is spent');
     expect(byId['grok']).toMatchObject({ eligibleForAutonomy: true, autonomyHeadroomPercent: 88 });
     expect(byId['local:qwen3.8:27b-ctx64k']).toMatchObject({ eligibleForAutonomy: true, autonomyHeadroomPercent: 100 });
     expect(body.readingMaxAgeMs).toBe(15 * 60_000);

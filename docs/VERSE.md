@@ -860,7 +860,8 @@ open the same control, clamped to the grant's ceiling.
 | **balanced** (default) | Up to each seat's reserve. Claude keeps 40 % of its weekly window for you and is never used while its five-hour window is above 70 %. Grok keeps no reserve. Local models incur no provider token charge; hardware and serving capacity still apply. |
 | **reserve** | Free local models first, and only a small paid slice (85 % of every paid window is kept for you). |
 
-Codex is off for autonomy in every mode until you switch it on. An unknown
+Balanced mode enables eligible included Codex allowance by default; a stored
+per-account Off setting remains respected. An unknown
 reading makes a seat ineligible for autonomous work, never eligible: your
 reserve is not spent on a guess. Your own chats ignore reserves (the reserves
 exist for you); a chat is refused only when its seat cannot run a turn at all.

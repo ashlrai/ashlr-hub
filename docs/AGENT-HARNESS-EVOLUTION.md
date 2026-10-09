@@ -89,9 +89,9 @@ work share evidence and navigation; selecting a workspace does not start a fleet
 | `foundry.goalPreferences.maxNewGoalsPerDay` | New goals in the last 24 hours | 3 |
 | `foundry.goalPreferences.maxGoalProposalsPerMemo` | Goal proposals per memo | 3 |
 | `foundry.goalPreferences.maxGoalsPerConductorCycle` | Goals considered per ordinary conductor cycle | 3 |
-| `foundry.leaderPreferences.maxFullRunsPerDay` | Full Leader runs per day | 3 |
-| `foundry.leaderPreferences.maxTotalRunsPerDay` | All Leader runs per day | 8 with check-ins enabled; otherwise 3 |
-| `foundry.leaderPreferences.maxGrokLanes` | Requested Grok lanes | 4 |
+| `foundry.leaderPreferences.maxFullRunsPerDay` | Full Leader runs per day | No preference limit |
+| `foundry.leaderPreferences.maxTotalRunsPerDay` | All Leader runs per day | No preference limit |
+| `foundry.leaderPreferences.maxGrokLanes` | Requested Grok lanes | No preference limit |
 
 Every preference accepts a positive safe integer or explicit `null`, displayed
 as **No preference limit**. Missing fields preserve existing defaults. Partial

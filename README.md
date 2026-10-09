@@ -128,9 +128,19 @@ can inform the choice; it cannot make a blocked resource eligible.
 
 **Manager** coordinates delegation and review for an explicit chat or outcome.
 **Leader** sets fleet priorities, refines work and asks for your decisions.
-These are different roles: the Manager supports the current Claude, Codex,
-Grok and local adapters; the Leader uses Grok or local models, with restricted
-Claude fallback, rather than Codex.
+Roles select an eligible account and fitting model rather than a preferred
+company. Leader planning and conversation support prepared Claude Code, Codex,
+Grok, local models and the included native Devin CLI models. Native roles use
+an account-bound dispatcher; Manager stages use qualified worker adapters.
+Cloud Devin sessions remain a separately accounted ACU lane. Balanced mode
+enables included Codex allowance by default; stored per-account Off settings
+remain respected. Each account's
+model variants share its allowance, so adding a model never creates quota.
+
+Routing retains current account, context, subscription-only billing and signed
+scope evidence. Unknown funding remains unavailable. Native completion traces
+record the selected account/model, wall time and reported tokens when present;
+whole-run throughput is distinct from generation tokens per second.
 
 ```mermaid
 flowchart LR

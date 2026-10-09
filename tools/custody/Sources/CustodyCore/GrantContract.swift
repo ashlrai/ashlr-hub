@@ -78,7 +78,7 @@ public enum GrantContract {
   // dispatch lane. Reported by `status.grantEngines` so the TS side drafts it
   // only for a helper that signs it.
   public static let fleetEngines = ["local", "grok-cli", "claude-cli", "codex", "devin"]
-  /// Seat ids with this prefix (lower-cased) are Devin seats: producer ONLY (never judge / leader).
+  /// Historical Devin seat prefix. Explicit Leader roles are valid; judges require independent family evidence.
   public static let producerOnlySeatPrefix = "devin"
   public static let leaderGrantClasses = ["A", "B"]
 

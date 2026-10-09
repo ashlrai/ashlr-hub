@@ -98,19 +98,22 @@ describe('budget policy defaults (Mason, 2026-09-24)', () => {
     expect(decision.exclusions[0]?.details).toContainEqual(expect.objectContaining({ kind: 'grant' }));
   });
 
-  it('defaults to balanced with Claude 40% weekly reserve + 70% 5-hour ceiling, Grok 0%, local unlimited, Codex off', () => {
+  it('defaults to balanced with Claude 40% weekly reserve + 70% 5-hour ceiling, Grok 0%, local unlimited and included Codex eligible', () => {
     const p = balanced();
     expect(p.mode).toBe('balanced');
     expect(p.seats).toEqual({});
     expect(effectiveSeatPolicy(p, 'claude')).toEqual({ seatId: 'claude', enabled: true, reservePercent: 40, maxSessionWindowPercent: 70 });
     expect(effectiveSeatPolicy(p, 'grok')).toEqual({ seatId: 'grok', enabled: true, reservePercent: 0 });
     expect(effectiveSeatPolicy(p, 'local:qwen')).toEqual({ seatId: 'local:qwen', enabled: true, reservePercent: 0 });
-    expect(effectiveSeatPolicy(p, 'codex-personal').enabled).toBe(false);
-    expect(effectiveSeatPolicy(p, 'codex-cmp').enabled).toBe(false);
+    expect(effectiveSeatPolicy(p, 'codex-personal').enabled).toBe(true);
+    expect(effectiveSeatPolicy(p, 'codex-cmp').enabled).toBe(true);
   });
 
-  it('keeps Codex off in every mode and gives all-in no reserve at all', () => {
-    for (const mode of ['all-in', 'balanced', 'reserve'] as const) expect(MODE_DEFAULTS[mode].codex.enabled).toBe(false);
+  it('preserves stored Codex Off while enabling the balanced included-allowance default', () => {
+    expect(MODE_DEFAULTS.balanced.codex.enabled).toBe(true);
+    const stored={...balanced(),seats:{'codex-personal':{seatId:'codex-personal',enabled:false,reservePercent:40}}};
+    expect(effectiveSeatPolicy(stored,'codex-personal').enabled).toBe(false);
+    for (const mode of ['all-in', 'reserve'] as const) expect(MODE_DEFAULTS[mode].codex.enabled).toBe(false);
     expect(defaultSeatPolicy('all-in', 'claude')).toEqual({ seatId: 'claude', enabled: true, reservePercent: 0 });
     expect(defaultSeatPolicy('reserve', 'grok').reservePercent).toBe(85);
   });
@@ -129,7 +132,7 @@ describe('budget policy defaults (Mason, 2026-09-24)', () => {
 
   it.each(['constructor', 'toString'])('uses a real default for an unstored prototype-like seat ID %s', (seatId) => {
     expect(effectiveSeatPolicy(balanced(), seatId)).toEqual({ seatId, enabled: true, reservePercent: 40, maxSessionWindowPercent: 70 });
-    expect(effectiveSeatPolicy(balanced(), seatId, 'codex')).toEqual({ seatId, enabled: false, reservePercent: 40, maxSessionWindowPercent: 70 });
+    expect(effectiveSeatPolicy(balanced(), seatId, 'codex')).toEqual({ seatId, enabled: true, reservePercent: 40, maxSessionWindowPercent: 70 });
   });
 });
 
@@ -206,7 +209,7 @@ describe('applying updates', () => {
     expect(next.seats['local:m149']).toEqual({ seatId: 'local:m149', enabled: false, reservePercent: 30, dailyUsdCap: 2.5 });
     expect(next.seats['local:m0']).toEqual(p.seats['local:m0']);
     expect(next.seats['local:m64']).toEqual(p.seats['local:m64']);
-    expect(effectiveSeatPolicy(next, 'codex-untouched').enabled).toBe(false);
+    expect(effectiveSeatPolicy(next, 'codex-untouched').enabled).toBe(true);
     expect(next.mode).toBe('balanced');
   });
 
@@ -458,8 +461,8 @@ describe('routeSeat — today’s machine in balanced mode', () => {
     expect(d.candidates).toEqual(['grok', 'local:qwen3.8:27b-ctx64k', 'claude']);
     expect(d.exclusions.map((e) => e.seatId)).toEqual(['codex-cmp', 'codex-personal']);
     // Codex is OFF by policy — that is the first reason, and "off" has no reopening date.
-    expect(d.exclusions[0]!.reasons[0]).toBe('Autonomy is switched off for this seat.');
-    expect(d.exclusions[0]!.nextEligibleAt).toBeNull();
+    expect(d.exclusions[0]!.reasons[0]).toContain('weekly window is spent');
+    expect(d.exclusions[0]!.nextEligibleAt).toBe(iso(40*H));
     expect(d.why).toMatch(/^Routed autonomous medium-difficulty code work to grok \(grok\) with 88% of its weekly window left for autonomy: balanced mode prefers the fast tier first/);
     expect(d.why.split('. ').length).toBe(1);
   });
@@ -625,8 +628,8 @@ describe('seat reasons as data (3.10.1)', () => {
     const d = routeSeat(auto('code', 'medium'), [claude(15, 70), codexSpent('codex-cmp', 40), codexSpent('codex-personal', 30), grok(6)], balanced(), opts);
     expect(d.seatId).toBe('grok');
     const cmp = d.exclusions.find((e) => e.seatId === 'codex-cmp')!;
-    expect(cmp.details!.map((r) => r.kind)).toEqual(['switched-off', 'spent']);
-    expect(cmp.details![1]!.resetsAt).toBe(iso(40 * H));
+    expect(cmp.details!.map((r) => r.kind)).toEqual(['spent']);
+    expect(cmp.details![0]!.resetsAt).toBe(iso(40 * H));
     expect(cmp.reasons).toEqual(reasonSentences(cmp.details!));
     for (const x of d.exclusions) expect(x.details).toHaveLength(x.reasons.length);
   });
@@ -683,5 +686,15 @@ describe('seat reasons as data (3.10.1)', () => {
     const stored = normalizeJournalRecord(record) as DispatchJournalRecord;
     expect(stored.seatDecision!.summary).toBe(decision.summary);
     expect(stored.seatDecision!.exclusions[0]!.details).toEqual(decision.exclusions[0]!.details);
+  });
+});
+
+
+describe('provider-neutral included native Devin role routing',()=>{
+  it('routes host-proved native included capacity but retains separate cloud/unknown funding lane',()=>{
+    const native=seat('devin-cli','devin',[],{free:true,costBasis:'free',reachable:true,tier:'fast'});
+    expect(routeSeat(auto('leader','high'),[native],balanced(),opts).seatId).toBe('devin-cli');
+    for(const held of [{...native,free:false},{...native,costBasis:'credits' as const},{...native,seatId:'devin-cloud'}])
+      expect(routeSeat(auto('leader','high'),[held],balanced(),opts).seatId).toBeNull();
   });
 });

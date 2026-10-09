@@ -102,7 +102,7 @@ describe('budget policy file', () => {
     expect(Object.keys(loadBudgetPolicy().seats)).toHaveLength(count);
     const next = updateBudgetPolicy({ seatId: `codex-${count}`, policy: { reservePercent: 25 } }, { now });
     expect(Object.keys(next.seats)).toHaveLength(count + 1);
-    expect(next.seats[`codex-${count}`]).toEqual({ seatId: `codex-${count}`, enabled: false, reservePercent: 25, maxSessionWindowPercent: 70 });
+    expect(next.seats[`codex-${count}`]).toEqual({ seatId: `codex-${count}`, enabled: true, reservePercent: 25, maxSessionWindowPercent: 70 });
     expect(next.seats['claude-0']).toEqual(seats['claude-0']);
     expect(next.seats[`claude-${count - 1}`]).toEqual(seats[`claude-${count - 1}`]);
     expect(loadBudgetPolicy()).toEqual(next);

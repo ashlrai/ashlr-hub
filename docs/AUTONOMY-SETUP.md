@@ -91,8 +91,8 @@ hours, and a red merge is reverted automatically. The full model is in
 (the default), Claude keeps 40 % of its weekly window for you, and autonomy
 never uses it while its five-hour window is above 70 %. Grok keeps no reserve.
 Local models incur no provider token charges; available hardware determines their capacity. **all-in** drops the budget preference reserves, while signed account floors and session ceilings still apply.
-**reserve** keeps 85 % of every paid window for you. Codex is off for autonomy
-until you switch it on. A seat whose usage cannot be read is never eligible.
+**reserve** keeps 85 % of every paid window for you. Balanced mode enables
+eligible included Codex allowance; stored per-account Off settings still apply. A seat whose usage cannot be read is never eligible.
 Your own chats ignore reserves.
 
 

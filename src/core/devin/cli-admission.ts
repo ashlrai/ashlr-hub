@@ -80,6 +80,8 @@ export function parseDevinCliPrincipal(text: string): Pick<DevinCliExecutionBind
 }
 
 export interface DevinCliAdmissionOptions {
+  /** Renew native metadata before a long-running role crosses its evidence TTL. */
+  forceRefresh?: boolean;
   cliPath?: string;
   credentialsPath?: string;
   now?: () => number;
@@ -100,11 +102,23 @@ function nativeMetadata(executable: string, args: readonly string[], env: NodeJS
 }
 
 /** Cheap contact-time continuity. No provider request, credential contents or binary rehash. */
-export function devinCliBindingCurrent(binding: DevinCliExecutionBinding | null | undefined, model: string, now = Date.now()): binding is DevinCliExecutionBinding {
-  if (!binding || !issued.has(binding) || binding.model !== model || !Number.isFinite(now) ||
-    now < binding.observedAt || now >= binding.validUntil) return false;
+export function devinCliIdentityCurrent(binding: DevinCliExecutionBinding | null | undefined, model: string): binding is DevinCliExecutionBinding {
+  if (!binding || !issued.has(binding) || binding.model !== model) return false;
   try { return realpathSync(binding.selectedPath) === binding.executable && epoch(binding.executable, true) === binding.executableEpoch &&
     epoch(binding.credentialsPath, false) === binding.credentialsEpoch; } catch { return false; }
+}
+/** Historical run settlement only. This proves launch continuity, never fresh
+ * pricing, quota or permission to contact the provider again. */
+export function peekDevinCliIdentityBinding(model: string): DevinCliExecutionBinding | null {
+  if (selected?.credentialsPath !== devinCliCredentialsPath()) return null;
+  for (const binding of entries.values()) {
+    if (binding.executable === selected.executable && binding.credentialsPath === selected.credentialsPath &&
+      devinCliIdentityCurrent(binding, model)) return binding;
+  }
+  return null;
+}
+export function devinCliBindingCurrent(binding: DevinCliExecutionBinding | null | undefined, model: string, now = Date.now()): binding is DevinCliExecutionBinding {
+  return devinCliIdentityCurrent(binding, model) && Number.isFinite(now) && now >= binding.observedAt && now < binding.validUntil;
 }
 export function peekDevinCliExecutionBinding(model: string, now = Date.now()): DevinCliExecutionBinding | null {
   if (selected?.credentialsPath !== devinCliCredentialsPath()) return null;
@@ -128,7 +142,7 @@ export async function refreshDevinCliExecutionBinding(model: string, opts: Devin
     const executableEpoch = epoch(executable, true); const credentialsEpoch = epoch(credentialsPath, false);
     const key = JSON.stringify([selectedPath, executable, executableEpoch, credentialsPath, credentialsEpoch, model]);
     const cached = entries.get(key);
-    if (cached && devinCliBindingCurrent(cached, model, now()) && admitted(opts)) { selected = cached; return cached; }
+    if (!opts.forceRefresh && cached && devinCliBindingCurrent(cached, model, now()) && admitted(opts)) { selected = cached; return cached; }
     const failed = failures.get(key);
     if (failed !== undefined && now() >= failed && now() - failed < RETRY_MS) return null;
     if (!flights.has(key)) {

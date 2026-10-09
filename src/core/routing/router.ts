@@ -433,14 +433,10 @@ export function describeExclusions(exclusions: readonly SeatExclusion[], max = 3
   return exclusions.length > max ? `${shown}; and ${exclusions.length - max} more` : shown;
 }
 
-/**
- * 3.15: a Devin seat is never a candidate for AUTONOMOUS work. The fleet
- * launches Devin only through devin/fleet-launcher.ts under its grant and its
- * own ACU reserve; the capacity snapshot refuses a `devin` seat
- * (budget-store.ts sanitizeSeatCapacity), and this is the second lock, so a
- * hand-built capacity list cannot route fleet work to it either. Mason's own
- * (interactive) work routes to Devin like any other elite seat.
- */
+/** Cloud ACU sessions retain their separately accounted launch lane. The native
+ * devin-cli adapter may route included models only when its caller supplies
+ * current host-issued pricing evidence as free capacity; a company label does
+ * not exclude a qualified native role. This pure router never mints evidence. */
 function devinFleetVerdict(capacity: SeatCapacity): Verdict {
   const details: SeatReason[] = [{
     kind: 'lane',
@@ -464,7 +460,7 @@ export function routeSeat(
     ...(seat.engine === 'claude-api' || seat.seatId.toLowerCase() === CLAUDE_API_SEAT_ID
       ? { capacity: seat, eligible: false, headroom: null, nextEligibleAt: null,
         details: [{ kind: 'grant' as const, text: 'Claude API is not commissioned in the signed grant.' }] }
-      : req.autonomous && seat.engine === 'devin'
+      : req.autonomous && seat.engine === 'devin' && !(seat.seatId === 'devin-cli' && seat.free === true && seat.costBasis === 'free')
       ? devinFleetVerdict(seat)
       : applyFit(
         req.autonomous

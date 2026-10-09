@@ -231,11 +231,20 @@ final class StandingGrantTests: XCTestCase {
     XCTAssertTrue(g.canonical.contains(#""engines":["local","grok-cli","claude-cli","codex","devin"]"#))
   }
 
-  func testRefusesADevinSeatThatJudgesOrLeads() {
+  func testRefusesADevinSeatThatJudgesWithoutIndependentModelEvidence() {
     let base = fx.payload.replacing([.key("engines")], with: enginesWithDevin)
-    for roles in [["producer", "judge"], ["judge"], ["leader"], ["producer", "leader"], []] {
+    for roles in [["producer", "judge"], ["judge"], ["leader", "judge"]] {
       assertRefused(base.replacing([.key("spend"), .key("seats"), .key("devin")], with: devinSeat(roles)), path: "spend.seats.devin.roles")
       assertRefused(base.replacing([.key("spend"), .key("seats"), .key("Devin-b")], with: devinSeat(roles)), path: "spend.seats.Devin-b.roles")
+    }
+  }
+
+  func testAcceptsDevinLeaderOnlyWhenExplicitlySigned() throws {
+    let base = fx.payload.replacing([.key("engines")], with: enginesWithDevin)
+    for roles in [["leader"], ["producer", "leader"]] {
+      let p = base.replacing([.key("spend"), .key("seats"), .key("devin")], with: devinSeat(roles))
+      let grant = try StandingGrantValidator.validate(p, context: fixtureContext)
+      XCTAssertTrue(grant.canonical.contains("\"leader\""))
     }
   }
 

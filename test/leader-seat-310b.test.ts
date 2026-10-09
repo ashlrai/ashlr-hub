@@ -1,19 +1,5 @@
-/**
- * V3.10 B-U8 — Leader seat: no cloud fallback (SPEC-310B §4, §7 U8 key test).
- *
- *   - no standing grant ⇒ only free local seats are candidates;
- *   - no eligible seat ⇒ `no-seat`, never a cloud fallback;
- *   - with a grant: grok first, then local; Claude only for the weekly deep
- *     run, and the router still refuses it while its 5-hour window is > 70%
- *     or the weekly reserve would be touched;
- *   - codex is never a Leader seat; a seat the grant does not list for the
- *     leader role is never used; local-only mode refuses paid engines;
- *   - the legacy Strategist's local model is never `managerJudgeModel`;
- *   - Claude is a candidate only when the judges' restricted-credential hook
- *     is available (fails closed to grok / local otherwise);
- *   - transports are the judges' text-only commands (restricted Claude argv
- *     snapshot here; spawning is covered in leader-seat-transports-310b).
- */
+/** Provider-neutral Leader routing: actual role/allowance/context gates remain,
+ * while model quality and router rank replace brand and cadence bans. */
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -69,6 +55,7 @@ function deps(opts: {
   calls?: string[];
   /** false = the judges' credential hook is not available in this build. */
   claudeHook?: boolean;
+  native?: boolean;
 }): LeaderSeatDeps {
   const calls = opts.calls ?? [];
   return {
@@ -86,6 +73,7 @@ function deps(opts: {
     capacityFromSeat: (s) => capacityFromSeat(s),
     recordDecision: () => undefined,
     transports: {
+      ...(opts.native ? {native:(seatId:string,engine:string,model:string)=>async()=>{calls.push(`${engine} ${seatId} ${model}`);return '{}';}} : {}),
       local: (base, model) => async () => { calls.push(`local ${base} ${model}`); return '{}'; },
       grok: (launcher, model) => async () => { calls.push(`grok ${launcher.join(' ')} ${model}`); return '{}'; },
       claude: (launcher, model) => async () => { calls.push(`claude ${launcher.join(' ')} ${model}`); return '{}'; },
@@ -97,7 +85,7 @@ function deps(opts: {
 describe('resolveLeaderSeat', () => {
   it('without a standing grant only free local seats are candidates', async () => {
     const r = await resolveLeaderSeat(deps({ candidates: [GROK, CLAUDE, LOCAL], standing: null, snapshot: [GROK_OK, claudeAt(5, 5)] }), { deep: true, promptChars: 20_000 });
-    expect(r.ok && r.choice).toMatchObject({ seatId: LOCAL.seat.id, engine: 'local', model: 'qwen3.8:27b-ctx64k', deep: false });
+    expect(r.ok && r.choice).toMatchObject({ seatId: LOCAL.seat.id, engine: 'local', model: 'qwen3.8:27b-ctx64k', deep: true });
   });
 
   it('no local seat and no grant ⇒ no-seat (fails closed, no cloud fallback)', async () => {
@@ -106,46 +94,65 @@ describe('resolveLeaderSeat', () => {
     if (!r.ok) expect(r.reason).toMatch(/without a standing grant/);
   });
 
-  it('with a grant: grok first, then local', async () => {
+  it('keeps the shared router rank instead of preferring Grok over an elite local model', async () => {
     const calls: string[] = [];
     const r = await resolveLeaderSeat(deps({ candidates: [LOCAL, GROK], snapshot: [GROK_OK], calls }), { deep: false, promptChars: 20_000 });
-    expect(r.ok && r.choice.seatId).toBe('grok');
+    expect(r.ok && r.choice.seatId).toBe(LOCAL.seat.id);
     if (r.ok) await r.complete('s', 'u');
-    expect(calls).toEqual(['grok node /profiles/grok/launcher.js grok-4.6']);
+    expect(calls).toEqual(['local http://127.0.0.1:11434 qwen3.8:27b-ctx64k']);
     // Grok with no fresh reading is ineligible (unknown usage is not headroom) → local.
     const stale = await resolveLeaderSeat(deps({ candidates: [LOCAL, GROK], snapshot: [] }), { deep: false, promptChars: 20_000 });
     expect(stale.ok && stale.choice.seatId).toBe(LOCAL.seat.id);
   });
 
-  it('Claude is a candidate only for the weekly deep run, and only inside the reserve', async () => {
-    const notDeep = await resolveLeaderSeat(deps({ candidates: [CLAUDE, GROK, LOCAL], snapshot: [claudeAt(10, 10), GROK_OK] }), { deep: false, promptChars: 20_000 });
-    expect(notDeep.ok && notDeep.choice.seatId).toBe('grok');
-    const deep = await resolveLeaderSeat(deps({ candidates: [CLAUDE, GROK, LOCAL], snapshot: [claudeAt(10, 10), GROK_OK] }), { deep: true, promptChars: 20_000 });
-    expect(deep.ok && deep.choice).toMatchObject({ seatId: 'claude', deep: true });
-    // 5-hour window above 70% protects Mason's live session.
-    const busy = await resolveLeaderSeat(deps({ candidates: [CLAUDE, GROK, LOCAL], snapshot: [claudeAt(75, 10), GROK_OK] }), { deep: true, promptChars: 20_000 });
-    expect(busy.ok && busy.choice.seatId).toBe('grok');
-    // Weekly reserve (40% kept for Mason) would be touched.
-    const reserve = await resolveLeaderSeat(deps({ candidates: [CLAUDE, GROK, LOCAL], snapshot: [claudeAt(10, 65), GROK_OK] }), { deep: true, promptChars: 20_000 });
-    expect(reserve.ok && reserve.choice.seatId).toBe('grok');
+  it('permits granted Claude for ordinary memos, check-ins and replies while retaining reserves', async () => {
+    for(const mode of ['full','checkin'] as const){
+      const r=await resolveLeaderSeat(deps({candidates:[CLAUDE,GROK],snapshot:[claudeAt(10,10),GROK_OK]}),{deep:false,mode,purpose:'reply',promptChars:1000});
+      expect(r.ok && r.choice.seatId).toBe('claude');
+    }
+    for(const capacity of [claudeAt(75,10),claudeAt(10,65)]){
+      const r=await resolveLeaderSeat(deps({candidates:[CLAUDE,GROK],snapshot:[capacity,GROK_OK]}),{deep:false,promptChars:1000});
+      expect(r.ok && r.choice.seatId).toBe('grok');
+    }
   });
 
   it('without the judges\' credential hook Claude is not a candidate, even for the deep run', async () => {
     const r = await resolveLeaderSeat(deps({ candidates: [CLAUDE, GROK, LOCAL], snapshot: [claudeAt(10, 10), GROK_OK], claudeHook: false }), { deep: true, promptChars: 20_000 });
-    expect(r.ok && r.choice.seatId).toBe('grok');
+    expect(r.ok && r.choice.seatId).toBe(LOCAL.seat.id);
     const alone = await resolveLeaderSeat(deps({ candidates: [CLAUDE], snapshot: [claudeAt(10, 10)], claudeHook: false }), { deep: true, promptChars: 20_000 });
     expect(alone.ok).toBe(false);
   });
 
-  it('never codex, and never a seat the grant does not list for the leader role', async () => {
-    const r = await resolveLeaderSeat(deps({ candidates: [CODEX, CLAUDE], snapshot: [claudeAt(1, 1)] }), { deep: false, promptChars: 1_000 });
-    expect(r.ok).toBe(false);
-    const base = makePolicy();
-    const noLeaderRole = makePolicy({
-      spend: { ...base.spend, seats: { ...base.spend.seats, grok: { ...base.spend.seats['grok']!, roles: ['producer'] } } },
-    });
-    const r2 = await resolveLeaderSeat(deps({ candidates: [GROK, LOCAL], standing: noLeaderRole, snapshot: [GROK_OK] }), { deep: false, promptChars: 1_000 });
-    expect(r2.ok && r2.choice.seatId).toBe(LOCAL.seat.id);
+  it('permits Codex with an account-bound adapter and current subscription-only boundary', async () => {
+    const base=makePolicy();
+    const policy=makePolicy({engines:[...base.engines,'codex'],spend:{...base.spend,seats:{...base.spend.seats,
+      'codex-personal':{seatId:'codex-personal',enabled:true,reserveFloorPercent:0,maxSessionWindowPercent:null,roles:['leader']}}}});
+    const capacity={...paidCapacity('codex-personal','codex',[{id:'weekly',usedPercent:10,resetsAt:null,resetDescription:null,limitReached:false}]),
+      accountHint:'c'.repeat(64),subscriptionOnlyBoundary:{source:'codex-siwc-app-credit-control' as const,accountHint:'c'.repeat(64),observedAt:OBSERVED,
+        expiresAt:new Date(NOW+30_000).toISOString(),creditsEnabled:false as const}};
+    const calls:string[]=[];
+    const r=await resolveLeaderSeat(deps({candidates:[CODEX],standing:policy,snapshot:[capacity],native:true,calls}),{deep:false,purpose:'reply',promptChars:1000});
+    expect(r.ok && r.choice).toMatchObject({seatId:'codex-personal',engine:'codex',model:'gpt-5.5'});
+    if(r.ok)await r.complete('s','u');
+    expect(calls).toEqual(['codex codex-personal gpt-5.5']);
+    const held=await resolveLeaderSeat(deps({candidates:[CODEX],standing:policy,snapshot:[{...capacity,subscriptionOnlyBoundary:null}],native:true}),{deep:false,promptChars:1000});
+    expect(held.ok).toBe(false);
+  });
+
+  it('never substitutes a producer grant for an absent Leader role', async () => {
+    const base=makePolicy();
+    const noLeaderRole=makePolicy({spend:{...base.spend,seats:{...base.spend.seats,grok:{...base.spend.seats['grok']!,roles:['producer']}}}});
+    const r=await resolveLeaderSeat(deps({candidates:[GROK,LOCAL],standing:noLeaderRole,snapshot:[GROK_OK]}),{deep:false,promptChars:1000});
+    expect(r.ok && r.choice.seatId).toBe(LOCAL.seat.id);
+  });
+
+  it('selects a fitting model variant without creating another allowance seat', async () => {
+    const multi={...CLAUDE,seat:{...CLAUDE.seat,models:[{id:'small',label:'small',contextWindow:8000},
+      {id:'claude-opus-5-5',label:'fit',contextWindow:200000}]}};
+    const r=await resolveLeaderSeat(deps({candidates:[multi],snapshot:[claudeAt(10,10)]}),{deep:false,promptChars:60000});
+    expect(r.ok && r.choice).toMatchObject({seatId:'claude',model:'claude-opus-5-5'});
+    const allUnavailable={...multi,seat:{...multi.seat,models:multi.seat.models.map(model=>({...model,unavailableReason:'unsupported pinned binary'}))}};
+    expect((await resolveLeaderSeat(deps({candidates:[allUnavailable],snapshot:[claudeAt(10,10)]}),{deep:false,promptChars:1000})).ok).toBe(false);
   });
 
   it('when the budget cannot be clamped to the grant, paid seats are dropped', async () => {

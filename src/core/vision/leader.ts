@@ -17,12 +17,10 @@
  *   actions go through leader-apply.ts's pure policy check (class A / B / C
  *   against the standing grant).
  *
- *   SEAT: leader-seat.ts — grok first, then local; Claude only for the weekly
- *   deep run inside Mason's reserve; no seat ⇒ `no-seat`, never a cloud
- *   fallback. 3.14: a run walks a CHAIN of router-approved seats (grok → fast
- *   local → large local → opt-in Claude) with per-attempt timeouts, and the
- *   memo records every attempt (leader-seat.ts planLeaderSeats,
- *   leader-run-chain.ts).
+ *   SEAT: leader-seat.ts selects account-bound provider-neutral models from
+ *   current routing capacity and signed scope. A run walks router-ranked
+ *   alternatives with per-attempt timeouts and records every attempt. Unknown
+ *   billing or account evidence never becomes a credential fallback.
  *
  *   CADENCE: daily at 06:30 local, plus runs triggered by 10 fleet merges, any
  *   revert, a seat window resetting, or a high-severity reasoning insight —
