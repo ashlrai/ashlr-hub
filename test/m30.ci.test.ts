@@ -162,6 +162,7 @@ describe('M30 CI workflow', () => {
       'test/m468.release-desktop-workflow-policy.test.ts',
       'test/authority-codeowners-310b.test.ts',
       'test/m30.ci.test.ts',
+      'test/m25.index.test.ts',
     ].join(' '));
     expect(ciYml.match(/run: npm run check:release/g)).toHaveLength(1);
     for (const [id, condition] of [
@@ -725,6 +726,7 @@ describe('M30 CI workflow', () => {
       'test/m468.release-desktop-workflow-policy.test.ts',
       'test/authority-codeowners-310b.test.ts',
       'test/m30.ci.test.ts',
+      'test/m25.index.test.ts',
     ].sort());
     expect(windowsPortabilityThree).toContain('--reporter=dot');
     expect(windowsPortabilityOverflow).toContain('--reporter=dot');
