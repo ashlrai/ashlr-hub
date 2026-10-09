@@ -71,6 +71,17 @@ describe('deterministic publication and uncertainty', { timeout: 30_000 }, () =>
     expect(host.promote.mock.calls[0]?.[0].deploymentId).toBe('dpl_new'); expect(websiteStatus().phase).toBe('published');
     await drainWebsitePublication(host); expect(host.stage).toHaveBeenCalledTimes(1); expect(host.promote).toHaveBeenCalledTimes(1);
   });
+  it('resumes a known staged deployment after a transient route check without another build or upload', async () => {
+    const host = adapter(); const build = vi.fn(host.build); host.build = build;
+    let ready = false;
+    host.validateStage = async () => { if (!ready) throw new Error('Website staged route is temporarily unavailable'); };
+    await drainWebsitePublication(host);
+    expect(host.stage).toHaveBeenCalledTimes(1); expect(host.promote).not.toHaveBeenCalled(); expect(websiteStatus().phase).toBe('held');
+    ready = true; await drainWebsitePublication(host);
+    expect(build).toHaveBeenCalledTimes(1); expect(host.stage).toHaveBeenCalledTimes(1); expect(host.promote).toHaveBeenCalledTimes(1);
+    expect(websiteStatus().phase).toBe('published');
+  });
+
   it('late Stop before upload blocks all contact', async () => {
     const host=adapter(); host.aliases=async () => { live.kill=true; return { 'phm.dev':'dpl_previous' }; }; await drainWebsitePublication(host);
     expect(host.stage).not.toHaveBeenCalled(); expect(host.promote).not.toHaveBeenCalled();

@@ -197,15 +197,18 @@ export async function drainWebsitePublication(adapter: WebsiteHostAdapter, signa
       else patchOperation(op, { phase: op.phase.startsWith('upload') ? 'upload-unknown' : 'promotion-unknown', reason: 'Provider contact needs reconciliation; no mutation was retried' });
       return;
     }
-    op = readState().operations.find((row) => row.revision === latest && row.profileDigest === commission.profileDigest && ['queued','qualifying','building','staged'].includes(row.phase));
+    op = readState().operations.find((row) => row.revision === latest && row.profileDigest === commission.profileDigest && (['queued','qualifying','building','staged'].includes(row.phase) || (row.phase === 'held' && !!row.deploymentId)));
     if (!op) return;
     patchOperation(op, { phase: 'qualifying' });
     const source = await adapter.qualifySource(op.revision); authorized();
+    if (op.outputDigest && op.source && websiteDigest(source) !== websiteDigest(op.source)) throw new Error('Website persisted source qualification changed');
     patchOperation(op, { source, phase: 'building' });
-    const outputDigest = await adapter.build(op, source); authorized();
+    // A known frozen output survives a restart. Its complete pin is freshly checked before reuse.
+    const outputDigest = op.outputDigest ?? await adapter.build(op, source); authorized();
+    if (inventoryWebsiteOutput(adapter.output(op)).digest !== outputDigest) throw new Error('Website persisted output changed');
     patchOperation(op, { outputDigest });
     await adapter.identities(); authorized();
-    const previousAliases = await adapter.aliases(); authorized();
+    const previousAliases = op.previousAliases ?? await adapter.aliases(); authorized();
     patchOperation(op, { previousAliases });
     const beforeContact = async (): Promise<void> => {
       authorized(); await adapter.identities();
@@ -218,8 +221,11 @@ export async function drainWebsitePublication(adapter: WebsiteHostAdapter, signa
       authorized();
     };
     await authorizeContact();
-    patchOperation(op, { phase: 'upload-sent' });
-    const staged = await adapter.stage(op, authorizeContact); patchOperation(op, { phase: 'staged', deploymentId: staged.id, deploymentUrl: staged.url });
+    if (!op.deploymentId) {
+      patchOperation(op, { phase: 'upload-sent' });
+      const staged = await adapter.stage(op, authorizeContact);
+      patchOperation(op, { phase: 'staged', deploymentId: staged.id, deploymentUrl: staged.url });
+    } else patchOperation(op, { phase: 'staged' });
     await adapter.validateStage(op); authorized();
     await authorizeContact();
     patchOperation(op, { phase: 'promote-sent' });

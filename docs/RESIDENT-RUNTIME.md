@@ -378,3 +378,12 @@ uncertain and promoted-but-unverified work from a verified public release.
 
 This implementation does not provision its publisher image or sign-in silently.
 Shipping the command alone does not establish commissioning or a live deployment.
+
+
+Maintainer Cargo verification keeps registry/vendor configuration immutable while
+Cargo cache metadata uses a separate writable directory in the verifier jail.
+Top-level Cargo commands receive the pinned config explicitly. Build scripts that
+recursively invoke Cargo do not inherit command-line `--config`; offline/network
+confinement remains in force, so those nested invocations may fail rather than
+use ambient account configuration. No mutable copy of registry config is supplied.
+Required command deadlines and source/check qualification remain unchanged.
