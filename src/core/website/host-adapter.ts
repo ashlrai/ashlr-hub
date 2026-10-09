@@ -14,6 +14,7 @@ import { runSafeGit } from '../sandbox/safe-git.js';
 import { authorityDir } from '../authority/ledger.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { acquireOutwardMutationFenceAsync, releaseOutwardMutationFence } from '../sandbox/mutation-fence.js';
+import { materializeWebsiteOutput } from './output-materialization.js';
 import {
   WEBSITE_PROFILE, assertWebsiteAuthority, inventoryWebsiteOutput, websiteDigest, websiteToolsDir,
   type WebsiteCommission, type WebsiteHostAdapter, type WebsiteOperation, type WebsiteSource,
@@ -205,6 +206,7 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
   };
   const operationRoot = (op: WebsiteOperation): string => join(authorityDir(), 'website-operations', op.id);
   const output = (op: WebsiteOperation): string => join(operationRoot(op), 'upload', '.vercel', 'output');
+  const projectMetadata = JSON.stringify({ projectId: WEBSITE_PROFILE.projectId, orgId: commission.teamId, projectName: 'web', settings: commission.projectSettings });
   const routeContract = async (base: string): Promise<void> => {
     const origin = new URL(base);
     if (origin.protocol !== 'https:' || (!origin.hostname.endsWith('.vercel.app') && origin.hostname !== WEBSITE_PROFILE.primaryDomain)) throw new Error('Website route origin is invalid');
@@ -230,7 +232,7 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
       const root = operationRoot(op); privateDirectory(root);
       const sourceRoot = join(root, 'source');
       if (existsSync(sourceRoot)) throw new Error('Website build source already exists; no silent rebuild');
-      privateDirectory(sourceRoot); privateDirectory(join(root, 'upload'));
+      privateDirectory(sourceRoot); privateDirectory(join(root, 'upload')); privateDirectory(join(root, 'builder-output'));
       const mirror = await ensureMirror({ nameWithOwner: WEBSITE_PROFILE.repo, base: WEBSITE_PROFILE.branch }, { signal, githubToken: async () => (await host.token(WEBSITE_PROFILE.repo)).token });
       if (!mirror.ok || mirror.path !== mirrorPathFor(WEBSITE_PROFILE.repo) || mirror.headSha !== source.merge) throw new Error('Website trusted mirror is not the exact merge');
       const target = { workTree: mirror.path, gitDir: join(mirror.path, '.git'), layout: 'repo' as const };
@@ -265,7 +267,7 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
       }
       if (cursor !== blobs.length) throw new Error('Website binary source stream has trailing content');
       const prepared = join(root, 'prepared'); privateDirectory(prepared);
-      writeFileSync(join(prepared, 'project.json'), JSON.stringify({ projectId: WEBSITE_PROFILE.projectId, orgId: commission.teamId, projectName: 'web', settings: commission.projectSettings }), { mode: 0o600, flag: 'wx' });
+      writeFileSync(join(prepared, 'project.json'), projectMetadata, { mode: 0o600, flag: 'wx' });
       writeFileSync(join(prepared, '.env.production.local'), Object.entries(commission.publicBuildEnv).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join('\n'), { mode: 0o600, flag: 'wx' });
       const image = object(JSON.parse(await run(commission.toolchain.docker, ['image', 'inspect', commission.toolchain.image, '--format', '{{json .}}'], { env: hostEnv(), signal })));
       if (image['Id'] !== commission.toolchain.image || image['Os'] !== 'linux' || image['Architecture'] !== 'amd64') throw new Error('Website builder must be the commissioned Linux x64 image');
@@ -287,9 +289,13 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
         const container = `phantom-website-${op.id}`;
         let buildError: unknown = null; let cleanupError: unknown = null;
         try {
+          // npm's installed binaries and native Next.js modules run from the
+          // temporary worktree. Docker tmpfs defaults to noexec, which prevents
+          // this offline build even though source execution is already admitted
+          // inside a credential-free, network-isolated container.
           await run(commission.toolchain.docker, ['run', '--rm', '--name', container, '--pull=never', '--platform=linux/amd64', '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', `--user=${userInfo().uid}:${userInfo().gid}`,
             ...Object.entries(WEBSITE_OFFLINE_BUILD_ENV).flatMap(([key, value]) => ['-e', `${key}=${value}`]),
-        '--tmpfs=/tmp:rw,nosuid,nodev,mode=1777', '--mount', `type=bind,src=${sourceRoot},dst=/source,readonly`, '--mount', `type=bind,src=${prepared},dst=/prepared,readonly`, '--mount', `type=bind,src=${join(root, 'upload')},dst=/output`,
+        '--tmpfs=/tmp:rw,exec,nosuid,nodev,mode=1777', '--mount', `type=bind,src=${sourceRoot},dst=/source,readonly`, '--mount', `type=bind,src=${prepared},dst=/prepared,readonly`, '--mount', `type=bind,src=${join(root, 'builder-output')},dst=/output`,
         '-e', 'HOME=/tmp/home', '-e', 'CI=1', '-e', 'NEXT_TELEMETRY_DISABLED=1', '-e', 'VERCEL_TELEMETRY_DISABLED=1', commission.toolchain.image, '/bin/sh', '-c', script], { env: hostEnv(), signal: lease.signal, timeout: 30 * 60_000 });
         } catch (error) { buildError = error; } finally {
           try {
@@ -307,6 +313,11 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
         if (cleanupError) throw cleanupError;
         if (buildError) throw buildError;
       }, { signal });
+      // The container is gone before host reads. Freeze internal Vercel aliases as regular
+      // copies so the original complete no-link inventory remains the publication gate.
+      privateDirectory(dirname(output(op)));
+      materializeWebsiteOutput(join(root, 'builder-output', '.vercel', 'output'), output(op));
+      writeFileSync(join(dirname(output(op)), 'project.json'), projectMetadata, { mode: 0o600, flag: 'wx' });
       const config = object(JSON.parse(readFileSync(join(output(op), 'config.json'), 'utf8')));
       if (config['version'] !== 3) throw new Error('Website build output version is unsupported');
       return inventoryWebsiteOutput(output(op)).digest;
@@ -316,6 +327,7 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
       try {
         assertWebsiteAuthority(commission);
         if (inventoryWebsiteOutput(output(op)).digest !== op.outputDigest) throw new Error('Website output changed before upload');
+        if (fileDigest(join(dirname(output(op)), 'project.json')) !== createHash('sha256').update(projectMetadata).digest('hex')) throw new Error('Website upload project metadata changed');
         await authorize();
         const url = await vc(['deploy', '--prebuilt', '--prod', '--skip-domain', '--yes'], join(operationRoot(op), 'upload'));
         const parsed = new URL(url); if (parsed.protocol !== 'https:' || !parsed.hostname.endsWith('.vercel.app') || parsed.pathname !== '/') throw new Error('Website upload returned no exact deployment URL');
