@@ -31,7 +31,7 @@ import { bindingLeftPercent } from '../usage/binding-left.js';
 import { accountStatus, buildCapacityRows, type AccountStatus, type CapacityRow } from '../usage/capacity-strip-model.js';
 import { formatUsd } from './resources-model.js';
 import { cloudCreditsQuery } from './resources-queries.js';
-import { creditPoolsQuery } from './CreditPools.js';
+import { creditPoolsQuery } from './credit-pools-query.js';
 import { apiGrantDisplay, apiGrantUsdDecimal } from './credit-pool-model.js';
 import { devinConsumptionEvidence, devinUsageEvidence, formatAcu } from '../devin/devin-model.js';
 import { DEVIN_POLL_MS, devinQuery } from '../devin/devin-queries.js';

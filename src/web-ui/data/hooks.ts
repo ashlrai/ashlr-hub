@@ -116,8 +116,11 @@ export function useRefresh<T>(def: QueryDef<T>): () => void {
   }, [def]);
 }
 
+const getAuthPhase = (): AuthPhase => getAuthSnapshot().phase;
+const getMutationHeldUntil = (): number | null => getAuthSnapshot().mutationTokenHeldUntil;
+
 export function useAuthPhase(): AuthPhase {
-  return useSyncExternalStore(subscribeAuth, () => getAuthSnapshot().phase, () => getAuthSnapshot().phase);
+  return useSyncExternalStore(subscribeAuth, getAuthPhase, getAuthPhase);
 }
 
 export interface MutationHold {
@@ -132,8 +135,8 @@ export interface MutationHold {
 export function useMutationHold(): MutationHold {
   const heldUntil = useSyncExternalStore(
     subscribeAuth,
-    () => getAuthSnapshot().mutationTokenHeldUntil,
-    () => getAuthSnapshot().mutationTokenHeldUntil,
+    getMutationHeldUntil,
+    getMutationHeldUntil,
   );
   return {
     hasHold: hasMutationHold(),

@@ -3,7 +3,8 @@ import { renderToString } from 'react-dom/server';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { evictAll, getQuerySnapshot, invalidateObserved, refetchQuery, runQuery } from './cache.js';
-import { useQuery } from './hooks.js';
+import { useAuthPhase, useMutationHold, useQuery } from './hooks.js';
+import { clearMutationToken, getAuthSnapshot, markCheckComplete, setMutationToken } from './auth-store.js';
 
 const strict = ({ children }: { children: ReactNode }) => <StrictMode>{children}</StrictMode>;
 const idle = { data: undefined, error: undefined, status: 'idle', updatedAt: null };
@@ -15,6 +16,36 @@ function deferred<T>() {
 async function settle() { await act(async () => { await Promise.resolve(); }); }
 beforeEach(() => evictAll());
 afterEach(() => { cleanup(); evictAll(); });
+
+describe('auth snapshot projections', () => {
+  beforeEach(() => { clearMutationToken(); markCheckComplete(false); });
+  afterEach(() => { clearMutationToken(); markCheckComplete(false); });
+
+  it('reads current auth and hold snapshots across notifications, rerenders and server rendering', () => {
+    const hook = renderHook(() => ({ phase: useAuthPhase(), hold: useMutationHold() }));
+    expect(hook.result.current.phase).toBe('unauthenticated');
+    expect(hook.result.current.hold).toMatchObject({ hasHold: false, token: null, heldUntil: null });
+    act(() => { markCheckComplete(true); setMutationToken('a'.repeat(64)); });
+    expect(hook.result.current.phase).toBe('authenticated');
+    expect(hook.result.current.hold).toMatchObject({ hasHold: true, token: 'a'.repeat(64), heldUntil: getAuthSnapshot().mutationTokenHeldUntil });
+    hook.rerender();
+    expect(hook.result.current.hold.heldUntil).toBe(getAuthSnapshot().mutationTokenHeldUntil);
+
+    function ServerProbe() {
+      const phase = useAuthPhase();
+      const hold = useMutationHold();
+      return <span>{phase}:{String(hold.heldUntil)}</span>;
+    }
+    const rendered = document.createElement('div');
+    rendered.innerHTML = renderToString(<ServerProbe />);
+    expect(rendered.textContent).toBe(`authenticated:${getAuthSnapshot().mutationTokenHeldUntil}`);
+    act(() => { hook.result.current.hold.clear(); markCheckComplete(false); });
+    expect(hook.result.current.phase).toBe('unauthenticated');
+    expect(hook.result.current.hold).toMatchObject({ hasHold: false, token: null, heldUntil: null });
+    rendered.innerHTML = renderToString(<ServerProbe />);
+    expect(rendered.textContent).toBe('unauthenticated:null');
+  });
+});
 
 describe('useQuery optional admission', () => {
   it('keeps a disabled StrictMode consumer stably idle without observing warm data', async () => {
