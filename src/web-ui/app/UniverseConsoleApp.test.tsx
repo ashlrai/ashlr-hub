@@ -40,6 +40,7 @@ describe('scoped Universe console composition', () => {
     const user = userEvent.setup();
     render(<UniverseConsoleApp />);
     await screen.findByRole('heading', { name: 'Connect to Phantom' });
+    expect(screen.getByText('phm universe console --root /absolute/universe-store', { selector: 'pre' })).toBeInTheDocument();
     expect(request.mock.calls.map(([path]) => path)).toEqual(['/api/universe/console']);
     expect(screen.queryByText(root)).not.toBeInTheDocument();
     await user.type(screen.getByLabelText('Read token'), 'a'.repeat(64));

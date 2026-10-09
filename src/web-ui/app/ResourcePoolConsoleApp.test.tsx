@@ -28,6 +28,7 @@ describe('resource console scoped bootstrap', () => {
     vi.stubGlobal('fetch', request); const user = userEvent.setup();
     render(<ResourcePoolConsoleApp />);
     expect(screen.getByRole('heading', { name: 'Connect to Phantom resources' })).toBeInTheDocument();
+    expect(screen.getByText('phm resources pool console --root /absolute/resource-store --pool /absolute/pool.json --bindings /absolute/bindings.json --observations /absolute/observations.json', { selector: 'pre' })).toBeInTheDocument();
     expect(screen.queryByLabelText('Resource store')).not.toBeInTheDocument();
     await user.type(screen.getByLabelText('Read token'), 'a'.repeat(64));
     await user.click(screen.getByRole('button', { name: 'Connect' }));

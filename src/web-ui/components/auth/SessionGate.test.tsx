@@ -58,6 +58,8 @@ describe('SessionGate', () => {
 
     render(<SessionGate heading="Connect to Ashlr Verse" command="ashlr verse" subject="Ashlr Verse" mutationField onAuthenticated={onAuthenticated} />);
     expect(screen.queryByText(/This dashboard/)).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Connect to Ashlr Verse' })).toBeInTheDocument();
+    expect(screen.getByText('ashlr verse', { selector: 'pre' })).toBeInTheDocument();
     expect(screen.getByText(/Ashlr Verse only ever talks/)).toBeInTheDocument();
     await user.type(screen.getByLabelText(/^read token/i), VALID_TOKEN);
     await user.type(screen.getByLabelText(/mutation token/i), mutation);
@@ -82,7 +84,9 @@ describe('SessionGate', () => {
 
   it('explains where to find the token instead of a bare 401', () => {
     render(<SessionGate />);
-    expect(screen.getAllByText(/ashlr serve/).length).toBeGreaterThan(0);
+    expect(screen.getByRole('heading', { name: 'Connect to Phantom' })).toBeInTheDocument();
+    expect(screen.getByText('phm serve', { selector: 'pre' })).toBeInTheDocument();
+    expect(screen.getByText(/This dashboard only ever talks to the Phantom server/)).toBeInTheDocument();
     expect(screen.getByLabelText(/read token/i)).toBeInTheDocument();
   });
 

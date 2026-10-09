@@ -85,7 +85,7 @@ export function UniverseConsoleApp() {
   if (phase === 'checking') return <p className={styles.checking} role="status">Checking for an existing console session…</p>;
   if (phase === 'unauthenticated') return <SessionGate
     heading={`Connect to ${PRODUCT_NAME}`}
-    command="ashlr universe console --root /absolute/universe-store"
+    command="phm universe console --root /absolute/universe-store"
   />;
   return <ScopedWorkspace />;
 }

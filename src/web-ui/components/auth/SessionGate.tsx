@@ -14,6 +14,7 @@
  * just spares the operator a second paste screen on the first Enter.
  */
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { PRODUCT_NAME } from '../../app/product-brand.js';
 import { adoptInjectedTokens, establishReadSession, setMutationToken } from '../../data/auth-store.js';
 import styles from './SessionGate.module.css';
 
@@ -23,7 +24,7 @@ export interface SessionGateProps {
   onAuthenticated?: () => void;
   heading?: string;
   command?: string;
-  /** What the copy calls this surface ("This dashboard", "Ashlr Verse"). */
+  /** What the copy calls this surface ("This dashboard", "Phantom"). */
   subject?: string;
   /**
    * Also offer the mutation token on the same screen. The two authorities
@@ -34,7 +35,7 @@ export interface SessionGateProps {
   mutationField?: boolean;
 }
 
-export function SessionGate({ onAuthenticated, heading = 'Connect to ashlr serve', command = 'ashlr serve', subject = 'This dashboard', mutationField = false }: SessionGateProps) {
+export function SessionGate({ onAuthenticated, heading = `Connect to ${PRODUCT_NAME}`, command = 'phm serve', subject = 'This dashboard', mutationField = false }: SessionGateProps) {
   const [token, setToken] = useState('');
   const [mutation, setMutation] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -87,7 +88,7 @@ export function SessionGate({ onAuthenticated, heading = 'Connect to ashlr serve
         </div>
         <h1 className={styles.heading}>{heading}</h1>
         <p className={styles.body}>
-          {subject} only ever talks to the ashlr server running on this machine
+          {subject} only ever talks to the {PRODUCT_NAME} server running on this machine
           (<code>127.0.0.1</code>, never a remote host). To read data, paste the{' '}
           <strong>read token</strong> printed in the terminal where you ran:
         </p>
