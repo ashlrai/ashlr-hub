@@ -1,3 +1,4 @@
+import { completeReportedTokens } from '../run/token-evidence.js';
 /** Advisory assembly from the existing capacity and bounded metadata ledger. */
 import { assessResetOpportunity } from './reset-pressure.js';
 import { isOuterAttemptIdentity, isSafeExecutionIdentity } from '../fleet/attempt-identity.js';
@@ -30,7 +31,7 @@ export function historySamples(events: readonly DispatchProductionEvent[], journ
     return [{ id, engine: event.backend, model: event.model ?? null,
       seatId: accountHint ? attribution!.seatId : null, accountHint, taskKind: event.source, completed: true,
       durationMs: typeof summary.durationMs === 'number' && summary.durationMs > 0 ? summary.durationMs : null,
-      tokens: typeof input === 'number' && typeof output === 'number' && Number.isSafeInteger(input) && Number.isSafeInteger(output) && input >= 0 && output >= 0 && Number.isSafeInteger(input + output) && input + output > 0
+      tokens: completeReportedTokens({ tokensIn: input as number, tokensOut: output as number, tokenEvidence: summary.tokenEvidence }) && typeof input === 'number' && typeof output === 'number' && Number.isSafeInteger(input) && Number.isSafeInteger(output) && input >= 0 && output >= 0 && Number.isSafeInteger(input + output) && input + output > 0
         ? input + output : null }];
   });
 }

@@ -1,4 +1,5 @@
-import { assertSelectedOutcomeAdmission, selectedOutcomeAdmissionCurrent, withSelectedOutcomeAdmission } from './outcome-admission.js';
+import { neutralTokenEvidence, requestTokenEvidence, tokenEvidenceFromSteps, validateTokenEvidence } from './token-evidence.js';
+import { assertSelectedOutcomeAdmission, selectedOutcomeAdmissionCurrent, SelectedOutcomeAdmissionRefusal, withSelectedOutcomeAdmission } from './outcome-admission.js';
 /**
  * core/run/orchestrator.ts — M4/M11/M15 local-first agent orchestrator.
  *
@@ -740,7 +741,7 @@ function runMetadataSummary(state: RunState): NonNullable<RunState['runEventSumm
       } satisfies RunActionCounts)
     : undefined;
   return {
-    ...(state.runEventSummary ?? {}),
+    ...Object.fromEntries(Object.entries(state.runEventSummary ?? {}).filter(([key]) => key !== 'tokenEvidence')),
     runId: state.id,
     status: state.status,
     outcome: runOutcomeLabel(state),
@@ -750,6 +751,7 @@ function runMetadataSummary(state: RunState): NonNullable<RunState['runEventSumm
     ...(diffLines !== undefined ? { diffLines } : {}),
     tokensIn: state.usage.tokensIn,
     tokensOut: state.usage.tokensOut,
+    ...(validateTokenEvidence(state.usage.tokenEvidence, state.usage.tokensIn, state.usage.tokensOut) ? { tokenEvidence: state.usage.tokenEvidence } : {}),
     costUsd: state.usage.estCostUsd,
     ...(durationMs !== undefined ? { durationMs } : {}),
     ...(actionCounts ? { actionCounts } : {}),
@@ -1743,7 +1745,7 @@ function hasCycle(tasks: RunTask[]): boolean {
 export async function planGoal(
   goal: string,
   client: ProviderClient,
-  onUsage?: (usage: { tokensIn: number; tokensOut: number; usageKnown?: boolean }) => void,
+  onUsage?: (usage: { tokensIn: number; tokensOut: number; usageKnown?: boolean; noContact?: boolean }) => void,
   memoryContext?: string,
   adaptive?: boolean,
   signal?: AbortSignal,
@@ -1768,7 +1770,7 @@ export async function planGoal(
   ];
   const promptReservation = conservativeRequestTokenReservation(messages, []);
   if (maxCombinedTokens !== undefined && !supportsGovernedModelCalls(client)) {
-    if (onUsage) onUsage({ tokensIn: 0, tokensOut: 0, usageKnown: true });
+    if (onUsage) onUsage({ tokensIn: 0, tokensOut: 0, usageKnown: true, noContact: true });
     process.stderr.write(
       `[ashlr run] planning provider lacks governed model-call authority — using single-task fallback\n`,
     );
@@ -1778,7 +1780,7 @@ export async function planGoal(
     ? undefined
     : maxCombinedTokens - promptReservation;
   if (maxOutputTokens !== undefined && maxOutputTokens < 1) {
-    if (onUsage) onUsage({ tokensIn: 0, tokensOut: 0, usageKnown: true });
+    if (onUsage) onUsage({ tokensIn: 0, tokensOut: 0, usageKnown: true, noContact: true });
     return [{ id: 't1', goal, deps: [], status: 'pending' }];
   }
 
@@ -1796,6 +1798,7 @@ export async function planGoal(
       ...reportedUsage,
       usageKnown: typeof err === 'object' && err !== null
         && (err as { usageKnown?: unknown }).usageKnown === true,
+      ...(err instanceof SelectedOutcomeAdmissionRefusal && err.usageKnown === true ? { noContact: true } : {}),
     });
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`[ashlr run] planning call failed: ${msg} — using single-task fallback\n`);
@@ -1843,6 +1846,7 @@ async function synthesize(
   content: string;
   usage: { tokensIn: number; tokensOut: number };
   usageKnown: boolean;
+  noContact?: boolean;
   failed?: boolean;
 }> {
   const doneTasks = tasks.filter((t) => t.status === 'done' && t.result);
@@ -1851,6 +1855,7 @@ async function synthesize(
       content: 'No tasks completed successfully — no result to synthesize.',
       usage: { tokensIn: 0, tokensOut: 0 },
       usageKnown: true,
+      noContact: true,
     };
   }
 
@@ -1871,6 +1876,7 @@ async function synthesize(
       content: doneTasks.map((t) => `[${t.id}] ${t.result ?? ''}`).join('\n'),
       usage: { tokensIn: 0, tokensOut: 0 },
       usageKnown: true,
+      noContact: true,
       failed: true,
     };
   }
@@ -1882,6 +1888,7 @@ async function synthesize(
       content: doneTasks.map((t) => `[${t.id}] ${t.result ?? ''}`).join('\n'),
       usage: { tokensIn: 0, tokensOut: 0 },
       usageKnown: true,
+      noContact: true,
       failed: true,
     };
   }
@@ -1908,6 +1915,7 @@ async function synthesize(
       content: fallback,
       usage: reportedUsage ?? { tokensIn: 0, tokensOut: 0 },
       usageKnown,
+      ...(err instanceof SelectedOutcomeAdmissionRefusal && err.usageKnown === true ? { noContact: true } : {}),
       failed: true,
     };
   }
@@ -2540,7 +2548,7 @@ async function runGoalInternal(
             let lastApiR: Awaited<ReturnType<typeof runApiModelSandboxed>> | null = null;
             let apiGoal = goal;
             const titrrBudget = resolveTitrrBudget(opts.budget, opts.allowCloud);
-            let titrrUsage = newUsage();
+            let titrrUsage = { ...newUsage(), tokenEvidence: neutralTokenEvidence() } as RunUsage;
             let titrrActionCounts: RunActionCounts = {};
             let titrrDurationMs: number | undefined = 0;
             let titrrCreatedAt: string | undefined;
@@ -2943,7 +2951,7 @@ async function runGoalInternal(
           let lastR: Awaited<ReturnType<typeof runEngineSandboxed>> | null = null;
           let titrrGoal = goal;
           const titrrBudget = resolveTitrrBudget(opts.budget, opts.allowCloud);
-          let titrrUsage = newUsage();
+          let titrrUsage = { ...newUsage(), tokenEvidence: neutralTokenEvidence() } as RunUsage;
           let titrrActionCounts: RunActionCounts = {};
           let titrrDurationMs: number | undefined = 0;
           let titrrCreatedAt: string | undefined;
@@ -3505,6 +3513,7 @@ async function runGoalInternal(
         tokensOut: maxOutputTokens,
         steps: 1,
         estCostUsd: 0,
+        tokenEvidence: requestTokenEvidence('reserved', promptTokenReservation, maxOutputTokens),
       },
     };
     // Persist the whole claim before provider contact. Parallel callers see it
@@ -3514,13 +3523,14 @@ async function runGoalInternal(
     state.usage.estCostUsd += claimedCost;
     state.usage.steps += 1;
     state.steps.push(step);
+    state.usage.tokenEvidence = tokenEvidenceFromSteps(state.usage, state.steps);
     state.updatedAt = step.ts;
     saveRun(state);
 
     let finalized = false;
     return {
       maxOutputTokens,
-      finalize(finalSummary, usage) {
+      finalize(finalSummary, usage, basis) {
         if (finalized) return;
         finalized = true;
         const authoritativeUsage = usage !== undefined
@@ -3536,7 +3546,9 @@ async function runGoalInternal(
           state.usage.estCostUsd += estCostUsd(providerForCost, tokensIn, tokensOut) - claimedCost;
         }
         step.summary = finalSummary;
-        step.usage = { tokensIn, tokensOut, steps: 1, estCostUsd: 0 };
+        step.usage = { tokensIn, tokensOut, steps: 1, estCostUsd: 0,
+          tokenEvidence: requestTokenEvidence(authoritativeUsage ? basis ?? 'reported' : 'reserved', tokensIn, tokensOut) };
+        state.usage.tokenEvidence = tokenEvidenceFromSteps(state.usage, state.steps);
         state.updatedAt = new Date().toISOString();
         cliOnStep?.(step, state.tasks);
         saveRun(state);
@@ -3591,6 +3603,7 @@ async function runGoalInternal(
             && (err as { usageKnown?: unknown }).usageKnown === true
             ? reportedModelUsage(err)
             : undefined,
+          err instanceof SelectedOutcomeAdmissionRefusal ? 'no-contact' : undefined,
         );
         throw err;
       }
@@ -3905,6 +3918,7 @@ async function runGoalInternal(
       let planTokensIn = 0;
       let planTokensOut = 0;
       let planUsageKnown = false;
+      let planNoContact = false;
       const tasks = await planGoal(
         goal,
         client,
@@ -3912,6 +3926,7 @@ async function runGoalInternal(
           planTokensIn = u.tokensIn;
           planTokensOut = u.tokensOut;
           planUsageKnown = u.usageKnown === true;
+          planNoContact = u.noContact === true;
         },
         memoryContext || undefined,
         adaptivePrompts,
@@ -3924,6 +3939,7 @@ async function runGoalInternal(
           ? 'Planning model call attempted and cancelled.'
           : `Planned ${tasks.length} task(s): ${tasks.map((t) => t.id).join(', ')}`,
         planUsageKnown ? { tokensIn: planTokensIn, tokensOut: planTokensOut } : undefined,
+        planNoContact ? 'no-contact' : 'reported',
       );
       if (cancelled()) {
         aborted = true;
@@ -4048,6 +4064,7 @@ async function runGoalInternal(
                 step.usage.tokensOut,
               );
             }
+            state.usage.tokenEvidence = tokenEvidenceFromSteps(state.usage, state.steps);
             state.updatedAt = new Date().toISOString();
             cliOnStep?.(step, state.tasks);
             saveRun(state);
@@ -4554,6 +4571,7 @@ async function runGoalInternal(
           : 'Synthesis model call failed; used concatenated fallback.'
         : 'Synthesis complete',
       synth.usageKnown ? synth.usage : undefined,
+      synth.noContact ? 'no-contact' : 'reported',
     );
   }
 

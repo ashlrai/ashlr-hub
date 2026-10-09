@@ -1,3 +1,4 @@
+import { completeReportedTokens, validateTokenEvidence } from '../run/token-evidence.js';
 /**
  * core/observability/otlp.ts — M19 OTLP/HTTP-JSON trace builder.
  *
@@ -158,8 +159,14 @@ export function buildGenAiTrace(spans: GenAiSpan[]): OtlpTrace {
       attributes: [
         strAttr('gen_ai.system', s.provider),
         strAttr('gen_ai.request.model', s.model),
-        intAttr('gen_ai.usage.input_tokens', s.tokensIn),
-        intAttr('gen_ai.usage.output_tokens', s.tokensOut),
+        ...(completeReportedTokens(s) ? [intAttr('gen_ai.usage.input_tokens', s.tokensIn), intAttr('gen_ai.usage.output_tokens', s.tokensOut)] : []),
+        strAttr('phantom.token_provenance', completeReportedTokens(s) ? 'reported' : validateTokenEvidence(s.tokenEvidence, s.tokensIn, s.tokensOut) ? 'partial' : 'unknown'),
+        intAttr('phantom.accounted.input_tokens', s.tokensIn),
+        intAttr('phantom.accounted.output_tokens', s.tokensOut),
+        ...(['reported', 'estimated', 'reserved', 'unknown'] as const).flatMap(basis => {
+          const evidence = validateTokenEvidence(s.tokenEvidence, s.tokensIn, s.tokensOut);
+          return evidence ? [intAttr(`phantom.${basis}.input_tokens`, evidence.input[basis]), intAttr(`phantom.${basis}.output_tokens`, evidence.output[basis])] : [];
+        }),
         doubleAttr('gen_ai.usage.cost_usd', s.estCostUsd),
         strAttr('ashlr.run.id', s.runId),
         strAttr('ashlr.provider', s.provider),
@@ -236,6 +243,7 @@ export function spansFromRun(run: RunState): GenAiSpan[] {
       model,
       provider,
       tier,
+      ...(validateTokenEvidence(task.usage.tokenEvidence, task.usage.tokensIn, task.usage.tokensOut) ? { tokenEvidence: task.usage.tokenEvidence } : {}),
       tokensIn: task.usage.tokensIn,
       tokensOut: task.usage.tokensOut,
       estCostUsd: task.usage.estCostUsd,
@@ -273,6 +281,7 @@ export function spansFromSwarm(swarm: SwarmRun): GenAiSpan[] {
       model,
       provider,
       tier,
+      ...(validateTokenEvidence(task.usage.tokenEvidence, task.usage.tokensIn, task.usage.tokensOut) ? { tokenEvidence: task.usage.tokenEvidence } : {}),
       tokensIn: task.usage.tokensIn,
       tokensOut: task.usage.tokensOut,
       estCostUsd: task.usage.estCostUsd,

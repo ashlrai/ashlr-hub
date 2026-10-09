@@ -1,3 +1,4 @@
+import { tokenEvidenceLabel } from '../../../../core/run/token-evidence.js';
 /**
  * routes/intelligence/pulse/PulseView.tsx — cost/token rollups over
  * 1d/7d/30d windows (GET /api/pulse?window=). Reference pattern followed:
@@ -117,7 +118,7 @@ function PulseBody({ rollup }: { rollup: ActivityRollup }) {
     { key: 'calls', label: 'Calls', numeric: true, render: (r) => String(r.calls) },
     {
       key: 'tokens',
-      label: 'Tokens',
+      label: 'Accounted tokens',
       numeric: true,
       render: (r) => chartFormat.formatCompact(r.tokensIn + r.tokensOut),
     },
@@ -129,9 +130,9 @@ function PulseBody({ rollup }: { rollup: ActivityRollup }) {
       <div className={styles.kpiGrid}>
         <StatTile label="Est. cost" value={chartFormat.formatUsd(rollup.totals.estCostUsd)} caption={rollup.window} />
         <StatTile
-          label="Tokens"
+          label="Accounted tokens"
           value={chartFormat.formatCompact(rollup.totals.tokensIn + rollup.totals.tokensOut)}
-          caption={`${chartFormat.formatCompact(rollup.totals.tokensIn)} in / ${chartFormat.formatCompact(rollup.totals.tokensOut)} out`}
+          caption={`${chartFormat.formatCompact(rollup.totals.tokensIn)} in / ${chartFormat.formatCompact(rollup.totals.tokensOut)} out · ${tokenEvidenceLabel(rollup.totals, chartFormat.formatCompact)}`}
         />
         <StatTile label="Sessions" value={String(rollup.totals.sessions)} />
         <StatTile label="Commits" value={String(rollup.totals.commits)} />

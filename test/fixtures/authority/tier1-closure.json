@@ -672,6 +672,7 @@
     "src/core/run/self-heal.ts",
     "src/core/run/spec-contract.ts",
     "src/core/run/streaming.ts",
+    "src/core/run/token-evidence.ts",
     "src/core/run/tool-path.ts",
     "src/core/run/verification-manifest.ts",
     "src/core/run/verify-commands.ts",

@@ -2,7 +2,7 @@
  * M32: pre-flight cost estimation — predict tokens / cost / duration for a
  * `run` or `swarm` BEFORE committing, from persisted history.
  *
- * Method: percentile statistics (p25 / median / p75) over completed history
+ * Method: percentile statistics (p25 / median / p75) over completed accounted-exposure history
  * (~/.ashlr/runs/, ~/.ashlr/swarms/), lightly weighted toward goals that share
  * keywords with the new goal. The upper bound is clamped to the requested
  * budget. Cloud cost uses the same reference pricing as forecast.ts; local
@@ -27,6 +27,7 @@ const HIGH_SAMPLES = 10;
 interface HistorySample {
   goal: string;
   tokens: number;
+  /** Accounted exposure, not necessarily provider-reported generation. */
   tokensIn: number;
   tokensOut: number;
   steps: number;
@@ -240,7 +241,7 @@ export function renderEstimate(e: RunEstimate): string {
   };
   const lines = [
     `estimate (${e.kind}) — confidence: ${e.confidence} (${e.sampleSize} similar ${e.kind}${e.sampleSize === 1 ? '' : 's'})`,
-    `  tokens    p25 ${fmtTok(e.tokens.p25)} · median ${fmtTok(e.tokens.median)} · p75 ${fmtTok(e.tokens.p75)}${e.budgetClamped ? ' (clamped to budget)' : ''}`,
+    `  accounted tokens    p25 ${fmtTok(e.tokens.p25)} · median ${fmtTok(e.tokens.median)} · p75 ${fmtTok(e.tokens.p75)}${e.budgetClamped ? ' (clamped to budget)' : ''}`,
     `  steps     p25 ${Math.round(e.steps.p25)} · median ${Math.round(e.steps.median)} · p75 ${Math.round(e.steps.p75)}`,
     `  cost      median $${e.estCostUsd.median.toFixed(4)} (local $0; would-be-cloud ≈ $${e.wouldBeCloudUsd.toFixed(4)})`,
     `  duration  p25 ${fmtDur(e.durationMs.p25)} · median ${fmtDur(e.durationMs.median)} · p75 ${fmtDur(e.durationMs.p75)}`,

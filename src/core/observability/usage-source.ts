@@ -1,3 +1,4 @@
+import { validateTokenEvidence } from '../run/token-evidence.js';
 /**
  * usage-source.ts — local-first UsageEvent collector (M5 observability).
  *
@@ -387,6 +388,7 @@ function collectRunEvents(sinceMs: number): UsageEvent[] {
       project: null,
       model,
       source: "run",
+      ...(validateTokenEvidence(u["tokenEvidence"], tokensIn, tokensOut) ? { tokenEvidence: validateTokenEvidence(u["tokenEvidence"], tokensIn, tokensOut) } : {}),
       tokensIn,
       tokensOut,
       cacheRead: 0,

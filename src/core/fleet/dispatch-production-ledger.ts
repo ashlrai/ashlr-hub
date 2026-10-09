@@ -6,6 +6,7 @@
  * cooldown ledger: never truncate, never rewrite, never throw.
  */
 
+import { tokenEnvelopeCurrent } from '../run/token-evidence.js';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   chmodSync,
@@ -189,7 +190,8 @@ export type DispatchProductionLabelOrigin =
   | 'derived-on-read';
 
 export interface DispatchProductionEvent {
-  schemaVersion: 1;
+  /** V2 withholds provenance-bearing rows from legacy readers without migrating V1. */
+  schemaVersion: 1 | 2;
   ts: string;
   machineId?: string;
   itemId: string;
@@ -1905,7 +1907,7 @@ export function sanitizeDispatchProductionEvent(
       })
     : storedLearningLabel;
   return {
-    schemaVersion: 1,
+    schemaVersion: causal.runEventSummary?.tokenEvidence ? 2 : 1,
     ts,
     ...(machineId ? { machineId } : {}),
     itemId,
@@ -1995,7 +1997,8 @@ function isDispatchProductionEvent(value: unknown): value is DispatchProductionE
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const obj = value as Record<string, unknown>;
   return (
-    obj['schemaVersion'] === 1 &&
+    (obj['schemaVersion'] === 1 || obj['schemaVersion'] === 2) &&
+    tokenEnvelopeCurrent(obj, true) &&
     typeof obj['ts'] === 'string' &&
     typeof obj['itemId'] === 'string' &&
     typeof obj['source'] === 'string' &&
@@ -2220,6 +2223,7 @@ export function recordDispatchProduction(
     if (events.length === 0) return result;
     for (const event of events) {
       try {
+        if (!tokenEnvelopeCurrent(event as unknown as Record<string, unknown>, false)) throw new Error('invalid token provenance envelope');
         const lifecycle = event.basis === 'repair-lifecycle-candidate' ||
           event.basis === 'repair-lifecycle-outcome';
         const writeEvent = lifecycle ? event : materializeDispatchProductionAttemptEnvelope(event);

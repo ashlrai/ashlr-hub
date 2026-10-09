@@ -1,3 +1,4 @@
+import { requestTokenEvidence } from '../src/core/run/token-evidence.js';
 import { describe, expect, it } from 'vitest';
 import { assessResetOpportunity, forecastFit, hasResetDeadline, opportunityPriority, validResetProvenance } from '../src/core/routing/reset-pressure.js';
 import { forecastWork, observedPercentiles } from '../src/core/routing/work-estimates.js';
@@ -231,7 +232,7 @@ describe('observed task estimates',()=>{
   });
   it('uses distinct canonical run IDs when attempt IDs are empty, retaining observed quartiles',()=>{
     const events=[1000,2000,3000,4000].map((durationMs,i)=>({backend:'grok-cli',model:'model-a',source:'todo',attemptId:'',runId:`run-${i}`,
-      runEventSummary:{status:'done',durationMs,tokensIn:(i+1)*10,tokensOut:0}} as DispatchProductionEvent));
+      runEventSummary:{status:'done',durationMs,tokensIn:(i+1)*10,tokensOut:0,tokenEvidence:requestTokenEvidence('reported',(i+1)*10,0)}} as DispatchProductionEvent));
     const samples=historySamples([...events,events[0]!]);
     expect(samples.map(v=>v.id)).toEqual(['run-0','run-1','run-2','run-3','run-0']);
     const forecast=forecastWork('task',cohort,samples);
@@ -251,8 +252,10 @@ describe('observed task estimates',()=>{
     expect(buildSchedulingView([seat()],policy,now,{a:wrongAccount}).accounts[0]!.forecast).toBeNull();
   });
   it('uses only completed reported metadata, with initialized zeros unknown',()=>{
-    const event={backend:'grok-cli',model:'model-a',source:'todo',attemptId:'attempt-00000000-0000-4000-8000-000000000001',runEventSummary:{status:'done',durationMs:30000,tokensIn:400,tokensOut:10}} as DispatchProductionEvent;
+    const event={backend:'grok-cli',model:'model-a',source:'todo',attemptId:'attempt-00000000-0000-4000-8000-000000000001',runEventSummary:{status:'done',durationMs:30000,tokensIn:400,tokensOut:10,tokenEvidence:requestTokenEvidence('reported',400,10)}} as DispatchProductionEvent;
     expect(historySamples([event])).toMatchObject([{durationMs:30000,tokens:410,seatId:null}]);
+    expect(historySamples([{...event,runEventSummary:{...event.runEventSummary,tokenEvidence:undefined}}])).toMatchObject([{durationMs:30000,tokens:null}]);
+    expect(historySamples([{...event,runEventSummary:{...event.runEventSummary,tokenEvidence:requestTokenEvidence('reserved',400,10)}}])).toMatchObject([{durationMs:30000,tokens:null}]);
     expect(historySamples([{...event,runEventSummary:{status:'running',durationMs:30000}}])).toEqual([]);
     expect(forecastWork('task',cohort,historySamples([{...event,runEventSummary:{status:'done',durationMs:0,tokensIn:0,tokensOut:0}}])).durationMs).toBeNull();
   });

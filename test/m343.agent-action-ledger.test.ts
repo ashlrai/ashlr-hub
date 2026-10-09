@@ -2,6 +2,7 @@
  * m343.agent-action-ledger.test.ts — append-only agent action telemetry.
  */
 
+import { requestTokenEvidence } from '../src/core/run/token-evidence.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   existsSync,
@@ -86,6 +87,30 @@ afterEach(() => {
 });
 
 describe('M343 agent action ledger', () => {
+  it('roundtrips V2 token provenance without upgrading legacy rows or admitting malformed V2', () => {
+    const tokenEvidence = requestTokenEvidence('reported', 11, 0)!;
+    const summary = { runId: 'run-a', tokensIn: 11, tokensOut: 0, tokenEvidence };
+    expect(recordAgentActionResult(makeEvent({ runId: 'run-a', runEventSummary: summary }))).toEqual({ attempted: 1, recorded: 1 });
+    const path = join(agentActionsDir(), '2026-07-08.jsonl');
+    const original = readFileSync(path, 'utf8');
+    const persisted = JSON.parse(original);
+    expect(persisted.schemaVersion).toBe(2);
+    expect(readAgentActionsDetailed().events[0]?.runEventSummary).toEqual(summary);
+    expect(readFileSync(path, 'utf8')).toBe(original);
+    expect(recordAgentActionResult(makeEvent({ schemaVersion: 2 }))).toEqual({ attempted: 1, recorded: 0 });
+    expect(recordAgentActionResult(makeEvent({ runEventSummary: { ...summary, tokensIn: 12 } }))).toEqual({ attempted: 1, recorded: 0 });
+    writeFileSync(path, [JSON.stringify({ ...persisted, schemaVersion: 1 }), JSON.stringify({ ...persisted, runEventSummary: { ...summary, tokensOut: 1 } }), JSON.stringify({ ...persisted, schemaVersion: 3 })].join('\n') + '\n');
+    const invalidBytes = readFileSync(path, 'utf8');
+    const invalid = readAgentActionsDetailed();
+    expect(invalid.events).toEqual([]);
+    expect(invalid.invalidRows).toBe(3);
+    expect(readFileSync(path, 'utf8')).toBe(invalidBytes);
+    writeFileSync(path, original);
+    expect(recordAgentActionResult(makeEvent()).recorded).toBe(1);
+    expect(readAgentActionsDetailed().events.map(event => event.schemaVersion)).toEqual([1, 2]);
+    expect(readAgentActionsDetailed().events[0]?.runEventSummary?.tokenEvidence).toBeUndefined();
+  });
+
   it('ignores emulated mode bits only on Windows while preserving filesystem safety checks', () => {
     const regular = statSync(home);
     const fileStat = {

@@ -1,3 +1,5 @@
+import { formatMetric } from '../../../components/charts/format-metric.js';
+import { tokenEvidenceLabel } from '../../../../core/run/token-evidence.js';
 /**
  * routes/work/runs/RunDetailView.tsx — GET /api/run/:id. Full RunState:
  * budget/usage, the append-only step log, and the task DAG (id, goal, deps,
@@ -95,9 +97,10 @@ export function RunDetailView() {
           </div>
         ) : null}
         <div>
-          <dt>Tokens in / out</dt>
+          <dt>Accounted tokens in / out</dt>
           <dd className={styles.numeric}>
-            {run.usage.tokensIn.toLocaleString()} / {run.usage.tokensOut.toLocaleString()}
+            {formatMetric(run.usage.tokensIn)} / {formatMetric(run.usage.tokensOut)}
+            <small>{tokenEvidenceLabel(run.usage, formatMetric)}</small>
           </dd>
         </div>
         <div>
@@ -174,8 +177,8 @@ export function RunDetailView() {
                 ) : null}
                 {task.usage ? (
                   <p className={styles.taskUsage}>
-                    {task.usage.tokensIn.toLocaleString()} / {task.usage.tokensOut.toLocaleString()} tokens · $
-                    {task.usage.estCostUsd.toFixed(4)}
+                    {formatMetric(task.usage.tokensIn)} / {formatMetric(task.usage.tokensOut)} accounted tokens · $
+                    {task.usage.estCostUsd.toFixed(4)} · {tokenEvidenceLabel(task.usage, formatMetric)}
                   </p>
                 ) : null}
               </li>

@@ -12,6 +12,7 @@
  *   - Run records (.ashlr/runs/*.json) are also collected with source:'run'
  */
 
+import { requestTokenEvidence } from '../src/core/run/token-evidence.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -662,6 +663,25 @@ describe('collectUsageEvents — ~/.ashlr/runs/*.json (source: run)', () => {
       status: opts.status ?? 'done',
     });
   }
+
+  it('preserves original run time and explicit token evidence without rewriting old or malformed records', () => {
+    const runsDir = path.join(tmpHome, '.ashlr', 'runs');
+    const ts = '2026-07-01T10:00:00.000Z';
+    const row = JSON.parse(makeRunRecord({ createdAt: ts, tokensIn: 11, tokensOut: 0 }));
+    row.usage.tokenEvidence = requestTokenEvidence('reported', 11, 0);
+    const source = path.join(runsDir, 'reported.json'); writeFile(source, JSON.stringify(row));
+    const original = fs.readFileSync(source, 'utf8');
+    const valid = collectUsageEvents(0).find(event => event.source === 'run')!;
+    expect(valid.ts).toBe(ts); expect(valid.tokenEvidence).toEqual(row.usage.tokenEvidence);
+    expect(Object.keys(valid)).not.toContain('goal');
+    row.usage.tokensIn = 12; writeFile(source, JSON.stringify(row));
+    const invalidBytes = fs.readFileSync(source, 'utf8');
+    const invalid = collectUsageEvents(0).find(event => event.source === 'run')!;
+    expect(invalid.tokensIn).toBe(12); expect(invalid.tokenEvidence).toBeUndefined();
+    expect(fs.readFileSync(source, 'utf8')).toBe(invalidBytes);
+    writeFile(source, original); delete row.usage.tokenEvidence; writeFile(source, JSON.stringify(row));
+    expect(collectUsageEvents(0).find(event => event.source === 'run')?.tokenEvidence).toBeUndefined();
+  });
 
   it('collects run records as source:"run" events', () => {
     const runsDir = path.join(tmpHome, '.ashlr', 'runs');

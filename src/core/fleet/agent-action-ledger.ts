@@ -39,6 +39,7 @@ import type {
 import { repairTreatmentForUnitId } from './generated-repair-identity.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { causalMetadata } from '../learning/causal.js';
+import { tokenEnvelopeCurrent } from '../run/token-evidence.js';
 import {
   classifyProductionAttemptForLearningWithLabel,
   sanitizeProductionAttemptLearningLabel,
@@ -87,7 +88,7 @@ const ROUTE_SNAPSHOT_KEYS = new Set([
 const RUN_SUMMARY_KEYS = new Set([
   'runId', 'status', 'outcome', 'proposalCreated', 'proposalId', 'diffFiles',
   'diffLines', 'tokensIn', 'tokensOut', 'costUsd', 'durationMs', 'cacheHit',
-  'contextSummary', 'actionCounts',
+  'contextSummary', 'actionCounts', 'tokenEvidence',
 ]);
 const EVIDENCE_OUTCOME_KEYS = new Set([
   'target', 'trustBasis', 'riskClass', 'verificationPassed', 'policyAllowed',
@@ -132,7 +133,8 @@ export type AgentActionOutcome =
   | 'unknown';
 
 export interface AgentActionEvent {
-  schemaVersion: 1;
+  /** V2 withholds provenance-bearing rows from legacy readers; V1 remains unchanged. */
+  schemaVersion: 1 | 2;
   ts: string;
   machineId?: string;
   actor: AgentActionActor;
@@ -770,7 +772,7 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
     : undefined;
 
   return {
-    schemaVersion: 1,
+    schemaVersion: causal.runEventSummary?.tokenEvidence ? 2 : 1,
     ts,
     actor,
     kind,
@@ -827,7 +829,8 @@ function isAgentActionEvent(value: unknown): value is AgentActionEvent {
   const runId = boundedOptionalText(obj['runId'], 160);
   const runEventSummary = normalizeRunEventSummary(obj['runEventSummary'] as never);
   return (
-    obj['schemaVersion'] === 1 &&
+    (obj['schemaVersion'] === 1 || obj['schemaVersion'] === 2) &&
+    tokenEnvelopeCurrent(obj, true) &&
     typeof obj['ts'] === 'string' &&
     enumValue(obj['actor'], AGENT_ACTION_ACTORS) !== undefined &&
     enumValue(obj['kind'], AGENT_ACTION_KINDS) !== undefined &&
@@ -1058,6 +1061,7 @@ export function recordAgentActionResult(
     const partitions = new Set<string>();
     for (const event of events) {
       try {
+        if (!tokenEnvelopeCurrent(event as unknown as Record<string, unknown>, false)) continue;
         const record = sanitizeEvent(event, true);
         if (!isAgentActionEvent(record)) continue;
         const partition = eventDateString(record.ts);

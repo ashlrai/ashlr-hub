@@ -6,6 +6,7 @@
  * on a Codex account that still has credits, and no launcher command anywhere
  * at all.
  */
+import { requestTokenEvidence } from '../../../../core/run/token-evidence.js';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -487,9 +488,21 @@ describe('UsageSection — token output and spend', () => {
     vi.unstubAllGlobals();
   });
 
+  it('shows reported and reserved usage without presenting held exposure as generated output', async () => {
+    vi.stubGlobal('fetch', routes({ '/api/verse/usage-series': () => json({ window: '7d', byDay: [
+      { day: '2026-09-18', tokensIn: 11, tokensOut: 0, estCostUsd: 0, sessions: 1, tokenEvidence: requestTokenEvidence('reported', 11, 0) },
+      { day: '2026-09-20', tokensIn: 20, tokensOut: 9, estCostUsd: 0.1, sessions: 1, tokenEvidence: requestTokenEvidence('reserved', 20, 9) },
+    ] }) }));
+    render(<UsageSection />);
+    await waitFor(() => expect(screen.getByText(/Across 2 recorded days.*Partial reported 11.*Reserved 29/)).toBeInTheDocument());
+    expect(screen.getByText('Reported 11')).toBeInTheDocument(); expect(screen.getByText('Reserved 29')).toBeInTheDocument();
+    expect(screen.queryByText('2026-09-19')).not.toBeInTheDocument();
+    expect(screen.queryByText('What the models actually produced')).not.toBeInTheDocument();
+  });
+
   it('charts tokens in/out and estimated spend, labelling the estimate', async () => {
     render(<UsageSection />);
-    await waitFor(() => expect(screen.getByText('Token output and spend')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Accounted tokens and spend')).toBeInTheDocument());
     expect(screen.getByRole('img', { name: /Tokens in and out per day over last 7 days/i })).toBeInTheDocument();
     expect(screen.getByRole('img', { name: /Estimated spend per day over last 7 days/i })).toBeInTheDocument();
     // Both the series panel and the cloud-spend tile carry the disclosure now:
@@ -516,9 +529,9 @@ describe('UsageSection — token output and spend', () => {
   it('switches to the 30d window on demand', async () => {
     const user = userEvent.setup();
     render(<UsageSection />);
-    await waitFor(() => expect(screen.getByText('Token output and spend')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Accounted tokens and spend')).toBeInTheDocument());
     await user.click(screen.getByRole('button', { name: '30d' }));
-    await waitFor(() => expect(screen.getByText('Tokens in · 30d')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Accounted tokens in · 30d')).toBeInTheDocument());
   });
 
   it('refuses the cache chart when no day reported a rate', async () => {
@@ -543,7 +556,7 @@ describe('UsageSection — token output and spend', () => {
   it('says the series route is missing rather than inventing a chart', async () => {
     vi.stubGlobal('fetch', routes({ '/api/verse/usage-series': () => new Response('nope', { status: 404 }) }));
     render(<UsageSection />);
-    await waitFor(() => expect(screen.getByText('Token output and spend')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('Accounted tokens and spend')).toBeInTheDocument());
     expect(screen.getByText(/does not expose \/api\/verse\/usage-series/)).toBeInTheDocument();
     expect(screen.queryByRole('img', { name: /Tokens in and out per day/ })).not.toBeInTheDocument();
   });

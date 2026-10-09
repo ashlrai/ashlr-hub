@@ -1,3 +1,5 @@
+import { mergeTokenEvidence, neutralTokenEvidence } from '../../../../core/run/token-evidence.js';
+import type { RunTokenEvidence } from '../../../../core/types.js';
 /**
  * routes/verse/usage/series-model.ts — the daily token/spend series, shaped
  * for the chart primitives.
@@ -68,6 +70,7 @@ function points(days: readonly DailyUsage[], pick: (d: DailyUsage) => number | n
 }
 
 export interface SeriesTotals {
+  tokenEvidence?: RunTokenEvidence;
   tokensIn: number;
   tokensOut: number;
   estCostUsd: number;
@@ -79,13 +82,14 @@ export interface SeriesTotals {
 export function totalsFor(days: readonly DailyUsage[]): SeriesTotals {
   return days.reduce<SeriesTotals>(
     (acc, d) => ({
+      tokenEvidence: mergeTokenEvidence(acc, d),
       tokensIn: acc.tokensIn + d.tokensIn,
       tokensOut: acc.tokensOut + d.tokensOut,
       estCostUsd: acc.estCostUsd + d.estCostUsd,
       sessions: acc.sessions + d.sessions,
       dayCount: acc.dayCount + 1,
     }),
-    { tokensIn: 0, tokensOut: 0, estCostUsd: 0, sessions: 0, dayCount: 0 },
+    { tokensIn: 0, tokensOut: 0, estCostUsd: 0, sessions: 0, dayCount: 0, tokenEvidence: neutralTokenEvidence() },
   );
 }
 
@@ -97,8 +101,8 @@ export function buildTokenSeries(series: UsageSeries | null): SeriesProjection {
     available: true,
     days: series.days,
     series: [
-      { id: 'tokensIn', label: 'Tokens in', points: points(series.days, (d) => d.tokensIn) },
-      { id: 'tokensOut', label: 'Tokens out', points: points(series.days, (d) => d.tokensOut) },
+      { id: 'tokensIn', label: 'Accounted tokens in', points: points(series.days, (d) => d.tokensIn) },
+      { id: 'tokensOut', label: 'Accounted tokens out', points: points(series.days, (d) => d.tokensOut) },
     ],
   };
 }

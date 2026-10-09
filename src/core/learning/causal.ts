@@ -1,3 +1,4 @@
+import { reportedTokenPair, validateTokenEvidence } from '../run/token-evidence.js';
 import type {
   CompressionContextSummary,
   DecisionEntry,
@@ -252,6 +253,8 @@ export function runEventSummary(input: RunEventSummary | undefined): RunEventSum
   const cacheHit = optionalBoolean(input.cacheHit);
   const contextSummary = runContextSummary(input.contextSummary);
   const actionCounts = runActionCounts(input.actionCounts);
+  const reportedPair = reportedTokenPair(input);
+  const tokenEvidence = reportedPair ? validateTokenEvidence(Object.getOwnPropertyDescriptor(input, 'tokenEvidence')?.value, reportedPair.tokensIn, reportedPair.tokensOut) : undefined;
   return {
     ...(runId ? { runId } : {}),
     ...(status ? { status } : {}),
@@ -262,6 +265,7 @@ export function runEventSummary(input: RunEventSummary | undefined): RunEventSum
     ...(diffLines !== undefined ? { diffLines } : {}),
     ...(tokensIn !== undefined ? { tokensIn } : {}),
     ...(tokensOut !== undefined ? { tokensOut } : {}),
+    ...(tokenEvidence ? { tokenEvidence } : {}),
     ...(costUsd !== undefined ? { costUsd } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
     ...(cacheHit !== undefined ? { cacheHit } : {}),

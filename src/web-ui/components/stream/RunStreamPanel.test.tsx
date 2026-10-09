@@ -52,6 +52,8 @@ describe('RunStreamPanel', () => {
 
       await waitFor(() => expect(screen.getByText('step 1')).toBeInTheDocument());
       expect(screen.getByText(/Live/)).toBeInTheDocument();
+      expect(screen.getByText('Token provenance unknown')).toBeInTheDocument();
+      expect(screen.getByText('Accounted tokens')).toBeInTheDocument();
 
       stepCount = 3;
 

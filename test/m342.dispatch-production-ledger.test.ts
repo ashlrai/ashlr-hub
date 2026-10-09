@@ -2,6 +2,7 @@
  * test/m342.dispatch-production-ledger.test.ts — append-only dispatch-production history.
  */
 
+import { requestTokenEvidence } from '../src/core/run/token-evidence.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // This suite drives the real on-disk production ledger — 216 cases of genuine
@@ -963,6 +964,25 @@ afterEach(() => {
 });
 
 describe('M342 dispatch production ledger', () => {
+  it('cold-reads strict paired token provenance and withholds mismatched rows without rewriting bytes', () => {
+    const evidence = requestTokenEvidence('reserved', 500, 4096)!;
+    const event = makeEvent({ runEventSummary: { tokensIn: 500, tokensOut: 4096, tokenEvidence: evidence } });
+    expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
+    const path = join(dispatchProductionDir(), '2026-07-08.jsonl');
+    const original = readFileSync(path, 'utf8');
+    const read = readDispatchProductionEventsDetailed();
+    expect(read).toMatchObject({ sourceState: 'healthy', invalidRows: 0, complete: true });
+    expect(read.events[0]?.runEventSummary?.tokenEvidence).toEqual(evidence);
+    expect(readFileSync(path, 'utf8')).toBe(original);
+    const row = JSON.parse(original);
+    row.runEventSummary.tokenEvidence.input.reserved++;
+    writeFileSync(path, JSON.stringify(row) + '\n');
+    const invalidBytes = readFileSync(path, 'utf8');
+    const invalid = readDispatchProductionEventsDetailed();
+    expect(invalid.events).toEqual([]); expect(invalid.invalidRows).toBe(1);
+    expect(readFileSync(path, 'utf8')).toBe(invalidBytes);
+  });
+
   it.each(['grok-cli', 'devin-cli'] as const)('preserves shipped %s identity without degrading durable duplicate-suppression history', (backend) => {
     const event = makeEvent({ backend, ts: new Date().toISOString(), itemId: `shipped-${backend}`, model: null, routeSnapshot: undefined });
     expect(recordDispatchProduction(event)).toEqual({ attempted: 1, recorded: 1, failed: 0 });
@@ -1517,7 +1537,15 @@ describe('M342 dispatch production ledger', () => {
       repairPreviousBackend: 'local-coder',
     });
 
+    second.runEventSummary = {
+      ...second.runEventSummary!,
+      tokensIn: 11,
+      tokensOut: 7,
+      tokenEvidence: requestTokenEvidence('reported', 11, 7),
+    };
     expect(recordDispatchProduction([first, second])).toEqual({ attempted: 2, recorded: 2, failed: 0 });
+    expect(readDispatchProductionEventsDetailed().events.find((event) => event.runId === second.runId))
+      .toMatchObject({ schemaVersion: 2, runEventSummary: { tokensIn: 11, tokensOut: 7 } });
     const results = resolveDispatchProductionAttemptProofs([
       proofTarget(second, { repo: linkedAlias }),
       proofTarget(first, { repo: linkedAlias }),

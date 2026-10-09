@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { formatDayLabel, formatTimeLabel, timeLabelLadder } from '../../../components/charts/format.js';
 import { calendarDayStart } from '../growth/calendar-day.js';
 import { inTimeZone, TEST_ZONES } from '../growth/time-zone.test-support.js';
+import { requestTokenEvidence } from '../../../../core/run/token-evidence.js';
 import type { DailyUsage, UsageSeries } from './usage-contract.js';
 import { projectUsageSeries } from './usage-contract.js';
 import {
@@ -41,8 +42,20 @@ const THREE_DAYS = series([
 ]);
 
 describe('totalsFor', () => {
+  it('keeps reported and reserved days separate from legacy unknown totals and gaps', () => {
+    const rows = [day({ day: '2026-09-17', tokensIn: 11, tokensOut: 2, tokenEvidence: requestTokenEvidence('reported', 11, 2) }),
+      day({ day: '2026-09-19', tokensIn: 20, tokensOut: 9, tokenEvidence: requestTokenEvidence('reserved', 20, 9) }),
+      day({ day: '2026-09-20', tokensIn: 5, tokensOut: 3 })];
+    const totals = totalsFor(rows)!;
+    expect(totals).toMatchObject({ tokensIn: 36, tokensOut: 14, dayCount: 3, tokenEvidence: {
+      input: { reported: 11, reserved: 20, unknown: 5 }, output: { reported: 2, reserved: 9, unknown: 3 },
+      requests: { reported: 1, reserved: 1, unknown: 0 }, unclassified: true,
+    } });
+    expect(rows.map(row => row.day)).toEqual(['2026-09-17', '2026-09-19', '2026-09-20']);
+  });
+
   it('sums the window and reports the day count behind it', () => {
-    expect(totalsFor(THREE_DAYS.days)).toEqual({
+    expect(totalsFor(THREE_DAYS.days)).toMatchObject({
       tokensIn: 6_000,
       tokensOut: 2_400,
       estCostUsd: 8,
