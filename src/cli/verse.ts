@@ -317,7 +317,7 @@ export async function cmdVerse(args: string[]): Promise<number> {
       return 0;
     }
     console.error(red('error: ') + parsed.error);
-    console.error(dim('Run `ashlr verse --help` for usage.'));
+    console.error(dim('Run `phm verse --help` for usage.'));
     return parsed.code;
   }
 
@@ -485,7 +485,7 @@ export async function cmdVerse(args: string[]): Promise<number> {
     if (remote) {
       console.log(`  ${green('✓')} Phone gateway on ${cyan(remote.gateway.url)} (loopback only)`);
       console.log(`  ${dim('Public Access origin:')} ${remote.publicOrigin}`);
-      console.log(`  ${dim('Mac operator commands:')} ashlr verse remote pending | invite | approve | revoke`);
+      console.log(`  ${dim('Mac operator commands:')} phm verse remote pending | invite | approve | revoke`);
       console.log(`  ${dim('Tunnel and DNS require separate provisioning; this listener is not public by itself.')}`);
       console.log('');
     }
@@ -557,7 +557,8 @@ export async function cmdVerse(args: string[]): Promise<number> {
 
 function printUsage(): void {
   console.log('');
-  console.log(bold('  ashlr verse') + dim(' [--port N] [--no-open] [--json]'));
+  console.log(bold('  phm verse') + dim(' [--port N] [--no-open] [--json]'));
+  console.log(dim('  Phantom CLI (ashlr remains compatible)'));
   console.log('');
   console.log('  Open the Phantom console: project + seat (Claude / Codex / Grok / local Ollama)');
   console.log('  multi-turn agent sessions served by the local dashboard server at /verse/.');
@@ -573,10 +574,10 @@ function printUsage(): void {
   console.log(`    ${cyan('--accounts-idle M')}  Pause polling after M idle minutes (1-720, default ${VERSE_DEFAULT_ACCOUNTS_IDLE_MINUTES})`);
   console.log('');
   console.log('  ' + bold('Notes:'));
-  console.log(`    ${dim('• Equivalent to `ashlr serve --allow-dispatch --open` pointed at /verse/')}`);
+  console.log(`    ${dim('• Equivalent to `phm serve --allow-dispatch --open` pointed at /verse/')}`);
   console.log(`    ${dim('• Binds 127.0.0.1 ONLY; read + mutation tokens are printed at startup')}`);
   console.log(`    ${dim('• Seats come from ~/.ashlr/account-connections/connections.json + Ollama')}`);
   console.log(`    ${dim('• Account probes are metadata-only: zero tokens and zero paid quota')}`);
-  console.log(`    ${dim('• The metadata lease is exclusive per root; `ashlr resource-console` wins')}`);
+  console.log(`    ${dim('• The metadata lease is exclusive per root; `phm resources pool console` wins')}`);
   console.log('');
 }

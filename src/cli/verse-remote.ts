@@ -15,7 +15,7 @@ export async function cmdVerseRemote(args: string[]): Promise<number> {
   const [action, id] = args;
   if (!action || !['invite', 'pending', 'devices', 'approve', 'deny', 'revoke'].includes(action)
     || (action !== 'invite' && args.length > 2)) {
-    console.error('Usage: ashlr verse remote invite <Access-subject> [read|act] | pending | devices | approve <id> | deny <id> | revoke <id>');
+    console.error('Usage: phm verse remote invite <Access-subject> [read|act] | pending | devices | approve <id> | deny <id> | revoke <id>');
     return 2;
   }
   if (action === 'invite') {

@@ -33,13 +33,13 @@ notarized; macOS may require **Open Anyway** on first launch. The CLI includes t
 See [desktop installation](#the-desktop-app-macos) or the
 [first-run guide](docs/QUICKSTART.md#open-verse).
 
-![Phantom 3.24.3 Work with me: read-only Demo chat with labeled sample accounts and provider-inactive conversation.](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/verse-work-with-me-3.24.3-demo.jpg)
+![Phantom 3.24.3 Work with me: read-only Demo chat with labeled sample accounts and provider-inactive conversation.](https://raw.githubusercontent.com/ashlrai/phantom/master/docs/images/verse-work-with-me-3.24.3-demo.jpg)
 
-![Phantom 3.24.3 Work for me: read-only Command overview with labeled Demo accounts and an illustrative Leader memo.](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/verse-work-for-me-3.24.3-demo.jpg)
+![Phantom 3.24.3 Work for me: read-only Command overview with labeled Demo accounts and an illustrative Leader memo.](https://raw.githubusercontent.com/ashlrai/phantom/master/docs/images/verse-work-for-me-3.24.3-demo.jpg)
 
 *Actual compiled 3.24.3 browser UI with labeled Demo accounts, a sample conversation and an illustrative Leader memo. No provider ran and no fleet was active. Verification, merge and production are separate records; CI is unknown and release/deployment is unrecorded. These screenshots show the browser UI, not native app chrome.*
 
-![Phantom agent world: an interactive illustration with provider logos and three colorful engineering agents.](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/phantom-agent-world-3.24.3-demo.jpg)
+![Phantom agent world: an interactive illustration with provider logos and three colorful engineering agents.](https://raw.githubusercontent.com/ashlrai/phantom/master/docs/images/phantom-agent-world-3.24.3-demo.jpg)
 
 *Explore the [interactive agent world](https://verse.ashlr.ai/#phantom-world): subscriptions, API credits, local models and MCP/CLI tools. This illustration does not launch agents.*
 

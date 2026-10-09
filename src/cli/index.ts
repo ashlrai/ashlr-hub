@@ -1735,7 +1735,7 @@ async function cmdHelp(rest: string[] = []): Promise<void> {
     const mod = await import('./help.js');
     await mod.cmdHelp(rest);
   } catch {
-    console.log('ashlr — local-first command center. Run a command or see the README.');
+    console.log('Phantom — local-first command center. Run `phm help` or see the README (ashlr remains compatible).');
   }
 }
 
@@ -2443,9 +2443,9 @@ async function main(): Promise<void> {
         try {
           const { didYouMean } = await import('./completions.js');
           const suggestion = didYouMean(cmd);
-          if (suggestion) console.error(`Did you mean ${cyan(`ashlr ${suggestion}`)}?`);
+          if (suggestion) console.error(`Did you mean ${cyan(`phm ${suggestion}`)}?`);
         } catch { /* suggestion is best-effort */ }
-        console.error(dim('Run `ashlr help` for usage.'));
+        console.error(dim('Run `phm help` for usage.'));
         process.exit(2);
       }
     }
