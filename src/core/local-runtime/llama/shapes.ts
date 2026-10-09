@@ -1,20 +1,20 @@
 /**
- * The two shapes one GPU's context can take, and the guard for moving between
+ * Two local runtime context shapes, and the guard for moving between
  * them. See docs/LOCAL-CONTEXT-STRATEGY.md.
  *
  * `llama-server` divides `-c` by `--parallel` AT LAUNCH, so a slot cannot borrow
  * from its neighbours and "give the planner the whole window" is a different
- * server shape rather than a request-time option. Measured on a 128 GB machine
- * with Qwen3.8 27B at Q8_0 (NOT four-bit — an earlier comment said so; the blob is
- * 27 GiB, where a four-bit build would be roughly 16 GB):
+ * server shape rather than a request-time option. September 21–22, 2026 trials
+ * on a 128 GB machine with a locally named Qwen3.8 27B Q8_0 artifact recorded
+ * startup residency with an empty cache (not current or steady-state costs):
  *
  *   plan      1 slot  x 262,144   43.0 GB   read widely, plan, review
  *   execute   4 slots x  65,536   43.4 GB   four targeted edits at once
  *
- * The wide shape costs 0.4 GB more than the deep one, because Qwen3.8 runs
- * linear attention on 48 of its 64 layers and only 16 carry a full KV cache.
- * Switching takes seconds rather than a cold load, because the weights stay in
- * the OS page cache across a restart — which is what makes two phases practical.
+ * The historical readings do not establish constant memory use or a causal
+ * shape-cost difference. Filled cache, artifact, runtime and workload matter.
+ * The historical restart took seconds with weights in the OS page cache;
+ * that is not a current restart-time guarantee.
  *
  * WHY THIS IS NOT AUTOMATIC. Reshaping restarts llama-server. A restart while a
  * slot is generating kills that turn mid-flight, and the agent sees a truncated
@@ -38,9 +38,10 @@ export interface RuntimeShape {
 }
 
 /**
- * 262,144 is Qwen3.8 27B's native trained context, not a round number chosen for
- * looks. Both shapes carry the same total so that switching changes only how it
- * is divided, which keeps the memory footprint essentially constant.
+ * Both shapes carry the same requested total context. The upstream Qwen3.8-27B
+ * model card reports a native 262,144-token window (linked in the strategy doc);
+ * local tag names alone do not prove converted-weight provenance. Equal total
+ * context does not guarantee equal residency or quality.
  */
 export const RUNTIME_SHAPES: Readonly<Record<RuntimeShapeName, RuntimeShape>> = {
   plan: {
@@ -72,9 +73,10 @@ export function resolveRuntimeShape(value: unknown): RuntimeShape | null {
 /**
  * Is a Claude Code agent's own system prompt going to fit in this shape?
  *
- * Measured at 23,310 tokens on this machine. The old 65,536 TOTAL default gave
- * each of four slots 16,384 — less than the agent's own instructions, before a
- * single turn began, and nothing reported an error. Any shape must clear this.
+ * Historical September 2026 trial: 23,310 tokens. This existing shape guard's
+ * reference is not a measurement of the current CLI/system/tool request. The
+ * old 65,536 TOTAL default yielded four 16,384-token slots, smaller than that
+ * trial's instructions. Actual request admission also uses context-fit checks.
  */
 export const AGENT_SYSTEM_PROMPT_TOKENS = 23_310;
 
