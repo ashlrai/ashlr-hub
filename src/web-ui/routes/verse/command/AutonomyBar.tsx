@@ -120,6 +120,7 @@ export function useGrantFlow(actions: SurfaceActions): GrantFlow {
         then={sheet?.then ?? null}
         why={sheet?.why ?? ''}
         busy={actions.busy}
+        actionStatus={actions}
         onApprove={approve}
         onClose={() => setSheet(null)}
         act={actions.act}

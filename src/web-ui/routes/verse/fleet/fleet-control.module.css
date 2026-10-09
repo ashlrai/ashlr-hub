@@ -44,6 +44,15 @@
   font-weight: var(--font-weight-semibold);
 }
 
+.stateMarker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--space-4);
+  height: var(--space-4);
+  flex: none;
+}
+
 .dot {
   width: 10px;
   height: 10px;

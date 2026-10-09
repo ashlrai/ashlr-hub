@@ -20,7 +20,7 @@
 
 Phantom 3.29.3 is published as `@ashlr/phantom` from `ashlrai/phantom`.
 Install the canonical package's promoted release.
-The source candidate is 3.29.4; preparing it does not publish or install it.
+This source tree targets version 3.29.5; check canonical release availability and exact matching assets before installation.
 
 ```sh
 npm install -g @ashlr/phantom   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows

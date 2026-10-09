@@ -81,6 +81,19 @@ source-only check; the complete release command below already runs them.
 but its import graph cannot discover dependencies read as text: select those
 files explicitly. Neither focused commands nor the gate replace release checks.
 
+For an offline smoke preview of a committed change, set `BASE_SHA` to a local
+ancestor commit and `HEAD_SHA` to the clean checkout’s current commit, using full
+40-character SHAs. Replace the example path with **every** changed path between
+those commits, including deletions:
+
+```sh
+node scripts/test-smoke-preview.mjs --root . --base "$BASE_SHA" --head "$HEAD_SHA" --changed src/core/run/model-catalog.ts
+```
+
+The JSON reports whole-module import suggestions and unknown/global-input
+warnings. It runs no tests and cannot authorize release skips or result reuse;
+an empty suggestion list does not establish coverage.
+
 ### Definition of green
 
 For the complete local source release check, run the canonical script once:

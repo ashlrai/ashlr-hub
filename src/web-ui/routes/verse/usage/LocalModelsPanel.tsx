@@ -198,7 +198,7 @@ function ContextCell({ row }: { row: LocalModelRow }): ReactNode {
   if (row.nativeContext === null && row.configuredContext === null) return <span>—</span>;
   if (!row.contextTruncated) return <span>{formatContextWindow(row.nativeContext ?? row.configuredContext)}</span>;
   return (
-    <span title={`Native context is ${formatContextWindow(row.nativeContext)}; Phantom runs this seat at ${formatContextWindow(row.configuredContext)}.`}>
+    <span title={`Reported context is ${formatContextWindow(row.configuredContext)}; native maximum is ${formatContextWindow(row.nativeContext)}. The serving allocation may differ.`}>
       {`${formatContextWindow(row.configuredContext)} of ${formatContextWindow(row.nativeContext)}`}
     </span>
   );

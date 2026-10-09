@@ -231,13 +231,12 @@ describe('emergency authority release truth', () => {
     const sourceParts = currentVersion.split('.').map(BigInt);
     const publishedParts = publishedVersion.split('.').map(BigInt);
     const differingPart = publishedParts.findIndex((part, index) => part !== sourceParts[index]);
+    const sourceMarker = `This source tree targets version ${currentVersion}; check canonical release availability and exact matching assets before installation.`;
+    expect(desktop.split(sourceMarker)).toHaveLength(2);
+    expect(desktop).not.toMatch(/The source candidate is [^\n]+; publication and installation are pending/);
     if (differingPart !== -1) {
       expect(publishedParts[differingPart]! < sourceParts[differingPart]!).toBe(true);
-      const pending = `The source candidate is ${currentVersion}; publication and installation are pending qualification and public byte verification.`;
-      expect(desktop.split(pending)).toHaveLength(2);
       expect(desktop).not.toContain(`/releases/download/v${currentVersion}/Phantom_${currentVersion}_aarch64.dmg`);
-    } else {
-      expect(desktop).not.toMatch(/The source candidate is [^\n]+; publication and installation are pending/);
     }
     expect(normalizedDesktop).toMatch(/locally signed, not Apple Developer ID notarized/i);
     expect(normalizedDesktop).toMatch(/Windows[^\n]*draft only/i);

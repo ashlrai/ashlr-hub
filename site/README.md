@@ -91,15 +91,21 @@ JavaScript. Keep the existing journey tabs, arrow-key controls and install-copy
 feedback working. Validate the Quickstart section and optional guide links.
 Run the existing documentation checker with `site/README.md` as an explicit
 entrypoint; its default operator-document set does not include this directory.
-Current public downloads are 3.24.2. The unchanged 3.24.3 candidate targets below
-must be publicly verified before this branch is deployed; a local preview does
-not establish publication or installed behavior.
+For current installation steps and published artifacts, use the
+[workbench first-run guide](https://github.com/ashlrai/phantom/blob/master/docs/QUICKSTART.md#open-verse).
+Candidate metadata is synchronized separately with
+`scripts/sync-candidate-version.mjs`; it must not update this page's published
+install target or software metadata before release verification. This legacy
+`verse.ashlr.ai` site is separate from the `phm.dev` website in
+`ashlrai/phantom-secrets/apps/web`.
 
-## Release 3.24.3 copy
+## Historical release 3.24.3 operations and copy
 
-The current software metadata and install targets name 3.24.3. Its GitHub
-release and downloads must exist and pass release checks before publishing this
-page. A source link or prepared download target is not publication evidence.
+At this source snapshot, public downloads were 3.24.2 and the software metadata
+and install targets named the 3.24.3 candidate. Those targets required public
+release and download verification before deployment. A local preview or
+prepared download target did not establish publication or installed behavior.
+The following notes describe that release's copy, not the current install path.
 
 The hero demonstrates Automatic chat selection with explicit overrides under
 Advanced, and Fleet's New outcome flow: desired result, enrolled repositories,

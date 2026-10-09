@@ -23,6 +23,7 @@ import type { FleetControlActionResultV1, FleetControlStateV1, FleetNextAction }
 import { Button } from '../../../components/primitives/Button.js';
 import { Input } from '../../../components/primitives/Input.js';
 import { Meter } from '../../../components/primitives/Meter.js';
+import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
 import { IconLock, IconPause, IconPlay, IconRefresh, IconStop } from '../../../components/primitives/icons.js';
 import { useQuery, useRefetch, useRefresh } from '../../../data/hooks.js';
 import { runQuery } from '../../../data/cache.js';
@@ -260,7 +261,11 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
     <section className={styles.control} aria-label="Fleet control" data-state={lastKnown ? 'unknown' : state.state} aria-busy={read.status === 'refreshing'}>
       <div className={styles.head}>
         <p className={styles.headline} role="status" aria-live="polite">
-          <span className={styles.dot} data-tone={lastKnown ? 'muted' : STATE_TONE[state.state]} aria-hidden="true" />
+          <span className={styles.stateMarker}>
+            {read.status === 'refreshing' ? <RefreshIndicator label="Updating fleet status…" /> : (
+              <span className={styles.dot} data-tone={lastKnown ? 'muted' : STATE_TONE[state.state]} aria-hidden="true" />
+            )}
+          </span>
           <span className={styles.stateWord}>{lastKnown ? 'Last known:' : ''} {preparing ? 'Preparing work' : STATE_WORD[state.state]}</span>
           <span>{preparing ? `0 agents working · ${tickProgress.phase}${stage ? ` · stage ${stage}` : ''}` : state.headline.replace(/^[A-Z][a-z]+ · /u, '')}</span>
         </p>
@@ -277,9 +282,9 @@ export function FleetControl({ actions, grantFlow, darkSince = null, setupShownB
         </div>
       </div>
 
-      {read.status === 'refreshing' || lastKnown ? (
+      {lastKnown ? (
         <p className={styles.muted} role="status">
-          {lastKnown ? `The latest fleet status could not be read. Showing the last reading from ${formatRelative(state.checkedAt)}.` : 'Updating fleet status…'}
+          The latest fleet status could not be read. Showing the last reading from {formatRelative(state.checkedAt)}.
           <button type="button" className={styles.link} onClick={refresh}>Check again</button>
         </p>
       ) : null}

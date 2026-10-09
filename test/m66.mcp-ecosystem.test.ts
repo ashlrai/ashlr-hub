@@ -10,7 +10,7 @@
  * the real ~/.ashlr directory.
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -20,7 +20,7 @@ import * as path from 'node:path';
 // ---------------------------------------------------------------------------
 
 import { knownConfigPaths } from '../src/core/mcp-registry.js';
-import { buildEcosystemMcpEntry, mergeEcosystemServers } from '../src/cli/mcp.js';
+import { buildEcosystemMcpEntry, mergeEcosystemServers, cmdMcp } from '../src/cli/mcp.js';
 import { locusServerSpec } from '../src/core/integrations/locus.js';
 
 // ---------------------------------------------------------------------------
@@ -29,6 +29,7 @@ import { locusServerSpec } from '../src/core/integrations/locus.js';
 
 const TMP = os.tmpdir();
 const tmpFiles: string[] = [];
+const tmpRoots: string[] = [];
 
 function tmpPath(label: string): string {
   const p = path.join(
@@ -53,6 +54,9 @@ afterEach(() => {
     try { fs.unlinkSync(f); } catch { /* ignore */ }
   }
   tmpFiles.length = 0;
+  for (const root of tmpRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 // ---------------------------------------------------------------------------
@@ -392,4 +396,145 @@ describe('mergeEcosystemServers — locus registers with identity env', () => {
     expect(Object.keys(obj.mcpServers)).not.toContain('phantom');
     expect(Object.keys(obj.mcpServers)).toContain('locus');
   });
+});
+
+
+// Detection reads bounded headers only; these native-header fixtures are never run.
+function ecosystemFixture(): string {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(TMP, 'phm-ecosystem-')));
+  tmpRoots.push(root);
+  vi.stubEnv('HOME', root);
+  vi.stubEnv('USERPROFILE', root);
+  vi.stubEnv('LOCUS_HOME', path.join(root, 'locus-home'));
+  return root;
+}
+function nativeCandidate(directory: string, name = 'phantom'): string {
+  fs.mkdirSync(directory, { recursive: true });
+  const file = path.join(directory, process.platform === 'win32' ? `${name}.exe` : name);
+  fs.writeFileSync(file, Buffer.from('cffaedfe00000000', 'hex'));
+  fs.chmodSync(file, 0o700);
+  return fs.realpathSync(file);
+}
+async function runEcosystem(args: string[] = []): Promise<{ code: number; output: string }> {
+  const lines: string[] = [];
+  vi.spyOn(console, 'log').mockImplementation((...values: unknown[]) => { lines.push(values.map(String).join(' ')); });
+  const code = await cmdMcp(['ecosystem', ...args]);
+  return { code, output: lines.join('\n') };
+}
+function settingsFor(root: string): string { return path.join(root, '.ashlr', 'settings.json'); }
+
+describe('ecosystem discovery binds a physical executable without launching it', () => {
+  it.skipIf(process.platform === 'win32')('skips first-existing nonexecutables and relative PATH entries, then registers the absolute native candidate', async () => {
+    const root = ecosystemFixture(); const early = path.join(root, 'early'); const valid = path.join(root, 'valid with spaces');
+    fs.mkdirSync(early); fs.writeFileSync(path.join(early, 'phantom'), 'not executable'); fs.chmodSync(path.join(early, 'phantom'), 0o600);
+    const selected = nativeCandidate(valid);
+    vi.stubEnv('PATH', ['', '.', early, valid].join(path.delimiter));
+    const result = await runEcosystem(['--write']);
+    expect(result.code).toBe(0);
+    const stored = readJson(settingsFor(root)) as { mcpServers: Record<string, { command: string; args: string[] }> };
+    expect(stored.mcpServers['phantom-secrets']).toEqual({ command: selected, args: ['mcp', 'serve'] });
+    vi.stubEnv('PATH', early);
+    expect((readJson(settingsFor(root)) as typeof stored).mcpServers['phantom-secrets']!.command).toBe(selected);
+    expect(result.output).not.toContain(path.join(early, 'phantom'));
+  });
+
+  it.skipIf(process.platform === 'win32')('does not select a directory with the executable name', async () => {
+    const root = ecosystemFixture(); const early = path.join(root, 'directory-first');
+    fs.mkdirSync(path.join(early, 'phantom'), { recursive: true });
+    const selected = nativeCandidate(path.join(root, 'native'));
+    vi.stubEnv('PATH', [early, path.dirname(selected)].join(path.delimiter));
+    expect((await runEcosystem(['--write'])).code).toBe(0);
+    expect((readJson(settingsFor(root)) as { mcpServers: Record<string, { command: string }> }).mcpServers['phantom-secrets']!.command).toBe(selected);
+  });
+
+  it.skipIf(process.platform === 'win32')('deduplicates aliases to the same physical executable', async () => {
+    const root = ecosystemFixture(); const selected = nativeCandidate(path.join(root, 'native')); const alias = path.join(root, 'alias');
+    fs.mkdirSync(alias); fs.symlinkSync(selected, path.join(alias, 'phantom'));
+    vi.stubEnv('PATH', [alias, path.dirname(selected), alias].join(path.delimiter));
+    expect((await runEcosystem(['--write'])).code).toBe(0);
+    expect((readJson(settingsFor(root)) as { mcpServers: Record<string, { command: string }> }).mcpServers['phantom-secrets']!.command).toBe(selected);
+  });
+
+  it('refuses distinct native candidates without choosing the first', async () => {
+    const root = ecosystemFixture(); const first = nativeCandidate(path.join(root, 'one')); const second = nativeCandidate(path.join(root, 'two'));
+    vi.stubEnv('PATH', [path.dirname(first), path.dirname(second)].join(path.delimiter));
+    const result = await runEcosystem(['--write']);
+    expect(result.output).toContain('ambiguous');
+    expect(fs.existsSync(settingsFor(root))).toBe(false);
+  });
+
+  it('refuses a bootstrap wrapper without executing or registering it', async () => {
+    const root = ecosystemFixture(); const bin = path.join(root, 'bin'); fs.mkdirSync(bin);
+    const marker = path.join(root, 'must-not-run');
+    const wrapper = path.join(bin, process.platform === 'win32' ? 'phantom.cmd' : 'phantom');
+    fs.writeFileSync(wrapper, `#!/bin/sh\n# downloadReleaseBinary\ntouch ${marker}\n`); fs.chmodSync(wrapper, 0o700);
+    vi.stubEnv('PATH', bin);
+    const result = await runEcosystem(['--write']);
+    expect(result.output).toContain('unsupported-launcher');
+    expect(fs.existsSync(settingsFor(root))).toBe(false);
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  it('writes the selected Locus MCP executable with existing identity environment', async () => {
+    const root = ecosystemFixture(); const selected = nativeCandidate(path.join(root, 'bin'), 'locus-mcp');
+    vi.stubEnv('PATH', path.dirname(selected));
+    expect((await runEcosystem(['--write'])).code).toBe(0);
+    const entry = (readJson(settingsFor(root)) as { mcpServers: Record<string, { command: string; env: Record<string, string> }> }).mcpServers.locus!;
+    expect(entry.command).toBe(selected);
+    expect(entry.env).toMatchObject({ LOCUS_HOME: path.join(root, 'locus-home'), LOCUS_CLIENT: 'ashlr-hub', LOCUS_NOTIFY: '0' });
+  });
+});
+
+describe('ecosystem settings refuse unknown content before writes', () => {
+  const invalid = [
+    ['malformed JSON', '{"private":"do-not-replace",'],
+    ['empty existing file', ''], ['null root', 'null'], ['array root', '[]'], ['scalar root', 'false'],
+    ['array mcpServers', '{"mcpServers":[]}'], ['null mcpServers', '{"mcpServers":null}'],
+    ['scalar server', '{"mcpServers":{"locus":"do-not-replace"}}'],
+    ['null server', '{"mcpServers":{"locus":null}}'],
+    ['array environment', '{"mcpServers":{"locus":{"command":"locus-mcp","env":[]}}}'],
+    ['malformed environment', '{"mcpServers":{"locus":{"command":"locus-mcp","env":{"LOCUS_HOME":3}}}}'],
+  ] as const;
+  for (const [label, bytes] of invalid) it(`preserves ${label} exactly on direct merge refusal`, () => {
+    const p = tmpPath('invalid'); fs.writeFileSync(p, bytes);
+    expect(() => mergeEcosystemServers([{ name: 'phantom-secrets', command: '/synthetic/native/phantom', args: ['mcp', 'serve'] }], p)).toThrow('existing MCP settings');
+    expect(fs.readFileSync(p, 'utf8')).toBe(bytes);
+  });
+
+  it('refuses an existing directory and leaves it intact', () => {
+    const root = ecosystemFixture(); const directory = path.join(root, 'settings-directory'); fs.mkdirSync(directory);
+    const marker = path.join(directory, 'unrelated'); fs.writeFileSync(marker, 'preserve');
+    expect(() => mergeEcosystemServers([], directory)).toThrow('existing MCP settings');
+    expect(fs.readFileSync(marker, 'utf8')).toBe('preserve');
+  });
+
+  it.skipIf(process.platform === 'win32')('refuses a dangling settings symlink without creating its missing target', () => {
+    const root = ecosystemFixture(); const missing = path.join(root, 'missing-target'); const link = path.join(root, 'settings-link');
+    fs.symlinkSync(missing, link);
+    expect(() => mergeEcosystemServers([], link)).toThrow('existing MCP settings');
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(missing)).toBe(false);
+  });
+
+  it('CLI refuses malformed current settings without exposing content or overwriting them', async () => {
+    const root = ecosystemFixture(); const selected = nativeCandidate(path.join(root, 'bin')); vi.stubEnv('PATH', path.dirname(selected));
+    const p = settingsFor(root); fs.mkdirSync(path.dirname(p)); const bytes = '{"private":"synthetic-secret-do-not-print",'; fs.writeFileSync(p, bytes);
+    const result = await runEcosystem(['--write']);
+    expect(result.code).toBe(1);
+    expect(result.output).toContain('existing MCP settings');
+    expect(result.output).not.toContain('synthetic-secret-do-not-print');
+    expect(fs.readFileSync(p, 'utf8')).toBe(bytes);
+  });
+});
+
+
+it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('CLI distinguishes a real write failure from a parse refusal without promising no change', async () => {
+  const root = ecosystemFixture(); const selected = nativeCandidate(path.join(root, 'bin')); vi.stubEnv('PATH', path.dirname(selected));
+  const settings = settingsFor(root); fs.mkdirSync(path.dirname(settings)); fs.writeFileSync(settings, '{}'); fs.chmodSync(settings, 0o400);
+  const result = await runEcosystem(['--write']);
+  expect(result.code).toBe(1);
+  expect(result.output).toContain('MCP registration failed');
+  expect(result.output).not.toContain('No settings were changed');
+  expect(result.output).not.toContain('EACCES');
+  expect(fs.readFileSync(settings, 'utf8')).toBe('{}');
 });

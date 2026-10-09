@@ -136,6 +136,37 @@ describe('automatic control polling', () => {
     </SectionVisibilityProvider>;
   }
 
+  it('keeps the control layout mounted during background polls and still publishes fresh readings', async () => {
+    const initial = fleetControl('live');
+    const refreshed = { ...initial, daemon: { ...initial.daemon, pid: 36373 } };
+    const replies: Array<(response: Response) => void> = [];
+    const fetcher = vi.fn(() => fetcher.mock.calls.length === 1
+      ? Promise.resolve(json(initial))
+      : new Promise<Response>(resolve => { replies.push(resolve); }));
+    vi.stubGlobal('fetch', fetcher);
+    const { unmount } = render(panel());
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    const region = screen.getByRole('region', { name: 'Fleet control' });
+    const layout = Array.from(region.children);
+    const facts = region.querySelector('dl');
+    expect(region).toHaveTextContent('Running · pid 4242');
+    for (let poll = 0; poll < 2; poll++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(FLEET_CONTROL_POLL_MS); });
+      expect(fetcher).toHaveBeenCalledTimes(poll + 2);
+      expect(region).toHaveAttribute('aria-busy', 'true');
+      expect(region).toHaveTextContent('Updating fleet status…');
+      expect(Array.from(region.children)).toEqual(layout);
+      expect(region.querySelector('dl')).toBe(facts);
+      expect(within(region).queryByRole('button', { name: 'Check again' })).toBeNull();
+      await act(async () => { replies[poll]!(json(refreshed)); });
+      expect(region).toHaveAttribute('aria-busy', 'false');
+      expect(region).toHaveTextContent('Running · pid 36373');
+      expect(Array.from(region.children)).toEqual(layout);
+      expect(region.querySelector('dl')).toBe(facts);
+    }
+    unmount();
+  });
+
   it('lets a read slower than several poll intervals update the PID without accumulating reads', async () => {
     const fresh = fleetControl('live');
     fresh.daemon.pid = 36373;
