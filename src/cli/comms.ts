@@ -223,7 +223,7 @@ async function cmdStatus(): Promise<number> {
 
   if (!enabled) {
     if (channel === 'telegram') {
-      console.log('Telegram channel not configured. Run `ashlr comms setup-telegram` for setup steps.');
+      console.log('Telegram channel not configured. Run `phm comms setup-telegram` for setup steps.');
     } else {
       console.log('Channel disabled. Set cfg.comms.enabled=true and cfg.comms.imessageHandle in ~/.ashlr/config.json.');
       console.log('');
@@ -403,7 +403,7 @@ async function cmdAskVision(): Promise<number> {
     const before = await sendLeaderBriefing(cfg);
     const { memoId } = before;
     if (before.outcome === 'no-memo' || !memoId) {
-      console.error('No Leader memo yet — run `ashlr leader run` (or wait for the 06:30 run), then try again.');
+      console.error('No Leader memo yet — run `phm leader run` (or wait for the 06:30 run), then try again.');
       return 1;
     }
     // Say exactly where the memo is: "already posted" used to mean only
@@ -413,7 +413,7 @@ async function cmdAskVision(): Promise<number> {
     } else if (before.outcome === 'queued') {
       console.log(`Leader memo ${memoId} is queued in the Leader thread, not delivered yet; sending now.`);
     } else if (before.outcome === 'failed') {
-      console.error(`Leader memo ${memoId}: Telegram delivery failed after its retries — see \`ashlr leader\` / Phantom for the memo.`);
+      console.error(`Leader memo ${memoId}: Telegram delivery failed after its retries — see \`phm leader\` / Phantom for the memo.`);
     } else {
       console.log(`Leader memo ${memoId} is not in the Leader thread (older than 7 days, or skipped as backlog) — nothing to deliver.`);
     }
@@ -433,7 +433,7 @@ async function cmdAskVision(): Promise<number> {
       return 0;
     }
     if (!telegramEnabled(cfg)) {
-      console.log(`Leader memo ${memoId} is in the Leader thread; it is delivered over Telegram only (read it in Phantom or \`ashlr leader\`).`);
+      console.log(`Leader memo ${memoId} is in the Leader thread; it is delivered over Telegram only (read it in Phantom or \`phm leader\`).`);
       return 0;
     }
     console.error(`Leader memo ${memoId} is queued but was not delivered — check the Telegram configuration (it retries on the next cycle).`);
@@ -446,7 +446,7 @@ async function cmdAskVision(): Promise<number> {
 
 async function cmdAsk(text: string, options: string[]): Promise<number> {
   if (!text) {
-    console.error('usage: ashlr comms ask "<text>" -o "option1" -o "option2"');
+    console.error('usage: phm comms ask "<text>" -o "option1" -o "option2"');
     return 2;
   }
   if (options.length === 0) {
@@ -492,9 +492,10 @@ async function cmdAsk(text: string, options: string[]): Promise<number> {
 
 function printCommsHelp(): void {
   console.log('');
-  console.log('  ashlr comms — bidirectional operator channel (Telegram/iMessage)');
+  console.log('  Phantom comms — bidirectional operator channel (Telegram/iMessage)');
   console.log('');
-  console.log('  Usage: ashlr comms <status|send-test|cycle|ask|digest|ask-vision|ask-merges|setup-telegram|telegram-brand>');
+  console.log('  Usage: phm comms <status|send-test|cycle|ask|digest|ask-vision|ask-merges|setup-telegram|telegram-brand>');
+  console.log('  Compatible alias: ashlr comms <command>');
   console.log('');
   console.log('    status                       config + pending/outstanding + watermark');
   console.log('    send-test                    post + send a test report to verify the channel');
@@ -536,7 +537,7 @@ export async function cmdComms(args: string[]): Promise<number> {
       return cmdSetupTelegram();
     default:
       console.error(`unknown subcommand: ${sub}`);
-      console.error('usage: ashlr comms <status|send-test|cycle|ask|digest|ask-vision|ask-merges|setup-telegram|telegram-brand>');
+      console.error('usage: phm comms <status|send-test|cycle|ask|digest|ask-vision|ask-merges|setup-telegram|telegram-brand>');
       return 2;
   }
 }
@@ -545,7 +546,7 @@ async function cmdTelegramBrand(args: string[]): Promise<number> {
   let apply = false, preview = false, json = false, expectedBotId: number | undefined;
   const seen = new Set<string>();
   const badUsage = (): number => {
-    console.error('usage: ashlr comms telegram-brand [--preview | --apply --expected-bot-id <id>] [--json]');
+    console.error('usage: phm comms telegram-brand [--preview | --apply --expected-bot-id <id>] [--json]');
     return 2;
   };
   for (let index = 0; index < args.length; index++) {
@@ -600,7 +601,7 @@ async function cmdSetupTelegram(): Promise<number> {
   console.log('  3. Follow prompts to name your bot (e.g. "Phantom")');
   console.log('  4. Copy the API token (looks like: 123456789:ABCDefgh...)');
   console.log('');
-  console.log('Step 2 — Add the token to your ashlr config');
+  console.log('Step 2 — Add the token to your Phantom configuration');
   console.log('  In ~/.ashlr/config.json, add:');
   console.log('  {');
   console.log('    "comms": {');
@@ -616,7 +617,7 @@ async function cmdSetupTelegram(): Promise<number> {
   console.log('');
   console.log('Step 3 — Discover your chat id');
   console.log('  1. Send any message to your bot in Telegram (e.g. "hello")');
-  console.log('  2. Run `ashlr comms setup-telegram` again — it will print your chat id');
+  console.log('  2. Run `phm comms setup-telegram` again — it will print your chat id');
   console.log('  3. Paste the chat id into cfg.comms.telegram.chatId');
   console.log('');
 

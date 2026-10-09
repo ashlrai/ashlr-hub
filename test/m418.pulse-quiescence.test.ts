@@ -5,19 +5,44 @@ import { performance } from 'node:perf_hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 
-const enrollmentTiming = vi.hoisted(() => ({
-  active: false,
-  acquisitions: 0,
-  fsyncs: 0,
-  phases: [] as Array<{ phase: string; atMs: number; fsyncs: number }>,
-  startedAt: 0,
-}));
+const enrollmentTiming = vi.hoisted(() => {
+  const metrics = {
+    fsync: { count: 0, totalMs: 0, maxMs: 0, nestedFsyncMs: 0 },
+    acquire: { count: 0, totalMs: 0, maxMs: 0, nestedFsyncMs: 0 },
+    release: { count: 0, totalMs: 0, maxMs: 0, nestedFsyncMs: 0 },
+    enroll: { count: 0, totalMs: 0, maxMs: 0, nestedFsyncMs: 0 },
+  };
+  const timing = {
+    active: false,
+    acquisitions: 0,
+    fsyncs: 0,
+    phases: [] as Array<{ phase: string; atMs: number; fsyncs: number }>,
+    startedAt: 0,
+    metrics,
+    measure<T>(kind: keyof typeof metrics, operation: () => T): T {
+      if (!timing.active) return operation();
+      const metric = metrics[kind];
+      const nestedFsyncBefore = metrics.fsync.totalMs;
+      const startedAt = globalThis.performance.now();
+      metric.count += 1;
+      try {
+        return operation();
+      } finally {
+        const elapsedMs = globalThis.performance.now() - startedAt;
+        metric.totalMs += elapsedMs;
+        metric.maxMs = Math.max(metric.maxMs, elapsedMs);
+        if (kind !== 'fsync') metric.nestedFsyncMs += metrics.fsync.totalMs - nestedFsyncBefore;
+      }
+    },
+  };
+  return timing;
+});
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return { ...actual, fsyncSync: (...args: Parameters<typeof actual.fsyncSync>) => {
     if (enrollmentTiming.active) enrollmentTiming.fsyncs += 1;
-    return actual.fsyncSync(...args);
+    return enrollmentTiming.measure('fsync', () => actual.fsyncSync(...args));
   } };
 });
 
@@ -25,8 +50,9 @@ vi.mock('../src/core/sandbox/mutation-fence.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/sandbox/mutation-fence.js')>();
   return { ...actual, acquireOutwardMutationFence: (...args: Parameters<typeof actual.acquireOutwardMutationFence>) => {
     if (enrollmentTiming.active) enrollmentTiming.acquisitions += 1;
-    return actual.acquireOutwardMutationFence(...args);
-  } };
+    return enrollmentTiming.measure('acquire', () => actual.acquireOutwardMutationFence(...args));
+  }, releaseOutwardMutationFence: (...args: Parameters<typeof actual.releaseOutwardMutationFence>) =>
+    enrollmentTiming.measure('release', () => actual.releaseOutwardMutationFence(...args)) };
 });
 
 const privateStorageHarness = vi.hoisted(() => ({ useSemanticAdapter: false }));
@@ -35,7 +61,7 @@ const enrollmentHook = vi.hoisted(() => ({ afterApply: null as (() => void) | nu
 vi.mock('../src/core/sandbox/policy.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/sandbox/policy.js')>();
   return { ...actual, enroll: (...args: Parameters<typeof actual.enroll>) => {
-    const result = actual.enroll(...args);
+    const result = enrollmentTiming.measure('enroll', () => actual.enroll(...args));
     enrollmentHook.afterApply?.();
     return result;
   } };
@@ -221,6 +247,9 @@ describe('M418 Pulse outward-mutation quiescence', () => {
 
     enrollmentTiming.acquisitions = 0;
     enrollmentTiming.fsyncs = 0;
+    for (const metric of Object.values(enrollmentTiming.metrics)) {
+      metric.count = metric.totalMs = metric.maxMs = metric.nestedFsyncMs = 0;
+    }
     enrollmentTiming.phases = [];
     enrollmentTiming.active = true;
     const startedAt = performance.now();
@@ -232,12 +261,22 @@ describe('M418 Pulse outward-mutation quiescence', () => {
     const elapsedMs = performance.now() - startedAt;
     enrollmentTiming.active = false;
     const limitMs = process.platform === 'win32' ? 2_000 : 1_000;
-    if (elapsedMs >= limitMs) {
-      console.error('[M418 enrollment timing]', JSON.stringify({
-        platform: process.platform, elapsedMs, acquisitions: enrollmentTiming.acquisitions,
-        fsyncs: enrollmentTiming.fsyncs, phases: enrollmentTiming.phases,
-      }));
-    }
+    const roundedMs = (value: number) => Math.round(value * 1_000) / 1_000;
+    // Inclusive acquire/release/enroll totals contain their nested fsync time;
+    // these diagnostic totals must not be added together as an operation budget.
+    console.info('[M418 enrollment timing]', JSON.stringify({
+      platform: process.platform, elapsedMs: roundedMs(elapsedMs), limitMs,
+      acquisitions: enrollmentTiming.acquisitions, fsyncs: enrollmentTiming.fsyncs,
+      inclusiveTotals: true,
+      operations: Object.fromEntries(Object.entries(enrollmentTiming.metrics).map(([kind, metric]) => [kind, {
+        count: metric.count, totalMs: roundedMs(metric.totalMs), maxMs: roundedMs(metric.maxMs),
+        nestedFsyncMs: roundedMs(metric.nestedFsyncMs),
+      }])),
+      phaseCount: enrollmentTiming.phases.length,
+      phases: enrollmentTiming.phases.slice(0, 8).map(({ phase, atMs, fsyncs }) => ({
+        phase, atMs: roundedMs(atMs), fsyncs,
+      })),
+    }));
 
     expect(result.commands).toEqual([
       expect.objectContaining({ id: 'm418-enroll', outcome: 'done' }),

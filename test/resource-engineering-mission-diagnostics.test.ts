@@ -51,6 +51,24 @@ function fixture(): ResourceEngineeringMissionConfig {
       projectsFile: '/fixture/projects.json', workspace: '/fixture/project',
     } } };
 }
+function completedQueue(config: ResourceEngineeringMissionConfig) {
+  return { schemaVersion: 1, configId: 'queue', configDigest: 'e'.repeat(64), sourceState: 'healthy', state: 'completed',
+    deadlineAt: config.deadlineAt, paused: false, revision: 1,
+    entries: ['initial', 'successor'].map(enrollmentId => ({ enrollmentId, enrollmentDigest: 'b'.repeat(64),
+      state: 'completed', reasons: ['completed'], attempts: 1 })),
+    admission: { maxEnrollments: 2, remainingEnrollments: 0, autoAdmitPrepared: false } };
+}
+function settledSuccessors(config: ResourceEngineeringMissionConfig, state = 'admitted') {
+  return { schemaVersion: 1, supervisionId: 'queue', profileId: 'fixed', configDigest: 'f'.repeat(64),
+    deadlineAt: config.deadlineAt, state: 'running', maxSuccessors: 1,
+    entries: [{ sourceEnrollmentId: 'initial', proposalTaskId: 'proposal', successorId: 'successor', state, reason: null }] };
+}
+function completionProof(config: ResourceEngineeringMissionConfig) {
+  return { schemaVersion: 1, scope: 'predecessor-completion-evidence-only', status: 'verified', reasons: [],
+    sampledAt: config.deadlineAt, executionAuthorized: false, effectsExecuted: false, providerContacted: false,
+    evidenceDigest: 'c'.repeat(64), tip: { enrollmentId: 'successor', enrollmentDigest: 'b'.repeat(64),
+      projectId: 'default', commit: 'd'.repeat(40) }, continuation: 'eligible' };
+}
 beforeEach(() => {
   vi.clearAllMocks(); runtime.releaseFails = false;
   runtime.setup.mockReturnValue({ planDigest: 'a'.repeat(64), initialEnrollmentDigest: 'b'.repeat(64), paths: {} });
@@ -61,6 +79,92 @@ beforeEach(() => {
 });
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 describe('mission invocation cleanup diagnostics', () => {
+  it('waits for a successor admitted after the earlier completed queue snapshot before closing', async () => {
+    const config = fixture(); config.maxScopes = 1;
+    config.initial.setup.policy = { id: 'queue', successors: { maxSuccessors: 1 } };
+    const proof = { schemaVersion: 1, scope: 'predecessor-completion-evidence-only', status: 'verified', reasons: [],
+      sampledAt: config.deadlineAt, executionAuthorized: false, effectsExecuted: false, providerContacted: false,
+      evidenceDigest: 'c'.repeat(64), tip: { enrollmentId: 'successor', enrollmentDigest: 'b'.repeat(64),
+        projectId: 'default', commit: 'd'.repeat(40) }, continuation: 'eligible' };
+    runtime.proof.mockReturnValue(proof);
+    let queueReads = 0, successorReads = 0;
+    const order: string[] = [];
+    runtime.request.mockImplementation(async options => {
+      if (options.path === '/api/resources/engineering-supervision') {
+        queueReads++; order.push(`queue-${queueReads}`);
+        if (queueReads === 2) {
+          expect(runtime.close).not.toHaveBeenCalled(); expect(runtime.proof).not.toHaveBeenCalled();
+        }
+        const entries = [{ enrollmentId: 'initial', enrollmentDigest: 'a'.repeat(64), state: 'completed', reasons: ['completed'], attempts: 1 },
+          ...(queueReads === 1 ? [] : [{ enrollmentId: 'successor', enrollmentDigest: 'b'.repeat(64),
+            state: queueReads === 2 ? 'waiting' : 'completed', reasons: queueReads === 2 ? ['not-started'] : ['completed'],
+            attempts: queueReads === 2 ? 0 : 1 }])];
+        return { schemaVersion: 1, configId: 'queue', configDigest: 'e'.repeat(64), sourceState: 'healthy',
+          state: queueReads === 2 ? 'running' : 'completed', deadlineAt: config.deadlineAt, paused: false,
+          revision: queueReads === 1 ? 0 : 1, entries,
+          admission: { maxEnrollments: 2, remainingEnrollments: 2 - entries.length, autoAdmitPrepared: false } };
+      }
+      if (options.path === '/api/resources/engineering-successors') {
+        successorReads++; order.push(`successors-${successorReads}`);
+        return { schemaVersion: 1, supervisionId: 'queue', profileId: 'fixed', configDigest: 'f'.repeat(64),
+          deadlineAt: config.deadlineAt, state: 'running', maxSuccessors: 1,
+          entries: [{ sourceEnrollmentId: 'initial', proposalTaskId: 'proposal', successorId: 'successor', state: 'admitted', reason: null }] };
+      }
+      throw Error('Unexpected fixture request');
+    });
+    expect(await runResourceEngineeringMission(config)).toMatchObject({ state: 'completed', reason: 'scope-limit' });
+    expect(order).toEqual(['queue-1', 'successors-1', 'queue-2', 'queue-3', 'successors-2', 'queue-4']);
+    expect(runtime.close).toHaveBeenCalledOnce(); expect(runtime.proof).toHaveBeenCalledOnce();
+    expect(readEngineeringMissionRecords(config).find(row => row.kind === 'settled')?.payload).toEqual(proof);
+  });
+  it.each(['admitted', 'stopped'])('closes normally after a stable completed queue and %s coordinator', async state => {
+    const config = fixture(); config.maxScopes = 1;
+    config.initial.setup.policy = { id: 'queue', successors: { maxSuccessors: 1 } };
+    runtime.proof.mockReturnValue(completionProof(config));
+    runtime.request.mockResolvedValueOnce(completedQueue(config)).mockResolvedValueOnce(settledSuccessors(config, state))
+      .mockResolvedValueOnce(completedQueue(config));
+    expect(await runResourceEngineeringMission(config)).toMatchObject({ state: 'completed', reason: 'scope-limit' });
+    expect(runtime.request).toHaveBeenCalledTimes(3); expect(runtime.close).toHaveBeenCalledOnce();
+    expect(runtime.proof).toHaveBeenCalledOnce();
+  });
+  it.each([
+    ['missing-admission', 'mission-successor-enrollment-unavailable'],
+    ['config-id', 'mission-supervision-scope-changed'], ['config-digest', 'mission-supervision-scope-changed'],
+    ['deadline', 'mission-supervision-scope-changed'], ['degraded', 'mission-supervision-scope-changed'],
+    ['paused', 'mission-supervision-scope-changed'], ['duplicate', 'executing-held'], ['invalid-id', 'executing-held'],
+  ])('holds instead of proving completion after a fresh %s snapshot', async (change, reason) => {
+      const config = fixture(); config.maxScopes = 1;
+      config.initial.setup.policy = { id: 'queue', successors: { maxSuccessors: 1 } };
+      const fresh = completedQueue(config);
+      if (change === 'missing-admission') { fresh.entries.pop(); fresh.admission.remainingEnrollments = 1; }
+      if (change === 'config-id') fresh.configId = 'other';
+      if (change === 'config-digest') fresh.configDigest = 'a'.repeat(64);
+      if (change === 'deadline') fresh.deadlineAt = new Date(Date.parse(config.deadlineAt) + 1000).toISOString();
+      if (change === 'degraded') { fresh.sourceState = 'degraded'; fresh.state = 'unavailable'; }
+      if (change === 'paused') { fresh.paused = true; fresh.state = 'paused'; }
+      if (change === 'duplicate') fresh.entries[1]!.enrollmentId = fresh.entries[0]!.enrollmentId;
+      if (change === 'invalid-id') fresh.entries[1]!.enrollmentId = '';
+      runtime.request.mockResolvedValueOnce(completedQueue(config)).mockResolvedValueOnce(settledSuccessors(config))
+        .mockResolvedValueOnce(fresh);
+      expect(await runResourceEngineeringMission(config)).toMatchObject({ state: 'held', reason });
+      expect(runtime.proof).not.toHaveBeenCalled(); expect(runtime.close).toHaveBeenCalledOnce();
+      expect(readEngineeringMissionRecords(config).some(row => row.kind === 'settled')).toBe(false);
+    });
+  it('honors caller Stop while the newly admitted successor is still waiting', async () => {
+    const config = fixture(); config.maxScopes = 1;
+    config.initial.setup.policy = { id: 'queue', successors: { maxSuccessors: 1 } };
+    const stop = new AbortController(); let reads = 0;
+    runtime.request.mockImplementation(async options => {
+      if (options.path === '/api/resources/engineering-successors') return settledSuccessors(config);
+      const queue = completedQueue(config);
+      if (++reads === 2) { queue.entries[1]!.state = 'waiting'; queue.entries[1]!.reasons = ['not-started'];
+        queue.entries[1]!.attempts = 0; queue.state = 'running'; stop.abort(); }
+      return queue;
+    });
+    expect(await runResourceEngineeringMission(config, { signal: stop.signal })).toMatchObject({ state: 'stopped' });
+    expect(runtime.proof).not.toHaveBeenCalled(); expect(runtime.close).toHaveBeenCalledOnce();
+    expect(readEngineeringMissionRecords(config).some(row => row.kind === 'settled')).toBe(false);
+  });
   it.each([false, true])('preserves exact original proposal bytes on restart (measured feedback=%s)', async enabled => {
     const config = fixture(); if (enabled) config.proposalFeedback = 'measured-outcomes-v1';
     config.initial.setup.recipe = { projectId: 'default', objective: 'Initial objective' };
@@ -91,10 +195,8 @@ describe('mission invocation cleanup diagnostics', () => {
     let feedback = project();
     runtime.proof.mockImplementation(options => ({ ...proof, ...(options.proposalFeedback ? { feedback } : {}) }));
     runtime.request.mockImplementation(async options => {
-      if (options.path === '/api/resources/engineering-supervision') return { configId: 'queue', sourceState: 'healthy', paused: false,
-        deadlineAt: config.deadlineAt, entries: [{ state: 'completed' }] };
-      if (options.path === '/api/resources/engineering-successors') return { supervisionId: 'queue', deadlineAt: config.deadlineAt,
-        entries: [{ state: 'admitted' }] };
+      if (options.path === '/api/resources/engineering-supervision') return completedQueue(config);
+      if (options.path === '/api/resources/engineering-successors') return settledSuccessors(config);
       throw Error('Fixture stops after durable proposal, before dispatch');
     });
     expect(await runResourceEngineeringMission(config)).toMatchObject({ state: 'held', reason: 'proposing-held' });
@@ -162,9 +264,9 @@ describe('mission invocation cleanup diagnostics', () => {
     expect(status.recordedPhase).toBe('not-started');
   });
   it('retains a failed scope drain even after the console handle was detached', async () => {
-    const config = fixture();
-    runtime.request.mockResolvedValueOnce({ sourceState: 'healthy', paused: false, deadlineAt: config.deadlineAt,
-      entries: [{ state: 'completed' }] }).mockResolvedValueOnce({ deadlineAt: config.deadlineAt, entries: [{ state: 'stopped' }] });
+    const config = fixture(); config.initial.setup.policy = { id: 'queue', successors: { maxSuccessors: 1 } };
+    runtime.request.mockResolvedValueOnce(completedQueue(config)).mockResolvedValueOnce(settledSuccessors(config, 'stopped'))
+      .mockResolvedValueOnce(completedQueue(config));
     runtime.close.mockRejectedValue(Error('PRIVATE_DRAIN_ERROR'));
     expect(await runResourceEngineeringMission(config)).toMatchObject({ state: 'held', reason: 'shutdown-unresolved' });
     expect(runtime.close).toHaveBeenCalledOnce();

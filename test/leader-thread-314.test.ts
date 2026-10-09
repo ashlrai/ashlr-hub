@@ -586,7 +586,10 @@ describe('approvals', () => {
     const w = world({ policy: () => makePolicy() });
     const [ask] = await enactLeaderActions(w.deps.apply, MEMO, [draft('escalate', { request: 'Add locus to the grant', argument: 'ready' })], [], { idFor: (i) => actionIdFor(MEMO, i) });
     expect(ask).toMatchObject({ class: 'C', status: 'escalated' });
-    expect(await approveLeaderAction(ask!.id, { channel: 'verse' })).toMatchObject({ ok: true, outcome: 'recorded-outside-grant' });
+    const approval = await approveLeaderAction(ask!.id, { channel: 'verse' });
+    expect(approval).toMatchObject({ ok: true, outcome: 'recorded-outside-grant' });
+    expect(approval.message).toContain('nothing was applied');
+    expect(approval.message).toContain('widen the grant yourself (phm authority)');
     expect(findStoredAction(ask!.id)!.action.status).toBe('escalated');
     expect(await approveLeaderAction('la-20260101000000-abcdef-9', { channel: 'verse' })).toMatchObject({ ok: false, code: 404, thread: null });
     await expect(approveLeaderAction('la-../../x', { channel: 'verse' })).rejects.toMatchObject({ code: 400 });

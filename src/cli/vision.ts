@@ -101,7 +101,7 @@ async function cmdShow(args: string[]): Promise<number> {
   const id = args[0] ?? 'ecosystem';
   const spec = loadSpec(id);
   if (!spec) {
-    console.error(`vision: spec '${id}' not found. Use 'ashlr vision show' to see the ecosystem spec.`);
+    console.error(`vision: spec '${id}' not found. Use 'phm vision show' to see the ecosystem spec.`);
     return 1;
   }
   printSpec(spec);
@@ -137,18 +137,18 @@ async function cmdReview(args: string[]): Promise<number> {
   if (at !== -1) {
     const value = rest[at + 1];
     if (value === undefined || value.startsWith('--')) {
-      console.error('usage: ashlr vision review [--project P]');
+      console.error('usage: phm vision review [--project P]');
       return 2;
     }
     project = value;
     rest.splice(at, 2);
   }
   if (rest.length > 0) {
-    console.error('usage: ashlr vision review [--project P]');
+    console.error('usage: phm vision review [--project P]');
     return 2;
   }
 
-  console.log(dim('`ashlr vision review` runs the Leader tick (same as `ashlr leader tick --wait`): budget-gated, and a run starts only when one is due.'));
+  console.log(dim('`phm vision review` runs the Leader tick (same as `phm leader tick --wait`): budget-gated, and a run starts only when one is due.'));
   if (project !== null) {
     // Control characters stripped: the value is echoed straight to a terminal.
     const shown = [...project].filter((c) => c >= ' ' && c !== '\u007f').join('').slice(0, 120);
@@ -169,7 +169,7 @@ async function cmdApprove(_args: string[]): Promise<number> {
   }
   const briefing = read.briefing;
   if (!briefing) {
-    console.error('vision: no Strategist briefing found. New direction now arrives as Leader memos — see `ashlr leader show`.');
+    console.error('vision: no Strategist briefing found. New direction now arrives as Leader memos — see `phm leader show`.');
     return 1;
   }
 
@@ -219,7 +219,7 @@ async function cmdReconcile(_args: string[]): Promise<number> {
   }
   const briefing = read.briefing;
   if (!briefing) {
-    console.error('vision: no Strategist briefing found. New direction now arrives as Leader memos — see `ashlr leader show`.');
+    console.error('vision: no Strategist briefing found. New direction now arrives as Leader memos — see `phm leader show`.');
     return 1;
   }
   const enrollment = policy.readEnrollmentRegistry();
@@ -268,7 +268,7 @@ async function cmdPreview(_args: string[]): Promise<number> {
   }
   const briefing = read.briefing;
   if (!briefing) {
-    console.error('vision: no Strategist briefing found. New direction now arrives as Leader memos — see `ashlr leader show`.');
+    console.error('vision: no Strategist briefing found. New direction now arrives as Leader memos — see `phm leader show`.');
     return 1;
   }
 
@@ -576,11 +576,13 @@ async function cmdSet(args: string[]): Promise<number> {
 
 function cmdVisionHelp(): void {
   console.log(`
-Usage: ashlr vision <subcommand> [options]
+Phantom vision
+Usage: phm vision <subcommand> [options]
+Compatible alias: ashlr vision <subcommand> [options]
 
 Subcommands:
   show [id]              Print the EndStateSpec (default: ecosystem).
-  review [--project P]   Run the Leader tick (alias of 'ashlr leader tick --wait'; budget-gated).
+  review [--project P]   Run the Leader tick (alias of 'phm leader tick --wait'; budget-gated).
   preview                Read-only compile: exact targets, dedupe, caps, and skip reasons.
   shadow [--json]        Record an evidence snapshot and show one zero-effect reconcile suggestion.
   approve                Apply the latest briefing: evolve spec + create goals.
@@ -590,14 +592,14 @@ Subcommands:
   set --id <specId>      Target a specific spec (default: ecosystem).
 
 Examples:
-  ashlr vision show
-  ashlr vision review
-  ashlr vision review --project my-repo
-  ashlr vision preview
-  ashlr vision shadow --json
-  ashlr vision approve
-  ashlr vision reconcile
-  ashlr vision set --north-star "Build the world's best autonomous engineering fleet."
+  phm vision show
+  phm vision review
+  phm vision review --project my-repo
+  phm vision preview
+  phm vision shadow --json
+  phm vision approve
+  phm vision reconcile
+  phm vision set --north-star "Build the world's best autonomous engineering fleet."
 `);
 }
 
@@ -629,7 +631,7 @@ export async function cmdVision(args: string[]): Promise<number> {
     case 'set':
       return cmdSet(rest);
     default:
-      console.error(`vision: unknown subcommand '${sub}'. Run 'ashlr vision --help' for usage.`);
+      console.error(`vision: unknown subcommand '${sub}'. Run 'phm vision --help' for usage.`);
       return 2;
   }
 }

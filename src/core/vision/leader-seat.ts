@@ -476,39 +476,58 @@ export function runCliCompletion(
 }
 
 /**
- * Read an Ollama `/api/chat` NDJSON stream to the end, concatenating
- * `message.content`. Rejects on a stream-level `error` line.
+ * Read complete Ollama `/api/chat` NDJSON records, concatenating
+ * `message.content`. EOF succeeds only after an explicit `done: true`.
  */
 async function readOllamaChatStream(body: ReadableStream<Uint8Array>): Promise<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffered = '';
   let text = '';
+  let completed = false;
   const take = (line: string): void => {
     const trimmed = line.trim();
     if (!trimmed) return;
-    let parsed: { message?: { content?: unknown }; error?: unknown };
+    let record: unknown;
     try {
-      parsed = JSON.parse(trimmed) as typeof parsed;
+      record = JSON.parse(trimmed) as unknown;
     } catch {
-      return; // a torn / non-JSON line is not content
+      throw new Error('ollama: malformed response stream');
     }
+    if (record === null || typeof record !== 'object' || Array.isArray(record)) {
+      throw new Error('ollama: malformed response stream');
+    }
+    const parsed = record as { message?: { content?: unknown }; error?: unknown; done?: unknown };
     if (typeof parsed.error === 'string') throw new Error(`ollama: ${parsed.error.slice(0, 200)}`);
-    if (typeof parsed.message?.content === 'string' && text.length < MAX_OUTPUT_BYTES) text += parsed.message.content;
-  };
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffered += decoder.decode(value, { stream: true });
-    let nl = buffered.indexOf('\n');
-    while (nl !== -1) {
-      take(buffered.slice(0, nl));
-      buffered = buffered.slice(nl + 1);
-      nl = buffered.indexOf('\n');
+    if (completed || (parsed.done !== undefined && typeof parsed.done !== 'boolean')) {
+      throw new Error('ollama: malformed response stream');
     }
+    if (typeof parsed.message?.content === 'string' && text.length < MAX_OUTPUT_BYTES) text += parsed.message.content;
+    if (parsed.done === true) completed = true;
+  };
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+      let nl = buffered.indexOf('\n');
+      while (nl !== -1) {
+        take(buffered.slice(0, nl));
+        buffered = buffered.slice(nl + 1);
+        nl = buffered.indexOf('\n');
+      }
+    }
+    take(buffered + decoder.decode());
+    if (!completed) throw new Error('ollama: incomplete response stream');
+    return text;
+  } catch (error) {
+    // Cancellation can reject or never settle; it must not delay or replace
+    // the transport failure under the caller's existing attempt deadline.
+    try { void reader.cancel().catch(() => {}); } catch { /* preserve the failure */ }
+    throw error;
+  } finally {
+    try { reader.releaseLock(); } catch { /* cleanup must not replace the result */ }
   }
-  take(buffered + decoder.decode());
-  return text;
 }
 
 /**

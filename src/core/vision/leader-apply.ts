@@ -1764,7 +1764,7 @@ export async function applyApprovedLeaderAction(
       ok: true,
       code: 200,
       outcome: 'recorded-outside-grant',
-      message: 'Recorded your approval. This is outside the standing grant, so nothing was applied; widen the grant yourself (ashlr authority) if you want the Leader to do it.',
+      message: 'Recorded your approval. This is outside the standing grant, so nothing was applied; widen the grant yourself (phm authority) if you want the Leader to do it.',
       action,
     };
   }

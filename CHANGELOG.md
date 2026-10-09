@@ -9,6 +9,27 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.26.1] — Unreleased
+
+### Changed
+
+- Keep mission supervision fresh after successor work settles so a waiting
+  admitted successor is not closed using an earlier empty queue reading.
+- Clarify Phantom and `phm` guidance in Leader help and Telegram replies while
+  preserving the `ashlr` alias, saved accounts and operational identities.
+- Update the Dots and Grok Bot companion guides to the Phantom name and
+  canonical repository links, preserving their connection and usage limits.
+- Report bounded enrollment timings in CI to distinguish filesystem sync and
+  ownership-check costs without changing the existing latency requirements.
+- Reject incomplete local Leader response streams rather than accepting an
+  unfinished answer. Retain the normal bounded retry and failure behavior.
+- Add the guarded manual installation path for an original signed published
+  release after protected master advances, with fresh release evidence and
+  the existing Stop, drain, rollback and separate authority requirements.
+
+This is a source candidate. Publication, installation and resident activation
+remain separate checks; the verified published stable release is 3.26.0.
+
 ## [3.26.0] — 2026-10-08
 
 ### Changed

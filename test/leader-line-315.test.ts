@@ -506,6 +506,7 @@ describe('routing Mason\'s texts', () => {
     expect(called).toBe(false);
     expect(texts()[1]).toMatch(/^Can't start "Build a status page/);
     expect(texts()[1]).toMatch(/not in the grant's current stage/);
+    expect(texts()[1]).toContain('Widen the grant (phm authority)');
   });
 });
 

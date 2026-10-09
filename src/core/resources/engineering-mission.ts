@@ -20,7 +20,7 @@ import { parseResourceEngineeringSuccessorProposal } from './engineering-success
 import { engineeringMissionRecordStore, missionData, missionExact, missionHash, missionRecord, readEngineeringMissionRecords,
   validateResourceEngineeringMissionConfig, type MissionRecordKind, type ResourceEngineeringMissionConfig } from './engineering-mission-store.js';
 import type { ResourceEngineeringRecipe } from './engineering-preparation-types.js';
-import type { ResourceConsoleEngineeringSupervisionSnapshot } from './console-engineering-supervisor-types.js';
+import { decodeEngineeringSupervision } from './console-engineering-supervisor-types.js';
 import type { ResourceEngineeringSuccessorCoordinatorSnapshot } from './engineering-successor-coordinator-types.js';
 import type { ResourceConsoleSnapshot, ResourceConsoleTranscript } from './console-types.js';
 import { MissionConsoleRequestError, requestEngineeringMissionConsole } from './engineering-mission-console.js';
@@ -192,7 +192,7 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
       if (!proof) {
         progress('executing'); await consoleStart(setup); progress('executing');
         while (true) {
-          const queue = await request<ResourceConsoleEngineeringSupervisionSnapshot>('/api/resources/engineering-supervision');
+          let queue = decodeEngineeringSupervision(await request('/api/resources/engineering-supervision'));
           requireFact(queue.configId === (setup.policy as { id: string }).id && queue.sourceState === 'healthy' && !queue.paused, 'Mission queue unavailable');
           const running = get<{ deadlineAt: string }>('running');
           if (!running) write('running', { deadlineAt: queue.deadlineAt });
@@ -202,7 +202,18 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
           const complete = queue.entries.length > 0 && queue.entries.every(row => row.state === 'completed');
           const settled = successors.entries.every(row => row.state === 'admitted' || row.state === 'stopped');
           const final = successors.entries.some(row => row.state === 'stopped') || successors.entries.length >= policy.successors.maxSuccessors;
-          if (complete && settled && final) break;
+          if (complete && settled && final) {
+            // Admission can occur between the queue and successor reads. Closing
+            // aborts owned work, so completion must include the newly admitted IDs.
+            const fresh = decodeEngineeringSupervision(await request('/api/resources/engineering-supervision'));
+            requireFact(fresh.configId === queue.configId && fresh.configDigest === queue.configDigest &&
+              fresh.deadlineAt === queue.deadlineAt && fresh.sourceState === 'healthy' && !fresh.paused &&
+              !['timed-out', 'unavailable', 'closed'].includes(fresh.state), 'Mission supervision scope changed');
+            requireFact(successors.entries.filter(row => row.state === 'admitted').every(row =>
+              fresh.entries.some(entry => entry.enrollmentId === row.successorId)), 'Mission successor enrollment unavailable');
+            queue = fresh;
+            if (queue.entries.length > 0 && queue.entries.every(row => row.state === 'completed')) break;
+          }
           requireFact(!['timed-out', 'unavailable', 'closed'].includes(queue.state) &&
             !queue.entries.some(row => ['held', 'stopped', 'unavailable'].includes(row.state)), 'Mission scope did not settle');
           await wait();

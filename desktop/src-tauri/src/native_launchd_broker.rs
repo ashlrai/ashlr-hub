@@ -2269,15 +2269,64 @@ mod macos {
 
         #[test]
         fn unjournaled_staging_identity_is_retained_for_reconciliation() {
+            // Project only closed diagnostic fields: never format the original
+            // error, which may carry paths, OS text or JSON/request details.
+            fn diagnostic(
+                error: &BrokerError,
+            ) -> (&'static str, Option<&'static str>, Option<i32>) {
+                let (class, reason, errno) = match error {
+                    BrokerError::UnsupportedPlatform => ("unsupported-platform", None, None),
+                    BrokerError::Invalid(reason) => ("invalid", Some(*reason), None),
+                    BrokerError::Authentication => ("authentication", None, None),
+                    BrokerError::Conflict(reason) => ("conflict", Some(*reason), None),
+                    BrokerError::ReconciliationRequired(reason) => {
+                        ("reconciliation-required", Some(*reason), None)
+                    }
+                    BrokerError::Io(error) => ("io", None, error.raw_os_error()),
+                    BrokerError::Json(_) => ("json", None, None),
+                };
+                let reason = reason.filter(|reason| {
+                    matches!(
+                        *reason,
+                        "injected-crash"
+                            | "pointer-temp-drift"
+                            | "custody-root-rebound"
+                            | "journal-missing"
+                            | "phase-zero-missing-with-later-artifact"
+                            | "different-native-selection-is-active"
+                            | "active-transaction-marker-missing"
+                            | "launchd-recovery-state-mismatch"
+                            | "pointer-old-state-unavailable"
+                            | "plist-old-state-unavailable"
+                    )
+                });
+                (class, reason, errno)
+            }
+
             let fixture = Fixture::new("unjournaled-staging");
-            assert!(execute_fixture(&fixture, Some(0)).is_err());
+            let setup = execute_fixture(&fixture, Some(0));
+            assert!(
+                matches!(&setup, Err(BrokerError::Conflict("injected-crash"))),
+                "setup diagnostic: {:?}",
+                setup.as_ref().err().map(diagnostic)
+            );
             let temp_name = format!(".ashlr-m569-{}-pointer-new", fixture.request.transaction_id);
             let temp_path = Path::new(&fixture.request.pointer_parent).join(&temp_name);
             symlink(&fixture.request.candidate_pointer_target, &temp_path).unwrap();
-            assert!(matches!(
-                recover_fixture(&fixture),
-                Err(BrokerError::ReconciliationRequired("pointer-temp-drift"))
-            ));
+            let recovery = recover_fixture(&fixture);
+            let recovery_diagnostic = match &recovery {
+                Ok(RecoveryOutcome::Committed(_)) => ("committed", None, None),
+                Ok(RecoveryOutcome::RolledBack) => ("rolled-back", None, None),
+                Err(error) => diagnostic(error),
+            };
+            assert!(
+                matches!(
+                    &recovery,
+                    Err(BrokerError::ReconciliationRequired("pointer-temp-drift"))
+                ),
+                "recovery diagnostic: {:?}",
+                recovery_diagnostic
+            );
             assert!(fs::symlink_metadata(&temp_path).is_ok());
         }
 

@@ -1,4 +1,4 @@
-# Dots beside Ashlr Verse
+# Dots beside Phantom
 
 Verified against official OpenAI documentation on **2026-09-30**. This guide
 describes an operator workflow and a proposed connector. No Dot, account,
@@ -7,7 +7,7 @@ plugin, schedule, or remote connection was activated by this work.
 Dots can coordinate engineering work through ChatGPT, use enabled supported
 plugins, and delegate tasks. OpenAI describes Dots as powered by GPT-6 Astra
 with a cloud computer; access is rolling out by account. This does not add a
-Dot engine, CLI seat, observed quota, or GPT-6.1 model entitlement to Verse.
+Dot engine, CLI seat, observed quota, or GPT-6.1 model entitlement to Phantom.
 Delegated Codex and Work tasks use their own product limits. Check availability
 in the actual account before planning capacity. [Meet dots](https://learn.chatgpt.com/docs/dots)
 
@@ -59,27 +59,27 @@ Custom rules do not grant new access. Pause the Dot, stop delegated Activity,
 and cancel schedules separately when stopping the whole workflow. Stopping
 does not undo completed actions. [Controls](https://learn.chatgpt.com/docs/dots/controls)
 
-## What the Hub currently implements
+## What Phantom currently implements
 
-The [Grok companion guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/GROK-BOT-COMPANION.md) documents manual reviews and an
+The [Grok companion guide](https://github.com/ashlrai/phantom/blob/master/docs/GROK-BOT-COMPANION.md) documents manual reviews and an
 optional provider webhook handoff. It explicitly distinguishes acceptance
-from completion and does not implement a two-way Hub Bot connector. Dots can
+from completion and does not implement a two-way Phantom Bot connector. Dots can
 serve the same companion role through its supported task delegation; a Grok
 webhook URL cannot be reused as a Dot trigger.
 
 | Existing surface | Actual contract | Dots implication |
 | --- | --- | --- |
-| Verse agents API | Local workbench reads and operator-gated mutations; no Dot backend | Local Codex tasks may use the workbench under existing permissions; cloud access needs its own connector |
-| Verse agent-tools MCP | Per-turn bearer, live chat scopes, revocation on turn end/Stop | Unsuitable as a persistent external subscription credential |
-| Verse MCP protocol | Lists `2026-07-28`, but handles only initialize, ping, and tool methods | Does not implement `server/discover` or MCP Events |
+| Phantom agents API | Local workbench reads and operator-gated mutations; no Dot backend | Local Codex tasks may use the workbench under existing permissions; cloud access needs its own connector |
+| Phantom agent-tools MCP | Per-turn bearer, live chat scopes, revocation on turn end/Stop | Unsuitable as a persistent external subscription credential |
+| Phantom MCP protocol | Lists `2026-07-28`, but handles only initialize, ping, and tool methods | Does not implement `server/discover` or MCP Events |
 | Automations webhook | Loopback-only, bounded strict payload, operator mutation gate | Not a public ChatGPT callback or an authenticated cloud ingress |
-| Hub MCP gateway / Ashlr Plugin | Local stdio tool surfaces | Installed tools are not automatically enabled ChatGPT plugins or Dot connections |
+| Phantom MCP gateway / Ashlr Plugin | Local stdio tool surfaces | Installed tools are not automatically enabled ChatGPT plugins or Dot connections |
 
-These claims come from [agents-api.ts](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/verse/agents-api.ts),
-[verse-mcp.ts](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/verse/verse-mcp.ts),
-[verse-mcp-grants.ts](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/verse/verse-mcp-grants.ts),
-[automations-api.ts](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/verse/automations-api.ts), and
-[mcp-gateway.ts](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/mcp-gateway.ts). No live Dot transport was tested.
+These claims come from [agents-api.ts](https://github.com/ashlrai/phantom/blob/master/src/core/verse/agents-api.ts),
+[verse-mcp.ts](https://github.com/ashlrai/phantom/blob/master/src/core/verse/verse-mcp.ts),
+[verse-mcp-grants.ts](https://github.com/ashlrai/phantom/blob/master/src/core/verse/verse-mcp-grants.ts),
+[automations-api.ts](https://github.com/ashlrai/phantom/blob/master/src/core/verse/automations-api.ts), and
+[mcp-gateway.ts](https://github.com/ashlrai/phantom/blob/master/src/core/mcp-gateway.ts). No live Dot transport was tested.
 
 ## Supported programmatic paths
 
@@ -128,5 +128,5 @@ claim a completed integration from a webhook acknowledgment.
 Developer testing can use a configured Secure MCP Tunnel; publication requires
 a public HTTPS MCP endpoint. Connect, inspect discovered tools/events, and
 exercise both successful and refused requests in the actual account before
-showing **Connected** in Verse. A locally installed stdio server is only the
+showing **Connected** in Phantom. A locally installed stdio server is only the
 starting transport. [Connect and test](https://developers.openai.com/plugins/deploy/connect-chatgpt)

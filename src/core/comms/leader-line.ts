@@ -804,7 +804,7 @@ export function taskAckText(action: LeaderAction, lane: TaskLane, repo: string, 
     case 'scheduled':
       return `${prefix}Scheduled: "${title}" launches ${action.applyAfter ? hhmmIn(action.applyAfter, tz) : 'soon'} unless you veto.${action.statusReason ? ` ${action.statusReason}` : ''}`;
     case 'escalated':
-      return `Can't start "${title}": ${action.statusReason ?? 'it is outside the standing grant'} Widen the grant (ashlr authority), or tell me a different lane.`;
+      return `Can't start "${title}": ${action.statusReason ?? 'it is outside the standing grant'} Widen the grant (phm authority), or tell me a different lane.`;
     case 'refused':
       return action.statusReason?.startsWith('dry run:')
         ? `Recorded "${title}", not started — ${action.statusReason}`

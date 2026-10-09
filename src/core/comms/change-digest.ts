@@ -349,7 +349,7 @@ export function autonomyLine(autonomy?: { on: boolean; mode: string | null }): s
   if (!a) a = { on: false, mode: null };
   return a.on
     ? `Autonomy: on (${a.mode ?? 'standing grant'})`
-    : 'Autonomy: off — next step: `ashlr authority setup`';
+    : 'Autonomy: off — next step: `phm authority setup`';
 }
 
 function fmtDuration(ms: number): string {
@@ -451,8 +451,8 @@ export function planChangeDigest(prev: DigestState | null, facts: DigestFacts, n
     next.lastSentAt = nowIso;
     const span = prev ? fmtDuration(idleFor) : '24h+';
     const text = facts.autonomy.on
-      ? `Fleet idle ${span}: nothing merged, opened or finished with autonomy on (${facts.autonomy.mode ?? 'standing grant'}) — check \`ashlr doctor\`.`
-      : `Fleet idle ${span}: autonomy is off — next step: \`ashlr authority setup\`.`;
+      ? `Fleet idle ${span}: nothing merged, opened or finished with autonomy on (${facts.autonomy.mode ?? 'standing grant'}) — check \`phm doctor\`.`
+      : `Fleet idle ${span}: autonomy is off — next step: \`phm authority setup\`.`;
     return { text, reason: 'idle', next };
   }
 
