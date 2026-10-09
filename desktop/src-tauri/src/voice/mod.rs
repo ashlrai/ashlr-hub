@@ -834,7 +834,6 @@ fn run_session(
                     continue;
                 }
                 let audio = sink.snapshot();
-                let mode = session_context(&hub, id).0;
                 let result = {
                     let mut slot = lock(&hub.engine);
                     match slot.as_mut() {
@@ -844,10 +843,11 @@ fn run_session(
                 };
                 match result {
                     Ok(Some(text)) => {
+                        let (mode, cwd) = session_context(&hub, id);
                         let text = if mode == Mode::Verbatim {
                             text
                         } else {
-                            hub.lexicon.apply_cached(&text)
+                            hub.lexicon.apply_cached(&text, cwd.as_deref())
                         };
                         emit(
                             app,

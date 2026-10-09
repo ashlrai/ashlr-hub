@@ -38,6 +38,7 @@
 import { join, delimiter } from 'path';
 import type { AshlrConfig } from './types.js';
 import { CONFIG_DIR, CONFIG_PATH } from './config.js';
+import { hasLocusJobEnv, withLocusJobChildEnv } from './integrations/locus-job-env.js';
 
 /** Options for callers that already know the active provider / model. */
 export interface BuildToolEnvOpts {
@@ -128,5 +129,12 @@ export function withToolEnv(
   base?: NodeJS.ProcessEnv,
   opts?: BuildToolEnvOpts,
 ): NodeJS.ProcessEnv {
-  return { ...(base ?? process.env), ...buildToolEnv(cfg, opts) };
+  const env = { ...withLocusJobChildEnv(base), ...buildToolEnv(cfg, opts) };
+  if (hasLocusJobEnv()) {
+    // These module-load paths belong to the daemon's HOME, not the sealed worker.
+    // No scoped hub-config contract exists yet, so omit even explicit overrides.
+    delete env.ASHLR_CONFIG;
+    delete env.ASHLR_GENOME_DIR;
+  }
+  return env;
 }

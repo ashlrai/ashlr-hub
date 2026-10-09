@@ -26,6 +26,7 @@ import { existsSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { AshlrConfig, EngineId, EngineCommand, RunStreamEvent } from '../types.js';
 import { withToolEnv } from '../env-bridge.js';
+import { assertLocusJobDispatch, hasLocusJobEnv, withLocusJobChildEnv } from '../integrations/locus-job-env.js';
 import {
   applyLocusPreMutateGate,
   formatPreMutateBlockers,
@@ -812,10 +813,23 @@ async function spawnEngineInner(
     };
   }
 
+  // Generic Secrets exec resolves credentials outside the sealed Locus binding.
+  // Refuse before CLI discovery, project-config inspection, or wrapper execution.
+  if (hasLocusJobEnv() && cfg.phantom?.enabled) {
+    return {
+      ok: false,
+      output: '',
+      error: 'Locus sealed jobs cannot use generic Secrets exec until a qualified scoped credential bridge exists',
+      terminationReason: 'error-exit',
+    };
+  }
+
   // Locus identity pre-mutate gate (opt-in via LOCUS_ENFORCE).
   // Shared with runSwarm / runApiModelSandboxed via applyLocusPreMutateGate.
   // Default off so monorepo CI without a pin is unaffected; LOCUS_ENFORCE=1 fails closed.
-  const locusGate = applyLocusPreMutateGate(opts?.env ?? process.env);
+  assertLocusJobDispatch();
+  const childEnv = opts?.env ? withLocusJobChildEnv(opts.env) : withToolEnv(cfg);
+  const locusGate = applyLocusPreMutateGate(childEnv);
   if (!locusGate.allow) {
     const msg =
       formatPreMutateBlockers(locusGate) ||
@@ -859,7 +873,7 @@ async function spawnEngineInner(
 
   // M45: a caller (sandboxed-engine) may pass a hardened, containment env; else
   // fall back to the allowlist-only env-bridge env (NON-SECRET).
-  const childEnv = opts?.env ?? withToolEnv(cfg);
+  assertLocusJobDispatch();
 
   // M236: streaming spawn — read stdout/stderr line-by-line, emit RunEvents.
   // The backstop timeoutMs is the outer runaway-cost safety net (default 2h).

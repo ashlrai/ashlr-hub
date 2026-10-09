@@ -129,6 +129,8 @@
 /docs/**/*AUTHORITY* @masonwyatt23
 /docs/**/*authority* @masonwyatt23
 # tier1-authority-code: Tier-1 authority code: the fleet may never change the code that decides what the fleet may do
+/src/core/integrations/locus-job-env.ts @masonwyatt23
+/src/core/integrations/locus.ts @masonwyatt23
 /src/core/vision/leader-display-text.ts @masonwyatt23
 /src/core/authority/** @masonwyatt23
 /src/core/desktop/** @masonwyatt23
@@ -385,6 +387,11 @@
 /test/local-only-policy.test.ts @masonwyatt23
 /test/local-work-observation.test.ts @masonwyatt23
 /test/locus-firm-onboard.test.ts @masonwyatt23
+/test/locus-job-env.test.ts @masonwyatt23
+/test/locus-job-secrets-wrapper.test.ts @masonwyatt23
+/test/locus-provider-scope.test.ts @masonwyatt23
+/test/locus-readiness.test.ts @masonwyatt23
+/test/locus-session-authority.test.ts @masonwyatt23
 /test/locus.probe.test.ts @masonwyatt23
 /test/m100.web-open.test.ts @masonwyatt23
 /test/m102.goal-conductor.test.ts @masonwyatt23
@@ -461,6 +468,7 @@
 /test/m195.nim-backend.test.ts @masonwyatt23
 /test/m197.observability.test.ts @masonwyatt23
 /test/m199.orchestrator.test.ts @masonwyatt23
+/test/m2.doctor.test.ts @masonwyatt23
 /test/m200.multibackend-merge.test.ts @masonwyatt23
 /test/m201.daemon-loop.test.ts @masonwyatt23
 /test/m202.cascade-browserverify-edge.test.ts @masonwyatt23
@@ -691,6 +699,7 @@
 /test/m568.runtime-activation-stopped-consumer-v2.test.ts @masonwyatt23
 /test/m570.release-successor-policy.test.ts @masonwyatt23
 /test/m571.local-production-gate.test.ts @masonwyatt23
+/test/m66.mcp-ecosystem.test.ts @masonwyatt23
 /test/m71.onboard-stack.test.ts @masonwyatt23
 /test/m78.titrr.test.ts @masonwyatt23
 /test/m80.subscription-usage.test.ts @masonwyatt23
@@ -717,6 +726,8 @@
 /test/maintainer-pr-verification.test.ts @masonwyatt23
 /test/maintainer-verify-cli.test.ts @masonwyatt23
 /test/mcp-firm-resources.test.ts @masonwyatt23
+/test/mcp-gateway-discovery.test.ts @masonwyatt23
+/test/mcp-gateway-recovery-probe.test.ts @masonwyatt23
 /test/merge-gates-310b.test.ts @masonwyatt23
 /test/mirror-sibling-deps-314.test.ts @masonwyatt23
 /test/mirrors-310b.test.ts @masonwyatt23
@@ -848,6 +859,7 @@
 /test/verse-local-fleet.test.ts @masonwyatt23
 /test/verse-manager-conversation.test.ts @masonwyatt23
 /test/verse-manager-session.test.ts @masonwyatt23
+/test/verse-mcp-scope.test.ts @masonwyatt23
 /test/verse-multimodel-auto-316.test.ts @masonwyatt23
 /test/verse-reliability.test.ts @masonwyatt23
 /test/verse-resources-ready-314.test.ts @masonwyatt23

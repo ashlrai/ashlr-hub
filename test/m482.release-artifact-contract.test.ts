@@ -981,7 +981,7 @@ describe('release artifact contract v1', () => {
     });
   });
 
-  it.each(['README.md', 'QUICKSTART.md', 'ARCHITECTURE.md', 'ASHLR-UNIVERSE.md', 'UNIVERSE-RESEARCH.md', 'UNIVERSE-AUTONOMY-RESEARCH.md', 'NORTH-STAR.md', 'RESOURCE-POOLS.md'])(
+  it.each(['README.md', 'QUICKSTART.md', 'COMPANIONS.md', 'ARCHITECTURE.md', 'ASHLR-UNIVERSE.md', 'UNIVERSE-RESEARCH.md', 'UNIVERSE-AUTONOMY-RESEARCH.md', 'NORTH-STAR.md', 'RESOURCE-POOLS.md'])(
     'admits shipped documentation %s without opening arbitrary package paths',
     (documentName) => {
       const release = fixture();
@@ -1002,6 +1002,7 @@ describe('release artifact contract v1', () => {
   );
 
   it.each([
+    { name: 'explicit companion inventory guide', guides: ['docs/COMPANIONS.md'], sibling: 'docs/COMPANIONS-PRIVATE.md' },
     { name: 'three explicit Agents guides', guides: ['docs/OPENAI-AGENTS-INTEGRATION.md', 'docs/DOTS-COMPANION.md', 'docs/AGENT-HARNESS-EVOLUTION.md'], sibling: 'docs/OPENAI-AGENTS-PRIVATE.md' },
     { name: 'explicit reset-aware scheduling guide', guides: ['docs/RESET-AWARE-SCHEDULING.md'], sibling: 'docs/RESET-AWARE-PRIVATE.md' },
     { name: 'explicit execution feedback guide', guides: ['docs/EXECUTION-FEEDBACK.md'], sibling: 'docs/EXECUTION-FEEDBACK-PRIVATE.md' },

@@ -13,6 +13,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Added
 
+- Explicit inventory of separately installed Phantom Secrets, Locus and Lexicon,
+  with inherited Locus identity checks and MCP discovery recovery.
 - Shared account-bound Leader, Manager and worker invocation for prepared
   Claude Code, Codex, Grok, included native Devin and local resources.
 - Qualified original-artifact npm trusted publishing, separate consumer checks

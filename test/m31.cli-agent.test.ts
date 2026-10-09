@@ -20,7 +20,7 @@ describe('AGENT_COMMANDS — the CLI-first agent contract', () => {
   it('every entry has usage, description, safety, and a json shape', () => {
     expect(AGENT_COMMANDS.length).toBeGreaterThanOrEqual(10);
     for (const c of AGENT_COMMANDS) {
-      expect(c.usage).toMatch(/^ashlr /);
+      expect(c.usage).toMatch(/^(?:phm|ashlr) /);
       expect(c.description.length).toBeGreaterThan(20);
       expect(['read', 'append', 'proposal', 'human-gate']).toContain(c.safety);
       expect(c.jsonShape.length).toBeGreaterThan(0);

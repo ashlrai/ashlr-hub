@@ -834,7 +834,16 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
       status = undefined;
       phantom = undefined;
     }
-    if (status?.installed && status.initialized) {
+    if (status?.error || status === undefined) {
+      warnings.push({
+        id: 'phantom',
+        severity: 'warning',
+        detail: 'Phantom Secrets project metadata status unverified',
+        fix: status?.error === 'status-config-unavailable'
+          ? 'Inspect existing project configuration and file access.'
+          : 'Use a compatible Phantom Secrets CLI: https://github.com/ashlrai/phantom-secrets/blob/main/docs/hub-status-contract.md',
+      });
+    } else if (status.installed && status.initialized) {
       const pulse = status.capability.knownFleetSecrets.pulseCredentialPresent
         ? 'pulse credential present'
         : 'pulse credential missing';
@@ -844,7 +853,7 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
         id: 'phantom',
         severity: 'info',
         detail:
-          `phantom ${status.version ?? 'unknown'} initialized; ` +
+          `phantom ${status.version ?? 'unknown'} project configured; vault readiness unverified; ` +
           `${status.capability.secretCount} secret name(s); ${pulse}; ${mcp}; ${agent}; values hidden`,
       });
     } else if (status?.installed) {
@@ -852,8 +861,8 @@ export async function buildReadiness(cfg: AshlrConfig): Promise<ReadinessReport>
       warnings.push({
         id: 'phantom',
         severity: 'warning',
-        detail: `phantom ${status.version ?? 'unknown'} installed but not initialized; ${agent}`,
-        fix: 'Run `phantom init` to enable fleet secret resolution.',
+        detail: `phantom ${status.version ?? 'unknown'} installed but project not configured; ${agent}`,
+        fix: 'Review project configuration with `phantom init`; vault readiness and execution authority remain unverified.',
       });
     } else {
       warnings.push({

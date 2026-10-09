@@ -7,7 +7,7 @@ import type { AshlrConfig, PhantomStatus } from '../src/core/types.js';
 import { makeFixture, makeCfg, type H1Fixture } from './helpers/h1-fixture.js';
 
 async function withReadinessMocks<T>(
-  status: PhantomStatus,
+  status: PhantomStatus | Error,
   servers: Array<{ name: string; command: string; args: string[]; source: string }> = [],
   fn: (buildReadiness: (cfg: AshlrConfig) => Promise<unknown>, fx: H1Fixture) => Promise<T>,
 ): Promise<T> {
@@ -26,7 +26,10 @@ async function withReadinessMocks<T>(
     }),
   }));
   vi.doMock('../src/core/phantom.js', () => ({
-    getPhantomStatus: () => status,
+    getPhantomStatus: () => {
+      if (status instanceof Error) throw status;
+      return status;
+    },
   }));
   vi.doMock('../src/core/mcp-registry.js', () => ({
     discoverMcpServers: () => ({ servers: resolvedServers }),
@@ -66,7 +69,7 @@ function phantomStatus(overrides: Partial<PhantomStatus> = {}): PhantomStatus {
       },
       modes: {
         metadataStatus: true,
-        childEnvInjectionAvailable: overrides.initialized ?? true,
+        childEnvInjectionAvailable: false,
         mcpServerAvailable: overrides.installed ?? true,
         mutationRequiresHumanApproval: overrides.installed ?? true,
       },
@@ -154,6 +157,7 @@ describe('M347 readiness Phantom capability snapshot', () => {
     const detail = report.info.find((finding) => finding.id === 'phantom')?.detail;
     expect(detail).toContain('agent command absent');
     expect(detail).toContain('values hidden');
+    expect(detail).toContain('project configured; vault readiness unverified');
   });
 
   it('surfaces agent command presence without exposing help text', async () => {
@@ -215,8 +219,38 @@ describe('M347 readiness Phantom capability snapshot', () => {
       mcp: { configured: false },
     });
     const detail = report.warnings.find((finding) => finding.id === 'phantom')?.detail;
-    expect(detail).toContain('installed but not initialized');
+    expect(detail).toContain('installed but project not configured');
     expect(detail).toContain('agent command absent');
+  });
+
+  it.each(['status-contract-unsupported', 'status-unavailable', 'status-config-unavailable'])(
+    'warns about unverified metadata for %s without suggesting initialization', async (error) => {
+      const report = await withReadinessMocks(
+        phantomStatus({ initialized: false, secretNames: [], error }),
+        [],
+        async (buildReadiness) => buildReadiness(makeCfg({})),
+      ) as { warnings: Array<{ id: string; detail: string; fix?: string }>; info: Array<{ id: string }> };
+      const finding = report.warnings.find((item) => item.id === 'phantom');
+      expect(finding?.detail).toBe('Phantom Secrets project metadata status unverified');
+      if (error === 'status-config-unavailable') {
+        expect(finding?.fix).toBe('Inspect existing project configuration and file access.');
+      } else {
+        expect(finding?.fix).toContain('phantom-secrets/blob/main/docs/hub-status-contract.md');
+      }
+      expect(finding?.fix).not.toContain('phantom init');
+      expect(report.info.some((item) => item.id === 'phantom')).toBe(false);
+    },
+  );
+
+  it('uses fixed unverified guidance when the status observer throws', async () => {
+    const report = await withReadinessMocks(
+      new Error('SECRET_OBSERVATION_SENTINEL'),
+      [],
+      async (buildReadiness) => buildReadiness(makeCfg({})),
+    ) as { warnings: Array<{ id: string; detail: string }> };
+    expect(report.warnings.find((item) => item.id === 'phantom')?.detail)
+      .toBe('Phantom Secrets project metadata status unverified');
+    expect(JSON.stringify(report)).not.toContain('SECRET_OBSERVATION_SENTINEL');
   });
 
   it('keeps a values-free all-false command snapshot when Phantom is not installed', async () => {

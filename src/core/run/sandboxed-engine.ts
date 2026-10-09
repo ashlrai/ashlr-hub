@@ -161,6 +161,7 @@ import {
 } from '../sandbox/execution-leases.js';
 import { addUsage, newUsage, estCostUsd } from './budget.js';
 import { withToolEnv } from '../env-bridge.js';
+import { assertLocusJobDispatch, getLocusJobEnv, hasInheritedLocusSession, hasLocusJobEnv } from '../integrations/locus-job-env.js';
 import { canonicalizeProposalDiff, scrubSecrets } from '../util/scrub.js';
 import { selectInboxStore } from '../seams/inbox.js';
 import {
@@ -937,13 +938,14 @@ const PRE_PUSH_BLOCK =
  * `hooksDir` holds the pre-push blocker installed via per-invocation git config.
  */
 export function buildContainedEnv(cfg: AshlrConfig, hooksDir: string): NodeJS.ProcessEnv {
-  const realHome = process.env.HOME ?? process.env.USERPROFILE ?? '';
+  const jobEnv = getLocusJobEnv();
+  const realHome = jobEnv.HOME ?? jobEnv.USERPROFILE ?? '';
   const base: NodeJS.ProcessEnv = {};
-  base.PATH = process.env.PATH ?? process.env.Path ?? '';
+  base.PATH = jobEnv.PATH ?? jobEnv.Path ?? '';
   if (realHome) base.HOME = realHome;
-  base.LANG = process.env.LANG ?? 'C';
-  if (process.env.TERM) base.TERM = process.env.TERM;
-  if (process.env.TMPDIR) base.TMPDIR = process.env.TMPDIR;
+  base.LANG = jobEnv.LANG ?? 'C';
+  if (jobEnv.TERM) base.TERM = jobEnv.TERM;
+  if (jobEnv.TMPDIR) base.TMPDIR = jobEnv.TMPDIR;
 
   // M230: USER + LOGNAME are required for macOS Keychain access. The Security
   // framework uses the OS username to locate the login keychain
@@ -955,27 +957,27 @@ export function buildContainedEnv(cfg: AshlrConfig, hooksDir: string): NodeJS.Pr
   // Passing them does NOT weaken any security boundary: no secret value is
   // transmitted, git-push remains severed (GIT_TERMINAL_PROMPT=0 + pre-push hook
   // + no SSH_AUTH_SOCK remain in force), and the worktree containment is unchanged.
-  if (process.env.USER) base.USER = process.env.USER;
-  if (process.env.LOGNAME) base.LOGNAME = process.env.LOGNAME;
+  if (jobEnv.USER) base.USER = jobEnv.USER;
+  if (jobEnv.LOGNAME) base.LOGNAME = jobEnv.LOGNAME;
 
   if (process.platform === 'win32') {
     if (realHome) base.USERPROFILE = realHome;
     for (const k of ['SystemRoot', 'windir', 'PATHEXT', 'COMSPEC', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA']) {
-      const v = process.env[k];
+      const v = jobEnv[k];
       if (v) base[k] = v;
     }
   }
 
   // Preserve the agent CLIs' OWN config homes — their subscription auth lives here.
   for (const k of ['CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME']) {
-    const v = process.env[k];
+    const v = jobEnv[k];
     if (v) base[k] = v;
   }
 
   // Preserve the agent CLIs' OWN headless auth tokens (claude's CLAUDE_CODE_OAUTH_TOKEN
   // etc.) — the engine's subscription credential, which must reach the engine.
   for (const k of ENGINE_AUTH_ALLOW) {
-    const v = process.env[k];
+    const v = jobEnv[k];
     if (v) base[k] = v;
   }
 
@@ -2470,12 +2472,12 @@ export async function runEngineSandboxed(
       let nativeSeat: NativeSeatConfinement | undefined;
       if (engineKey === GROK_CLI_ENGINE_ID && confinementProfile.mode === 'os') {
         const seat = resolveGrokCliSeat(cfg, undefined, opts.seatId);
-        const home = process.env.HOME ?? process.env.USERPROFILE;
+        const home = getLocusJobEnv().HOME ?? getLocusJobEnv().USERPROFILE;
         if (seat.ok && home) nativeSeat = nativeSeatConfinement(seat.launch, home);
       }
       launcher = buildSandboxLauncher(confinementProfile, {
         worktree: sb.worktreePath,
-        home: process.env.HOME ?? process.env.USERPROFILE,
+        home: getLocusJobEnv().HOME ?? getLocusJobEnv().USERPROFILE,
         env: env,
         ...(nativeSeat ? { nativeSeat } : {}),
       });
@@ -3416,12 +3418,15 @@ export async function runApiModelSandboxed(
     ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
     : writeSandboxedRunAgentAction;
   const spec = resolveEngineSpec(engine, cfg);
+  const delegatedLocusJob = hasLocusJobEnv() || hasInheritedLocusSession();
   const isClaudeApi = engine === 'claude-api';
   const apiGrantHeld = isClaudeApi && (!opts.claudeApiGrantBinding || opts.budget?.allowCloud !== true || !cfg.foundry?.allowedBackends?.includes('claude-api'));
-  if (!spec || spec.kind !== 'api-model' || !spec.api || apiGrantHeld ||
+  if (delegatedLocusJob || !spec || spec.kind !== 'api-model' || !spec.api || apiGrantHeld ||
     (isClaudeApi && spec.api.protocol !== 'anthropic-messages') ||
     (!isClaudeApi && spec.api.protocol === 'anthropic-messages')) {
-    const outcome = proposalOutcome('engine-unsupported', apiGrantHeld
+    const outcome = proposalOutcome('engine-unsupported', delegatedLocusJob
+      ? 'Locus sealed jobs require scoped child engines; in-process API providers have no qualified job credential contract'
+      : apiGrantHeld
       ? 'Claude API held: source-owned grant binding and explicit cloud opt-in required.'
       : !spec || spec.kind !== 'api-model' || !spec.api
         ? `engine "${engine}" is not an api-model — cannot run in-process`
@@ -3578,7 +3583,8 @@ export async function runApiModelSandboxed(
   // API-model producers never hit spawnEngine — fence here so LOCUS_ENFORCE
   // covers in-process mutate paths. Default off; enforce fails closed.
   {
-    const locusGate = applyLocusPreMutateGate(process.env);
+    assertLocusJobDispatch();
+    const locusGate = applyLocusPreMutateGate(getLocusJobEnv());
     if (!locusGate.allow) {
       const msg =
         formatPreMutateBlockers(locusGate) ||

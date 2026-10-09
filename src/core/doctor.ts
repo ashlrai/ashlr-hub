@@ -1,5 +1,5 @@
 /**
- * core/doctor.ts — one-glance health check for ashlr-hub.
+ * core/doctor.ts — one-glance health check for the Phantom workbench.
  *
  * `runDoctor` probes all configured integrations and returns a typed
  * DoctorReport. It NEVER throws — a failed probe becomes a 'fail' DoctorCheck.
@@ -303,20 +303,24 @@ function checkSpendBudget(
   return check('budget-spend', 'Spend budget', 'pass', budget.message);
 }
 
-/** node version >= 18 */
+/** Stable Node.js >= 22.15.0, matching package.json engines.node. */
 function checkNodeVersion(): DoctorCheck {
   try {
-    const ver = process.version; // e.g. "v22.1.0"
-    const major = parseInt(ver.replace(/^v/, '').split('.')[0] ?? '0', 10);
-    if (major >= 18) {
-      return check('node', 'Node.js version', 'pass', `${ver} (>= 18 required)`);
+    const ver = process.version;
+    // Reject unknown/prerelease versions rather than reporting unsupported
+    // runtimes as ready. Major-only checks miss early Node 22 releases.
+    const stable = /^v(\d+)\.(\d+)\.(\d+)$/.exec(ver);
+    const major = Number(stable?.[1]);
+    const minor = Number(stable?.[2]);
+    if (stable && (major > 22 || (major === 22 && minor >= 15))) {
+      return check('node', 'Node.js version', 'pass', `${ver} (>= 22.15.0 required)`);
     }
     return check(
       'node',
       'Node.js version',
       'fail',
-      `${ver} — need >= v18`,
-      'Install Node.js 18+ from https://nodejs.org',
+      `${ver} — need stable Node.js >= 22.15.0`,
+      'Install Node.js 22.15.0+ from https://nodejs.org',
     );
   } catch (err) {
     return check('node', 'Node.js version', 'fail', String(err));
@@ -354,20 +358,21 @@ function checkLocalBin(): DoctorCheck {
   );
 }
 
-/** ashlr binary present (which/where ashlr) */
+/** Workbench binary present: canonical phm or compatible ashlr. */
 function checkAshlrInstalled(): DoctorCheck {
   // `which` is Unix-only; Windows uses `where`.
   const finder = process.platform === 'win32' ? 'where' : 'which';
-  const out = runCmd(finder, ['ashlr']);
+  // `phantom` belongs to Secrets and cannot satisfy this workbench check.
+  const out = runCmd(finder, ['phm']) ?? runCmd(finder, ['ashlr']);
   if (out) {
-    return check('ashlr', 'Phantom CLI installed (ashlr)', 'pass', out);
+    return check('ashlr', 'Phantom CLI installed (phm / ashlr)', 'pass', out);
   }
   return check(
     'ashlr',
-    'Phantom CLI installed (ashlr)',
+    'Phantom CLI installed (phm / ashlr)',
     'fail',
-    'ashlr not found on PATH',
-    'Run: npm install -g @ashlr/hub  (or ensure ~/.local/bin is on PATH)',
+    'phm and compatible ashlr not found on PATH',
+    'Run: npm install -g @ashlr/phantom  (or ensure ~/.local/bin is on PATH)',
   );
 }
 
@@ -450,40 +455,51 @@ function checkIndex(): DoctorCheck {
   }
 }
 
-/** phantom installed + initialized */
+/** Values-free Secrets project metadata; configuration is not vault readiness. */
 function checkPhantom(): DoctorCheck {
   try {
     const status = getPhantomStatus();
     if (!status.installed) {
       return check(
         'phantom',
-        'Phantom secrets CLI',
+        'Phantom Secrets CLI (phantom)',
         'warn',
         'phantom not found on PATH',
-        'Install: brew install ashlrai/tap/phantom  or  https://phantom.sh',
+        'Install Phantom Secrets (phantom): https://github.com/ashlrai/phantom-secrets#installation',
       );
     }
     const ver = status.version ? ` v${status.version}` : '';
+    if (status.error) {
+      return check(
+        'phantom',
+        'Phantom Secrets CLI (phantom)',
+        'warn',
+        `phantom${ver} installed, project metadata status unverified`,
+        status.error === 'status-config-unavailable'
+          ? 'Inspect existing project configuration and file access'
+          : 'Use a compatible Phantom Secrets CLI: https://github.com/ashlrai/phantom-secrets/blob/main/docs/hub-status-contract.md',
+      );
+    }
     if (!status.initialized) {
       return check(
         'phantom',
-        'Phantom secrets CLI',
+        'Phantom Secrets CLI (phantom)',
         'warn',
-        `phantom${ver} installed but vault not initialized`,
+        `phantom${ver} installed but project not configured`,
         'phantom init',
       );
     }
     const count = status.secretNames.length;
     return check(
       'phantom',
-      'Phantom secrets CLI',
+      'Phantom Secrets CLI (phantom)',
       'pass',
-      `phantom${ver} installed, vault initialized (${count} secret${count !== 1 ? 's' : ''})`,
+      `phantom${ver} installed, project configured (${count} secret name${count !== 1 ? 's' : ''}; vault readiness unverified)`,
     );
   } catch (err) {
     return check(
       'phantom',
-      'Phantom secrets CLI',
+      'Phantom Secrets CLI (phantom)',
       'warn',
       `Could not determine phantom status: ${String(err)}`,
     );

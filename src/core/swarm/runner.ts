@@ -1,3 +1,4 @@
+import { assertLocusJobDispatch, getLocusJobEnv, withLocusJobChildEnv } from '../integrations/locus-job-env.js';
 import { selectedOutcomeAdmissionCurrent } from '../run/outcome-admission.js';
 /**
  * core/swarm/runner.ts — M12 swarm runner, M17 verified + unattended-safe.
@@ -82,7 +83,6 @@ import {
 import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
 import {
   applyLocusPreMutateGate,
-  applyLocusSessionEnv,
   formatPreMutateBlockers,
   LocusMintError,
   LocusSessionConfigError,
@@ -1013,7 +1013,7 @@ function spawnBackgroundWorker(swarmId: string): Promise<boolean> {
       detached: true,
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
       env: {
-        ...process.env,
+        ...withLocusJobChildEnv(),
         // Worker must NOT set ASHLR_IN_SWARM itself — it IS the swarm runner.
         ASHLR_IN_SWARM: undefined as unknown as string,
         ASHLR_BACKGROUND_HANDOFF_TOKEN: handoffToken,
@@ -1646,7 +1646,8 @@ async function runSwarmInternal(
   // spawnEngine is also gated — this covers swarm entry + fleet tick paths.
   // -------------------------------------------------------------------------
   {
-    const locusGate = applyLocusPreMutateGate(process.env);
+    assertLocusJobDispatch();
+    const locusGate = applyLocusPreMutateGate(getLocusJobEnv());
     if (!locusGate.allow) {
       const msg =
         formatPreMutateBlockers(locusGate) ||
@@ -2369,28 +2370,10 @@ export async function runSwarm(
   const execute = async (): Promise<SwarmRun> => {
     try {
       // CI isolation: when LOCUS_CI_BINDING/LOCUS_BINDING is set, mint an
-      // ephemeral sealed session and overlay LOCUS_* onto process.env so child
-      // engines inherit it. Restores prior values after the swarm finishes.
+      // ephemeral sealed session in a private job context for child engines.
       // Default (unset binding + LOCUS_ENFORCE off) is a no-op pass-through.
-      return await runWithLocusSessionIfConfigured(async (handle) => {
-        const restored: Array<[string, string | undefined]> = [];
-        if (handle) {
-          const overlay: NodeJS.ProcessEnv = {};
-          applyLocusSessionEnv(overlay, handle.env);
-          for (const [key, value] of Object.entries(overlay)) {
-            if (typeof value !== 'string') continue;
-            restored.push([key, process.env[key]]);
-            process.env[key] = value;
-          }
-        }
-        try {
-          return await runSwarmInternal(input, cfg, opts, sink);
-        } finally {
-          for (const [key, prev] of restored) {
-            if (prev === undefined) delete process.env[key];
-            else process.env[key] = prev;
-          }
-        }
+      return await runWithLocusSessionIfConfigured(async () => {
+        return await runSwarmInternal(input, cfg, opts, sink);
       });
     } catch (error) {
       if (
