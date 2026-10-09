@@ -27,10 +27,13 @@ npm install -g @ashlr/phantom@3.28.0   # `phm` and compatible `ashlr`; Node.js 2
 phm verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
-On an Apple silicon Mac, download the
-[v3.28.0 desktop DMG](https://github.com/ashlrai/phantom/releases/download/v3.28.0/Phantom_3.28.0_aarch64.dmg).
-The app inside the DMG is locally signed; the DMG is unsigned. Neither is Apple
-notarized; macOS may require **Open Anyway** on first launch. The CLI includes the browser console on macOS, Linux and Windows.
+The [v3.28.0 release](https://github.com/ashlrai/phantom/releases/tag/v3.28.0)
+provides a signed macOS arm64 app archive and paired update manifest; it has no
+DMG. Existing installations use the qualified signed-update flow. Maintainer
+artifact installation requires the original qualified bundle and prior
+Stop/drain and Quit; downloading the archive alone is not that installation.
+See [desktop installation](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install). The app is locally signed,
+not Apple Developer ID notarized. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
 [first-run guide](docs/QUICKSTART.md#open-verse).
 
@@ -277,8 +280,10 @@ separate Node.js install to run.
 ### Install
 
 Use the [v3.28.0 release](https://github.com/ashlrai/phantom/releases/tag/v3.28.0)
-for the versioned arm64 DMG. The app inside is locally signed; the DMG is unsigned.
-Neither is Apple Developer ID notarized, so macOS may require **Open Anyway** on first launch. To build from source on a
+for the original signed arm64 app archive and paired update manifest. No 3.28.0
+DMG was published; use the [desktop installation guide](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install)
+for the qualified update or maintainer artifact path. The app is locally signed,
+not Apple Developer ID notarized, so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
 "Ashlr Local" code-signing identity. The prerequisites, exact build order and
 verification steps are in [Releasing without CI](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md)

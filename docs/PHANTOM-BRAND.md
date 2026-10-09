@@ -2,8 +2,9 @@
 
 Phantom is the engineering agent workbench, formerly Ashlr Verse. AshlrAI, Inc. is the company; [ashlr.ai](https://ashlr.ai) remains the company site.
 
-The current published canonical release is Phantom 3.27.0: repository `ashlrai/phantom`,
+The current published canonical release is Phantom 3.28.0: repository `ashlrai/phantom`,
 package `@ashlr/phantom` and project homepage [phm.dev](https://phm.dev).
+The source candidate is 3.29.0; it is not yet published or installed.
 The canonical package has its own verified original public bytes. Compatibility releases
 through 3.25.3 retain their original `@ashlr/hub` package and release evidence.
 Both package profiles expose the same five SDK surfaces in their own namespace;

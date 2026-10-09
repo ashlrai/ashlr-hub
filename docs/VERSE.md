@@ -1692,9 +1692,12 @@ tray and the Dock badge are the reliable signals there. Details:
 
 ### Install it on this Mac
 
-The published canonical 3.26.0 release provides the [Phantom macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.0/Phantom_3.26.0_aarch64.dmg).
+The published canonical [3.28.0 release](https://github.com/ashlrai/phantom/releases/tag/v3.28.0)
+provides a signed arm64 app archive and paired update manifest. No 3.28.0 DMG was
+published. Use the signed-update flow in an eligible installed app or the
+maintainer artifact procedure below; unpacking an archive is not that installation.
 Publication does not install the app or activate resident authority.
-The 3.26.0 app is locally signed, not Apple Developer ID notarized; macOS may require
+The 3.28.0 app is locally signed, not Apple Developer ID notarized; macOS may require
 **Open Anyway** on first launch. Follow the [desktop installation guide](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install)
 for the supported path. Do not copy an app over an existing installation.
 
