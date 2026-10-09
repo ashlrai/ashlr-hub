@@ -681,6 +681,13 @@ More, stored as layout state only).
   the runtime (activity loop, permissions, sheet, toasts), Home's cards and
   every other screen are preloaded chunks that download in parallel with the
   session probe they would have to wait for anyway.
+  The required npm checks use 354 KiB for desktop and 250 KiB for phone,
+  measuring the complete existing static import closure. On October 9, the
+  desktop baseline increased from 353 to 354 KiB for 43 bytes of generated
+  preload-map metadata from the shared, lazy Bot-profile query: 361,453 bytes
+  before and 361,496 after. The latter exceeded the old limit by 24 bytes;
+  the new limit leaves 1,000 bytes. The phone bundle was unchanged. No editor
+  became eager, no files were excluded, and this change proves no speed gain.
 - **Layout rules** (`mobile-overflow.test.ts`): type in em from the
   platform body font (Dynamic Type), 44 pt targets, no fixed widths, no
   horizontal scroll containers — code and diffs wrap. Safe-area insets pad

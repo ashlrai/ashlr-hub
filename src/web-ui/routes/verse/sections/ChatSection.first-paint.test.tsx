@@ -13,8 +13,10 @@
  *     and the real columns replace them.
  */
 import { act, render, screen } from '@testing-library/react';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error — a plain .mjs build script with no type declarations.
 import { aliasGroupedRoots, CHAT_FIRST_PAINT_ROOTS, criticalFiles } from '../../../../../scripts/check-first-paint-budget.mjs';
@@ -59,6 +61,42 @@ describe('check-first-paint-budget: what counts as critical', () => {
 
   it('measures from the entry, the /verse console and the Chat section', () => {
     expect(CHAT_FIRST_PAINT_ROOTS).toEqual(['index.html', 'app/VerseConsoleApp.tsx', 'routes/verse/sections/ChatSection.tsx']);
+  });
+});
+
+describe('configured first-paint entrypoints retain absolute limits', () => {
+  const scripts = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')).scripts as Record<string, string>;
+  const check = (entry: 'check:first-paint' | 'check:first-paint:built', desktopBytes: number, mobileBytes: number) => {
+    const dir = mkdtempSync(join(tmpdir(), 'phantom-paint-boundary-'));
+    try {
+      mkdirSync(join(dir, '.vite'));
+      const manifest = {
+        'index.html': { file: 'index.js' },
+        'app/VerseConsoleApp.tsx': { file: 'console.js' },
+        'routes/verse/sections/ChatSection.tsx': { file: 'chat.js' },
+        'app/VerseMobileApp.tsx': { file: 'mobile.js' },
+        'routes/verse/mobile/screens/HomeScreen.tsx': { file: 'home.js' },
+      };
+      writeFileSync(join(dir, '.vite/manifest.json'), JSON.stringify(manifest));
+      for (const [file, bytes] of [['index.js', 1], ['console.js', desktopBytes - 2], ['chat.js', 1],
+        ['mobile.js', 1], ['home.js', mobileBytes - 2]] as const) writeFileSync(join(dir, file), Buffer.alloc(bytes));
+      // Exercise the actual required npm command arguments against bytes on disk;
+      // no bundle build or candidate JS execution occurs in this fixture.
+      const [node, ...args] = scripts[entry]!.split(/\s+/);
+      expect(node).toBe('node');
+      return spawnSync(process.execPath, [...args, '--no-build', '--out-dir', dir, '--json'], { cwd: process.cwd(), encoding: 'utf8' });
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  };
+  it.each(['check:first-paint', 'check:first-paint:built'] as const)('%s admits measured lazy-loader overhead but refuses desktop and phone overruns', (entry) => {
+    const accepted = check(entry, 361_496, 255_296);
+    expect(accepted.status).toBe(0);
+    expect(JSON.parse(accepted.stdout)).toMatchObject({ ok: true, totalBytes: 361_496, mobile: { ok: true, totalBytes: 255_296 } });
+    const desktopOver = check(entry, 354 * 1024 + 1, 255_296);
+    expect(desktopOver.status).toBe(1);
+    expect(JSON.parse(desktopOver.stdout)).toMatchObject({ ok: false, desktopOk: false, mobile: { ok: true } });
+    const phoneOver = check(entry, 361_496, 250 * 1024 + 1);
+    expect(phoneOver.status).toBe(1);
+    expect(JSON.parse(phoneOver.stdout)).toMatchObject({ ok: false, desktopOk: true, mobile: { ok: false } });
   });
 });
 
