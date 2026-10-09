@@ -2,6 +2,12 @@
 
 Phantom keeps each account's subscription windows, native credit units, captured dollar balances, and operator estimates separate. The resource sidebar uses the same live capacity model as the resource drawer. Refreshing a reading does not renew its original observation or expiration.
 
+Connect native CLI accounts for subscription work, configure API resources separately,
+or run models on your own hardware. Routing is provider-neutral: an account's
+supported execution path, model capabilities and current evidence determine which
+roles it can run. A company name alone does not qualify a Leader, Manager or worker.
+See [work modes and routing](AUTOMATIC-OUTCOMES.md).
+
 On startup, a validated private reading cache can show last-known usage before native metadata collection completes. Gray meters say **last** and retain the original reading date. Fresh native readings replace them. Historical windows never supply live capacity, account authentication, usable-again times, routing eligibility, or reset spend-down pressure. An account switch or sign-out suppresses the previous account's values.
 
 ```mermaid
@@ -30,6 +36,8 @@ The private cache binds readings to the account, selected native profile, and a 
 | Captured purchased usage credits | Separate last-recorded dollars and expiration, if known | Does not acquire subscription reset urgency |
 | Captured Claude API promotion | Separate recorded API dollars and verified date precision | Advisory only; billing, execution binding and signed API authority must be commissioned before spending |
 | Operator cloud estimate | **Cloud estimate**, with its estimate qualifier | Separate from a provider-reported wallet or captured balance |
+| Local model | Runtime readiness, host CPU/RAM and scoped speed readings | Uses this computer's hardware, not a provider subscription allowance |
+| Grok Bot profile | Separate identity; unknown allowance and reset until verified | Grok Build quota does not establish Bot capacity or connect Bot execution |
 
 Dollar references are not invoices, purchased-credit prices, or attributed task costs. Subscription percentages are not token counts. Different accounts remain independent, including accounts from the same provider. No account-count truncation is introduced by these views.
 
@@ -53,6 +61,10 @@ not a verified remaining allowance or reset. Phantom has not qualified a native
 Bot quota reader or autonomous Bot dispatch. Unknown Bot usage stays unknown;
 saving a profile never enables spending. See [proactive profiles](VERSE.md#proactive-agent-profiles).
 
+Track each account and product independently. Build allowance cannot substitute
+for Bot allowance, even when one subscription gives access to both. Purchased
+credits and Bot on-demand billing are not included allowance to spend before a reset.
+
 ## Local hardware and task speed
 
 Expand the local resource to inspect host CPU, RAM, runtime-reported model
@@ -65,6 +77,12 @@ residency and recorded task speed. These measurements have different meanings:
   bound to the selected resource, model, context and endpoint. It includes tool
   and harness time; it is not decoder speed. Failed or cancelled turns do not
   become successful speed observations. Warm measurements retain their warm scope.
+
+Input, output, cache-read and cache-write counts each require explicitly reported,
+valid token evidence. Missing fields and older events without that evidence stay
+unknown; a normalized zero does not prove zero usage. A turn can report output
+tokens while its input or cache counts remain unknown. Only qualified output
+counts and a completed turn duration establish its end-to-end token rate.
 
 Missing measurements remain unknown, and visible ages retain the original
 observation time. The router uses reported allowance, context, serving capacity
