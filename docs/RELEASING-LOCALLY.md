@@ -1,6 +1,6 @@
 # Releasing locally
 
-The published canonical 3.26.0 release uses `ashlrai/phantom`,
+The published canonical 3.27.0 release uses `ashlrai/phantom`,
 `@ashlr/phantom` and `phm`. The earlier published 3.25.3 compatibility
 artifacts retain their original legacy identity. Canonical release
 admission requires complete exact-source hosted CI, independent Audit and
@@ -32,6 +32,15 @@ not add npm provenance to the published package. Record both boundaries when
 reporting a release.
 
 ## Reuse a qualified CI build
+
+### Keep candidate versions consistent
+
+Run `npm run version:sync -- X.Y.Z` to update the workbench package, lockfile,
+desktop package, native version and desktop URL together. `npm run check:version`
+checks these fields without changing files and runs before every build.
+Dependency versions and release history remain unchanged. Website and article
+metadata instead use the latest freshly verified public release; preparing a
+candidate does not advertise it as published.
 
 ### Canonical npm trusted publishing
 

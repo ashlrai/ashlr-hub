@@ -54,7 +54,7 @@ describe('candidate version synchronization', () => {
     expect(missing.stderr).toContain('Usage:');
     expect(() => syncCandidateVersion(root, undefined)).toThrow(/canonical release version/);
     expect(paths.map((path) => read(root, path))).toEqual(before);
-  });
+  }, 5_000);
 
   it('checks without edits, synchronizes only candidate identities, then checks idempotently', () => {
     const root = fixture();
