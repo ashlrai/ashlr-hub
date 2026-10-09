@@ -282,6 +282,7 @@ jobs:
           curl --fail --silent --show-error --max-time 30 'https://registry.npmjs.org/@ashlr%2Fphantom' > "$RUNNER_TEMP/phantom-packument.json"
           node scripts/canonical-npm-publisher.mjs latest "$RUNNER_TEMP/phantom-npm-admitted"
           npm dist-tag add "@ashlr/phantom@$VERSION" latest --registry=https://registry.npmjs.org
-          curl --fail --silent --show-error --max-time 30 'https://registry.npmjs.org/@ashlr%2Fphantom' > "$RUNNER_TEMP/phantom-packument-after.json"
-          node --input-type=module -e 'import fs from "node:fs"; const p=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+"/phantom-packument-after.json")); if(p["dist-tags"].latest!==process.env.VERSION)throw Error("Latest readback differs");'
+          # Public registry visibility can lag the single successful tag write.
+          # Reconcile reads only; never replay the mutation inside this wait.
+          node scripts/canonical-npm-publisher.mjs latest-readback "$RUNNER_TEMP/phantom-npm-admitted"
           printf 'Accepted @ashlr/phantom@%s from its original qualified archive.\n' "$VERSION" >> "$GITHUB_STEP_SUMMARY"

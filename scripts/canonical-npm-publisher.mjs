@@ -168,9 +168,9 @@ export function verifyCanonicalProvenance(record, audit, revision, currentRun, c
 }
 
 class RegistryReadPending extends Error {}
-async function registryFetch(url) {
+async function registryFetch(url, timeoutMs = 30_000) {
   let response;
-  try {response = await fetch(url, {redirect: 'error', signal: AbortSignal.timeout(30_000)});}
+  try {response = await fetch(url, {redirect: 'error', signal: AbortSignal.timeout(timeoutMs)});}
   catch {throw new RegistryReadPending('Public registry read unavailable');}
   if ([404, 408, 429].includes(response.status) || response.status >= 500) {
     throw new RegistryReadPending('Public registry is still processing or unavailable');
@@ -207,6 +207,33 @@ export async function reconcileRegistry(record, directory) {
   }
 }
 
+/** Read back one completed promotion; never repeats a publication or tag write. */
+export async function reconcileLatest(record) {
+  assert.equal(record.name, PACKAGE);
+  assertLatestPromotion(record.version, record.version);
+  const deadline = Date.now() + 2 * 60_000;
+  let delay = 2000;
+  for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new RegistryReadPending('Latest promotion not confirmed; reconcile public state before any new mutation');
+    try {
+      const response = await registryFetch('https://registry.npmjs.org/@ashlr%2Fphantom', Math.min(30_000, remaining));
+      const packument = await response.json();
+      assert.equal(packument.name, PACKAGE);
+      const latest = packument['dist-tags']?.latest;
+      // A later stable version is not stale success and must never be overwritten.
+      assertLatestPromotion(record.version, latest);
+      if (latest === record.version) return packument;
+      throw new RegistryReadPending('Public latest still precedes the admitted version');
+    } catch (error) {
+      const waitRemaining = deadline - Date.now();
+      if (!(error instanceof RegistryReadPending) || waitRemaining <= 0) throw error;
+      await new Promise(done => setTimeout(done, Math.min(delay, waitRemaining)));
+      delay = Math.min(delay * 2, 30_000);
+    }
+  }
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [command, directory] = process.argv.slice(2);
   if (command === 'prepare') prepare();
@@ -224,5 +251,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const record = verifyHandoff(directory, process.env.ADMISSION_SHA256, process.env.PACKAGE_SHA256);
     const packument = readBoundedJson(join(process.env.RUNNER_TEMP, 'phantom-packument.json'));
     assertLatestPromotion(record.version, packument['dist-tags']?.latest);
+  } else if (command === 'latest-readback') {
+    const record = verifyHandoff(directory, process.env.ADMISSION_SHA256, process.env.PACKAGE_SHA256);
+    const packument = await reconcileLatest(record);
+    fs.writeFileSync(join(process.env.RUNNER_TEMP, 'phantom-packument-after.json'), JSON.stringify(packument), {mode: 0o600});
   } else throw new Error('unknown canonical publisher command');
 }
