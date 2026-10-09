@@ -116,13 +116,15 @@ describe('account connections evidence', () => {
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
   });
 
-  it('always distinguishes Grok metadata from unintegrated execution', () => {
+  it('distinguishes Grok adapter availability from observed metadata and enabled billing', () => {
     render(<AccountConnections connections={snapshot([account({ provider: 'grok', label: 'SuperGrok', planType: 'supergrok',
       executionSupported: true, onDemandEnabled: true })])} />);
-    expect(screen.getByText('Execution not integrated')).toBeVisible();
-    expect(screen.getByText('Grok metadata does not enable Phantom execution.')).toBeVisible();
+    expect(screen.getByText('Phantom transport available')).toBeVisible();
+    expect(screen.getByText(/^Grok Build\s+SuperGrok$/)).toHaveTextContent('Grok Build · SuperGrok');
+    expect(screen.queryByText('Ready')).not.toBeInTheDocument();
+    expect(screen.getByText('Grok Build execution still requires the selected account, current allowance and billing checks.')).toBeVisible();
     expect(screen.getByText('On-demand billing enabled')).toBeVisible();
-    expect(screen.queryByText('Phantom transport available')).not.toBeInTheDocument();
+    expect(screen.getByText('Sign-in metadata is not proof of task readiness.')).toBeVisible();
   });
 
   it('does not present historical billing metadata as current configuration', () => {
@@ -232,12 +234,27 @@ describe('account connections evidence', () => {
     expect(screen.getByRole('meter')).toHaveAttribute('data-historical', 'true');
   });
 
+  it('keeps Grok transport available when current authentication, quota and billing are unknown', () => {
+    render(<AccountConnections connections={snapshot([account({ provider: 'grok', label: 'My Grok account',
+      executionSupported: true, state: 'unavailable', authentication: 'unknown', health: 'unknown',
+      observedAt: null, expiresAt: null, windows: [], onDemandEnabled: null,
+    })])} />);
+    expect(screen.getByRole('heading', { name: 'My Grok account' })).toBeVisible();
+    expect(screen.getByText('Phantom transport available')).toBeVisible();
+    expect(screen.getByText('Sign-in unverified')).toBeVisible();
+    expect(screen.getByText('Quota unknown')).toBeVisible();
+    expect(screen.queryByText('Signed in')).not.toBeInTheDocument();
+    expect(screen.queryByText('Ready')).not.toBeInTheDocument();
+    expect(screen.queryByText('On-demand billing disabled')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
   it('keeps Grok comparisons explicitly unrelated to Phantom execution', () => {
     render(<AccountConnections ceilingPercent={75} connections={snapshot([account({ provider: 'grok', executionSupported: false,
       windows: [{ id: 'grok_build_weekly', usedPercent: 8, resetsAt: RESET }],
     })])} />);
     expect(screen.getByText('67 percentage points below the 75% reference')).toBeVisible();
-    expect(screen.getByText('Grok metadata does not enable Phantom execution.')).toBeVisible();
+    expect(screen.getByText('Grok Build execution still requires the selected account, current allowance and billing checks.')).toBeVisible();
     expect(screen.getByText('Execution not integrated')).toBeVisible();
   });
 

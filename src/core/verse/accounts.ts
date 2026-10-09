@@ -1006,7 +1006,7 @@ export function deriveVerseAccountRecordFromEvidence(
     windows,
     reason: evidenceReason,
     onDemandEnabled: null,
-    executionSupported: identity.provider !== 'grok',
+    executionSupported: true,
     credits: null,
     binding: bindingWindow(windows),
     notes: providerNotes(identity.provider, base),

@@ -345,6 +345,14 @@ describe('connection and allocation response boundaries', () => {
     await expect(extension({ connections })).resolves.toMatchObject({ connections });
     expect(read).toHaveBeenCalledExactlyOnceWith('/api/resources', undefined);
   });
+  it.each([true, false])('accepts Grok adapter availability %s without admitting task readiness', async executionSupported => {
+    const connections = connection();
+    Object.assign(connections.accounts[0]!, { provider: 'grok', planType: 'SuperGrok Heavy', executionSupported,
+      state: 'unavailable', authentication: 'unknown', health: 'unknown', windows: [], onDemandEnabled: null,
+      reason: 'connection-not-checked', observedAt: null, expiresAt: null });
+    await expect(extension({ connections })).resolves.toMatchObject({ connections });
+    expect(read).toHaveBeenCalledExactlyOnceWith('/api/resources', undefined);
+  });
   it('accepts explicitly display-only Claude native reports', async () => {
     const connections = connection();
     Object.assign(connections.accounts[0]!, { provider: 'claude', reason: 'usage-native-reported', health: 'unknown',
@@ -383,7 +391,7 @@ describe('connection and allocation response boundaries', () => {
     ['bad health', { health: 'ready' }], ['bad plan', { planType: 'PRIVATE_PLAN' }], ['bad label', { label: '\u0000' }],
     ['long label bytes', { label: '€'.repeat(27) }], ['bad id', { id: '../private' }], ['invalid timestamp', { observedAt: '2026-02-31T12:00:00.000Z' }],
     ['invalid expiry', { expiresAt: 1 }], ['bad billing', { onDemandEnabled: 'false' }], ['bad execution', { executionSupported: 1 }],
-    ['Grok execution claim', { provider: 'grok', executionSupported: true }], ['bad window count', { windows: Array(65).fill({}) }],
+    ['Grok nonboolean execution', { provider: 'grok', executionSupported: 'true' }], ['bad window count', { windows: Array(65).fill({}) }],
     ['private window id', { windows: [{ id: '/private/auth', usedPercent: 1, resetsAt: null }] }],
     ['oversized percent', { windows: [{ id: 'usage', usedPercent: 101, resetsAt: null }] }],
     ['negative percent', { windows: [{ id: 'usage', usedPercent: -1, resetsAt: null }] }],

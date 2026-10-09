@@ -100,7 +100,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
   const hints = new Map(config.accounts.filter((row) => row.expectedAccountHint).map((row) => [row.id, row.expectedAccountHint!]));
   const blank = (row: ResourceConnectionConfig['accounts'][number]): ResourceAccountConnection => ({ id: row.id, label: row.label,
     provider: row.provider, state: 'checking', authentication: 'unknown', health: 'unknown', planType: null,
-    observedAt: null, expiresAt: null, windows: [], accountHint: null, codexCredits: null, reason: 'connection-not-checked', onDemandEnabled: null, executionSupported: row.provider !== 'grok' });
+    observedAt: null, expiresAt: null, windows: [], accountHint: null, codexCredits: null, reason: 'connection-not-checked', onDemandEnabled: null, executionSupported: true });
   let rows = config.accounts.map(blank);
   let readingRevision = 0;
   const inFlight = new Map<number, Promise<void>>();
