@@ -20,6 +20,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   details, usage charts and traces. Keep exact accounting and round display
   values to two significant figures; routing learns token throughput only from
   complete reported generation.
+- Launch desktop metadata collectors through the signed native host, and add a
+  credential-free check of the installed app and its paired CLI.
 
 ### Fixed
 
@@ -27,6 +29,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   read on each polling interval.
 - Publish Node metadata-child process identity before execution so an interrupted
   collector can recover without guessing whether unregistered work stopped.
+- Dispatch outcome Managers into their admitted workspaces while preserving
+  saved project targets. Resolve the same mapping for existing interactive chats.
+- Permit executable temporary build files in the isolated website builder and
+  materialize validated internal Vercel output aliases before publication.
 - Use current provider-neutral CLI help and explicit local model tags instead of
   a stale example model recommendation.
 - Describe notification delivery from the actual delivery method rather than
