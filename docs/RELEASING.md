@@ -901,6 +901,29 @@ recognized only after a fresh successful verification and current pin checks.
 New maintainer receipts use version 2; older version-1 files remain historical
 evidence and do not authorize dependency attachment or check publication.
 
+Maintainer command results include `processGroupSettlement`: `not-started`,
+`group-exit-confirmed`, or `unconfirmed`. Successful admission requires
+`group-exit-confirmed` for every executed command. The witness proves absence
+of that invocation's POSIX process group; it does not prove the absence of
+descendants that escaped the group. Missing evidence, unexpected runner errors,
+and unconfirmed exit retain the private verification HOME, confinement root,
+dependency attachment, and linked worktree instead of claiming removal.
+Cargo vendor preparation follows the same rule before an attachment exists.
+
+A failed receipt's `cleanupRetention` records the exact retained roots and,
+when observed, the original `processGroupId`. Its recovery instruction is
+`observe-group-absence-before-owned-cleanup`. This numeric identity is diagnostic;
+it never authorizes a delayed signal or proves that a current process is still
+the original child. Inspect genuine group absence before cleaning only those
+owned roots and the matching linked worktree registration. Unknown identity,
+a present group, or an inspection error requires retention. There is no
+automatic cleanup command or receipt-import shortcut. `sourceUnchanged: false`
+after an interrupted suite means the final source assertion was not completed;
+it does not by itself prove that candidate code modified tracked source.
+The retained-resource behavior applies to the compiled candidate only after
+normal review, release qualification, installation, and approval of its changed
+authority surface; a source PR does not update installed verification authority.
+
 For base-derived Cargo commands on supported macOS/Linux hosts, the runner
 requires a locally installed exact `rust-toolchain.toml` version and a Cargo
 lockfile containing only workspace packages and checksum-bound crates.io

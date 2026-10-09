@@ -20,7 +20,7 @@ function evidence(): MaintainerRunEvidence {
   const output = 'actual command output';
   return {
     ...pins, ok: true, diffSha256: 'd'.repeat(64), contractSha256: 'e'.repeat(64),
-    expectedCommands: [command], commands: [{ command, result: { ok: true, exitCode: 0, command: 'node check.cjs', output, timedOut: false },
+    expectedCommands: [command], commands: [{ command, result: { ok: true, exitCode: 0, command: 'node check.cjs', output, timedOut: false, processGroupSettlement: 'group-exit-confirmed' },
       startedAt: new Date(now).toISOString(), durationMs: 5, outputSha256: createHash('sha256').update(output).digest('hex') }],
     confinement: 'required', sourceUnchanged: true, worktreeRemoved: true,
   };
@@ -293,6 +293,14 @@ describe('executed command receipt completeness', () => {
   it.each([
     ['summary failed', (run: MaintainerRunEvidence) => { run.ok = false; }],
     ['tree mismatch', (run: MaintainerRunEvidence) => { run.treeSha = 'f'.repeat(40); }],
+    ['group receipt missing', (run: MaintainerRunEvidence) => { delete run.commands[0]!.result.processGroupSettlement; }],
+    ['group exit unconfirmed', (run: MaintainerRunEvidence) => { run.commands[0]!.result.processGroupSettlement = 'unconfirmed'; }],
+    ['command never started', (run: MaintainerRunEvidence) => { run.commands[0]!.result.processGroupSettlement = 'not-started'; }],
+    ['verification HOME retained', (run: MaintainerRunEvidence) => { run.commands[0]!.result.retainedVerificationHome = '/tmp/synthetic-retained'; }],
+    ['confinement root retained', (run: MaintainerRunEvidence) => { run.commands[0]!.result.retainedConfinementRoot = '/tmp/synthetic-retained'; }],
+    ['run resources retained', (run: MaintainerRunEvidence) => { run.cleanupRetention = {
+      reason: 'process-group-exit-unconfirmed', recovery: 'observe-group-absence-before-owned-cleanup', worktree: '/tmp/synthetic-retained',
+    }; }],
     ['cleanup failed', (run: MaintainerRunEvidence) => { run.worktreeRemoved = false; }],
     ['source changed', (run: MaintainerRunEvidence) => { run.sourceUnchanged = false; }],
     ['contract missing', (run: MaintainerRunEvidence) => { run.contractSha256 = ''; }],

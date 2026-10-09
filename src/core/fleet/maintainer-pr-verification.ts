@@ -55,6 +55,17 @@ export interface MaintainerRunEvidence {
   worktreeRemoved: boolean;
   cargoDependencies?: MaintainerCargoReceipt;
   dependenciesRemoved?: boolean;
+  /** Failed invocations retain owned trees until genuine group absence can be observed. */
+  cleanupRetention?: {
+    reason: 'process-group-exit-unconfirmed';
+    recovery: 'observe-group-absence-before-owned-cleanup';
+    worktree?: string;
+    dependencyRoot?: string;
+    confinementRoot?: string;
+    verificationHome?: string;
+    /** Diagnostic only: a numeric PGID never authorizes signalling or proves ownership. */
+    processGroupId?: number;
+  };
 }
 
 export interface MaintainerVerificationReceipt {
@@ -180,7 +191,7 @@ async function observe(repo: string, pr: number, actor: string, deps: Maintainer
 
 /** Independently check complete executed-command evidence; a summary `ok` is insufficient. */
 export function maintainerRunFailure(pins: MaintainerPrPins, run: MaintainerRunEvidence): string | null {
-  if (!run.ok || run.confinement !== 'required' || !run.sourceUnchanged || !run.worktreeRemoved) return 'verification failed, confinement was unavailable, or cleanup/source checks failed';
+  if (!run.ok || run.confinement !== 'required' || !run.sourceUnchanged || !run.worktreeRemoved || run.cleanupRetention) return 'verification failed, confinement was unavailable, or cleanup/source checks failed';
   for (const key of ['baseSha', 'headSha', 'treeSha', 'mergeBaseSha'] as const) {
     if (run[key] !== pins[key] || !SHA.test(run[key])) return `verification ${key} does not match the PR`;
   }
@@ -199,6 +210,7 @@ export function maintainerRunFailure(pins: MaintainerPrPins, run: MaintainerRunE
     const actual = run.commands[i]!;
     if (expected.cmd.length === 0 || maintainerEvidenceDigest(expected) !== maintainerEvidenceDigest(actual.command)) return 'executed command differs from the base contract';
     if (!actual.result.ok || actual.result.exitCode !== 0 || actual.result.timedOut || actual.result.cancelled) return 'a verification command failed or was interrupted';
+    if (actual.result.processGroupSettlement !== 'group-exit-confirmed' || actual.result.retainedVerificationHome || actual.result.retainedConfinementRoot) return 'verification process-group exit or temporary cleanup is unconfirmed';
     if (!Number.isFinite(actual.durationMs) || actual.durationMs < 0 || !Number.isFinite(Date.parse(actual.startedAt)) ||
         !DIGEST.test(actual.outputSha256) || actual.outputSha256 !== createHash('sha256').update(actual.result.output).digest('hex')) {
       return 'executed command output/timing evidence is invalid';
