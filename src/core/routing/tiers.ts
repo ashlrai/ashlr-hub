@@ -3,18 +3,19 @@
  *
  * Mason, 2026-09-27: Claude, Codex and Devin are all elite and all a
  * commodity — different models for different things, but none of them is the
- * house favourite. Local models are the most free. So resources are ranked by
- * TIER, never by provider:
+ * house favourite. The configured quality priors below originated in that
+ * preference; they are not measured performance. They affect ranking without
+ * restricting which providers can serve eligible roles:
  *
  *   elite  Claude Code, Codex (every account), Devin (cloud and CLI), and
- *          the local Qwen 3.8 27B (elite quality at no cost — Mason's call)
- *   fast   Grok, and Devin's SWE models (free on the Devin plan)
+ *          the local Qwen 3.8 27B (the operator's configured preference)
+ *   fast   Grok, and Devin's SWE models
  *   free   every other local model (Ollama / LM Studio / llama-server)
  *
  * A seat's tier is per MODEL: the same Devin CLI seat is elite on its default
- * model and fast on SWE, and a local seat is elite only while it runs Qwen
- * 3.8 27B. Cost basis is a separate axis — a tier says how strong, the cost
- * basis says what one more turn costs.
+ * model and fast on SWE, and the built-in local preference is elite for Qwen
+ * 3.8 27B. Tier is a ranking prior; cost basis is a separate billing category.
+ * Neither alone proves current model quality, price or funding eligibility.
  *
  * Inside a tier nothing here prefers one provider over another: the seat
  * router (router.ts) orders a tier by headroom, marginal cost and latency, and
@@ -46,9 +47,9 @@ export const TIER_LABELS: Readonly<Record<ResourceTier, string>> = Object.freeze
 
 /** One line per tier, for the drawer's group headings and tooltips. */
 export const TIER_BLURBS: Readonly<Record<ResourceTier, string>> = Object.freeze({
-  elite: 'Claude Code, Codex, Devin and local Qwen 3.8 27B — equal partners. Routing picks among them by fit, headroom, cost and latency.',
-  fast: 'Quick, cheap turns: Grok and Devin’s free SWE models.',
-  free: 'Other local models on this Mac — no usage, nothing leaves the machine; slower and not as strong.',
+  elite: 'Resources in the Elite routing tier. Eligible providers are equal partners; this grouping does not restrict Leader or Manager roles.',
+  fast: 'Resources in the Fast routing tier. This is a configured preference, not a measured speed or price.',
+  free: 'Local resources in this routing tier. Inference runs on this computer; connected tools can use network services.',
 });
 
 export type CostBasis = 'subscription' | 'credits' | 'per-token' | 'free';
@@ -83,13 +84,13 @@ export interface ModelTierSource {
 }
 
 /**
- * Devin's SWE family (`swe`, `swe-2`, `swe-1.5`, …) is included free on the
- * Devin plan and tuned for fast turns — the fast tier, not elite.
+ * Devin's SWE family uses the configured Fast prior. Native execution must
+ * separately qualify the selected model's current included funding boundary.
  */
 const DEVIN_FAST_MODEL_RE = /^swe(?:$|[-_.\d])/i;
 
 /**
- * Local models Mason counts as ELITE (2026-09-27): Qwen 3.8 27B — the house
+ * Local models configured as ELITE (2026-09-27): Qwen 3.8 27B — the house
  * default `qwen3.8:27b-ctx64k` and any other context build of it. Still free
  * and still local (cost basis `free`); it simply competes for elite work
  * instead of waiting behind it. Other local tags stay in the free tier.

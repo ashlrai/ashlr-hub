@@ -14,6 +14,7 @@ import {
   GROK_CONTEXT_SEAT,
   LOCAL_CONTEXT_SEAT,
   OPUS_55_REASON,
+  UNKNOWN_WINDOW_SEAT,
   UNREAD_SEAT,
 } from './seat-fixtures.test-support.js';
 import { NewChatDialog, normalizeChoice, requestContextMode, seatPreferredMode, type RunMutation } from './NewChatDialog.js';
@@ -305,25 +306,43 @@ describe('NewChatDialog — models the pinned CLI cannot run', () => {
 describe('NewChatDialog — context fit', () => {
   const boot = bootstrap();
 
+  it('distinguishes a large project inventory from a focused local chat', async () => {
+    queries.fetchContextFit.mockResolvedValue(fitOf(19_000_000));
+    const user = userEvent.setup(), onCreate = vi.fn();
+    const prompt = 'Read docs/RESOURCE-EVIDENCE.md and summarize it in three bullets.';
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={onCreate} />);
+    await screen.findByText(/Project inventory estimate: ~19M tokens/);
+    const local = screen.getByRole('option', { name: /qwen3\.8:27b-ctx64k/ });
+    expect(local).toBeEnabled();
+    await user.selectOptions(screen.getByLabelText('Seat and model'), encodeSeatChoice({ seatId: LOCAL_CONTEXT_SEAT.id, model: 'qwen3.8:27b-ctx64k' }));
+    expect(screen.getByText(/A focused task can still use this model by reading relevant files as needed/)).toBeInTheDocument();
+    expect(screen.getByText(/not the prompt or current chat context/)).toBeInTheDocument();
+    expect(screen.queryByText(/Split the work|code too big/)).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText('What would you like to work on?'), prompt);
+    expect(screen.getByRole('button', { name: 'Start chat' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Start chat' }));
+    expect(onCreate).toHaveBeenCalledExactlyOnceWith({projectPath:'/Users/mason/dev/hub',seatId:LOCAL_CONTEXT_SEAT.id,model:'qwen3.8:27b-ctx64k'},prompt,{automatic:false});
+  });
+
   it('sizes the chosen folder and gives every model a verdict, explaining the chosen one', async () => {
     queries.fetchContextFit.mockResolvedValue(fitOf(300_000));
     const user = userEvent.setup();
     render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
-    expect(await screen.findByText('Tight fit')).toBeInTheDocument();
+    expect(await screen.findByText('Tight inventory estimate')).toBeInTheDocument();
     expect(queries.fetchContextFit).toHaveBeenCalledWith({ projectPath: '/Users/mason/dev/hub' });
-    expect(screen.getByText(/~300k tokens of tracked code fits under the ≈370k compaction point/)).toBeInTheDocument();
+    expect(screen.getByText(/~300k tokens\. Reading it all at once would fit under the ≈370k compaction point/)).toBeInTheDocument();
     expect(screen.getByText(/bytes ÷ 4/)).toBeInTheDocument();
     // Every row carries its own verdict.
-    expect(screen.getByRole('option', { name: /GPT-6 Astra .* · code needs expansive/ })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /qwen3\.8:27b-ctx64k .* · code too big — split/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /GPT-6 Astra .* · project estimate needs expansive/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /qwen3\.8:27b-ctx64k .* · project estimate exceeds context/ })).toBeInTheDocument();
 
     await user.selectOptions(screen.getByLabelText('Seat and model'), encodeSeatChoice({ seatId: LOCAL_CONTEXT_SEAT.id, model: 'qwen3.8:27b-ctx64k' }));
-    expect(screen.getByText('Split the work')).toBeInTheDocument();
-    expect(screen.getByText(/fan it out across several chats, each scoped to one folder or subsystem/)).toBeInTheDocument();
+    expect(screen.getByText('Larger than one context')).toBeInTheDocument();
+    expect(screen.getByText(/A focused task can still use this model by reading relevant files as needed/)).toBeInTheDocument();
 
     await user.selectOptions(screen.getByLabelText('Seat and model'), encodeSeatChoice({ seatId: 'codex-b', model: 'gpt-6-astra' }));
-    expect(screen.getByText('Needs expansive')).toBeInTheDocument();
-    expect(screen.getByText(/Switch to Expansive, or narrow the folders/)).toBeInTheDocument();
+    expect(screen.getByText('Inventory estimate: Expansive')).toBeInTheDocument();
+    expect(screen.getByText(/A focused task can read only relevant files/)).toBeInTheDocument();
     // Suggests — never switches.
     expect(screen.getByRole('radio', { name: 'Standard', checked: true })).toBeInTheDocument();
   });
@@ -332,18 +351,30 @@ describe('NewChatDialog — context fit', () => {
     queries.fetchContextFit.mockResolvedValue(fitOf(300_000));
     const user = userEvent.setup();
     render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
-    expect(await screen.findByText('Tight fit')).toBeInTheDocument();
-    expect(screen.getByText(/Expansive \(≈970k\) would hold it with room to spare/)).toBeInTheDocument();
+    expect(await screen.findByText('Tight inventory estimate')).toBeInTheDocument();
+    expect(screen.getByText(/Expansive \(≈970k\) would leave more room/)).toBeInTheDocument();
     await user.click(screen.getByRole('radio', { name: 'Expansive' }));
-    expect(screen.getByText('Fits')).toBeInTheDocument();
-    expect(screen.getByText(/fits well inside this model's Expansive budget \(compacts ≈970k\)/)).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /Fable 5\.1 · 1M ctx · compacts ≈970k \(expansive\) · code fits$/ })).toBeInTheDocument();
+    expect(screen.getByText('Project estimate fits')).toBeInTheDocument();
+    expect(screen.getByText(/fit well inside this model's Expansive budget \(compacts ≈970k\)/)).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Fable 5\.1 · 1M ctx · compacts ≈970k \(expansive\) · project estimate fits$/ })).toBeInTheDocument();
   });
 
   it('marks a truncated scan as a floor', async () => {
     queries.fetchContextFit.mockResolvedValue(fitOf(100_000, true));
     render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
-    expect(await screen.findByText(/All at least ~100k tokens of tracked code fits/)).toBeInTheDocument();
+    expect(await screen.findByText(/Project inventory estimate: at least ~100k tokens/)).toBeInTheDocument();
+    expect(screen.getByText(/Reading the scanned files at once would fit/)).toBeInTheDocument();
+    expect(screen.getByText(/The scan is partial; the whole-project fit is unconfirmed/)).toBeInTheDocument();
+    expect(screen.queryByText(/Reading it all at once would fit/)).not.toBeInTheDocument();
+  });
+
+  it('keeps partial inventory and unknown model context distinct', async () => {
+    queries.fetchContextFit.mockResolvedValue(fitOf(19_000_000, true));
+    render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={[UNKNOWN_WINDOW_SEAT]} onCreate={() => {}} />);
+    expect(await screen.findByText(/Project inventory estimate: at least ~19M tokens\. This model’s budget is unknown, so no fit is claimed/)).toBeInTheDocument();
+    expect(screen.getByText(/This estimate is not the prompt or current chat context/)).toBeInTheDocument();
+    expect(screen.getByRole('option', {name:/window unknown/})).toBeEnabled();
+    expect(screen.queryByText('Larger than one context')).not.toBeInTheDocument();
   });
 
   it('sizes a saved project by its id', async () => {
@@ -377,7 +408,7 @@ describe('NewChatDialog — context fit', () => {
     queries.fetchContextFit.mockRejectedValue(new ApiError('GET failed (HTTP 400).', 400, '/api/verse/context-fit', 'projectPath is not a directory'));
     render(<NewChatDialog initialManual open onClose={() => {}} projects={boot.projects} seats={V39_SEATS} onCreate={() => {}} />);
     expect(await screen.findByText('Could not size the chosen folders: projectPath is not a directory')).toBeInTheDocument();
-    expect(screen.queryByRole('option', { name: /code fits/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /project estimate fits/ })).not.toBeInTheDocument();
   });
 });
 

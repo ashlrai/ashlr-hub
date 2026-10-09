@@ -1,4 +1,8 @@
 import { assertSelectedOutcomeAdmission, selectedOutcomeAdmissionCurrent, SelectedOutcomeAdmissionRefusal } from './outcome-admission.js';
+import { observeRoleAccount, roleAccountEpoch, nativeLaunchEpoch } from './role-account.js';
+import { resolveNativeSeatLaunch, type NativeSeatLaunch } from '../resources/native-profile.js';
+import { resolveAccountsRoot } from '../verse/seats.js';
+import { assertHostNativeAccountContext } from '../integrations/locus-job-env.js';
 import { devinCliBindingCurrent, refreshDevinCliExecutionBinding, type DevinCliExecutionBinding } from '../devin/cli-admission.js';
 /**
  * sandboxed-engine.ts — M45: run an external agent CLI (Claude Code / Codex)
@@ -258,6 +262,8 @@ export interface RunEngineSandboxedOptions {
   onSelectedDevinSpawn?: (model: string, binding: DevinCliExecutionBinding) => void;
   /** Host-only exact selected Claude account/authority fence; never model input. */
   selectedClaudeAdmission?: () => boolean;
+  /** Original routed Codex principal plus current host admission; never model input. */
+  selectedCodexAccount?: import('../types.js').RunOptions['selectedCodexAccount'];
   /** Source-owned API grant/ledger authority, never populated from CLI or HTTP JSON. */
   claudeApiGrantBinding?: ClaudeApiExecutionBinding;
   /** Caller-owned current outcome revision, ignored for immutable signed shadows. */
@@ -1475,11 +1481,11 @@ class ProducerAuthority {
   }
 
   /** Release everything, execution lease last. Idempotent. */
-  releaseAll(): void {
+  releaseAll(retainExecutionLease = false): void {
     this.releaseFence();
     this.captureLease?.release();
     this.captureLease = null;
-    this.lease?.release();
+    if (!retainExecutionLease) this.lease?.release();
   }
 }
 
@@ -1931,6 +1937,7 @@ export async function runEngineSandboxed(
   // `finally`; this outer one covers a throw between registering the lease and
   // entering that block, so a thrown run can never leave kill "not quiesced".
   let registeredExecutionLease: ExecutionLease | null = null;
+  let retainExecutionLease = false;
   try {
   const runCreatedAtIso = new Date().toISOString();
   const recordSandboxedRunAgentAction = opts.deferTerminalAction
@@ -2233,6 +2240,38 @@ export async function runEngineSandboxed(
   const engineKey: string = engine;
   const selectedStandingGrok = engineKey === GROK_CLI_ENGINE_ID && opts.seatId !== undefined && opts.selectedGrokAdmission !== undefined;
   const selectedStandingClaude = ['claude','claude-cli'].includes(engineKey) && opts.seatId !== undefined && opts.selectedClaudeAdmission !== undefined;
+  const selectedStandingCodex = engineKey === 'codex' && opts.seatId !== undefined;
+  let codexCaptureDenied = false;
+  let selectedCodexLaunch: NativeSeatLaunch | null = null;
+  let selectedCodexLaunchEpoch: string | null = null;
+  let selectedCodexAccountEpoch: string | null = null;
+  let selectedCodexIdentityStillCurrent: (() => boolean) | null = null;
+  let selectedCodexSpawns = 0;
+  const selectedCodexLaunchCurrent = (): boolean => {
+    try {
+      if (runCancelled() || !selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission) ||
+          !selectedCodexLaunch || !opts.selectedCodexAccount || !opts.selectedCodexAccount.admitted()) return false;
+      const fresh = resolveNativeSeatLaunch({accountsRoot:resolveAccountsRoot(cfg),provider:'codex',seatId:opts.seatId});
+      return fresh.ok && nativeLaunchEpoch(fresh.launch) === selectedCodexLaunchEpoch &&
+        (selectedCodexIdentityStillCurrent === null || selectedCodexIdentityStillCurrent());
+    } catch { return false; }
+  };
+  const selectedCodexCurrent = (spawn: AutonomousSpawn | null): boolean => selectedCodexLaunchCurrent() &&
+    selectedCodexAccountEpoch !== null && roleAccountEpoch(cfg,selectedCodexLaunch!,opts.selectedCodexAccount!.accountHint) === selectedCodexAccountEpoch &&
+    spawn !== null && autonomousVendorIdentityCurrent(spawn.overlay);
+  const observeSelectedCodex = async (): Promise<boolean> => {
+    if (!selectedCodexLaunchCurrent()) return false;
+    const account = await observeRoleAccount({cfg,launch:selectedCodexLaunch!,accountHint:opts.selectedCodexAccount!.accountHint,
+      cwd:sb.worktreePath,signal:opts.signal!,admitted:selectedCodexLaunchCurrent});
+    if (account.uncertain) {
+      // Metadata descendants are not proven stopped: retain the existing
+      // drain lease as well as files, rather than reporting false quiescence.
+      retainExecutionLease = true;
+      sandboxRetention = retainedSandboxEvidence(sb);
+    }
+    selectedCodexAccountEpoch = account.epoch;
+    return account.epoch !== null && selectedCodexLaunchCurrent();
+  };
   const claudeEvidence = async (finished: import('../sandbox/autonomous-run.js').AutonomousSpawnFinish): Promise<void> => {
     if (finished.violations.length) await recordAutonomousViolations({engine,sourceRepo:opts.sourceRepo,runId:id,operations:finished.violations});
     if (finished.violationsKnown !== true) await recordSandboxEvidenceUnknown({engine,sourceRepo:opts.sourceRepo,runId:id,evidence:finished.kernelEvidence});
@@ -2283,7 +2322,7 @@ export async function runEngineSandboxed(
   const goalWithContext = `${renderDelegationScopeForPrompt(delegationScope)}${contextPrefix ? contextPrefix + goal : goal}`;
 
   try {
-    if ((selectedStandingGrok || selectedStandingClaude) && !autonomousRun) {
+    if ((selectedStandingGrok || selectedStandingClaude || selectedStandingCodex) && !autonomousRun) {
       const outcome = proposalOutcome('sandbox-unavailable','selected native standing authority no longer supports autonomous confinement');
       recordSandboxedRunAgentAction({engine,engineModel,tier,runId:id,sourceRepo:opts.sourceRepo,
         workItemId:opts.workItemId,workSource:opts.workSource,outcome,status:'failed',actionCounts});
@@ -2408,8 +2447,9 @@ export async function runEngineSandboxed(
           outcome: proposalOutcomeResult, status: 'failed', actionCounts,
         });
         return {
-          state: withProposalOutcome(mk({ status: 'failed', result: proposalOutcomeResult.reason }), proposalOutcomeResult, actionCounts),
+          state: withSandboxRetention(withProposalOutcome(mk({ status: 'failed', result: proposalOutcomeResult.reason }), proposalOutcomeResult, actionCounts),sandboxRetention),
           proposalOutcome: proposalOutcomeResult,
+          ...(sandboxRetention ? {sandboxRetention} : {}),
         };
       };
       // Claude producer contact requires the source-owned native adapter.
@@ -2429,9 +2469,22 @@ export async function runEngineSandboxed(
         if (!selectedDevinCurrent()) return refuse('engine-unsupported', 'the selected Devin native principal, executable or current free-model pricing is unconfirmed; no paid fallback is allowed');
         cmd = { ...cmd, bin:selectedDevinBinding!.executable };
       }
+      if (selectedStandingCodex) {
+        try {
+          assertHostNativeAccountContext();
+          if (!opts.selectedCodexAccount || !/^[a-f0-9]{64}$/.test(opts.selectedCodexAccount.accountHint))
+            return refuse('engine-unsupported','the selected Codex original account allowance is unbound');
+          const found = resolveNativeSeatLaunch({accountsRoot:resolveAccountsRoot(cfg),provider:'codex',seatId:opts.seatId});
+          if (!found.ok) return refuse('engine-unsupported','the selected Codex pinned native profile is unavailable');
+          selectedCodexLaunch = found.launch;
+          selectedCodexLaunchEpoch = nativeLaunchEpoch(found.launch);
+          if (!await observeSelectedCodex()) return refuse('engine-unsupported','the selected Codex native account observation is unavailable or changed');
+          cmd = {...cmd,bin:found.launch.executable};
+        } catch { return refuse('engine-unsupported','the selected Codex native launch cannot be qualified'); }
+      }
       if (!selectedStandingClaude) {
       let seatId: string | null = opts.seatId ?? null;
-      let nativeStatePath: string | null = null;
+      let nativeStatePath: string | null = selectedCodexLaunch?.nativeStatePath ?? null;
       if (engineKey === GROK_CLI_ENGINE_ID) {
         const direct = grokCliDirectCommand(cmd, cfg, opts.seatId);
         if (!direct) return refuse('engine-command-missing', 'grok-cli seat launcher did not resolve for a direct autonomous exec');
@@ -2457,6 +2510,10 @@ export async function runEngineSandboxed(
         return refuse('sandbox-unavailable', `autonomous confinement unavailable: ${err instanceof Error ? err.message : String(err)}`);
       }
       if (selectedGrokCommand) selectedGrokIdentityStillCurrent = captureAutonomousVendorIdentityCheck(autonomousSpawn.overlay);
+      if (selectedCodexLaunch) {
+        selectedCodexIdentityStillCurrent = captureAutonomousVendorIdentityCheck(autonomousSpawn.overlay);
+        if (!selectedCodexCurrent(autonomousSpawn)) return refuse('engine-unsupported','the selected Codex account or launch changed during sandbox setup');
+      }
       if (selectedDevinBinding && !selectedDevinCurrent()) return refuse('engine-unsupported', 'the selected Devin native identity changed during sandbox setup');
       cmd = { ...cmd, bin: autonomousSpawn.bin };
       spawnEnv = autonomousSpawn.env;
@@ -2538,6 +2595,10 @@ export async function runEngineSandboxed(
         res = { ok:false, output:'', error:'selected Devin native identity or free-pricing evidence changed before execution', terminationReason:'error-exit' };
         break;
       }
+      if (selectedCodexLaunch && !selectedCodexCurrent(autonomousSpawn)) {
+        res = {ok:false,output:'',error:'selected Codex account or launch changed before execution',terminationReason:'error-exit'};
+        break;
+      }
       if (selectedGrokCommand) {
         const admitted = selectedAdmissionCurrent();
         const fresh = admitted ? grokCliDirectCommand(selectedGrokCommand.launcher, cfg, opts.seatId) : null;
@@ -2552,13 +2613,15 @@ export async function runEngineSandboxed(
       incrementRunActionCount(actionCounts, 'spawnAttempts');
       const _spawnStart = Date.now();
       const devinSpawnsBefore = selectedDevinSpawns;
+      const codexSpawnsBefore = selectedCodexSpawns;
       res = selectedStandingClaude
         ? await runSelectedClaude(goalWithContext,cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,observeEngineEvent)
         : await spawnEngine(cmd, spawnCfg, {
-        ...(selectedDevinBinding ? { selectedOutcomeAdmission:() => selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission) && selectedDevinCurrent() }
+        ...(selectedCodexLaunch ? {nativeEngine:'codex' as const,selectedOutcomeAdmission:() => selectedCodexCurrent(autonomousSpawn)}
+          : selectedDevinBinding ? { selectedOutcomeAdmission:() => selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission) && selectedDevinCurrent() }
           : opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
         env: spawnEnv,
-        ...(selectedDevinBinding ? { onSpawn: notifySelectedDevinSpawn } : {}),
+        ...(selectedCodexLaunch ? {onSpawn:() => {selectedCodexSpawns++;}} : selectedDevinBinding ? { onSpawn: notifySelectedDevinSpawn } : {}),
         timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         launcher: launcher ?? undefined,
         ...(opts.signal ? { signal: opts.signal } : {}),
@@ -2583,7 +2646,8 @@ export async function runEngineSandboxed(
         const grokUsage = grokStreamUsage(res.output);
         if (grokUsage) res = { ...res, usage: grokUsage };
       }
-      const invocationCount = selectedDevinBinding ? selectedDevinSpawns - devinSpawnsBefore
+      const invocationCount = selectedCodexLaunch ? selectedCodexSpawns - codexSpawnsBefore
+        : selectedDevinBinding ? selectedDevinSpawns - devinSpawnsBefore
         : selectedStandingClaude && res.providerContacted !== true ? 0 : 1 + (res.configRecoveryAttempts ?? 0);
       if (res.configRecoveryAttempts) {
         incrementRunActionCount(actionCounts, 'spawnAttempts', res.configRecoveryAttempts);
@@ -2944,6 +3008,26 @@ export async function runEngineSandboxed(
                   });
                   if (!builtRepairCmd) return null;
                   let repairSpawn: AutonomousSpawn | null = null;
+                  if (selectedCodexLaunch) {
+                    if (!await observeSelectedCodex()) { codexCaptureDenied = true; return null; }
+                    try {
+                      repairSpawn = prepareAutonomousSpawn({engine,worktree:sb.worktreePath,baseEnv:env,
+                        bin:selectedCodexLaunch.executable,seatId:selectedCodexLaunch.seatId,nativeStatePath:selectedCodexLaunch.nativeStatePath,
+                        extraReadOnly:[hooksDir],profile:confinementProfile});
+                    } catch { codexCaptureDenied = true; return null; }
+                    if (!selectedCodexCurrent(repairSpawn)) {
+                      const finished = finishAutonomousSpawn(repairSpawn,{output:''});
+                      if (finished.violations.length) await recordAutonomousViolations({ engine, sourceRepo:opts.sourceRepo, runId:id, operations:finished.violations });
+                      // A refused repair still owns a prepared spawn: unknown
+                      // kernel evidence must hold the rollout, never count as clean.
+                      if (finished.violationsKnown !== true) {
+                        await recordSandboxEvidenceUnknown({ engine, sourceRepo: opts.sourceRepo, runId: id, evidence: finished.kernelEvidence });
+                      }
+                      codexCaptureDenied = true;
+                      return null;
+                    }
+                    builtRepairCmd = {...builtRepairCmd,bin:repairSpawn.bin};
+                  }
                   if (selectedDevinBinding) {
                     if (!selectedDevinCurrent()) return null;
                     try {
@@ -2998,15 +3082,17 @@ export async function runEngineSandboxed(
                   incrementRunActionCount(actionCounts, 'spawnAttempts');
                   let r: SpawnEngineResult | null = null;
                   const devinSpawnsBefore = selectedDevinSpawns;
+                  const codexSpawnsBefore = selectedCodexSpawns;
                   try {
                     r = selectedStandingClaude
                       ? await runSelectedClaude(repairGoal,_v2g.perRunTimeoutMs ?? 180_000,observeEngineEvent)
                       : await spawnEngine(repairCmd, cfg, {
-                      ...(selectedDevinBinding ? { selectedOutcomeAdmission:() => selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission) &&
+                      ...(selectedCodexLaunch ? {nativeEngine:'codex' as const,selectedOutcomeAdmission:() => selectedCodexCurrent(repairSpawn)}
+                        : selectedDevinBinding ? { selectedOutcomeAdmission:() => selectedOutcomeAdmissionCurrent(opts.selectedOutcomeAdmission) &&
                         repairSpawn !== null && selectedDevinCurrent(repairSpawn) }
                         : opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
                       env:repairSpawn?.env ?? env,
-                      ...(selectedDevinBinding ? { onSpawn: notifySelectedDevinSpawn } : {}),
+                      ...(selectedCodexLaunch ? {onSpawn:() => {selectedCodexSpawns++;}} : selectedDevinBinding ? { onSpawn: notifySelectedDevinSpawn } : {}),
                       timeoutMs:_v2g.perRunTimeoutMs ?? 180_000,
                       onEvent: observeEngineEvent,
                       launcher:repairSpawn?.launcher ?? launcher ?? undefined,
@@ -3028,7 +3114,8 @@ export async function runEngineSandboxed(
                     const reported = grokStreamUsage(r.output);
                     if (reported) r = {...r,usage:reported};
                   }
-                  const invocationCount = selectedDevinBinding ? selectedDevinSpawns - devinSpawnsBefore
+                  const invocationCount = selectedCodexLaunch ? selectedCodexSpawns - codexSpawnsBefore
+                    : selectedDevinBinding ? selectedDevinSpawns - devinSpawnsBefore
                     : selectedStandingClaude && r.providerContacted !== true ? 0 : 1 + (r.configRecoveryAttempts ?? 0);
                   if (r.configRecoveryAttempts) {
                     incrementRunActionCount(actionCounts, 'spawnAttempts', r.configRecoveryAttempts);
@@ -3046,6 +3133,13 @@ export async function runEngineSandboxed(
                   return { ok: r.ok };
                 },
               });
+              if (codexCaptureDenied) {
+                const outcome = proposalOutcome('sandbox-unavailable','Native Codex repair account or launch evidence unavailable');
+                recordSandboxedRunAgentAction({engine,engineModel,tier,runId:id,sourceRepo:opts.sourceRepo,
+                  workItemId:opts.workItemId,workSource:opts.workSource,outcome,status:'failed',usage,durationMs:_spawnDurationMs,actionCounts});
+                return {state:withSandboxRetention(withProposalOutcome(mk({status:'failed',result:outcome.reason,usage}),outcome,actionCounts),sandboxRetention),
+                  proposalOutcome:outcome,...(sandboxRetention ? {sandboxRetention} : {})};
+              }
               if (claudeCaptureDenied) {
                 const outcome=proposalOutcome('sandbox-unavailable','Native Claude repair admission or confinement evidence unavailable');
                 recordSandboxedRunAgentAction({engine,engineModel,tier,runId:id,sourceRepo:opts.sourceRepo,
@@ -3333,11 +3427,11 @@ export async function runEngineSandboxed(
     if (createdHere && !sandboxRetention) await authority.cleanupSandbox(sb);
     // Fence, repo lease, then the execution lease — last, because kill /
     // unenroll drain waits for exactly that.
-    authority.releaseAll();
+    authority.releaseAll(retainExecutionLease);
   }
   } finally {
     endStreamSink(streamSink);
-    registeredExecutionLease?.release();
+    if (!retainExecutionLease) registeredExecutionLease?.release();
   }
 }
 

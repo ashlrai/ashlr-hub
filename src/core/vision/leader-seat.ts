@@ -3,6 +3,7 @@
  * each account retains one shared allowance. Native completion contacts enter
  * the same account-bound, Stop-aware execution lifecycle as native workers.
  * Missing authority, billing or model evidence remains a specific hold. */
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,7 +18,8 @@ import type { SeatCapacity } from '../routing/headroom.js';
 import { seatTier, tierRank } from '../routing/tiers.js';
 import { tierPreference } from '../routing/router.js';
 import type { NativeRoleEngine, RoleCompletionMetrics } from '../run/role-completion.js';
-import type { LocalLeaderBinding } from './local-leader-transport.js';
+import type { AgentActionEvent } from '../fleet/agent-action-ledger.js';
+import type { LocalLeaderCompletionMetrics, LocalLeaderBinding } from './local-leader-transport.js';
 import { subscriptionOnlyCurrent } from '../routing/subscription-only.js';
 import { peekDevinCliExecutionBinding, refreshDevinCliExecutionBinding } from '../devin/cli-admission.js';
 import type { EffectivePolicy } from '../authority/types.js';
@@ -25,7 +27,7 @@ import type { VerseSeat } from '../verse/types.js';
 import type { LeaderRunMode, LeaderSeatAttempt } from './leader-types.js';
 import { leaderCallBudget, type LeaderCallBudget } from './leader-seat-plan.js';
 
-export type LeaderComplete = (system: string, user: string) => Promise<string>;
+export type LeaderComplete = (system: string, user: string, signal?: AbortSignal) => Promise<string>;
 export type LeaderSeatEngine = 'claude' | 'codex' | 'grok' | 'devin' | 'local';
 
 export interface LeaderSeatChoice {
@@ -71,7 +73,7 @@ export type LeaderCallOptions = Partial<LeaderCallBudget>;
 
 export interface LeaderTransports {
   local(baseUrl: string, model: string, opts?: LeaderCallOptions): LeaderComplete;
-  llama?(binding: LocalLeaderBinding, opts?: LeaderCallOptions): LeaderComplete;
+  llama?(binding: LocalLeaderBinding, opts?: LeaderCallOptions, invocation?: { seatId: string }): LeaderComplete;
   grok(launcher: readonly string[], model: string, opts?: LeaderCallOptions): LeaderComplete;
   claude(launcher: readonly string[], model: string, credential: LeaderClaudeCredential, opts?: LeaderCallOptions): LeaderComplete;
   /** Host-issued account-bound dispatcher; absent older builds retain only their qualified legacy transports. */
@@ -92,8 +94,8 @@ export interface LeaderSeatDeps {
   recordDecision(req: RoutingRequest, decision: SeatDecision): void;
   transports: LeaderTransports;
   /**
-   * The judges' restricted-Claude credential hook. Absent / null ⇒ Claude is
-   * not a Leader candidate (the weekly deep run falls to grok or local): a
+   * The legacy judges' restricted-Claude credential hook. Without a native
+   * dispatcher, absent / null excludes the legacy Claude candidate: a
    * Claude call whose credential path cannot be vouched for would otherwise
    * run on whatever login the launcher finds.
    */
@@ -267,7 +269,7 @@ function buildSeat(deps: LeaderSeatDeps, chosen: LeaderSeatCandidate, opts: { mo
       if (!binding || binding.model !== model || binding.contextWindow !== chosen.seat.contextWindow || !deps.transports.llama) {
         return { ok: false, reason: 'The selected local model has no current llama-server model and context binding.' };
       }
-      complete = deps.transports.llama(binding, budget);
+      complete = deps.transports.llama(binding, budget, { seatId: chosen.seat.id });
     } else {
       if (!chosen.ollamaBaseUrl) return { ok: false, reason: 'The local seat has no endpoint.' };
       complete = deps.transports.local(chosen.ollamaBaseUrl, model, budget);
@@ -601,19 +603,41 @@ export function claudeLeaderCommand(launcher: readonly string[], model: string, 
 const LEADER_CLI_TIMEOUT_MS = 10 * 60_000;
 const GROK_CLI_ENGINE = 'grok-cli';
 
+/** Metadata from a settled exact local role invocation, never a quota reading. */
+export function localLeaderCompletionEvent(metrics: Readonly<LocalLeaderCompletionMetrics>, seatId?: string): AgentActionEvent {
+  return { schemaVersion: 1, ts: metrics.finishedAt, actor: 'agent', kind: 'reflection',
+    outcome: metrics.outcome === 'completed' ? 'ok' : metrics.outcome, action: 'role:completion',
+    summary: `leader completion ${metrics.outcome}.`, runId: metrics.runId, model: metrics.model,
+    backend: 'llama-server', ...(metrics.elapsedMs === null ? {} : { durationMs: metrics.elapsedMs }),
+    tags: ['trace:local-leader-completion-v1', 'role:leader', `runtime-binding:${metrics.bindingHint}`,
+      ...(seatId === undefined ? [] : [`seat-hint:${createHash('sha256').update(seatId).digest('hex')}`])],
+    counts: { inferenceRequests: metrics.inferenceRequestStarted ? 1 : 0, contextWindowTokens: metrics.contextWindow,
+      ...(metrics.tokensIn === null || metrics.tokensOut === null ? {} : { tokensIn: metrics.tokensIn, tokensOut: metrics.tokensOut }) } };
+}
+
 export function defaultLeaderTransports(cfg: AshlrConfig): LeaderTransports {
   return {
-    llama: (binding, opts) => async (system, user) => {
-      const { llamaLeaderTransport } = await import('./local-leader-transport.js');
-      return llamaLeaderTransport(binding, cfg, opts)(system, user);
+    llama: (binding, opts, invocation) => {
+      const seatId = invocation?.seatId;
+      const selectedBinding = Object.freeze({ ...binding });
+      return async (system, user, signal) => {
+        signal?.throwIfAborted();
+        const { llamaLeaderTransport } = await import('./local-leader-transport.js');
+        signal?.throwIfAborted();
+        return llamaLeaderTransport(selectedBinding, cfg, opts, undefined, metrics => {
+          // Capture the event before lazy publication; import latency must not renew its time or identity.
+          const event = localLeaderCompletionEvent(metrics, seatId);
+          void import('../fleet/agent-action-ledger.js').then(({ recordAgentAction }) => recordAgentAction(event)).catch(() => {});
+        })(system, user, signal);
+      };
     },
-    native: (seatId,engine,model,admitted,opts) => async(system,user) => {
+    native: (seatId,engine,model,admitted,opts) => async(system,user,signal) => {
       const {nativeRoleCompletion}=await import('../run/role-completion.js');
       const {readCapacitySnapshot}=await import('../routing/budget-store.js');
       const accountHint=readCapacitySnapshot()?.seats.find(row=>row.seatId === seatId)?.accountHint ?? undefined;
       const sameAccount=()=>admitted() && (engine === 'devin' || accountHint !== undefined &&
         readCapacitySnapshot()?.seats.find(row=>row.seatId === seatId)?.accountHint === accountHint);
-      return nativeRoleCompletion({cfg,role:'leader',seatId,engine,model,accountHint,admitted:sameAccount,timeoutMs:opts.timeoutMs ?? LEADER_CLI_TIMEOUT_MS},
+      return nativeRoleCompletion({cfg,role:'leader',seatId,engine,model,accountHint,admitted:sameAccount,timeoutMs:opts.timeoutMs ?? LEADER_CLI_TIMEOUT_MS,...(signal ? {signal} : {})},
         (metrics:RoleCompletionMetrics)=>{
           void import('../fleet/agent-action-ledger.js').then(({recordAgentAction})=>recordAgentAction({schemaVersion:1,ts:new Date().toISOString(),
             actor:'agent',kind:'reflection',outcome:metrics.outcome === 'completed' ? 'ok' : metrics.outcome,action:'role:completion',

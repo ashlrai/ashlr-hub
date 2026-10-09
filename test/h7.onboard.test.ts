@@ -22,6 +22,8 @@
  *    { dryRun: true } and NEVER with { dryRun: false } (no live daemon).
  *  - vi.mock('../src/core/readiness.js') replaces `buildReadiness` so we drive
  *    ready vs. blocked deterministically with NO live probeEndpoint.
+ *  - The optional Stack advisory is injected as unavailable; its own detection
+ *    and status behavior are covered in m69/m71, without ambient CLI calls here.
  *  - The exported `_internals.confirm` seam is overridden so we control the TTY
  *    confirm without a real terminal (a direct module-internal call to the
  *    exported promptConfirm cannot be spied across the ESM boundary).
@@ -38,7 +40,10 @@ import { makeFixture, seedBacklog, type H1Fixture } from './helpers/h1-fixture.j
 // tick: records its opts + returns a fixed dry-run-shaped tick so
 // renderDryRunPlan gets an authoritative itemsConsidered without a live daemon.
 // buildReadiness: deterministic ready/blocked, no live probeEndpoint.
-const { tickSpy, readinessSpy } = vi.hoisted(() => ({
+const { stackInstalledSpy, stackStatusSpy, stackProjectConfiguredSpy, tickSpy, readinessSpy } = vi.hoisted(() => ({
+  stackInstalledSpy: vi.fn(() => false),
+  stackStatusSpy: vi.fn(() => ({ ok: false, detail: 'stack not installed' })),
+  stackProjectConfiguredSpy: vi.fn(() => false),
   tickSpy: vi.fn(async (_cfg: unknown, opts: { dryRun: boolean }) => ({
     ts: new Date().toISOString(),
     itemsConsidered: opts.dryRun ? 2 : 0,
@@ -47,6 +52,11 @@ const { tickSpy, readinessSpy } = vi.hoisted(() => ({
     reason: 'dry-run',
   })),
   readinessSpy: vi.fn(),
+}));
+vi.mock('../src/core/integrations/stack.js', () => ({
+  stackInstalled: stackInstalledSpy,
+  stackStatus: stackStatusSpy,
+  stackProjectConfigured: stackProjectConfiguredSpy,
 }));
 vi.mock('../src/core/daemon/loop.js', () => ({ tick: tickSpy }));
 vi.mock('../src/core/readiness.js', () => ({ buildReadiness: readinessSpy }));
@@ -107,6 +117,9 @@ beforeEach(() => {
   createProposalSpy = vi.spyOn(inboxStore, 'createProposal');
   tickSpy.mockClear();
   readinessSpy.mockReset();
+  stackInstalledSpy.mockReset().mockReturnValue(false);
+  stackStatusSpy.mockReset().mockReturnValue({ ok: false, detail: 'stack not installed' });
+  stackProjectConfiguredSpy.mockReset().mockReturnValue(false);
 });
 
 afterEach(() => {
@@ -131,6 +144,8 @@ describe('h7 onboard — guided first-activation walkthrough', () => {
     // No prompt, no dry-run, no live daemon.
     expect(confirmSpy).not.toHaveBeenCalled();
     expect(tickSpy).not.toHaveBeenCalled();
+    expect(stackInstalledSpy).toHaveBeenCalled();
+    expect(stackStatusSpy).not.toHaveBeenCalled();
     // Printed the numbered activation steps + the inbox pointer.
     const out = logged();
     expect(out).toContain('ashlr preflight');

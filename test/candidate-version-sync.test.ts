@@ -10,6 +10,8 @@ const paths = [
   'package.json', 'package-lock.json', 'desktop/package.json',
   'desktop/src-tauri/tauri.conf.json', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/Cargo.lock',
   'CHANGELOG.md', '.github/workflows/release.yml',
+  'desktop/README.md',
+  'README.md', 'docs/QUICKSTART.md',
 ];
 const read = (root: string, path: string) => readFileSync(join(root, path), 'utf8');
 const json = (root: string, path: string) => JSON.parse(read(root, path));
@@ -18,6 +20,7 @@ function fixture() {
   roots.push(root);
   mkdirSync(join(root, 'desktop/src-tauri'), { recursive: true });
   mkdirSync(join(root, '.github/workflows'), { recursive: true });
+  mkdirSync(join(root, 'docs'), { recursive: true });
   const putJson = (path: string, value: unknown) => writeFileSync(join(root, path), `${JSON.stringify(value, null, 2)}\n`);
   putJson('package.json', { name: '@ashlr/phantom', version: '3.27.0', dependencies: { unrelated: '3.27.0' } });
   putJson('package-lock.json', { name: '@ashlr/phantom', version: '3.27.0', lockfileVersion: 3, packages: {
@@ -33,6 +36,8 @@ function fixture() {
   writeFileSync(join(root, 'desktop/src-tauri/Cargo.lock'), '# Locked dependencies\nversion = 4\n\n[[package]]\nname = "unrelated"\nversion = "3.27.0"\nchecksum = "preserve-me"\n\n[[package]]\nname = "ashlr-desktop"\nversion = "3.27.0"\ndependencies = ["unrelated"]\n');
   writeFileSync(join(root, 'CHANGELOG.md'), '## [3.27.0] — historical published release\n');
   writeFileSync(join(root, '.github/workflows/release.yml'), '# frozen 3.3.2\n');
+  writeFileSync(join(root, 'desktop/README.md'), 'The source candidate is 3.27.0; publication and installation are pending qualification and public byte verification.\n\nThe published 3.27.0 release is historical.\n');
+  for (const path of ['README.md', 'docs/QUICKSTART.md']) writeFileSync(join(root, path), 'The source candidate is 3.27.0; preparing it does not publish or install it.\n\nThe published 3.27.0 release is historical.\n');
   return root;
 }
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -61,9 +66,9 @@ describe('candidate version synchronization', () => {
     const before = paths.map((path) => read(root, path));
     const check = syncCandidateVersion(root, '3.28.0', { check: true });
     expect(check.matches).toBe(false);
-    expect(check.changed).toHaveLength(6);
+    expect(check.changed).toHaveLength(9);
     expect(paths.map((path) => read(root, path))).toEqual(before);
-    expect(syncCandidateVersion(root, '3.28.0').changed).toHaveLength(6);
+    expect(syncCandidateVersion(root, '3.28.0').changed).toHaveLength(9);
     for (const path of ['package.json', 'package-lock.json', 'desktop/package.json', 'desktop/src-tauri/tauri.conf.json']) {
       expect(json(root, path).version).toBe('3.28.0');
     }
@@ -80,6 +85,12 @@ describe('candidate version synchronization', () => {
     expect(read(root, 'desktop/src-tauri/Cargo.lock')).toContain('name = "ashlr-desktop"\nversion = "3.28.0"');
     expect(read(root, 'CHANGELOG.md')).toBe(before[6]);
     expect(read(root, '.github/workflows/release.yml')).toBe(before[7]);
+    expect(read(root, 'desktop/README.md')).toContain('The source candidate is 3.28.0;');
+    expect(read(root, 'desktop/README.md')).toContain('The published 3.27.0 release is historical.');
+    for (const path of ['README.md', 'docs/QUICKSTART.md']) {
+      expect(read(root, path)).toContain('The source candidate is 3.28.0;');
+      expect(read(root, path)).toContain('The published 3.27.0 release is historical.');
+    }
     const synced = paths.map((path) => read(root, path));
     expect(syncCandidateVersion(root, '3.28.0').changed).toEqual([]);
     expect(syncCandidateVersion(root, '3.28.0', { check: true }).matches).toBe(true);
@@ -100,6 +111,16 @@ describe('candidate version synchronization', () => {
     const before = paths.map((path) => read(root, path));
     expect(() => syncCandidateVersion(root, '3.28.0')).toThrow(/one ashlr-desktop entry/);
     expect(paths.map((path) => read(root, path))).toEqual(before);
+  });
+
+  it.each(['desktop/README.md', 'README.md', 'docs/QUICKSTART.md'].flatMap((path) => ['missing', 'duplicate'].map((mutation) => [path, mutation])))('refuses %s %s candidate documentation before any metadata is written', (relativePath, mutation) => {
+    const root = fixture();
+    const path = join(root, relativePath);
+    const original = read(root, relativePath);
+    writeFileSync(path, mutation === 'missing' ? 'No candidate marker.\n' : `${original}\n${original}`);
+    const before = paths.map((file) => read(root, file));
+    expect(() => syncCandidateVersion(root, '3.28.0')).toThrow(/candidate documentation/);
+    expect(paths.map((file) => read(root, file))).toEqual(before);
   });
 
   it('refuses wrong package identities and a nonlocal or duplicate version URL without editing', () => {

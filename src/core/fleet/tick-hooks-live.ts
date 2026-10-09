@@ -122,7 +122,8 @@ import { readLeaderDirectives } from '../vision/leader-apply.js';
 import { killSwitchOn, listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
 import { scrubSecrets } from '../util/scrub.js';
-import { LOCAL_FLEET_ENGINE, localFleetEnabled } from '../daemon/local-fleet.js';
+import { LOCAL_FLEET_CAPACITY_TTL_MS, LOCAL_FLEET_ENGINE, localFleetEnabled } from '../daemon/local-fleet.js';
+import { resolveLlamaServerBaseUrl } from '../local-runtime/llama/config.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import { engineInstalled } from '../run/engines.js';
 import { routeBackend, type RouteDecision } from './router.js';
@@ -212,6 +213,11 @@ export interface LocalRuntimeReading {
   reachable: boolean | null;
   /** Effective parallel serving slots; null only when the runtime cannot be bounded. */
   slots: number | null;
+  /** Observed activity, distinct from total capacity; absent/null = unknown. */
+  busySlots?: number | null;
+  idleSlots?: number | null;
+  /** Original metadata observation time, never refreshed by a cached read. */
+  observedAt?: string | null;
   /** Context tokens of ONE slot; null when unknown. */
   contextPerSlot: number | null;
   detail: string;
@@ -415,10 +421,13 @@ export async function probeLocalRuntimeDefault(cfg: AshlrConfig, snapshot: Capac
   if (localFleetEnabled(cfg)) {
     try {
       const { probeLlamaRuntime } = await import('../local-runtime/llama/health.js');
-      const reading = await probeLlamaRuntime({ timeoutMs: 1_500 });
+      const reading = await probeLlamaRuntime({ baseUrl: resolveLlamaServerBaseUrl(cfg), timeoutMs: 1_500 });
       return {
         reachable: reading.state === 'up',
         slots: reading.slots.configured,
+        busySlots: reading.slots.busy,
+        idleSlots: reading.slots.idle,
+        observedAt: reading.checkedAt,
         contextPerSlot: reading.contextPerSlot,
         detail: `llama-server ${reading.state}${reading.slots.configured !== null ? ` with ${reading.slots.configured} slot(s)` : ''}`,
       };
@@ -440,6 +449,19 @@ export async function probeLocalRuntimeDefault(cfg: AshlrConfig, snapshot: Capac
     contextPerSlot: windows.length > 0 ? Math.min(...windows) : null,
     detail: 'local models via Ollama (one effective serving slot)',
   };
+}
+
+/** Use only complete, current activity; an unknown observation keeps the existing total-capacity policy. */
+function measuredLocalIdle(reading: LocalRuntimeReading, nowMs: number): number | null {
+  const { slots, busySlots, idleSlots, observedAt } = reading;
+  if (reading.reachable !== true || typeof slots !== 'number' || !Number.isSafeInteger(slots) || slots <= 0
+    || typeof busySlots !== 'number' || !Number.isSafeInteger(busySlots) || busySlots < 0
+    || typeof idleSlots !== 'number' || !Number.isSafeInteger(idleSlots) || idleSlots < 0
+    || busySlots > slots || idleSlots > slots || busySlots + idleSlots !== slots
+    || typeof observedAt !== 'string') return null;
+  const atMs = Date.parse(observedAt);
+  const ageMs = nowMs - atMs;
+  return Number.isFinite(ageMs) && ageMs >= 0 && ageMs < LOCAL_FLEET_CAPACITY_TTL_MS ? idleSlots : null;
 }
 
 /**
@@ -792,7 +814,7 @@ interface TickContext {
   budget: BudgetPolicy;
   enrolled: string[];
   pathOfRepo: Map<string, string>;
-  routeCache: Map<string, DispatchRoute>;
+  routeCache: Map<string, DispatchRoute & { selectedAccountHint?: string | null }>;
   /** Null until the loop identifies the selected batch; probes never reserve. */
   plannedItemIds: Set<string> | null;
   /** Primary lane slots after best-of-N reserve, consumed once per newly routed item. */
@@ -1638,6 +1660,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       } catch {
         local = { reachable: null, slots: null, contextPerSlot: null, detail: 'the local runtime probe failed' };
       }
+      const experimentAtObservation = experiment;
       const capacity: SeatCapacity[] = [
         ...(snapshot?.seats ?? []).filter((s) => s.engine !== 'local'),
         localSeat(local),
@@ -1790,7 +1813,10 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       // loop dispatches too (last seen via standingBacklog), not only the
       // fleet task queue — and unknown backlog is not idle.
       lastFleetQueueDepth = Math.max(fleetItems.length, lastBacklogDepth ?? 0) + (waitingVerify ?? 0);
-      if (!hookCtx.dryRun && !hookCtx.meteredUsdExhausted && holdProduction === null && lanes.local.slots > 0) {
+      const experimentWidth = lastFleetQueueDepth > 0 ? EXPERIMENT_LOCAL_SLOTS_BUSY : EXPERIMENT_LOCAL_SLOTS_IDLE;
+      const idleBeforeExperiment = measuredLocalIdle(local, deps.now());
+      if (!hookCtx.dryRun && !hookCtx.meteredUsdExhausted && holdProduction === null && lanes.local.slots > 0
+        && (idleBeforeExperiment === null || idleBeforeExperiment >= experimentWidth)) {
         let overnight = false;
         try {
           overnight = deps.overnightActive();
@@ -1805,10 +1831,21 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       // EXPERIMENT_SLOTS.fleetBusy (1) while work waits, idle (2) otherwise;
       // a pair already in flight when work arrives finishes first (bounded
       // overlap of one turn, stated rather than hidden).
+      let newlyReservedSlots = 0;
       if (experiment && lanes.local.slots > 0) {
-        const width = lastFleetQueueDepth > 0 ? EXPERIMENT_LOCAL_SLOTS_BUSY : EXPERIMENT_LOCAL_SLOTS_IDLE;
-        const left = Math.max(0, lanes.local.slots - width);
+        const left = Math.max(0, lanes.local.slots - experimentWidth);
+        if (experiment !== experimentAtObservation) newlyReservedSlots = lanes.local.slots - left;
         lanes.local = { lane: 'local', slots: left, capReason: `A harness experiment is using ${countOf(lanes.local.slots - left, 'local slot')}.` };
+      }
+      const measuredIdle = measuredLocalIdle(local, deps.now());
+      if (measuredIdle !== null) {
+        // Existing experiments may already occupy observed slots: min avoids
+        // double subtraction. A newly launched experiment was not observed,
+        // so only its new reservation comes out of measured idle once.
+        const available = Math.max(0, measuredIdle - newlyReservedSlots);
+        if (available < lanes.local.slots) {
+          lanes.local = { lane: 'local', slots: available, capReason: `The local runtime has ${countOf(available, 'available slot')} for new work.` };
+        }
       }
 
       // ── Best-of-N reserve (review c15) ──────────────────────────────────
@@ -2127,7 +2164,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       if (!current) return noContextRoute(item, cfg);
       if (!current.itemInfo.has(item.id)) current.itemInfo.set(item.id, { title: item.title, source: item.source });
       const cached = current.routeCache.get(item.id);
-      let decision: DispatchRoute;
+      let decision: DispatchRoute & { selectedAccountHint?: string | null };
       if (cached) {
         decision = cached;
       } else {
@@ -2156,10 +2193,17 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
               : plan.capReason,
           }];
         })) as Record<FleetEngine, LanePlan>;
-        decision = routeWorkItem(item, legacy, { ...current.router, lanes, cfg,
+        const routeContext = { ...current.router, lanes, cfg,
           budget: budgetForItem(current,item.id,resolveSubscriptionMaxPercent(cfg)),
           scheduling: current.itemScheduling.get(item.id),
-          advisorySeatId: current.advisedPair?.taskId === item.id ? current.advisedPair.seatId : null });
+          advisorySeatId: current.advisedPair?.taskId === item.id ? current.advisedPair.seatId : null };
+        decision = routeWorkItem(item, legacy, routeContext);
+        if (!decision.hold && decision.lane === 'codex') {
+          // current.capacity can refresh without current.router. Bind the
+          // exact source passed to routing, then retain it with the decision.
+          const selected = routeContext.capacity.filter(seat => seat.engine === 'codex' && seat.seatId === decision.seatDecision?.seatId);
+          decision = { ...decision, selectedAccountHint:selected.length === 1 ? selected[0]!.accountHint ?? null : null };
+        }
         if (planning && !decision.hold && decision.lane !== null) {
           current.plannedLaneUse[decision.lane] = (current.plannedLaneUse[decision.lane] ?? 0) + 1;
         }
@@ -2181,6 +2225,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         ...(decision.model ? { model: decision.model } : {}),
         reason: decision.reason,
         seatDecision: decision.seatDecision,
+        ...(decision.selectedAccountHint !== undefined ? {selectedAccountHint:decision.selectedAccountHint} : {}),
         hold: decision.hold,
       };
     },
@@ -2196,6 +2241,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       }
       if (lane === DEVIN_CLI_LANE) return devinCliSeatAllows(current);
       const selectedClaude = lane === 'claude-cli' && opts.seatId !== undefined;
+      const selectedCodex = lane === 'codex' && opts.seatId !== undefined;
       if (opts.itemId !== undefined || (lane === 'grok-cli' || selectedClaude) && opts.seatId !== undefined) {
         // Selected-account execution may follow awaited planning or sandbox
         // setup. Re-read its actual authority and telemetry synchronously;
@@ -2230,8 +2276,12 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       }
       const routed = opts.itemId ? current.routeCache.get(opts.itemId) : undefined;
       if (opts.itemId && (!routed || routed.hold || routed.backend !== engine || (opts.model ?? null) !== (routed.model ?? null) ||
-        selectedClaude && routed.seatDecision?.seatId !== opts.seatId)) {
+        (selectedClaude || selectedCodex) && routed.seatDecision?.seatId !== opts.seatId)) {
         return {allowed:false,reason:'The current task engine/model route changed; a fresh admitted route is required.'};
+      }
+      if (selectedCodex && routed && (typeof routed.selectedAccountHint !== 'string' ||
+          current.capacity.find(seat => seat.engine === 'codex' && seat.seatId === opts.seatId)?.accountHint !== routed.selectedAccountHint)) {
+        return {allowed:false,reason:'The selected Codex account identity changed or is unavailable; a fresh route is required.'};
       }
       const taskBudget = budgetForItem(current,opts.itemId,opts.maxPercent);
       if (!current.policy.engines.includes(grantEngineOfLane(lane))) {

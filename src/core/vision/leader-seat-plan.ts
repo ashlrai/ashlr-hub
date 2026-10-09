@@ -45,10 +45,9 @@ export function preferredLeaderLocalModels(cfg: AshlrConfig | undefined): string
 }
 
 /**
- * `foundry.leader.claudeFallback: true` lets a router-approved Claude seat be
- * the LAST fallback of a full (non-deep) run when the budget mode is not
- * `reserve`. Off by default: Claude stays Mason's, used by the Leader only for
- * the weekly deep run (leader-seat.ts), as the 3.10 seat rules say.
+ * Legacy configuration helper retained for compatibility. Current native
+ * Leader routing is provider-neutral; this flag does not exclude Claude from
+ * conversations or reserve it for weekly runs.
  */
 export function claudeFallbackEnabled(cfg: AshlrConfig | undefined): boolean {
   return leaderCfg(cfg)['claudeFallback'] === true;

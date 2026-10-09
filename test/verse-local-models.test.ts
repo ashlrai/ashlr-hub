@@ -730,11 +730,11 @@ describe('llama-server per-slot context', () => {
     expect(seen.sort()).toEqual(['http://127.0.0.1:8080/props', 'http://127.0.0.1:8080/slots']);
   });
 
-  it('falls back to /slots[0].n_ctx, then floor(-c / total_slots)', async () => {
+  it('uses complete consistent live slots and never promotes requested context', async () => {
     expect(await probeLlamaSlotContext(llamaFetch({ props: { total_slots: 2 }, slots: [{ id: 0, n_ctx: 32_768 }, { id: 1, n_ctx: 32_768 }] }), 'http://h:8080'))
       .toEqual({ perSlot: 32_768, totalSlots: 2, source: 'slots' });
     expect(await probeLlamaSlotContext(llamaFetch({ props: { total_slots: 4 } }), 'http://h:8080', { requestedContext: 262_144 }))
-      .toEqual({ perSlot: 65_536, totalSlots: 4, source: 'requested' });
+      .toEqual({ perSlot: null, totalSlots: 4, source: null });
     // Without the server's slot count, the requested -c alone is not a per-slot figure.
     expect(await probeLlamaSlotContext(llamaFetch({}), 'http://h:8080', { requestedContext: 262_144 }))
       .toEqual({ perSlot: null, totalSlots: null, source: null });
@@ -743,5 +743,12 @@ describe('llama-server per-slot context', () => {
   it('never throws on a dead server', async () => {
     const dead = (async () => { throw new Error('ECONNREFUSED'); }) as unknown as typeof fetch;
     await expect(probeLlamaSlotContext(dead, 'http://127.0.0.1:1')).resolves.toEqual({ perSlot: null, totalSlots: null, source: null });
+  });
+
+  it('does not use the first slot to conceal incomplete or contradictory allocations', async () => {
+    expect(await probeLlamaSlotContext(llamaFetch({props:{total_slots:2},slots:[{id:0,n_ctx:65_536}]}),'http://h:8080',{requestedContext:131_072}))
+      .toEqual({perSlot:null,totalSlots:2,source:null});
+    expect(await probeLlamaSlotContext(llamaFetch({props:{total_slots:2,default_generation_settings:{n_ctx:65_536}},slots:[{id:0,n_ctx:16_384},{id:1,n_ctx:16_384}]}),'http://h:8080'))
+      .toEqual({perSlot:null,totalSlots:2,source:null});
   });
 });

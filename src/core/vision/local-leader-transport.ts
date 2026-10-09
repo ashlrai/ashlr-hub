@@ -1,4 +1,5 @@
 /** Private local Leader binding: a catalog tag must name the actual serving weights. */
+import { createHash, randomUUID } from 'node:crypto';
 import { lstatSync, realpathSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import type { AshlrConfig } from '../types.js';
@@ -12,6 +13,14 @@ import type { LeaderCallOptions, LeaderComplete } from './leader-seat.js';
 export interface LocalLeaderRuntime { baseUrl: string; servingModel: string; contextWindow: number }
 export interface LocalLeaderBinding extends LocalLeaderRuntime {
   model: string; blobPath: string; manifestPath: string; epoch: string;
+}
+
+/** One settled local invocation; not decode speed, account usage or billing. */
+export interface LocalLeaderCompletionMetrics {
+  runId: string; finishedAt: string; model: string; contextWindow: number; bindingHint: string;
+  elapsedMs: number | null; inferenceRequestStarted: boolean;
+  tokensIn: number | null; tokensOut: number | null;
+  outcome: 'completed' | 'failed' | 'unknown';
 }
 
 export function localLeaderBase(value: string): string | null {
@@ -95,14 +104,27 @@ export function localLeaderBindingCurrent(binding: LocalLeaderBinding, cfg: Ashl
 }
 
 /** Same local API request path as workers; no credentials, listener or tool authority. */
-export function llamaLeaderTransport(binding: LocalLeaderBinding, cfg: AshlrConfig, opts: LeaderCallOptions = {},
-  readRuntime: typeof readLocalLeaderRuntime = readLocalLeaderRuntime): LeaderComplete {
-  return async (system, user) => {
+export function llamaLeaderTransport(inputBinding: LocalLeaderBinding, cfg: AshlrConfig, opts: LeaderCallOptions = {},
+  readRuntime: typeof readLocalLeaderRuntime = readLocalLeaderRuntime,
+  record?: (metrics: Readonly<LocalLeaderCompletionMetrics>) => void): LeaderComplete {
+  // Correlation follows the selected snapshot; later settings cannot relabel it.
+  const binding = Object.freeze({ ...inputBinding });
+  const selected = binding;
+  const bindingHint = createHash('sha256').update(JSON.stringify(selected)).digest('hex');
+  return async (system, user, signal) => {
+    const runId = randomUUID();
+    let inferenceRequestStarted = false;
+    let tokensIn: number | null = null, tokensOut: number | null = null;
+    let outcome: LocalLeaderCompletionMetrics['outcome'] = 'failed';
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error('Local Leader deadline elapsed')), opts.timeoutMs ?? 15 * 60_000);
     const watch = setInterval(() => { if (!localLeaderBindingCurrent(binding, cfg)) controller.abort(new Error('Local Leader binding unavailable')); }, 100);
     watch.unref(); const started = performance.now();
+    const onAbort = () => controller.abort(signal?.reason);
     try {
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+      controller.signal.throwIfAborted();
       if (!localLeaderBindingCurrent(binding, cfg)) throw new Error('Local Leader binding unavailable');
       const current = await metadataWait(readRuntime(cfg, controller.signal), controller.signal);
       const fresh = bindLocalLeaderModel(current, binding.model, binding.contextWindow);
@@ -112,12 +134,27 @@ export function llamaLeaderTransport(binding: LocalLeaderBinding, cfg: AshlrConf
       const remaining = (opts.timeoutMs ?? 15 * 60_000) - (performance.now() - started);
       if (remaining <= 0 || controller.signal.aborted) throw new Error('Local Leader deadline elapsed');
       const client = buildOpenAICompatibleClient(binding.baseUrl, '', binding.servingModel, false, 0.2, controller.signal, {
-        cfg, strictStreaming: { expectedModel: binding.servingModel }, redirect: 'error', timeoutMs: Math.ceil(remaining),
+        cfg, onRequestStart: () => { inferenceRequestStarted = true; }, strictStreaming: { expectedModel: binding.servingModel }, redirect: 'error', timeoutMs: Math.ceil(remaining),
         maxRequestBytes: 1024 * 1024, maxResponseBytes: 1024 * 1024, maxOutputTokens: opts.maxOutputTokens ?? 4096,
       });
       const result = await client.chatStream!([{ role: 'system', content: system }, { role: 'user', content: user }], undefined, () => {}, controller.signal);
+      if (result.usageKnown === true && Number.isSafeInteger(result.usage.tokensIn) && result.usage.tokensIn >= 0 &&
+          Number.isSafeInteger(result.usage.tokensOut) && result.usage.tokensOut >= 0) {
+        tokensIn = result.usage.tokensIn; tokensOut = result.usage.tokensOut;
+      }
       if (!localLeaderBindingCurrent(binding, cfg) || controller.signal.aborted) throw new Error('Local Leader binding unavailable');
+      outcome = 'completed';
       return result.content;
-    } finally { controller.abort(); clearTimeout(timer); clearInterval(watch); }
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+      controller.abort(); clearTimeout(timer); clearInterval(watch);
+      const elapsed = performance.now() - started;
+      const metrics = Object.freeze({ runId, finishedAt: new Date().toISOString(), model: selected.model,
+        contextWindow: selected.contextWindow, bindingHint,
+        elapsedMs: Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : null,
+        inferenceRequestStarted, tokensIn, tokensOut,
+        outcome: outcome === 'completed' ? outcome : inferenceRequestStarted ? 'unknown' : 'failed' });
+      try { void Promise.resolve(record?.(metrics)).catch(() => {}); } catch { /* Telemetry never changes the completion or its refusal. */ }
+    }
   };
 }

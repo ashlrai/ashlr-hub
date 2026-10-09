@@ -226,10 +226,10 @@ describe('SeatSelector — context per model', () => {
 
   it('adds a fit verdict to every row once the chosen folders are sized', () => {
     render(<SeatSelector seats={SEATS_V39} value={null} onChange={() => {}} workingSetTokens={300_000} />);
-    expect(screen.getByRole('option', { name: /Fable 5\.1 .* · code fits, tight$/ })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /GPT-6 Astra .* · code needs expansive$/ })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /GPT-5\.5 .* · code too big — split$/ })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /qwen3\.8:27b-ctx64k .* · code too big — split$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Fable 5\.1 .* · project estimate tight$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /GPT-6 Astra .* · project estimate needs expansive$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /GPT-5\.5 .* · project estimate exceeds context$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /qwen3\.8:27b-ctx64k .* · project estimate exceeds context$/ })).toBeInTheDocument();
   });
 
   it('shows the budget of the mode each row would run in', () => {

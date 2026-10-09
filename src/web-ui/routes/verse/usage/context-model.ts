@@ -228,18 +228,18 @@ export function noModeReason(engine: VerseEngine, option: VerseModelOption): str
 
 /** Short form for a picker row, where it sits beside the capacity words. */
 export const FIT_SHORT: Record<VerseFitVerdict, string> = {
-  fits: 'code fits',
-  tight: 'code fits, tight',
-  expansive: 'code needs expansive',
-  split: 'code too big — split',
+  fits: 'project estimate fits',
+  tight: 'project estimate tight',
+  expansive: 'project estimate needs expansive',
+  split: 'project estimate exceeds context',
 };
 
 /** Badge text for the chosen model. */
 export const FIT_LABEL: Record<VerseFitVerdict, string> = {
-  fits: 'Fits',
-  tight: 'Tight fit',
-  expansive: 'Needs expansive',
-  split: 'Split the work',
+  fits: 'Project estimate fits',
+  tight: 'Tight inventory estimate',
+  expansive: 'Inventory estimate: Expansive',
+  split: 'Larger than one context',
 };
 
 /** A fit reading that is a FLOOR (a root hit its file or time cap). */
@@ -283,7 +283,8 @@ export function modelFit(
  * The sentence under the fit badge, for the verdict `modelFit` gave in the
  * chat's mode. In Standard a tight fit also names the Expansive budget when
  * one exists, and "needs expansive" says what to do — suggestions only;
- * nothing here switches the mode.
+ * nothing here switches the mode. This compares the tracked project inventory,
+ * not the files a focused task will actually read or the current chat context.
  */
 export function fitExplanation(input: {
   verdict: VerseFitVerdict;
@@ -292,7 +293,7 @@ export function fitExplanation(input: {
   mode: VerseContextMode;
   floor?: boolean;
 }): string {
-  const amount = `${input.floor ? 'at least ' : ''}~${formatTokens(input.tokens)} tokens of tracked code`;
+  const amount = `Project inventory estimate: ${input.floor ? 'at least ' : ''}~${formatTokens(input.tokens)} tokens.`;
   const inExpansive = resolveContextMode(input.option, input.mode) === 'expansive';
   const standard = budgetFor(input.option, 'standard');
   const expansive = budgetFor(input.option, 'expansive');
@@ -300,34 +301,32 @@ export function fitExplanation(input: {
   const expCap = expansive ? formatTokens(expansive.autoCompactAt ?? expansive.contextWindow) : null;
   const cap = inExpansive ? expCap : stdCap;
   const budget = inExpansive ? 'Expansive budget' : 'budget';
+  const reading = input.floor ? 'Reading the scanned files at once' : 'Reading it all at once';
+  const partial = input.floor ? ' The scan is partial; the whole-project fit is unconfirmed.' : '';
   switch (input.verdict) {
     case 'fits':
-      return `All ${amount} fits well inside this model's ${budget}${cap ? ` (compacts ≈${cap})` : ''}, with room left for the conversation.`;
+      return `${amount} ${reading} would fit well inside this model's ${budget}${cap ? ` (compacts ≈${cap})` : ''}, with room left for the conversation.${partial}`;
     case 'tight': {
       const roomier = !inExpansive && expCap !== null && hasExpansiveMode(input.option)
-        ? ` Expansive (≈${expCap}) would hold it with room to spare.`
+        ? ` Expansive (≈${expCap}) would leave more room.`
         : '';
-      return `${capitalize(amount)} fits under the ≈${cap ?? '?'} compaction point${inExpansive ? ' of the Expansive budget' : ''}, with little room for the conversation — expect it to compact if the agent reads widely.${roomier}`;
+      return `${amount} ${reading} would fit under the ≈${cap ?? '?'} compaction point${inExpansive ? ' of the Expansive budget' : ''}, with little room for the conversation.${roomier}${partial}`;
     }
     case 'expansive':
-      return `${capitalize(amount)} is more than the Standard budget (≈${stdCap ?? '?'}) holds; only Expansive (≈${expCap ?? '?'}) takes it all. Switch to Expansive, or narrow the folders to the part you are changing.`;
+      return `${amount} ${reading} exceeds Standard (≈${stdCap ?? '?'}), but fits Expansive (≈${expCap ?? '?'}). A focused task can read only relevant files.${partial}`;
     case 'split':
-      return `${capitalize(amount)} is more than any single context on this model holds${expCap ? `, even Expansive (≈${expCap})` : ''}. Split the work: fan it out across several chats, each scoped to one folder or subsystem, or narrow this chat to the part you are changing.`;
+      return `${amount} ${reading} exceeds this model's context budget${expCap ? `, including Expansive (≈${expCap})` : ''}. A focused task can still use this model by reading relevant files as needed.${partial}`;
   }
 }
 
 /**
- * How the working-set figure is made — shown once, beside the badge. Names the
+ * How the project-inventory figure is made — shown once, beside the badge. Names the
  * fixed-prompt figure the verdict added, and calls it an estimate: no CLI
  * reports its base prompt before a turn has run.
  */
 export function fitMethodNote(engine: VerseEngine | null): string {
   const cli = engine ? ` for ${ENGINE_CLI_NAME[engine]}` : '';
-  return `Estimated from the size of tracked text files (bytes ÷ 4), plus an estimated ~${formatTokens(sessionOverheadTokens(engine))} of fixed prompt${cli} that every chat starts with. An upper bound — agents rarely read everything.`;
-}
-
-function capitalize(text: string): string {
-  return text.length === 0 ? text : text.charAt(0).toUpperCase() + text.slice(1);
+  return `Tracked text files (bytes ÷ 4), not the prompt or current chat context. Includes code, docs and tests. The comparison adds an estimated ~${formatTokens(sessionOverheadTokens(engine))} of fixed prompt${cli}. Agents read relevant files as needed.`;
 }
 
 // ---------------------------------------------------------------------------

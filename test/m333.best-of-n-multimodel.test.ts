@@ -715,6 +715,28 @@ describe('M333 — candidate specs', () => {
     expect(JSON.stringify(result)).not.toContain('selectedGrokAdmission');
   });
 
+  it('keeps the original Codex account binding host-local and only on routed Codex candidates', async () => {
+    const cli = makeSandboxMock(0.1, 'selected-codex');
+    const h = await harness({cli:cli.fn,api:cli.fn});
+    const cfg = makeConfig();cfg.foundry!.allowedBackends=['codex','claude'];
+    const account = {accountHint:'a'.repeat(64),admitted:vi.fn(() => true)};
+    const result = await h.runBestOfN(makeItem(),cfg,{n:2,engine:'codex',seatId:'codex-b',selectedCodexAccount:account,
+      candidates:[{engine:'codex'},{engine:'claude'}]});
+    expect(result.candidates).toHaveLength(2);
+    expect(cli.calls.map(c=>c.engine).sort()).toEqual(['claude','codex']);
+    for (let i=0;i<cli.calls.length;i++) {
+      if (cli.calls[i]!.engine==='codex') {
+        expect(cli.options[i]).toMatchObject({seatId:'codex-b'});
+        expect(cli.options[i]?.['selectedCodexAccount']).toBe(account);
+      } else {
+        expect(cli.options[i]).not.toHaveProperty('seatId');
+        expect(cli.options[i]).not.toHaveProperty('selectedCodexAccount');
+      }
+    }
+    expect(account.admitted).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain('selectedCodexAccount');
+  });
+
   it('forwards host-only native Devin admission only to actual Devin candidates', async () => {
     const cli = makeSandboxMock(0, 'selected-devin');
     const h = await harness({cli:cli.fn,api:cli.fn});

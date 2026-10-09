@@ -705,16 +705,35 @@ describe('buildKnowledge — deletion pruning after complete collection', () => 
     plantFile(tmpRepo, 'z-survivor.ts', 'export const unseen = 7;');
     await buildKnowledge({ repos: [tmpRepo] });
     const survivor = loadChunks(tmpRepo);
-    for (let i = 0; i < 500; i++) plantFile(tmpRepo, `a-${String(i).padStart(3, '0')}.ts`, 'export const fresh = 8;');
+    const meta = path.join(knowledgeDir(), fs.readdirSync(knowledgeDir())[0]!, 'meta.json');
+    const metaBytes = fs.readFileSync(meta);
+    const indexedAt = (JSON.parse(metaBytes.toString()) as { lastIndexedAt: number }).lastIndexedAt;
+    const freshNames = Array.from({ length: 500 }, (_, i) => `a-${String(i).padStart(3, '0')}.ts`);
+    for (const name of freshNames) {
+      const file = plantFile(tmpRepo, name, 'export const fresh = 8;');
+      // A fast filesystem can create the first file in the index's own
+      // millisecond. Make this changed-file fixture strictly newer than meta,
+      // independent of host write speed and timestamp precision.
+      fs.utimesSync(file, new Date(indexedAt + 1000), new Date(indexedAt + 1000));
+    }
+    expect(freshNames.every(name => fs.statSync(path.join(tmpRepo, name)).mtimeMs > indexedAt)).toBe(true);
+    let listed: string[] = [];
     const original = fs.readdirSync;
     const read = vi.spyOn(fs, 'readdirSync').mockImplementation(((...args: Parameters<typeof fs.readdirSync>) => {
       const entries = original(...args);
-      return args[0] === tmpRepo ? [...entries].sort((a, b) => String(a.name).localeCompare(String(b.name))) : entries;
+      if (args[0] !== tmpRepo) return entries;
+      const ordered = [...entries].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      listed = ordered.map(entry => String(entry.name));
+      return ordered;
     }) as typeof fs.readdirSync);
     try {
       const result = await buildKnowledge({ repos: [tmpRepo] });
+      expect(read).toHaveBeenCalledWith(tmpRepo, { withFileTypes: true });
+      expect(listed).toEqual([...freshNames, 'z-survivor.ts']);
       expect(result.chunks).toBe(500);
+      expect(loadChunks(tmpRepo)).toHaveLength(501);
       expect(loadChunks(tmpRepo).filter(chunk => chunk.file === 'z-survivor.ts')).toEqual(survivor);
+      expect(fs.readFileSync(meta)).toEqual(metaBytes);
     } finally { read.mockRestore(); }
   });
 

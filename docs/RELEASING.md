@@ -1,35 +1,38 @@
 # Releasing Phantom
 
-> **Current release process — rechecked 2026-10-08 UTC:** use
-> [Releasing locally](RELEASING-LOCALLY.md) for the current manual release lane.
-> Qualify the final clean source through the current release lane, inspect
-> hosted pull-request checks for that exact revision, and independently
-> verify the tarball and desktop artifacts before publication. Hosted
-> pull-request checks run; the automated desktop-release workflow remains
-> disabled during the Linux dependency quarantine. npm publication uses the
-> maintainer's interactive web 2FA and does not carry CI provenance.
+> **Current release process:** follow the
+> [canonical npm trusted-publishing procedure](RELEASING-LOCALLY.md#canonical-npm-trusted-publishing).
+> The commissioned GitHub workflow publishes the original qualified CI
+> archive using short-lived identity, verifies public bytes and npm provenance,
+> tests an isolated consumer, then promotes `latest`. Routine qualified npm
+> releases do not require repeated Touch ID or browser approvals. Initial or
+> changed publisher bindings still require npm owner authentication.
 >
-> `@ashlr/phantom@3.26.0`, npm `latest` and GitHub `v3.26.0` are independently
-> verified. Public archives match the original qualified bytes; both CLI
-> aliases and all public SDK imports pass an offline consumer install.
-> Installation and resident activation remain separate gates. The frozen
-> `release.yml` and `promote.yml`
-> procedures below describe the historical 3.3.2 lane, not a publishing path
-> for later versions. Keep source versions strictly above `3.3.2`. Publication
-> does not install the desktop or activate provider credentials, spending
-> permissions, or resident autonomy.
+> Complete exact-source hosted CI, independent Audit and trusted attestation
+> remain prerequisites. Native desktop finalization, signed asset publication,
+> installation and resident activation are separate steps. The frozen
+> `release.yml` and `promote.yml` procedures below describe the historical
+> 3.3.2 lane; they are not the current publisher. Publication does not activate
+> provider credentials, spending permissions or resident autonomy.
 
 <a id="current-canonical-source-candidate"></a>
 
 ## Current canonical release
 
-Version 3.26.0 is published from the canonical `ashlrai/phantom` repository as
-`@ashlr/phantom`, with `phm` and compatible `ashlr` launchers. Its original
-canonical CI archive was qualified through complete exact-source hosted CI,
-independent Audit, trusted attestation and the normal finalizer. The artifact
-installer remains a separate explicitly authorized maintenance operation.
-Existing legacy local-production policy receipts do not admit this canonical profile. Public registry and installed startup
-acceptance remain separate. The frozen historical lane below stays unchanged.
+The canonical repository is `ashlrai/phantom`; its package is `@ashlr/phantom`,
+with `phm` and compatible `ashlr` launchers. Use
+[`phm release-articles metadata --json`](https://github.com/ashlrai/phantom/blob/master/src/cli/release-articles.ts) for freshly
+verified public release facts. It checks GitHub, npm and the complete source
+qualification before returning a published version; a candidate version bump
+does not become a publication claim. See the
+[GitHub release records](https://github.com/ashlrai/phantom/releases) and
+[npm version records](https://www.npmjs.com/package/@ashlr/phantom?activeTab=versions)
+for exact distributions.
+
+The artifact installer remains a separate maintenance operation. Existing legacy
+local-production policy receipts do not admit the canonical profile. Public
+registry acceptance and installed startup acceptance remain separate. The frozen
+historical evidence below stays unchanged.
 
 > **Verified distribution state — 2026-09-05 UTC:** `@ashlr/hub@3.3.2` is the
 > accepted npm production version. Both npm dist-tags, `latest` and `candidate`,

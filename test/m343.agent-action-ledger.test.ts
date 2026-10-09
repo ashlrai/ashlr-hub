@@ -947,3 +947,56 @@ describe('M343 agent action ledger', () => {
     }
   });
 });
+
+
+describe('versioned local role trace metadata', () => {
+  function local(overrides: Partial<AgentActionEvent> = {}): AgentActionEvent {
+    return makeEvent({actor:'agent',kind:'reflection',action:'role:completion',outcome:'ok',backend:'llama-server',
+      tags:['trace:local-leader-completion-v1','role:leader',`runtime-binding:${'a'.repeat(64)}`,`seat-hint:${'b'.repeat(64)}`],
+      counts:{tokensIn:0,tokensOut:0,inferenceRequests:1,contextWindowTokens:65536},...overrides});
+  }
+  it('retains known zero pairs through the writer and cold reader without dropping the scope at the tag limit', () => {
+    const tags = ['auto-live','dispatch-skip','metadata-only','ordinary-turn','reflection','selection','swarm','verify','sandboxed-engine','empty-diff','dry-run','budget-cap',...local().tags!];
+    expect(recordAgentActionResult(local({tags}),{sync:true})).toEqual({attempted:1,recorded:1});
+    const read = readAgentActionsDetailed({inspectionOnly:true,requireComplete:true});
+    expect(read.complete).toBe(true);
+    expect(read.events[0]?.counts).toEqual({tokensIn:0,tokensOut:0,inferenceRequests:1,contextWindowTokens:65536});
+    expect(read.events[0]?.tags).toEqual(expect.arrayContaining(['trace:local-leader-completion-v1','role:leader',`runtime-binding:${'a'.repeat(64)}`]));
+  });
+  it('keeps unversioned native and local history unknown and byte-identical during inspection', () => {
+    const dir = agentActionsDir();mkdirSync(dir,{recursive:true});
+    const file = join(dir,'2026-07-08.jsonl');
+    const rows = [makeEvent({actor:'agent',kind:'reflection',action:'role:completion',backend:'codex',durationMs:50,
+      counts:{tokensIn:12,tokensOut:3,providerContacted:1},tags:['role:leader','seat:private-native']}),
+      local({tags:['role:leader',`runtime-binding:${'a'.repeat(64)}`]}),makeEvent({durationMs:75})];
+    const bytes = rows.map(row=>JSON.stringify(row)).join('\n')+'\n';writeFileSync(file,bytes,{mode:0o600});
+    const read = readAgentActionsDetailed({inspectionOnly:true,requireComplete:true});expect(read.complete).toBe(true);
+    expect(read.events).toHaveLength(3);
+    for(const event of read.events.filter(row=>row.action==='role:completion')) expect(event.counts).toBeUndefined();
+    expect(read.events.find(row=>row.backend==='codex' && row.action==='role:completion')?.durationMs).toBe(50);
+    expect(readFileSync(file,'utf8')).toBe(bytes);
+  });
+  it('does not turn inherited or accessor fields into reported token measurements', () => {
+    let getterCalls=0;
+    const inherited=Object.assign(Object.create({tokensIn:12,tokensOut:3}),{inferenceRequests:1,contextWindowTokens:65536});
+    const accessor={inferenceRequests:1,contextWindowTokens:65536,tokensOut:3};
+    Object.defineProperty(accessor,'tokensIn',{enumerable:true,get:()=>{getterCalls++;return 12;}});
+    recordAgentAction([local({runId:'inherited',counts:inherited}),local({runId:'accessor',counts:accessor})]);
+    const read=readAgentActionsDetailed({inspectionOnly:true,requireComplete:true});expect(read.complete).toBe(true);expect(read.events).toHaveLength(2);
+    for(const event of read.events){expect(event.counts?.tokensIn).toBeUndefined();expect(event.counts?.tokensOut).toBeUndefined();}
+    expect(getterCalls).toBe(0);
+  });
+  it('declines malformed or mismatched measurement metadata without activating other native counters', () => {
+    const cases = [local({counts:{tokensIn:0.5,tokensOut:3,inferenceRequests:1}}),
+      local({counts:{tokensIn:-1,tokensOut:3,inferenceRequests:1}}),
+      local({counts:{tokensIn:Number.MAX_SAFE_INTEGER+1,tokensOut:3,inferenceRequests:1}}),
+      local({counts:{tokensIn:12,inferenceRequests:1}}),local({counts:{tokensIn:12,tokensOut:3,inferenceRequests:0}}),
+      local({counts:{tokensIn:12,tokensOut:3,inferenceRequests:2}}),local({backend:'codex'}),
+      local({tags:['trace:local-leader-completion-v1','role:leader','runtime-binding:/private/context']})];
+    recordAgentAction(cases.map((row,i)=>({...row,runId:`declined-${i}`})));
+    const read = readAgentActionsDetailed({inspectionOnly:true,requireComplete:true});expect(read.complete).toBe(true);
+    expect(read.events).toHaveLength(cases.length);
+    for(const event of read.events) {expect(event.counts?.tokensIn).toBeUndefined();expect(event.counts?.tokensOut).toBeUndefined();}
+    const raw = readFileSync(join(agentActionsDir(),'2026-07-08.jsonl'),'utf8');expect(raw).not.toContain('/private/context');
+  });
+});

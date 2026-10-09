@@ -91,7 +91,7 @@ import { readOutcomeWorkItemContext, materializeOutcomeIntents, outcomeDirectory
 import { OutcomeStore } from '../goals/outcome-store.js';
 import { readOutcomeInventory } from '../vision/leader-outcomes.js';
 import { OutcomeDispatch, isOutcomeWorkItem, reconcileOutcomeCompletions } from './outcome-dispatch.js';
-import { OutcomeManagerDispatch, isOutcomeManagerWorkItem, outcomeManagerWorkItems, readOutcomeManagerWorkItemContext, reconcileOutcomeManagerTerminals } from './outcome-manager.js';
+import { OutcomeManagerDispatch, isOutcomeManagerWorkItem, outcomeManagerWorkItems, readOutcomeManagerWorkItemContext, readOutcomeManagerPrompt, reconcileOutcomeManagerTerminals } from './outcome-manager.js';
 import { managerConversation, managerHostAdmission } from './outcome-manager-host.js';
 import type { OutcomeManagerRoute } from '../goals/outcome-manager-types.js';
 import { buildBacklog, loadBacklog } from '../portfolio/backlog.js';
@@ -163,6 +163,7 @@ import { supportsRoleExecution } from '../run/role-invocation.js';
 import { grantEngineOfLane } from '../fleet/fleet-types.js';
 import { fleetLaneOf, routingRequestFor } from '../fleet/dispatch-router.js';
 import { routeSeat } from '../routing/router.js';
+import { readCapacitySnapshot } from '../routing/budget-store.js';
 import { engineOfSeatId } from '../routing/policy.js';
 // Type-only: erased at compile time, so this does NOT eagerly load
 // self-improve.js/post-merge-credit.js at module init (those are still
@@ -396,8 +397,11 @@ import {
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readStableRegularFile } from '../util/stable-file-read.js';
 import { fsyncDirectory } from '../util/durability.js';
-import { withApprovedKnowledge } from '../learn/retro/inject.js';
-import { withFleetPlaybook } from '../playbooks/lanes.js';
+import { withApprovedKnowledge, knowledgeBlockFor } from '../learn/retro/inject.js';
+import { recordKnowledgeHits } from '../learn/retro/store.js';
+import { withFleetPlaybook, prepareFleetPlaybook, type PreparedFleetPlaybook } from '../playbooks/lanes.js';
+import { recordPlaybookUse } from '../playbooks/store.js';
+import { ROUTING_SESSION_OVERHEAD_TOKENS } from '../fleet/dispatch-router.js';
 
 type FleetQuotaReservationRefusal = Extract<
   FleetQuotaReservationResult,
@@ -4883,12 +4887,43 @@ export async function tick(
     return resolveNativeSeatLaunch({ accountsRoot: resolveAccountsRoot(routingCfg), provider, seatId: route.seatId,
       ...(provider === 'claude' ? { requireClaudeBrokerSafety: true } : {}) }).ok;
   };
+  const producerGoalWithGuidance = (prompt: string, item: WorkItem, runId: string, preview = false): string => {
+    const harnessGoal = standingTick ? withHarnessProducerPrompt(prompt, hooks) : prompt;
+    const baseGoal = withFleetPlaybook(harnessGoal, item, runId, { recordUse: !preview });
+    return withApprovedKnowledge(baseGoal,
+      { repo: item.repo, paths: [], kind: null, text: `${item.title}\n${item.detail}` },
+      { fromLeader: item.tags.includes('fleet-source:leader'), recordHits: !preview });
+  };
+  // Per-tick private prompt bytes, never persisted in the backlog, tags or trace.
+  // A context tag carries only the existing conservative routing forecast.
+  type PreparedManagerPrompt = { basisDigest: string; prompt: string;
+    playbookUse: PreparedFleetPlaybook['use']; knowledgeNoteIds: string[] };
+  const preparedManagerPrompts = new Map<string, PreparedManagerPrompt>();
+  const readPreparedManagerPrompt = (item: WorkItem): PreparedManagerPrompt | null => {
+    const context = readOutcomeManagerWorkItemContext(item);
+    if (!context) return null;
+    const prompt = readOutcomeManagerPrompt(context, { conversation: managerConversation });
+    if (prompt === null) return null;
+    const harnessGoal = standingTick ? withHarnessProducerPrompt(prompt, hooks) : prompt;
+    const playbook = prepareFleetPlaybook(harnessGoal, item);
+    const knowledge = knowledgeBlockFor({ repo: item.repo, paths: [], kind: null, text: `${item.title}\n${item.detail}` },
+      { fromLeader: item.tags.includes('fleet-source:leader'), recordHits: false });
+    return { basisDigest: context.next.basisDigest,
+      prompt: knowledge.text ? `${playbook.prompt}\n\n${knowledge.text}` : playbook.prompt,
+      playbookUse: playbook.use, knowledgeNoteIds: knowledge.noteIds };
+  };
+  const managerPromptStillCurrent = (item: WorkItem): boolean => {
+    const prepared = preparedManagerPrompts.get(item.id);
+    const current = readPreparedManagerPrompt(item);
+    return !!prepared && !!current && outcomeDigest(prepared) === outcomeDigest(current);
+  };
   const refreshBacklogForTick = async (): Promise<WorkItem[]> => {
     if (stopRequested()) return [];
     const settleObservation = beginTickStageObservation('backlog-refresh');
     let observationOutcome: 'ok' | 'failed' = 'ok';
     try {
       const managerItems: WorkItem[] = [];
+      preparedManagerPrompts.clear();
       if (!opts.dryRun) {
         const inventory = readOutcomeInventory();
         // Unknown/partial discovery cannot authorize creation or completion.
@@ -4921,7 +4956,14 @@ export async function tick(
             materializeOutcomeIntents(outcome.id, { stillAuthorized: authorized, cfg: routingCfg });
             const fresh = new OutcomeStore(outcomeDirectory(outcome.id)).read();
             if (fresh.sourceState === 'healthy' && authorized()) {
-              managerItems.push(...outcomeManagerWorkItems([fresh.state], new Date().toISOString()));
+              for (const candidate of outcomeManagerWorkItems([fresh.state], new Date().toISOString())) {
+                const prepared = readPreparedManagerPrompt(candidate);
+                if (!prepared || !authorized()) continue;
+                const contextTokens = Math.ceil(prepared.prompt.length / 4) + ROUTING_SESSION_OVERHEAD_TOKENS;
+                preparedManagerPrompts.set(candidate.id, prepared);
+                managerItems.push({ ...candidate,
+                  tags: [...candidate.tags.filter(tag => !/^context:\d+$/.test(tag)), `context:${contextTokens}`] });
+              }
             }
           }
         }
@@ -6709,6 +6751,12 @@ export async function tick(
     const outcomeDispatch = workerOutcomeDispatch ?? managerOutcomeDispatch;
     let outcomeWatch: ReturnType<typeof setInterval> | undefined;
     const beginQueueExecution = (): void => {
+      // Re-read the same private scope/feedback/overlays immediately before
+      // execution. Drift returns next tick for a fresh forecast, never a launch
+      // sized from an older smaller prompt.
+      if (managerCandidate && !managerPromptStillCurrent(item)) {
+        throw new Error('Manager prompt changed after routing; a fresh forecast is required');
+      }
       if (dispatchSignal.aborted || !coordinator.beginExecution(item.id, machineId)) {
         if (!leaseController.signal.aborted) {
           leaseController.abort(new Error(`shared queue claim authority lost for ${item.id}`));
@@ -6758,6 +6806,13 @@ export async function tick(
             skipReason: 'repair-authority-unavailable',
           }),
         };
+      }
+
+      if (managerCandidate && !managerPromptStillCurrent(item)) {
+        return { item, spentUsd: 0, dispatched: false, dispatch: dispatchTrace(item, {
+          assignedBy: 'manager-context', reason: 'Manager prompt changed or is unavailable; waiting for a fresh routing forecast.',
+          dispatched: false, runId: attemptId, trajectoryId: `run:${attemptId}`, skipReason: 'manager-context-changed',
+        }) };
       }
 
       // V3.10 (U5): under a standing grant the router's decision is taken ONCE
@@ -7362,18 +7417,14 @@ export async function tick(
       // V3.10 (B-U9): a standing tick's producers run with the active harness —
       // its producer prompt overlay rides on the goal (baseline: none).
       const itemGoal = outcomeDispatch ? outcomeDispatch.prompt() : buildItemGoal(item);
-      const harnessGoal = standingTick ? withHarnessProducerPrompt(itemGoal, hooks) : itemGoal;
-      // 3.15: the playbook the item names (`!macro`) or auto-matches, recorded
-      // against this runId for retros (playbooks/lanes.ts). None ⇒ byte-identical.
-      const baseGoal = withFleetPlaybook(harnessGoal, item, attemptId);
-      // 3.15: Mason-approved, trigger-scoped lessons from earlier task ends
-      // (learn/retro/inject.ts; ≤ 16 KiB). Guidance only — it changes no
-      // route, gate or authority. Nothing approved/matching ⇒ byte-identical goal.
-      const goal = withApprovedKnowledge(
-        baseGoal,
-        { repo: item.repo, paths: [], kind: null, text: `${item.title}\n${item.detail}` },
-        { fromLeader: item.tags.includes('fleet-source:leader') },
-      );
+      const goal = producerGoalWithGuidance(itemGoal, item, attemptId, managerCandidate);
+      if (managerCandidate && goal !== preparedManagerPrompts.get(item.id)?.prompt) {
+        return { item, spentUsd: 0, dispatched: false, dispatch: dispatchTrace(item, {
+          backend, tier: backendTier, model: selectedModel, assignedBy: 'manager-context',
+          reason: 'Manager guidance changed after routing; waiting for a fresh routing forecast.',
+          dispatched: false, runId: attemptId, trajectoryId: `run:${attemptId}`, skipReason: 'manager-context-changed',
+        }) };
+      }
       // …and its effort / sampling ride on the engine invocation itself.
       const dispatchHarness = standingTick ? standingDispatchHarness(hooks) : null;
       const dispatchCfg = dispatchConfigForItem(item, routingCfg);
@@ -7733,6 +7784,13 @@ export async function tick(
             try { return hooks.seatAllows(backend!, { maxPercent:resolveSubscriptionMaxPercent(routingCfg), itemId:item.id, model }).allowed === true ? selectedDevinBinding : null; }
             catch { return null; }
           } : undefined;
+        const selectedCodexAccount = standingSeatId && fleetLaneOf(backend, routingCfg) === 'codex'
+          ? { accountHint:standingRoute?.selectedAccountHint ?? '', admitted:() => {
+            const hint = standingRoute?.selectedAccountHint;
+            if (typeof hint !== 'string' || !/^[a-f0-9]{64}$/.test(hint) || !selectedDispatchAdmission()) return false;
+            const rows = readCapacitySnapshot()?.seats.filter(row => row.engine === 'codex' && row.seatId === standingSeatId);
+            return rows?.length === 1 && rows[0]!.accountHint === hint;
+          } } : undefined;
         const selectedClaudeAdmission = standingSeatId && ['claude','claude-cli'].includes(String(backend))
           ? () => {
             if (!stillOwnsTick() || stopRequested() || dispatchSignal.aborted) return false;
@@ -7755,6 +7813,7 @@ export async function tick(
               ...(selectedGrokAdmission ? { selectedGrokAdmission } : {}),
               ...(selectedDevinAdmission ? { selectedDevinAdmission } : {}),
               ...(selectedClaudeAdmission ? { selectedClaudeAdmission } : {}),
+              ...(selectedCodexAccount ? { selectedCodexAccount } : {}),
               ...(dispatchHarness ? { harness: dispatchHarness } : {}),
               budget: itemBudget,
               ...(_bonCandidates ? { candidates: _bonCandidates as never } : {}),
@@ -7911,11 +7970,20 @@ export async function tick(
               ...(selectedDevinAdmission ? { selectedDevinAdmission } : {}),
               ...(onSelectedDevinSpawn ? { onSelectedDevinSpawn } : {}),
               ...(selectedClaudeAdmission ? { selectedClaudeAdmission } : {}),
+              ...(selectedCodexAccount ? { selectedCodexAccount } : {}),
               ...(outcomeDispatch || selectedTaskAdmission ? { selectedOutcomeAdmission: selectedDispatchAdmission } : {}),
               ...(dispatchHarness ? { harness: dispatchHarness } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,
               signal: dispatchSignal,
             });
+            if (managerCandidate) {
+              // Record the exact admitted snapshot only after the direct run
+              // starts. Refused previews/claims/quota never become use records;
+              // no second resolution can substitute guidance or attribution.
+              const prepared = preparedManagerPrompts.get(item.id)!;
+              if (prepared.playbookUse) void recordPlaybookUse({ lane: 'fleet', key: attemptId, ...prepared.playbookUse });
+              if (prepared.knowledgeNoteIds.length) void recordKnowledgeHits(prepared.knowledgeNoteIds);
+            }
             recordUse(backend!);
             return { kind: 'started' as const, run };
           });

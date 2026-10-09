@@ -7,7 +7,8 @@
  * models, and the cloud credits — so capacity is visible on every surface
  * without opening anything. Hover (or keyboard focus) shows the detail: every
  * window with its reset, the reserve kept for Mason, the account's state.
- * Clicking a row opens the Resources drawer. The whole bar can be switched
+ * Native and credit rows open the Resources drawer; saved Bot profiles open
+ * Proactive agents and report no inferred allowance. The whole bar can be switched
  * off ("Hide resource bar" in ⌘K or the drawer), which brings back the rail's
  * single capacity ring.
  *
@@ -29,14 +30,16 @@ import { ACCOUNT_CLOCK_MS, useCapacityData } from '../usage/CapacityStrip.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { bindingLeftPercent } from '../usage/binding-left.js';
 import { accountStatus, buildCapacityRows, type AccountStatus, type CapacityRow } from '../usage/capacity-strip-model.js';
-import { formatUsd } from './resources-model.js';
+import { formatUsd, localObservationAge } from './resources-model.js';
 import { cloudCreditsQuery } from './resources-queries.js';
 import { creditPoolsQuery } from './credit-pools-query.js';
 import { apiGrantDisplay, apiGrantUsdDecimal } from './credit-pool-model.js';
 import { devinConsumptionEvidence, devinUsageEvidence, formatAcu } from '../devin/devin-model.js';
 import { DEVIN_POLL_MS, devinQuery } from '../devin/devin-queries.js';
-import { openResources, useResourcesUi } from './resources-store.js';
+import { closeResources, openResources, useResourcesUi } from './resources-store.js';
 import { moveResource, orderedResources, useResourceOrder } from './resource-order.js';
+import { proactiveProfilesQuery } from '../proactive/proactive-queries.js';
+import { setVerseSection } from '../verse-ui-store.js';
 import styles from './ResourcesBar.module.css';
 
 type Level = 'ok' | 'low' | 'out' | 'idle' | 'unknown';
@@ -71,7 +74,7 @@ const LEVEL_OF_STATUS: Readonly<Record<AccountStatus['kind'], Level>> = {
 };
 
 /** Pure: capacity rows → bar rows (exported for tests). */
-export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolean; now: number; pendingSeatIds?: readonly string[]; devinConsumption?: unknown }): BarRow[] {
+export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolean; now: number; localReadFailed?: boolean; pendingSeatIds?: readonly string[]; devinConsumption?: unknown }): BarRow[] {
   const out: BarRow[] = [];
   for (const row of rows) {
     const surfaceLabel = row.engine === 'grok' && row.label !== 'Grok Build' ? ' · Grok Build' : '';
@@ -91,10 +94,10 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
         leftPercent: null,
         // An unread runtime is not "ready": the battery must say what the
         // hover summary does ("readiness not reported"), as Command's strip does.
-        level: row.cls === 'blocked' ? 'out' : row.cls === 'unread' ? 'unknown' : 'idle',
-        value: row.cls === 'blocked' ? 'offline' : row.cls === 'unread' ? 'not reported' : 'ready',
-        summary: `${row.label}: ${row.summary}`,
-        detail: ['No metered usage — runs on this Mac.', ...row.notes],
+        level: opts.localReadFailed ? 'unknown' : row.cls === 'blocked' ? 'out' : row.cls === 'unread' ? 'unknown' : 'idle',
+        value: row.cls === 'unread' ? 'not reported' : `${opts.localReadFailed ? 'last ' : ''}${row.cls === 'blocked' ? 'offline' : 'ready'}`,
+        summary: `${row.label}: ${opts.localReadFailed ? 'Last readiness · latest refresh failed' : row.summary}`,
+        detail: ['No metered usage — runs on this Mac.', `Readiness observation · ${localObservationAge(row.checkedAt, opts.now)}`, ...(opts.localReadFailed ? ['Retained readiness; current availability is unconfirmed.'] : []), ...row.notes],
       });
       continue;
     }
@@ -226,6 +229,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   const devinRead = useQuery(devinQuery);
   const refreshDevin = useRefetch(devinQuery);
   const resources = useResourcesUi();
+  const proactiveRead = useQuery(proactiveProfilesQuery, { enabled: resources.bar });
   const creditRead = useQuery(creditPoolsQuery, { enabled: resources.bar, freshMs: 15_000 });
   const refreshCredits = useRefetch(creditPoolsQuery);
   const devin = devinRead.data?.value ?? null;
@@ -256,8 +260,8 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   usePollWhileVisible(() => setClock(Date.now()), ACCOUNT_CLOCK_MS);
   const now = Date.now();
   const rows = useMemo(
-    () => (data.loading ? [] : barRows(buildCapacityRows(data.seats, { health: data.health, budget: data.budget, local: 'collapse', now }), { healthRead: data.health !== null, now, pendingSeatIds: data.pendingSeatIds, devinConsumption: devin?.consumption })),
-    [data.loading, data.seats, data.health, data.budget, data.pendingSeatIds, now, devin?.consumption],
+    () => (data.loading ? [] : barRows(buildCapacityRows(data.seats, { health: data.health, budget: data.budget, local: 'collapse', now }), { healthRead: data.health !== null, now, localReadFailed: data.localReadFailed, pendingSeatIds: data.pendingSeatIds, devinConsumption: devin?.consumption })),
+    [data.loading, data.seats, data.health, data.budget, data.localReadFailed, data.pendingSeatIds, now, devin?.consumption],
   );
   const cloud = cloudRead.data?.credits ?? null;
   const cloudLeft = cloud && cloud.totalUsd > 0 ? (cloud.remainingUsd / cloud.totalUsd) * 100 : null;
@@ -310,6 +314,35 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
         </Tooltip>
     ),
   }));
+  // Saved Bot identities are metadata, never native seats or allowance readings.
+  // Keep each profile distinct: matching declared accounts do not prove billing binding.
+  for (const profile of proactiveRead.error === undefined ? proactiveRead.data?.profiles ?? [] : []) {
+    if (profile.identity.provider !== 'grok-bot') continue;
+    const name = `${profile.displayName} · Grok Bot`;
+    const preference = profile.enabled ? 'Configured' : 'Preference off';
+    entries.push({ key: `proactive:${profile.id}`, name, content: (
+      <Tooltip placement="right" content={
+        <div className={styles.tip}>
+          <div className={styles.tipHead}><ProviderLogo engine="grok" size={14} /><strong>{name}</strong></div>
+          <div className={styles.tipSummary}>{preference} · usage unknown</div>
+          <div className={styles.tipLine}>Weekly Bot allowance and reset unknown. Separate from Grok Build and xAI API credits.</div>
+          <div className={styles.tipLine}>Saved account: {profile.identity.accountId} · agent: {profile.identity.agentId}. Provider binding unverified.</div>
+          <div className={styles.tipLine}>Bots may share their account's allowance. Dispatch not verified.</div>
+          <div className={styles.tipHint}>Open Proactive agents</div>
+        </div>
+      }>
+        <button type="button" className={styles.row} data-level="unknown"
+          aria-label={`${name}: ${preference.toLowerCase()}, usage and reset unknown. Open Proactive agents`}
+          onClick={() => { closeResources(); setVerseSection('agents', 'proactive-agents'); }}>
+          <span className={styles.line}>
+            <ProviderLogo engine="grok" size={14} className={styles.logo} />
+            {expanded ? <span className={styles.name}>{name}</span> : null}
+          </span>
+          {expanded ? <span className={styles.credits}>{preference} · usage unknown</span> : null}
+        </button>
+      </Tooltip>
+    ) });
+  }
   // Recorded API money is not subscription capacity, a seat, or permission to spend.
   const apiGrants = creditValue?.v === 2 && creditValue.apiGrants.state === 'healthy'
     ? creditValue.apiGrants.rows : [];

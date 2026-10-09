@@ -10,7 +10,7 @@ vi.mock('../src/core/run/orchestrator.js', () => ({ loadRun: mocks.run }));
 vi.mock('../src/core/inbox/store.js', () => ({ loadProposal: mocks.proposal }));
 vi.mock('../src/core/sandbox/policy.js', () => ({ readEnrollmentRegistry: mocks.enrollment }));
 import { OutcomeManagerDispatch, outcomeManagerWorkItems, readOutcomeManagerWorkItemContext,
-  readOutcomeManagerResult, reconcileOutcomeManagerTerminals, readOutcomeManagerSessionProjection, readOutcomeManagerSession, isOutcomeManagerWorkItem } from '../src/core/daemon/outcome-manager.js';
+  readOutcomeManagerResult, readOutcomeManagerPrompt, reconcileOutcomeManagerTerminals, readOutcomeManagerSessionProjection, readOutcomeManagerSession, isOutcomeManagerWorkItem } from '../src/core/daemon/outcome-manager.js';
 import { OutcomeManagerCoordinator, type OutcomeManagerAdmission } from '../src/core/goals/outcome-manager.js';
 import { OutcomeCoordinator } from '../src/core/goals/outcome-coordinator.js';
 import { OutcomeStore } from '../src/core/goals/outcome-store.js';
@@ -73,6 +73,16 @@ describe('actual tool-capable manager host bridge', () => {
     const prompt = f.dispatch().prompt(); expect(prompt).toContain('Use native tools');
     expect(prompt).toContain(f.state().scope.acceptance[0]); expect(prompt).toContain('normal captured proposals');
     expect(f.state().manager!.stages).toEqual([]);
+  });
+  it('discovers the exact saved private prompt without a launch and refuses missing conversation', () => {
+    const f = fixture(true); const context = readOutcomeManagerWorkItemContext(f.item)!;
+    const before = JSON.stringify(f.state());
+    const prompt = readOutcomeManagerPrompt(context, { conversation: () => 'Actual persisted private message' });
+    expect(prompt).toBe(f.dispatch().prompt());
+    expect(prompt).toContain(f.state().scope.desiredOutcome); expect(prompt).toContain(f.state().scope.acceptance[0]);
+    expect(prompt).toContain('Actual persisted private message'); expect(f.item.detail).not.toContain('Actual persisted private message');
+    expect(readOutcomeManagerPrompt(context, { conversation: () => null })).toBeNull();
+    expect(JSON.stringify(f.state())).toBe(before); expect(f.state().manager!.stages).toEqual([]);
   });
   it.each([
     { engine: 'llama-server', seatId: 'local', model: 'qualified-local-model', tier: 'local' as const },

@@ -2587,7 +2587,8 @@ the standalone resource-pool CLI.
 
 ## Provider research and billing boundaries
 
-Research checked September 7, 2026; provider rules and models can change.
+Research checked September 7, 2026; Grok scope notes updated October 9, 2026.
+Provider rules and models can change.
 
 - Codex documents subscription authentication separately from usage-billed API
   authentication. App Server exposes account quota windows and metered bucket IDs;
@@ -2607,7 +2608,7 @@ Research checked September 7, 2026; provider rules and models can change.
   [Claude SDK plan notice](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan).
 - On Max, Fable 5/5.1 can use up to 50% of the **same** weekly allowance, not an
   additional allowance. Continued Fable use after that limit can involve paid
-  credits. Hub neither enables such credits nor guarantees the owner has disabled
+  credits. Phantom neither enables such credits nor guarantees the owner has disabled
   them. The exact Fable native wire bucket name was not established; no name or
   numeric allowance is hardcoded into the scheduler.
   [Fable plan limits](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan).
@@ -2617,23 +2618,27 @@ Research checked September 7, 2026; provider rules and models can change.
   [Status-line resource fields](https://code.claude.com/docs/en/statusline),
   [Claude gateway support](https://code.claude.com/docs/en/llm-gateway).
 - Grok Build has an official native CLI, headless output modes, and an ACP stdio
-  interface. Hub has **no Grok worker transport** yet: a version-pinned terminal
-  result/usage contract and a tested tool/customization boundary are still needed.
+  interface. Phantom's main workbench has a native Grok Build worker transport
+  with account-bound execution and parsed result/usage evidence. This standalone
+  resource pool still supports Codex, Claude Code and local workers; it is a
+  separate execution path, not the workbench's complete resource inventory.
   Its documented child-network restriction is a no-op on macOS, so a similarly
   named sandbox is not proof of equivalent containment.
   [Grok Build scripting](https://docs.x.ai/build/cli/headless-scripting),
   [sandbox limits](https://docs.x.ai/build/features/sandbox).
 - Grok Bot is an external cloud-computer product, not this console's local
-  desktop-control worker. The August 26 announcement expands plan access and
-  describes its own usage pool; a public Hub-controllable Bot API and this user's
-  exact entitlement have not been established. Do not infer either from a Grok
-  subscription. [Grok Bot plan announcement](https://x.ai/news/grok-bot-more-plans),
+  desktop-control worker. Its included allowance and reset are independent of
+  Grok Build. A Phantom-qualified dispatch connection, current Bot quota and
+  this user's exact entitlement remain unverified; a linked subscription does
+  not establish them. See [separate Bot usage and billing](RESOURCE-EVIDENCE.md#grok-build-and-grok-bot).
+  [Grok Bot plan announcement](https://x.ai/news/grok-bot-more-plans),
   [Grok Bot FAQ](https://docs.x.ai/grok-bot/faq). For an evidence-gated companion
-  workflow using its documented plugins, see [Grok Bot beside Phantom](https://github.com/ashlrai/phantom/blob/master/docs/GROK-BOT-COMPANION.md).
+  workflow using its documented plugins and optional one-way routine webhook,
+  see [Grok Bot beside Phantom](https://github.com/ashlrai/phantom/blob/master/docs/GROK-BOT-COMPANION.md).
 - Consumer access, native Build access, and an xAI API-key billing account are
   distinct integration choices. The documented API route uses API credentials
   and metered billing; confirm any account-specific included credits, overage,
-  or auto-top-up before use. Hub does not fall back to a paid xAI endpoint.
+  or auto-top-up before use. Phantom does not fall back to a paid xAI endpoint.
   [xAI API quickstart](https://docs.x.ai/developers/quickstart),
   [API billing](https://docs.x.ai/developers/faq/billing).
 

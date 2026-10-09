@@ -9,7 +9,58 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.29.2] — Unreleased
+## [3.29.3] — Unreleased
+
+### Added
+
+- Saved Grok Bot profiles appear separately in the reorderable resource sidebar.
+  Declared account and agent identities remain unverified; Bot allowance and reset
+  stay unknown rather than borrowing Build or API usage.
+- Explain account-usage collection holds separately from sign-in readiness,
+  preserving existing readings and provider-specific diagnostics.
+- Record local Leader completion tokens, duration and immutable model/runtime
+  bindings when actually reported; distinguish missing counters from zero usage.
+
+### Changed
+
+- Use fresh, complete llama runtime slot observations to schedule available local
+  capacity. Count experiment reservations once; retain configured behavior when
+  physical occupancy is unknown. CPU and RAM remain descriptive host metrics.
+- Remove the hidden daily Leader conversation cap and propagate cancellation to
+  native replies. Existing funding rules and explicit stop controls remain.
+- Clarify that project inventory estimates differ from the context a particular
+  task needs; a large repository need not prevent a narrow local-model task.
+- Explain resource evidence and configured routing priors without presenting
+  estimated context, hardware readings or configured tiers as measured capability.
+- Update release guidance for the commissioned original-artifact trusted publisher.
+- Increase the desktop first-paint baseline from 353 to 354 KiB for 43 additional
+  bytes of lazy preload metadata; phone size and its 250 KiB limit are unchanged.
+  This is a documented size allowance, not a measured speed improvement.
+
+### Fixed
+
+- Forecast Manager context from the prepared prompt and harness instead of a
+  generic token estimate, then revalidate the actual dispatch before invocation.
+- Pin selected Codex launches to the chosen account, executable and profile across
+  Manager, worker and repair paths; preserve reported token provenance.
+- Clarify native Grok transport, standalone historical resource pools, independent
+  Bot funding, local measurement scope and subscription evidence in documentation.
+- Show the original age of retained local runtime and readiness observations;
+  keep refresh failures visible during retries until a real successful read.
+- Bind local context availability to validated runtime metadata instead of the
+  requested configuration; forward caller cancellation through local Leader reads.
+- Keep unchanged authority-alert arrival times stable across fresh status checks,
+  allowing Jev's existing advisory cache to reuse unchanged inputs. Substantive
+  changes, recovery and recurrence still invalidate the observation.
+- Classify the durable OutcomeStore tests in the existing real-I/O lane, retaining
+  every case and complete platform coverage without changing production deadlines.
+- Synchronize explicit candidate lines in the README, quickstart and desktop
+  guide with package/native metadata. Preserve verified publication records and
+  reject missing or duplicate markers before writing any file.
+
+Publication and installation of this candidate remain pending qualification.
+
+## [3.29.2] — 2026-10-09
 
 ### Added
 
@@ -37,7 +88,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   Preserve numeric totals; show unknown historical details rather than measured
   zero or an unsupported exact throughput rate.
 
-Publication and installation of this candidate remain pending qualification.
+Published `@ashlr/phantom@3.29.2` through the commissioned trusted publisher in
+[run 37944263148, attempt 1](https://github.com/ashlrai/phantom/actions/runs/37944263148/attempts/1).
+Signed GitHub desktop assets and local installation were verified separately.
+Website commissioning and resident provider activation remain incomplete.
 
 ## [3.29.0] — 2026-10-09
 

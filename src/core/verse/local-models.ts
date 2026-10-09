@@ -651,9 +651,8 @@ export function readOllamaServerDefault(
  * 4` is 65536 per slot). Read back from the live server, exactly as
  * `local-runtime/llama/health.ts` derives `contextPerSlot`:
  *
- *   `/props.default_generation_settings.n_ctx` → `/slots[0].n_ctx` →
- *   `floor(requestedContext / total_slots)` (the `-c` we launched it with,
- *   from the ownership record, over the slot count the SERVER reports).
+ *   `/props.default_generation_settings.n_ctx` → complete consistent `/slots`.
+ * Requested launch settings never establish the responding server's allocation.
  *
  * Null when the server does not answer — the caller then falls back to the
  * Ollama figure and says so. Never throws.
@@ -669,23 +668,13 @@ export async function probeLlamaSlotContext(
     fetchJsonDetailed(fetchImpl, `${base}/props`, timeoutMs),
     fetchJsonDetailed(fetchImpl, `${base}/slots`, timeoutMs),
   ]);
-  const { deriveSlotCapacity } = await import('../local-runtime/llama/health.js');
-  const capacity = deriveSlotCapacity(
+  const { deriveSlotContext } = await import('../local-runtime/llama/health.js');
+  // requestedContext remains an accepted legacy option, but configuration is
+  // never promoted to a live reading. Preserve the source on this projection.
+  return deriveSlotContext(
     { httpStatus: props.failure === null ? 200 : null, body: props.body, error: props.failure },
     { httpStatus: slots.failure === null ? 200 : null, body: slots.body, error: slots.failure },
   );
-  const totalSlots = capacity.configured;
-  const generation = isRecord(props.body) ? props.body['default_generation_settings'] : null;
-  const fromProps = isRecord(generation) ? num(generation['n_ctx']) : null;
-  if (fromProps !== null && fromProps > 0) return { perSlot: Math.floor(fromProps), totalSlots, source: 'props' };
-  const first = Array.isArray(slots.body) ? slots.body[0] : null;
-  const fromSlots = isRecord(first) ? num(first['n_ctx']) : null;
-  if (fromSlots !== null && fromSlots > 0) return { perSlot: Math.floor(fromSlots), totalSlots, source: 'slots' };
-  const requested = opts.requestedContext ?? null;
-  if (requested !== null && requested > 0 && totalSlots !== null && totalSlots > 0) {
-    return { perSlot: Math.floor(requested / totalSlots), totalSlots, source: 'requested' };
-  }
-  return { perSlot: null, totalSlots, source: null };
 }
 
 /** How a local window was decided — for notes and tests, never for the wire. */

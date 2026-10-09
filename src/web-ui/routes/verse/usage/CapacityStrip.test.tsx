@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { StrictMode, type ReactNode } from 'react';
-import { evictAll, invalidateObserved } from '../../../data/cache.js';
+import { evictAll, invalidateObserved, refetchQuery } from '../../../data/cache.js';
 import { SectionVisibilityProvider } from '../shell/section-visibility.js';
 import userEvent from '@testing-library/user-event';
 import type { BudgetView } from '../../../../core/routing/policy.js';
@@ -26,6 +26,8 @@ import {
 } from '../seat-fixtures.test-support.js';
 import { CapacityStrip, useCapacityData } from './CapacityStrip.js';
 import { buildCapacityRows } from './capacity-strip-model.js';
+import { verseHealthQuery } from '../health/health-queries.js';
+import { budgetQuery } from '../budget/budget-queries.js';
 import { barRows } from '../resources/ResourcesBar.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -258,6 +260,28 @@ describe('useCapacityData budget opt-out', () => {
   });
   afterEach(() => { cleanup(); evictAll(); vi.unstubAllGlobals(); });
   const budgetReads = () => reads.filter(path => path === '/api/verse/budget').length;
+
+  it('keeps local refresh failure separate from budget failure and clears it only after a real health refresh', async () => {
+    const hook = renderHook(() => useCapacityData(), { wrapper });
+    await waitFor(() => expect(hook.result.current.budget).toEqual(BUDGET));
+    await waitFor(() => expect(hook.result.current.health).toEqual([]));
+    await act(async () => { await refetchQuery(budgetQuery.key, async () => { throw new Error('budget read failed'); }); });
+    expect(hook.result.current.readFailed).toBe(true);
+    expect(hook.result.current.localReadFailed).toBe(false);
+    await act(async () => { await refetchQuery(verseHealthQuery.key, async () => { throw new Error('health read failed'); }); });
+    expect(hook.result.current.localReadFailed).toBe(true);
+    expect(hook.result.current.health).toEqual([]); // Original observation remains retained.
+    let complete!: () => void;
+    const deferred = new Promise<void>(resolve => { complete = resolve; });
+    let retry!: Promise<void>;
+    await act(async () => { retry = refetchQuery(verseHealthQuery.key, async () => { await deferred; return verseHealthQuery.fetch(); }); });
+    expect(hook.result.current.refreshing).toBe(true);
+    expect(hook.result.current.localReadFailed).toBe(true); // Pending retry is not a new health observation.
+    expect(hook.result.current.health).toEqual([]);
+    await act(async () => { complete(); await retry; });
+    expect(hook.result.current.localReadFailed).toBe(false);
+    expect(hook.result.current.readFailed).toBe(true); // Unrelated budget is still unavailable.
+  });
 
   it('does not read a budget for summary-only consumers, including observed renewal', async () => {
     const hook = renderHook(() => useCapacityData({ withBudget: false }), { wrapper });

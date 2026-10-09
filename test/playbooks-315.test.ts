@@ -356,7 +356,10 @@ describe('lane hooks', () => {
 
   it('fleet: a !macro appends the block and records runId → id@version', async () => {
     const goal = 'GOAL TEXT';
+    const preview = withFleetPlaybook(goal, { repo: '/tmp/repo', title: 'Fix crash', detail: 'Parser crash. !fix-bug' }, 'preview', { recordUse: false });
+    expect((await readPlaybookUses()).size).toBe(0);
     const out = withFleetPlaybook(goal, { repo: '/tmp/repo', title: 'Fix crash', detail: 'Parser crash. !fix-bug' }, 'run-42');
+    expect(preview).toBe(out);
     expect(out.startsWith('GOAL TEXT\n\n## Playbook: Fix a reported bug')).toBe(true);
     let uses = await readPlaybookUses();
     for (let i = 0; i < 20 && uses.size === 0; i += 1) {

@@ -852,6 +852,7 @@ async function runBestOfNInternal(
     selectedDevinAdmission?: import('../types.js').RunOptions['selectedDevinAdmission'];
     /** Host-only exact selected Claude account/authority fence; never model input. */
     selectedClaudeAdmission?: () => boolean;
+    selectedCodexAccount?: import('../types.js').RunOptions['selectedCodexAccount'];
     /** Caller-owned outcome revision shared by all ordinary candidates and critics. */
     selectedOutcomeAdmission?: () => boolean;
     /**
@@ -1033,11 +1034,12 @@ async function runBestOfNInternal(
     }]);
   }
   // The routed seat only ever applies to the routed engine (see opts.seatId).
-  const seatFor = (e: EngineId): Pick<import('../types.js').RunOptions, 'seatId' | 'selectedGrokAdmission' | 'selectedDevinAdmission' | 'selectedClaudeAdmission'> => ({
+  const seatFor = (e: EngineId): Pick<import('../types.js').RunOptions, 'seatId' | 'selectedGrokAdmission' | 'selectedDevinAdmission' | 'selectedClaudeAdmission' | 'selectedCodexAccount'> => ({
     ...(opts?.seatId && opts.engine !== undefined && e === opts.engine
       ? { seatId:opts.seatId,
         ...(String(e) === 'grok-cli' && opts.selectedGrokAdmission ? {selectedGrokAdmission:opts.selectedGrokAdmission} : {}),
-        ...(['claude','claude-cli'].includes(String(e)) && opts.selectedClaudeAdmission ? {selectedClaudeAdmission:opts.selectedClaudeAdmission} : {}) } : {}),
+        ...(['claude','claude-cli'].includes(String(e)) && opts.selectedClaudeAdmission ? {selectedClaudeAdmission:opts.selectedClaudeAdmission} : {}),
+        ...(String(e) === 'codex' && opts.selectedCodexAccount ? {selectedCodexAccount:opts.selectedCodexAccount} : {}) } : {}),
     ...(String(e) === 'devin-cli' && opts?.selectedDevinAdmission ? { selectedDevinAdmission:opts.selectedDevinAdmission } : {}),
   });
   const runnerFor = (e: EngineId): typeof runEngineSandboxed => {

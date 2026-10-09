@@ -60,19 +60,17 @@ describe('package.json publish shape', () => {
     // provenance key": a re-added flag (or any other publish-time switch)
     // should be a deliberate edit to this test, not a silent regression.
     expect(pkg['publishConfig']).toEqual({ access: 'public' });
-    // Provenance is requested per publish instead, and only where it can be
-    // honoured: the historical release workflow passes
-    // `--provenance` on its own `npm publish` line — asserted in the release
-    // workflow suite below.
-    // Manual npm publication has no npm CI provenance. A separately signed
-    // qualified build handoff proves its own inputs, not registry publication.
+    // Supported CI publishers request provenance per invocation. The manual
+    // lane is historical: its separately signed qualified handoff did not
+    // establish npm provenance, and current commissioning cannot rewrite it.
     const releasingLocally = readFileSync(join(REPO_ROOT, 'docs', 'RELEASING-LOCALLY.md'), 'utf8');
     expect(releasingLocally).toContain('publishConfig.provenance: true');
     expect(releasingLocally).toContain('Automatic provenance generation not supported for provider: null');
-    const normalized = releasingLocally.replace(/\s+/g, ' ');
-    expect(normalized).toContain("Manual npm publication does not carry npm's CI provenance attestation.");
-    expect(normalized).toContain('The qualified CI handoff separately signs and verifies the tested source, build and original archive before local adoption;');
-    expect(normalized).toContain('it does not add npm provenance to the published package.');
+    const historical = (releasingLocally.split('## Historical manual publishing and provenance\n')[1]?.split('\n## ')[0] ?? '').replace(/\s+/g, ' ');
+    expect(historical).toMatch(/manual lane[^.]*did not carry npm's CI provenance attestation/iu);
+    expect(historical).toMatch(/qualified CI handoff separately signed and verified[^.]*original archive before local adoption/iu);
+    expect(historical).toMatch(/current \[trusted publisher\][^.]*generates and verifies npm provenance/iu);
+    expect(historical).toMatch(/earlier manual release does not gain provenance retroactively/iu);
   });
 
   it('gates publish behind the full verification suite', () => {

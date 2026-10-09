@@ -190,19 +190,74 @@ export function deriveSlotCapacity(props: EndpointReading, slots: EndpointReadin
   }
 
   let busy: number | null = null;
-  if (slotList !== null) {
-    busy = slotList.filter((slot) => {
-      if (typeof slot !== 'object' || slot === null) return false;
+  if (slots.httpStatus === 200 && slots.error === null && slotList !== null && slotList.length === configured) {
+    const ids = new Set<string>();
+    const activity = slotList.map((slot): boolean | null => {
+      if (typeof slot !== 'object' || slot === null) return null;
       const record = slot as Record<string, unknown>;
-      if (record['is_processing'] === true) return true;
+      // IDs are optional in older builds. Identifiable duplicates cannot
+      // establish complete coverage, even when the array length matches.
+      if (Object.hasOwn(record, 'id')) {
+        const id = record['id'];
+        if (!(typeof id === 'number' && Number.isSafeInteger(id) && id >= 0)
+          && !(typeof id === 'string' && id.trim().length > 0)) return null;
+        const key = String(id).trim();
+        if (ids.has(key)) return null;
+        ids.add(key);
+      }
+      if (typeof record['is_processing'] === 'boolean') return record['is_processing'];
       // Older builds report a numeric state; 0 is idle, anything else is not.
       const state = record['state'];
-      return typeof state === 'number' && state !== 0;
-    }).length;
+      return typeof state === 'number' && Number.isSafeInteger(state) ? state !== 0 : null;
+    });
+    // Unknown or partial activity must not masquerade as an idle slot. Total
+    // configured capacity remains independently usable by existing callers.
+    if (activity.every((value) => value !== null)) busy = activity.filter(Boolean).length;
   }
 
   const idle = configured !== null && busy !== null ? Math.max(0, configured - busy) : null;
   return { configured, busy, idle, source };
+}
+
+/** Observed allocation only. Requested launch context is configuration, not a
+ * reading from this server. A slot fallback must cover every reported slot
+ * with a unique integer server ID (the supported /slots metadata shape);
+ * conflicting metadata cannot be resolved by quoting an older launch request. */
+export function deriveSlotContext(props: EndpointReading, slots: EndpointReading): {
+  perSlot: number | null; totalSlots: number | null; source: 'props' | 'slots' | null;
+} {
+  const usable = (reading: EndpointReading): EndpointReading => reading.httpStatus === 200 && reading.error === null
+    ? reading : { httpStatus: null, body: null, error: reading.error };
+  const observedProps = usable(props);
+  const observedSlots = usable(slots);
+  const totalSlots = deriveSlotCapacity(observedProps, observedSlots).configured;
+  const unknown = { perSlot: null, totalSlots, source: null };
+  const positive = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+  const generation = observedProps.body !== null && typeof observedProps.body === 'object'
+    ? (observedProps.body as Record<string, unknown>)['default_generation_settings'] : null;
+  const rawProps = generation !== null && typeof generation === 'object' && !Array.isArray(generation)
+    ? (generation as Record<string, unknown>)['n_ctx'] : null;
+  if (rawProps !== null && rawProps !== undefined && !positive(rawProps)) return unknown;
+  const fromProps = positive(rawProps) ? rawProps : null;
+  const list = Array.isArray(observedSlots.body) ? observedSlots.body as unknown[] : null;
+  const reportsContext = list?.some(slot => slot !== null && typeof slot === 'object' && Object.hasOwn(slot, 'n_ctx')) ?? false;
+  if (!reportsContext) return fromProps === null ? unknown : { perSlot: fromProps, totalSlots, source: 'props' };
+  if (totalSlots === null || list === null || list.length !== totalSlots) return unknown;
+  const ids = new Set<number>();
+  let fromSlots: number | null = null;
+  for (const slot of list) {
+    if (slot === null || typeof slot !== 'object' || Array.isArray(slot)) return unknown;
+    const row = slot as Record<string, unknown>;
+    // Missing IDs cannot prove coverage; string/fractional coercion can hide
+    // duplicates. Older IDless payloads do not establish a slot allocation.
+    const id = row['id'];
+    if (typeof id !== 'number' || !Number.isSafeInteger(id) || id < 0 || ids.has(id)) return unknown;
+    ids.add(id);
+    const context = row['n_ctx'];
+    if (!positive(context) || fromSlots !== null && context !== fromSlots || fromProps !== null && context !== fromProps) return unknown;
+    fromSlots = context;
+  }
+  return { perSlot: fromProps ?? fromSlots, totalSlots, source: fromProps === null ? 'slots' : 'props' };
 }
 
 /** Options for {@link probeLlamaRuntime}. */
@@ -269,16 +324,10 @@ export function composeSnapshot(args: {
     args.record?.modelRef ??
     (basename !== null && !/^sha256[-:][0-9a-f]{16,}$/i.test(basename) ? basename : null);
 
-  const generation = (args.readings.props.body as Record<string, unknown> | null)?.[
-    'default_generation_settings'
-  ];
-  const contextPerSlot = numField(generation ?? null, 'n_ctx');
-  const contextTotal =
-    contextPerSlot !== null && slots.configured !== null
-      ? contextPerSlot * slots.configured
-      : (args.record?.requestedContext ?? 0) > 0
-        ? (args.record as LlamaOwnershipRecord).requestedContext
-        : null;
+  const context = deriveSlotContext(args.readings.props, args.readings.slots);
+  const contextPerSlot = context.perSlot;
+  const total = contextPerSlot !== null && context.totalSlots !== null ? contextPerSlot * context.totalSlots : null;
+  const contextTotal = total !== null && Number.isSafeInteger(total) ? total : null;
 
   const readopted = typeof args.observedPid === 'number' && args.observedPid > 1;
   const startedAt = args.ownershipVerified && !readopted

@@ -250,6 +250,7 @@
 /test/cloud-budget.test.ts @masonwyatt23
 /test/cloud-intake-313.test.ts @masonwyatt23
 /test/cloud-timeline.test.ts @masonwyatt23
+/test/codex-selected-producer.test.ts @masonwyatt23
 /test/comms-telegram-leader-314.test.ts @masonwyatt23
 /test/completeness-gate-stash-hardening-310b.test.ts @masonwyatt23
 /test/confine-autonomous-310b.test.ts @masonwyatt23
@@ -382,6 +383,7 @@
 /test/live-fleet-leader-315.test.ts @masonwyatt23
 /test/local-eval-comparison.test.ts @masonwyatt23
 /test/local-eval-heldout.test.ts @masonwyatt23
+/test/local-leader-binding.test.ts @masonwyatt23
 /test/local-only-consumer-parity.test.ts @masonwyatt23
 /test/local-only-dispatch-paths.test.ts @masonwyatt23
 /test/local-only-policy.test.ts @masonwyatt23

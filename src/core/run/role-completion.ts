@@ -2,7 +2,7 @@
  * before contact and throughout the owned process. No global CLI login, API
  * credential fallback or model-authored transport configuration is accepted. */
 import { randomUUID } from 'node:crypto';
-import { lstatSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { AshlrConfig, EngineCommand } from '../types.js';
@@ -21,7 +21,7 @@ import { compileArgv, GROK_CLI_HEADLESS_ARGV, extractGrokStreamText } from './en
 import { codexAdapter } from '../verse/adapters/codex.js';
 import { refreshDevinCliExecutionBinding, devinCliBindingCurrent, type DevinCliExecutionBinding } from '../devin/cli-admission.js';
 import { enginePermitted } from '../policy/local-only.js';
-import { observeRoleAccount, roleAccountEpoch } from './role-account.js';
+import { observeRoleAccount, roleAccountEpoch, nativeLaunchEpoch } from './role-account.js';
 import { assertHostNativeAccountContext } from '../integrations/locus-job-env.js';
 
 export type NativeRoleEngine = 'claude' | 'codex' | 'grok' | 'devin';
@@ -51,13 +51,6 @@ function policyEpoch(req: RoleCompletionRequest): string | null {
         Date.parse(p.expiresAt) <= Date.now() || !req.admitted()) return null;
     return canonical({grantId:p.grantId,grantSeq:p.grantSeq,rollout:p.rollout,spend:p.spend,engines:p.engines});
   } catch { return null; }
-}
-function launchEpoch(launch: NativeSeatLaunch): string {
-  return canonical([launch, ...[...launch.command,launch.executable,join(dirname(launch.command[1]),'profile.json')].map(path => {
-    const s=lstatSync(path,{bigint:true});
-    if (!s.isFile() || s.isSymbolicLink()) throw new Error('Native launch identity unavailable');
-    return [path,s.dev,s.ino,s.size,s.mtimeNs,s.ctimeNs].map(String);
-  })]);
 }
 /** Strict completion framing. A message before a failed/truncated turn is not
  * a successful plan. The existing Codex parser owns its message vocabulary. */
@@ -120,7 +113,7 @@ export function nativeRoleCompletion(req: RoleCompletionRequest, record?: (metri
         if (native) {
           const fresh=resolveNativeSeatLaunch({accountsRoot:resolveAccountsRoot(req.cfg),provider:native.provider,seatId:req.seatId,
             ...(native.provider === 'claude' ? {requireClaudeBrokerSafety:true} : {})});
-          if (!fresh.ok || launchEpoch(fresh.launch) !== epoch) return false;
+          if (!fresh.ok || nativeLaunchEpoch(fresh.launch) !== epoch) return false;
           if (accountEpoch && roleAccountEpoch(req.cfg,native,req.accountHint!) !== accountEpoch) return false;
         }
         if (devin && (!devinCliBindingCurrent(devin,req.model) || owned && !autonomousDevinIdentityCurrent(owned.overlay))) return false;
@@ -173,7 +166,7 @@ export function nativeRoleCompletion(req: RoleCompletionRequest, record?: (metri
         } else {
           const found=resolveNativeSeatLaunch({accountsRoot:resolveAccountsRoot(req.cfg),provider:req.engine,seatId:req.seatId});
           if(!found.ok)throw new Error('Selected native account launch unavailable');
-          native=found.launch;epoch=launchEpoch(native);
+          native=found.launch;epoch=nativeLaunchEpoch(native);
           const account=await observeRoleAccount({cfg:req.cfg,launch:native,accountHint:req.accountHint!,cwd:scratch,signal,admitted:current});
           if(account.uncertain){retained=true;outcome='unknown';throw new Error('Native account metadata process cleanup unconfirmed');}
           accountEpoch=account.epoch;

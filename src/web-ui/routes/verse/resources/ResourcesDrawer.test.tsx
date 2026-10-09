@@ -23,7 +23,7 @@ import { verseBootstrapQuery } from '../verse-queries.js';
 import { budgetQuery } from '../budget/budget-queries.js';
 import { ResourcesBar } from './ResourcesBar.js';
 import { ResourcesDrawer } from './ResourcesDrawer.js';
-import { verseLocalModelsQuery } from '../usage/usage-queries.js';
+import { verseAccountsQuery, verseLocalModelsQuery } from '../usage/usage-queries.js';
 import { resourceReadinessQuery } from './resources-queries.js';
 import { getResourcesUi, openResources, reloadResourcesUiForTest } from './resources-store.js';
 
@@ -151,6 +151,7 @@ let calls: Call[];
 let cloud: unknown;
 let readiness: unknown;
 let readinessResponse: (() => Promise<Response>) | null;
+let accountsResponse: (() => Promise<Response>) | null;
 let localModels: unknown;
 let devin: unknown;
 let roster: unknown[];
@@ -189,6 +190,8 @@ function stubFetch() {
       case '/api/verse/budget/readiness':
         if (readinessResponse) return readinessResponse();
         return readiness === 404 ? json({ error: 'not found' }, 404) : json(readiness);
+      case '/api/verse/accounts':
+        return accountsResponse ? accountsResponse() : json({ error: 'not found' }, 404);
       case '/api/verse/runtime':
         return json(RUNTIME);
       case '/api/verse/cloud':
@@ -210,6 +213,7 @@ beforeEach(() => {
   cloud = 404;
   readiness = 404;
   readinessResponse = null;
+  accountsResponse = null;
   localModels = LOCAL_MODELS;
   devin = 404;
   roster = ROSTER;
@@ -223,6 +227,78 @@ afterEach(() => {
 });
 
 const cardOf = (label: string) => screen.getByRole('heading', { name: new RegExp(`^${label}`) }).closest('li')!;
+
+describe('ResourcesDrawer — usage collection', () => {
+  const HELD = 'Usage collection is held. Readings may be historical; Chat sign-in and Fleet permission are separate.';
+  const blocked = { sampledAt: CHECKED, collector: {
+    mode: 'owned', state: 'blocked', owner: 'this-server', reasonCode: 'collector-unavailable',
+    note: 'Waiting for cleanup', lastPolledAt: CHECKED,
+  } };
+
+  it('explains held collection while preserving separate Chat and Fleet verdicts, without actions', async () => {
+    accountsResponse = async () => json(blocked);
+    readiness = READINESS;
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    expect(await screen.findByText(HELD)).toBeInTheDocument();
+    const status = await screen.findByRole('group', { name: 'Cash Margin Partners: readiness' });
+    expect(within(status).getByText('Ready')).toBeInTheDocument();
+    expect(within(status).getByText('Not in this stage')).toBeInTheDocument();
+    expect(calls.every(call => call.method === 'GET')).toBe(true);
+    expect(screen.queryByText('collector-unavailable')).toBeNull();
+  });
+
+  it('labels retained collection as last during refresh and never presents failed evidence as current', async () => {
+    accountsResponse = async () => json(blocked);
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    await screen.findByText(HELD);
+    let complete!: (response: Response) => void;
+    accountsResponse = () => new Promise(resolve => { complete = resolve; });
+    fireEvent.click(screen.getByRole('button', { name: 'Read everything again' }));
+    await waitFor(() => expect(getQuerySnapshot(verseAccountsQuery.key).status).toBe('refreshing'));
+    expect(screen.queryByText(HELD)).toBeNull();
+    expect(screen.getByText(`Last collection status · ${HELD} Checking again…`)).toBeInTheDocument();
+    await act(async () => { complete(json({ error: 'expired' }, 401)); });
+    expect(await screen.findByText('Usage collection status is unavailable · sign in again.')).toBeInTheDocument();
+    expect(getQuerySnapshot(verseAccountsQuery.key).data).toEqual({ available: true, raw: blocked, reason: null });
+    accountsResponse = async () => json({ collector: { ...blocked.collector, state: 'running', reasonCode: null } });
+    await act(async () => { await runQuery(verseAccountsQuery.key, () => verseAccountsQuery.fetch()); });
+    expect(screen.queryByText(HELD)).toBeNull();
+    expect(screen.queryByText(/Usage collection status is unavailable/)).toBeNull();
+    expect(calls.every(call => call.method === 'GET')).toBe(true);
+  });
+
+  it('describes shared ownership without treating another process as sign-out or a measured quota', async () => {
+    accountsResponse = async () => json({ collector: {
+      ...blocked.collector, mode: 'read-only', owner: 'another-collector', reasonCode: 'collector-owned',
+    } });
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    expect(await screen.findByText('Another Phantom process owns usage collection; this view depends on its shared readings.')).toBeInTheDocument();
+    expect(screen.queryByText(HELD)).toBeNull();
+    expect(calls.every(call => call.method === 'GET')).toBe(true);
+  });
+
+  it('distinguishes normal idle lease handoff from a held collection', async () => {
+    accountsResponse = async () => json({ collector: {
+      ...blocked.collector, mode: 'read-only', state: 'suspended', owner: 'none', reasonCode: 'connection-polling-paused',
+    } });
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    expect(await screen.findByText('Usage collection is paused while idle.')).toBeInTheDocument();
+    expect(screen.queryByText(HELD)).toBeNull();
+    expect(calls.every(call => call.method === 'GET')).toBe(true);
+  });
+
+  it.each([
+    { collector: { ...blocked.collector, mode: { toString: 1 } } },
+    { collector: { ...blocked.collector, owner: 'none' } },
+    { collector: null },
+    {},
+  ])('reports malformed ownership as unavailable without inventing collection state', async body => {
+    accountsResponse = async () => json(body);
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    expect(await screen.findByText('Usage collection status is unavailable.')).toBeInTheDocument();
+    expect(screen.queryByText(HELD)).toBeNull();
+  });
+});
 
 describe('ResourcesDrawer — accounts', () => {
   it('discloses current native credit units and qualified dollar value without admitting Fleet spending', async () => {
@@ -810,5 +886,8 @@ describe('ResourcesDrawer — equal partners (3.15)', () => {
     const titles = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent);
     expect(titles).toEqual(['Use allowance before resets', 'Elite', 'Fast', 'Free · local', 'Decision layer']);
     expect(within(screen.getByRole('region', { name: 'Elite' })).getByText(/equal partners/)).toBeInTheDocument();
+    expect(within(screen.getByRole('region', { name: 'Elite' })).getByText(/does not restrict Leader or Manager roles/)).toBeInTheDocument();
+    expect(within(screen.getByRole('region', { name: 'Fast' })).getByText(/configured preference, not a measured speed or price/)).toBeInTheDocument();
+    expect(within(screen.getByRole('region', { name: 'Free · local' })).getByText(/connected tools can use network services/)).toBeInTheDocument();
   });
 });

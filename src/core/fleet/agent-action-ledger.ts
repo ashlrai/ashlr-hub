@@ -369,6 +369,7 @@ const AGENT_ACTION_TAG_CODES = new Set([
 const ENGINE_IDS = new Set<EngineId>([
   'builtin',
   'local-coder',
+  'llama-server',
   'ashlrcode',
   'aw',
   'claude',
@@ -525,12 +526,28 @@ function enumValue<T extends string>(value: unknown, allowed: ReadonlySet<T>): T
   return typeof value === 'string' && allowed.has(value as T) ? value as T : undefined;
 }
 
-function sanitizeCounts(counts: unknown): Record<string, number> | undefined {
+function sanitizeCounts(counts: unknown, localTrace: boolean): Record<string, number> | undefined {
   if (!counts || typeof counts !== 'object' || Array.isArray(counts)) return undefined;
   const out: Record<string, number> = {};
-  for (const [key, value] of Object.entries(counts).slice(0, 20)) {
-    if (!AGENT_ACTION_COUNT_KEYS.has(key) || !Number.isFinite(value)) continue;
+  const own = (key: string): unknown => {
+    const field = Object.getOwnPropertyDescriptor(counts, key);
+    return field && 'value' in field ? field.value : undefined;
+  };
+  const entries = localTrace
+    ? Object.keys(counts).map(key => [key, own(key)] as const)
+    : Object.entries(counts);
+  for (const [key, value] of entries.slice(0, localTrace ? 16 : 20)) {
+    if (!AGENT_ACTION_COUNT_KEYS.has(key) || typeof value !== 'number' || !Number.isFinite(value)) continue;
     out[key] = value;
+  }
+  if (localTrace) {
+    const values = Object.fromEntries(['tokensIn', 'tokensOut', 'inferenceRequests', 'contextWindowTokens'].map(key => [key, own(key)]));
+    const count = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+    if (values['inferenceRequests'] === 1 && count(values['tokensIn']) && count(values['tokensOut'])) {
+      out['tokensIn'] = values['tokensIn']; out['tokensOut'] = values['tokensOut'];
+    }
+    if (values['inferenceRequests'] === 0 || values['inferenceRequests'] === 1) out['inferenceRequests'] = values['inferenceRequests'];
+    if (count(values['contextWindowTokens']) && values['contextWindowTokens'] > 0) out['contextWindowTokens'] = values['contextWindowTokens'];
   }
   return Object.keys(out).length > 0 ? out : undefined;
 }
@@ -547,10 +564,12 @@ function sanitizeTags(fields: {
   backend?: EngineId | null;
   tier?: EngineTier | null;
   tags?: string[];
+  localTrace?: boolean;
 }): string[] | undefined {
   const out = [
-    ...(fields.tags ?? []).filter((tag) =>
-      AGENT_ACTION_TAG_CODES.has(tag) || /^drain:(?:diagnostic-reslices|ordinary)$/.test(tag)),
+    ...(fields.localTrace === true ? ['trace:local-leader-completion-v1', 'role:leader',
+      ...(fields.tags ?? []).filter(tag => /^(?:seat-hint|runtime-binding):[a-f0-9]{64}$/.test(tag))] : []),
+    ...(fields.tags ?? []).filter(tag => AGENT_ACTION_TAG_CODES.has(tag) || /^drain:(?:diagnostic-reslices|ordinary)$/.test(tag)),
     `kind:${fields.kind}`,
     `outcome:${fields.outcome}`,
     ...(fields.source ? [`source:${fields.source}`] : []),
@@ -603,7 +622,12 @@ function expectedAgentActionSemanticProducer(
 
 function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false): AgentActionEvent {
   const ts = eventTimestamp(event.ts);
-  const counts = sanitizeCounts(event.counts);
+  // A new trace scope must not activate unversioned native/legacy counters on read.
+  const traceTags = Array.isArray(event.tags) ? event.tags.filter((tag): tag is string => typeof tag === 'string') : [];
+  const localTrace = event.actor === 'agent' && event.kind === 'reflection' && event.action === 'role:completion' &&
+    event.backend === 'llama-server' && traceTags.includes('trace:local-leader-completion-v1') &&
+    traceTags.includes('role:leader') && traceTags.some(tag => /^runtime-binding:[a-f0-9]{64}$/.test(tag));
+  const counts = sanitizeCounts(event.counts, localTrace);
   const durationMs = finiteNumber(event.durationMs);
   const spentUsd = finiteNumber(event.spentUsd);
   const learningLabel = sanitizeProductionAttemptLearningLabel(event.learningLabel);
@@ -616,6 +640,7 @@ function sanitizeEvent(event: AgentActionEvent, remintSemanticOccurrence = false
   const action = sanitizeActionCode(event.action, actor, kind);
   const digest = proseDigest(event);
   const tags = sanitizeTags({
+    localTrace,
     kind,
     outcome,
     source,

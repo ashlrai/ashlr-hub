@@ -52,6 +52,7 @@ import {
 import {
   composeSnapshot,
   deriveSlotCapacity,
+  deriveSlotContext,
   fleetConcurrencyLimit,
   identifyRuntime,
   interpretHealth,
@@ -526,6 +527,75 @@ describe('slot capacity', () => {
     const capacity = deriveSlotCapacity(reading({ body: { total_slots: 2 } }), reading({ body: [{ state: 1 }, { state: 0 }] }));
     expect(capacity.busy).toBe(1);
   });
+
+  it.each([
+    [{ is_processing: false }],
+    [{}, { is_processing: false }],
+    [null, { is_processing: false }],
+    [{ state: NaN }, { state: 0 }],
+    [{ state: Infinity }, { state: 0 }],
+    [{ state: 0.5 }, { state: 0 }],
+    [{ id: 0, is_processing: false }, { id: 0, is_processing: false }],
+    [{ id: 0, is_processing: false }, { id: '0', is_processing: false }],
+    [{ id: {}, is_processing: false }, { id: 1, is_processing: false }],
+    [{ state: 0 }, { state: 0 }, { state: 0 }],
+  ].map((body) => ({ body })))('retains total capacity without inventing idle from incomplete activity %j', ({ body }) => {
+    expect(deriveSlotCapacity(reading({ body: { total_slots: 2 } }), reading({ body })))
+      .toEqual({ configured: 2, busy: null, idle: null, source: 'props' });
+  });
+
+  it('does not treat an unsuccessful slot response as available work', () => {
+    expect(deriveSlotCapacity(reading({ body: { total_slots: 2 } }), reading({ httpStatus: 503, body: [{ state: 0 }, { state: 0 }] })))
+      .toEqual({ configured: 2, busy: null, idle: null, source: 'props' });
+    expect(deriveSlotCapacity(reading({ body: { total_slots: 2 } }), reading({ error: 'invalid body', body: [{ state: 0 }, { state: 0 }] })))
+      .toEqual({ configured: 2, busy: null, idle: null, source: 'props' });
+  });
+
+  it('uses explicit modern processing flags and keeps total distinct from full occupancy', () => {
+    expect(deriveSlotCapacity(reading({ body: { total_slots: 2 } }), reading({ body: [{ id: 0, is_processing: true }, { id: 1, is_processing: true }] })))
+      .toEqual({ configured: 2, busy: 2, idle: 0, source: 'props' });
+    expect(deriveSlotCapacity(reading({ body: { total_slots: 1 } }), reading({ body: [{ is_processing: false, state: 1 }] })))
+      .toEqual({ configured: 1, busy: 0, idle: 1, source: 'props' });
+  });
+});
+
+describe('observed slot context', () => {
+  const props = (n_ctx?: unknown) => reading({body:{total_slots:2,...(n_ctx === undefined ? {} : {default_generation_settings:{n_ctx}})}});
+  const slots = (body: unknown) => reading({body});
+  it('uses complete live context independently of activity and ignores requested allocation', () => {
+    expect(deriveSlotContext(props(),slots([{id:0,n_ctx:16_384},{id:1,n_ctx:16_384}]))).toEqual({perSlot:16_384,totalSlots:2,source:'slots'});
+    expect(deriveSlotContext(props(65_536),slots([{id:0,n_ctx:65_536},{id:1,n_ctx:65_536}]))).toEqual({perSlot:65_536,totalSlots:2,source:'props'});
+    expect(deriveSlotContext(props(65_536),slots([{id:0},{id:1}]))).toEqual({perSlot:65_536,totalSlots:2,source:'props'});
+  });
+  it.each([
+    [{id:0,n_ctx:16_384}],
+    [{id:0,n_ctx:16_384},{id:1}],
+    [{id:0,n_ctx:16_384},{id:1,n_ctx:32_768}],
+    [{id:0,n_ctx:16_384},{id:0,n_ctx:16_384}],
+    [{id:0,n_ctx:16_384},{id:'0',n_ctx:16_384}],
+    [{n_ctx:16_384},{n_ctx:16_384}],
+    [{id:0,n_ctx:16_384},{n_ctx:16_384}],
+    [{id:'0',n_ctx:16_384},{id:'01',n_ctx:16_384}],
+    [{id:0,n_ctx:16_384},{id:1.5,n_ctx:16_384}],
+    [{id:0,n_ctx:16_384},{id:1,n_ctx:0}],
+    [{id:0,n_ctx:16_384},{id:1,n_ctx:1.5}],
+    [{id:0,n_ctx:16_384},{id:1,n_ctx:Number.MAX_SAFE_INTEGER+1}],
+    [{id:0,n_ctx:16_384},null],
+  ].map(body=>({body})))('leaves partial, duplicate or inconsistent allocation unknown: %j', ({body}) => {
+    expect(deriveSlotContext(props(),slots(body))).toEqual({perSlot:null,totalSlots:2,source:null});
+  });
+  it('does not resolve contradictory observed props/slots by selecting props', () => {
+    expect(deriveSlotContext(props(65_536),slots([{id:0,n_ctx:16_384},{id:1,n_ctx:16_384}]))).toEqual({perSlot:null,totalSlots:2,source:null});
+    expect(deriveSlotContext(props(65_536),slots([{id:0,n_ctx:65_536},{id:1}]))).toEqual({perSlot:null,totalSlots:2,source:null});
+  });
+  it.each([0,-1,1.5,Number.MAX_SAFE_INTEGER+1,'65536'])('refuses malformed props allocation %j', n_ctx => {
+    expect(deriveSlotContext(props(n_ctx),slots([{id:0,n_ctx:16_384},{id:1,n_ctx:16_384}]))).toEqual({perSlot:null,totalSlots:2,source:null});
+  });
+  it('ignores context bodies from failed endpoints', () => {
+    expect(deriveSlotContext(props(),reading({httpStatus:503,body:[{n_ctx:65_536},{n_ctx:65_536}]}))).toEqual({perSlot:null,totalSlots:2,source:null});
+    expect(deriveSlotContext(props(),reading({error:'invalid body',body:[{n_ctx:65_536},{n_ctx:65_536}]}))).toEqual({perSlot:null,totalSlots:2,source:null});
+    expect(deriveSlotContext(reading({httpStatus:503,body:{total_slots:4,default_generation_settings:{n_ctx:65_536}}}),slots([{id:0,n_ctx:16_384},{id:1,n_ctx:16_384}]))).toEqual({perSlot:16_384,totalSlots:2,source:'slots'});
+  });
 });
 
 describe('snapshot composition', () => {
@@ -541,6 +611,31 @@ describe('snapshot composition', () => {
     }),
     slots: reading({ body: [{ is_processing: false }, { is_processing: false }, { is_processing: false }, { is_processing: false }] }),
   };
+
+  it.each([sampleRecord({requestedContext:262_144}),sampleRecord({port:9090,requestedContext:262_144}),null])('keeps absent live context unknown despite historical requested context: %j', record => {
+    const snapshot=composeSnapshot({origin:'http://127.0.0.1:8080',baseUrl:'http://127.0.0.1:8080/v1',host:'127.0.0.1',port:8080,
+      readings:{...readings,props:reading({body:{total_slots:4}})},record,ownershipVerified:false,launchAgent:false,killSwitch:false,now:1_000});
+    expect(snapshot.contextPerSlot).toBeNull();
+    expect(snapshot.contextTotal).toBeNull();
+    expect(snapshot.slots.configured).toBe(4);
+    expect(snapshot.checkedAt).toBe(new Date(1_000).toISOString());
+  });
+
+  it('uses live slot context rather than a mismatched requested total', () => {
+    const snapshot=composeSnapshot({origin:'http://127.0.0.1:8080',baseUrl:'http://127.0.0.1:8080/v1',host:'127.0.0.1',port:8080,
+      readings:{...readings,props:reading({body:{total_slots:4}}),slots:reading({body:[0,1,2,3].map(id=>({id,n_ctx:16_384}))})},
+      record:sampleRecord({requestedContext:262_144}),ownershipVerified:false,launchAgent:false,killSwitch:false,now:1_000});
+    expect(snapshot.contextPerSlot).toBe(16_384);
+    expect(snapshot.contextTotal).toBe(65_536);
+  });
+
+  it('does not publish an unsafe computed total', () => {
+    const snapshot=composeSnapshot({origin:'http://127.0.0.1:8080',baseUrl:'http://127.0.0.1:8080/v1',host:'127.0.0.1',port:8080,
+      readings:{...readings,props:reading({body:{total_slots:4,default_generation_settings:{n_ctx:Number.MAX_SAFE_INTEGER}}})},
+      record:null,ownershipVerified:false,launchAgent:false,killSwitch:false});
+    expect(snapshot.contextPerSlot).toBe(Number.MAX_SAFE_INTEGER);
+    expect(snapshot.contextTotal).toBeNull();
+  });
 
   it('derives total context from what the server actually built', () => {
     const snapshot = composeSnapshot({

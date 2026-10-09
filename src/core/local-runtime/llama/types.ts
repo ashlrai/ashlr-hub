@@ -86,9 +86,9 @@ export interface LlamaRuntimeSnapshot {
   modelName: string | null;
   /** Quantisation the server reports (`model_ftype`), e.g. 'Q8_0'. */
   quant: string | null;
-  /** Context tokens the server was launched with, across all slots. */
+  /** Observed per-slot context × observed slot count; null when unreported. */
   contextTotal: number | null;
-  /** Context tokens available to ONE slot (`/props` n_ctx). */
+  /** Observed context available to ONE slot (props or complete consistent slots). */
   contextPerSlot: number | null;
   slots: LlamaSlotCapacity;
   /** Pid of the serving process when we can prove it is ours, else null. */

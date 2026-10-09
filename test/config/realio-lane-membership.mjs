@@ -54,6 +54,7 @@ export const REAL_IO_TEST_FILES = [
   'test/authority-claude-native-broker.test.ts', // real authenticated loopback capability and cancellation lifecycle
   'test/authority-claude-tool-worker.test.ts', // real fixed child process, source pin and filesystem boundary
 
+  'test/outcome-core.test.ts', // actual private immutable OutcomeStore revisions, recovery, filesystem locks and complete journal reads
   'test/outcome-daemon-loop.test.ts', // actual resident ticks with disposable Git repositories and protected private stores
   'test/outcome-proposal-admission.test.ts', // protected selected proposals and a real disposable Git repo at the legacy merge boundary
   'test/test-ci-sharded.test.ts', // real bounded child-process shards in private temporary homes
@@ -177,6 +178,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-review-benchmark.test.ts', // fixed calibration through real ledger and loopback transport
   'test/resource-pool-cli.test.ts', // explicit private manifests and CLI output files
   'test/resource-codex-account-probe.test.ts', // native metadata protocol and owned subprocess cleanup
+  'test/codex-selected-producer.test.ts', // real pinned inert Codex processes, private login copies and captured Git edits
   'test/resource-probe-cli.test.ts', // private commissioning reports and signal ownership
   'test/resource-quota-console.test.ts', // actual foreground collector, HTTP and subprocess lifecycle
   'test/resource-quota-refresh-lease.test.ts', // actual collector lease and durable pending marker

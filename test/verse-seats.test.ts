@@ -37,6 +37,7 @@ import { DEFAULT_LOCAL_MODEL_TAG } from '../src/core/run/model-catalog.js';
 import { resetModelWindowCaches } from '../src/core/verse/model-windows.js';
 import { discoverProjects } from '../src/core/verse/projects.js';
 import * as localHarness from '../src/core/verse/local-harness.js';
+import { writeOwnershipRecord } from '../src/core/local-runtime/llama/record.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -871,6 +872,37 @@ function ollamaFetch(
 }
 
 describe('verse seats — local context windows (V3.9 precedence)', () => {
+  it.each([8080,9090])('does not promote a historical launch request into runtime context (record port %j)',async port=>{
+    expect(writeOwnershipRecord({schemaVersion:1,pid:4242,port,host:'127.0.0.1',binPath:'/inert/llama-server',modelPath:'/inert/model.gguf',modelRef:'qwen3.8:27b-ctx64k',
+      args:['--port',String(port)],requestedSlots:4,requestedContext:262_144,startedAt:new Date(0).toISOString(),owner:'adopted'})).toBe(true);
+    const fetchOllama=ollamaFetch({'qwen3.8:27b-ctx64k':{parameters:'num_ctx 65536',native:262_144}});
+    const fetchImpl=(async (input: string | URL | Request,init?: RequestInit)=>{
+      if(String(input)==='http://llama.test:8080/props')return new Response(JSON.stringify({total_slots:4}));
+      if(String(input)==='http://llama.test:8080/slots')return new Response(JSON.stringify([0,1,2,3].map(id=>({id,is_processing:false}))));
+      return fetchOllama(input,init);
+    }) as typeof fetch;
+    const discovery=await discoverSeats(makeConfig(),{accountsRoot:tmpRoot,claudeUsage:zeroUsage,ollamaBaseUrl:'http://ollama.test',
+      localDispatch:'llama-server',llamaServerOrigin:'http://llama.test:8080',fetchImpl});
+    const seat=discovery.seats.find(s=>s.id==='local:qwen3.8:27b-ctx64k')!;
+    expect(seat.contextWindow).toBe(65_536);
+    expect(seat.models[0]!.windowSource).toBe('provider-catalog');
+    expect(seat.notes).toContain("llama-server did not report its per-slot context, so this window is Ollama's figure for the tag; turns on the llama-server lane get one slot's share, which may be less.");
+  });
+
+  it('retains observed64k context when all live slots agree, independently of the tag estimate',async()=>{
+    const fetchOllama=ollamaFetch({'qwen3.8:27b-ctx64k':{parameters:'num_ctx 262144',native:262_144}});
+    const fetchImpl=(async (input: string | URL | Request,init?: RequestInit)=>{
+      if(String(input)==='http://llama.test:8080/props')return new Response(JSON.stringify({total_slots:4,default_generation_settings:{n_ctx:65_536}}));
+      if(String(input)==='http://llama.test:8080/slots')return new Response(JSON.stringify([0,1,2,3].map(id=>({id,n_ctx:65_536}))));
+      return fetchOllama(input,init);
+    }) as typeof fetch;
+    const discovery=await discoverSeats(makeConfig(),{accountsRoot:tmpRoot,claudeUsage:zeroUsage,ollamaBaseUrl:'http://ollama.test',
+      localDispatch:'llama-server',llamaServerOrigin:'http://llama.test:8080',fetchImpl});
+    const seat=discovery.seats.find(s=>s.id==='local:qwen3.8:27b-ctx64k')!;
+    expect(seat.contextWindow).toBe(65_536);
+    expect(seat.models[0]!.windowSource).toBe('runtime');
+    expect(seat.notes).toBeUndefined();
+  });
   it('pinned num_ctx is capped at the trained length; unpinned tags get Ollama\'s real default', async () => {
     const calls: string[] = [];
     const discovery = await discoverSeats(makeConfig(), {

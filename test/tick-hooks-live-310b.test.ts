@@ -320,6 +320,86 @@ describe('beforeTick — fail closed', () => {
 });
 
 describe('lanes, presence and the router seam', () => {
+  it('probes the dispatch endpoint and preserves the original total, activity and time', async () => {
+    const health = await import('../src/core/local-runtime/llama/health.js');
+    const baseUrl = 'http://127.0.0.1:9864/v1';
+    const original = health.composeSnapshot({
+      origin: 'http://127.0.0.1:9864', baseUrl, host: '127.0.0.1', port: 9864,
+      readings: {
+        health: { httpStatus: 200, error: null, body: { status: 'ok' } },
+        props: { httpStatus: 200, error: null, body: { total_slots: 2, default_generation_settings: { n_ctx: 65_536 } } },
+        slots: { httpStatus: 200, error: null, body: [{ is_processing: true }, { is_processing: false }] },
+      }, record: null, ownershipVerified: false, launchAgent: false, killSwitch: false, now: NOW,
+    });
+    const probe = vi.spyOn(health, 'probeLlamaRuntime').mockResolvedValue(original);
+    try {
+      const cfg = { ...CFG, foundry: { ...CFG.foundry, localOnly: true }, models: { llamaServer: { baseUrl } } } as unknown as AshlrConfig;
+      for (let i = 0; i < 2; i++) {
+        expect(await probeLocalRuntimeDefault(cfg, null)).toMatchObject({
+          reachable: true, slots: 2, busySlots: 1, idleSlots: 1, observedAt: NOW_ISO, contextPerSlot: 65_536,
+        });
+      }
+      expect(probe.mock.calls).toEqual([[{ baseUrl, timeoutMs: 1_500 }], [{ baseUrl, timeoutMs: 1_500 }]]);
+    } finally { probe.mockRestore(); }
+  });
+
+  it('allocates only observed free slots and routes overflow to an eligible subscription', async () => {
+    const hooks = createLiveTickHooks({ deps: { ...h.deps,
+      probeLocalRuntime: async () => ({ reachable: true, slots: 4, busySlots: 2, idleSlots: 2, observedAt: NOW_ISO, contextPerSlot: 65_536, detail: 'measured runtime' }),
+      legacyRoute: () => ({ backend: 'llama-server' as EngineId, tier: 'mid', reason: 'local runtime' }),
+    } });
+    hooks.effectiveConfig(CFG);
+    hooks.standingBacklog([item({ effort: 1 })]);
+    expect((await hooks.beforeTick(hookCtx)).laneCaps.local).toBe(2);
+    hooks.beginDispatchPlan(['first', 'second', 'third']);
+    expect(hooks.route(item({ id: 'first', effort: 1 }), CFG).backend).toBe('llama-server');
+    expect(hooks.route(item({ id: 'second', effort: 1 }), CFG).backend).toBe('llama-server');
+    expect(hooks.route(item({ id: 'third', effort: 1 }), CFG).backend).toBe('grok-cli');
+    expect(hooks.route(item({ id: 'first', effort: 1 }), CFG).backend).toBe('llama-server');
+  });
+
+  it('parks full-runtime work when no other resource is authorized', async () => {
+    policy = policyFixture({ engines: ['local'] });
+    const hooks = createLiveTickHooks({ deps: { ...h.deps,
+      probeLocalRuntime: async () => ({ reachable: true, slots: 4, busySlots: 4, idleSlots: 0, observedAt: NOW_ISO, contextPerSlot: 65_536, detail: 'full runtime' }),
+    } });
+    hooks.effectiveConfig(CFG);
+    expect((await hooks.beforeTick(hookCtx)).laneCaps.local).toBe(0);
+    expect(hooks.route(item({ effort: 1 }), CFG).hold?.kind).toBe('park');
+  });
+
+  it.each([
+    { busySlots: null, idleSlots: null, observedAt: NOW_ISO },
+    { busySlots: 2, idleSlots: 2, observedAt: null },
+    { busySlots: 2, idleSlots: 2, observedAt: 'not a date' },
+    { busySlots: 2, idleSlots: 2, observedAt: new Date(NOW - 2_000).toISOString() },
+    { busySlots: 2, idleSlots: 2, observedAt: new Date(NOW + 1).toISOString() },
+    { busySlots: 1, idleSlots: 2, observedAt: NOW_ISO },
+    { busySlots: -1, idleSlots: 5, observedAt: NOW_ISO },
+    { busySlots: 1.5, idleSlots: 2.5, observedAt: NOW_ISO },
+  ])('preserves configured-only dispatch when occupancy evidence is unknown %j', async (occupancy) => {
+    const hooks = createLiveTickHooks({ deps: { ...h.deps,
+      probeLocalRuntime: async () => ({ reachable: true, slots: 4, ...occupancy, contextPerSlot: 65_536, detail: 'runtime' }),
+    } });
+    hooks.effectiveConfig(CFG);
+    expect((await hooks.beforeTick(hookCtx)).laneCaps.local).toBe(4);
+  });
+
+  it('does not renew activity after a slow tick or promote an unavailable runtime', async () => {
+    let now = NOW;
+    const hooks = createLiveTickHooks({ deps: { ...h.deps, now: () => now,
+      probeLocalRuntime: async () => ({ reachable: true, slots: 4, busySlots: 4, idleSlots: 0, observedAt: NOW_ISO, contextPerSlot: 65_536, detail: 'runtime' }),
+      syncReleaseArticles: async () => { now += 2_001; },
+    } });
+    hooks.effectiveConfig(CFG);
+    expect((await hooks.beforeTick(hookCtx)).laneCaps.local).toBe(4);
+    const down = createLiveTickHooks({ deps: { ...h.deps,
+      probeLocalRuntime: async () => ({ reachable: false, slots: 4, busySlots: 0, idleSlots: 4, observedAt: NOW_ISO, contextPerSlot: 65_536, detail: 'down' }),
+    } });
+    down.effectiveConfig(CFG);
+    expect((await down.beforeTick(hookCtx)).laneCaps.local).toBe(0);
+  });
+
   it.each([33, 64])('passes %s fresh measured slots into the standing dispatch pool', async (slots) => {
     presenceNow = { present: false, reason: 'Away', evidenceAt: NOW_ISO };
     const hooks = createLiveTickHooks({ deps: {
@@ -972,6 +1052,23 @@ describe('review c9 — the Leader\'s class-B Codex enable passes the final seat
     if (routed.backend === ('codex' as EngineId)) expect(hooks.seatAllows(routed.backend, { maxPercent: 90 }).allowed).toBe(true);
   });
 
+  it('pins the cached Codex hint to the exact routing source and refuses replacement before dispatch', async () => {
+    const original = {...codexSeat(),accountHint:'a'.repeat(64)};
+    const world = codexWorld(original);
+    let snapshot = {v:1 as const,publishedAt:NOW_ISO,seats:[original]};
+    const hooks = createLiveTickHooks({deps:{...world.deps,capacitySnapshot:()=>snapshot}});
+    hooks.effectiveConfig(CODEX_CFG);await hooks.beforeTick({...hookCtx,cfg:CODEX_CFG});
+    // Refresh the mutable capacity container without refreshing router.capacity.
+    snapshot = {...snapshot,seats:[{...original,accountHint:'b'.repeat(64)}]};
+    expect(hooks.seatAllows('codex',{maxPercent:90,itemId:'unrouted-refresh',seatId:'codex'}).allowed).toBe(false);
+    const task = item({id:'original-source',effort:5});
+    const route = hooks.route(task,CODEX_CFG);
+    expect(route).toMatchObject({backend:'codex',hold:null,seatDecision:{seatId:'codex'},selectedAccountHint:'a'.repeat(64)});
+    expect(hooks.route(task,CODEX_CFG).selectedAccountHint).toBe('a'.repeat(64));
+    expect(hooks.seatAllows('codex',{maxPercent:90,itemId:task.id,seatId:'codex',model:route.model}).allowed).toBe(false);
+    expect(world.calls).toEqual([]);
+  });
+
   it('still applies the window ceiling to a directive-enabled Codex seat', async () => {
     const world = codexWorld(codexSeat(95, 10));
     const hooks = createLiveTickHooks({ deps: world.deps });
@@ -998,6 +1095,52 @@ describe('review c15 — best-of-N and experiments stay inside the lane caps', (
   it('pins the experiment slot constants to the runner', () => {
     expect(EXPERIMENT_LOCAL_SLOTS_IDLE).toBe(EXPERIMENT_SLOTS.idle);
     expect(EXPERIMENT_LOCAL_SLOTS_BUSY).toBe(EXPERIMENT_SLOTS.fleetBusy);
+  });
+
+  it.each([0, 1])('does not start an idle experiment when only %s measured slots are free', async (idleSlots) => {
+    const runExperiment = vi.fn(async () => null);
+    const hooks = createLiveTickHooks({ deps: { ...h.deps, runExperiment,
+      probeLocalRuntime: async () => ({ reachable: true, slots: 4, busySlots: 4 - idleSlots, idleSlots, observedAt: NOW_ISO, contextPerSlot: 65_536, detail: 'runtime' }),
+    } });
+    hooks.effectiveConfig(CFG);
+    hooks.standingBacklog([]);
+    expect((await hooks.beforeTick(hookCtx)).laneCaps.local).toBe(idleSlots);
+    expect(runExperiment).not.toHaveBeenCalled();
+  });
+
+  it('counts a newly started experiment after observation once, then does not double-count its observed occupancy', async () => {
+    let busySlots = 2;
+    const runExperiment = vi.fn(() => new Promise<string | null>(() => undefined));
+    const hooks = createLiveTickHooks({ deps: { ...h.deps, runExperiment,
+      probeLocalRuntime: async () => ({ reachable: true, slots: 4, busySlots, idleSlots: 4 - busySlots, observedAt: NOW_ISO, contextPerSlot: 65_536, detail: 'runtime' }),
+    } });
+    hooks.effectiveConfig(CFG);
+    hooks.standingBacklog([]);
+    // Two external requests were observed, then the new pair reserves two more.
+    expect((await hooks.beforeTick(hookCtx)).laneCaps.local).toBe(0);
+    expect(runExperiment).toHaveBeenCalledTimes(1);
+    // Only that experiment remains in the next observation: two free, not zero.
+    busySlots = 2;
+    expect((await hooks.beforeTick({ ...hookCtx, nowMs: NOW + 1 })).laneCaps.local).toBe(2);
+    expect(runExperiment).toHaveBeenCalledTimes(1);
+    hooks.stopBackground('test complete');
+  });
+
+  it('keeps primary and BON reservations within the measured idle lane', async () => {
+    const hooks = createLiveTickHooks({ deps: { ...h.deps,
+      probeLocalRuntime: async () => ({ reachable: true, slots: 4, busySlots: 2, idleSlots: 2, observedAt: NOW_ISO, contextPerSlot: 65_536, detail: 'runtime' }),
+    } });
+    hooks.effectiveConfig(CFG);
+    const hard = item({ id: 'measured-hard', effort: 5 });
+    hooks.standingBacklog([hard]);
+    const result = await hooks.beforeTick(hookCtx);
+    const lane = hooks.lastTickState()!.lanes.find((l) => l.lane === 'local')!;
+    expect(lane.slots).toBe(2);
+    const route = hooks.route(hard, CFG);
+    const plan = hooks.bestOfNPlan(hard, { maxPercent: 70 });
+    const extraLocal = localTurns(plan) - (fleetLaneOf(route.backend, CFG) === 'local' ? 1 : 0);
+    expect((result.laneCaps.local ?? 0) + extraLocal).toBeLessThanOrEqual(2);
+    expect(hooks.bestOfNPlan(hard, { maxPercent: 70 })).toEqual(plan);
   });
 
   it('while Mason is present (local cap 2), pool slots + fan-out turns never exceed the cap', async () => {
