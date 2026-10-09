@@ -24,12 +24,12 @@
  *
  *   CADENCE: daily at 06:30 local, plus runs triggered by 10 fleet merges, any
  *   revert, a seat window resetting, or a high-severity reasoning insight —
- *   skipped when the evidence digest is unchanged, and at most 3 full model
- *   runs per local day. 3.14 (leader-cadence.ts): a failed full run retries
+ *   skipped when the evidence digest is unchanged. Daily volume limits are
+ *   optional operator preferences. 3.14 (leader-cadence.ts): a failed full run retries
  *   (bounded, backed off), and a cheap advisory check-in may run every
  *   `foundry.leader.checkinHours` (default 2) in working hours when the
- *   evidence changed materially — by default at most 8 model runs a day in total.
- *   Operator preferences can replace or explicitly remove those daily ceilings.
+ *   evidence changed materially. Finite user limits require complete daily run
+ *   observations; an uncapped policy preserves unknown metrics without inventing a count.
  *
  *   ACCOUNTABILITY: each move's expectedDelta is graded against the measured
  *   metric once 7 days have passed and its own deadline has come; the grades

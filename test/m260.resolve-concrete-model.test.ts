@@ -71,14 +71,14 @@ describe('M260 resolveConcreteModel — registry defaultModel fallback', () => {
     delete process.env.ASHLR_MODEL;
   });
 
-  it('codex: no cfg.foundry.models, no capturedModel, no ASHLR_MODEL → registry defaultModel gpt-5.5', () => {
+  it('codex: no cfg.foundry.models, no capturedModel, no ASHLR_MODEL → registry defaultModel gpt-6.1-sol', () => {
     const cfg = makeCfg([{ engine: 'codex', model: 'gpt-5.5' }]);
-    expect(resolveConcreteModel('codex', cfg)).toBe('gpt-5.5');
+    expect(resolveConcreteModel('codex', cfg)).toBe('gpt-6.1-sol');
   });
 
-  it('claude: no cfg.foundry.models, no capturedModel, no ASHLR_MODEL → registry defaultModel claude-opus-4-8', () => {
+  it('claude: no cfg.foundry.models, no capturedModel, no ASHLR_MODEL → registry defaultModel claude-opus-5-5', () => {
     const cfg = makeCfg([{ engine: 'claude', model: 'claude-opus-4-8' }]);
-    expect(resolveConcreteModel('claude', cfg)).toBe('claude-opus-4-8');
+    expect(resolveConcreteModel('claude', cfg)).toBe('claude-opus-5-5');
   });
 
   it('cfg.foundry.models still wins over registry defaultModel (priority 1 > 4)', () => {
@@ -125,7 +125,7 @@ describe('M260 evaluateMergeAuthority — frontier resolved concrete model passe
   ]);
 
   it('codex proposal with resolved concrete model (gpt-5.5) is AUTHORIZED', () => {
-    const engineModel = `codex:${resolveConcreteModel('codex', frontierCfg)}`;
+    const engineModel = `codex:${resolveConcreteModel('codex', frontierCfg, 'gpt-5.5')}`;
     expect(engineModel).toBe('codex:gpt-5.5');
 
     const p = makeProposal({ engineTier: 'frontier', engineModel });
@@ -135,13 +135,21 @@ describe('M260 evaluateMergeAuthority — frontier resolved concrete model passe
   });
 
   it('claude proposal with resolved concrete model (claude-opus-4-8) is AUTHORIZED', () => {
-    const engineModel = `claude:${resolveConcreteModel('claude', frontierCfg)}`;
+    const engineModel = `claude:${resolveConcreteModel('claude', frontierCfg, 'claude-opus-4-8')}`;
     expect(engineModel).toBe('claude:claude-opus-4-8');
 
     const p = makeProposal({ engineTier: 'frontier', engineModel });
     const v = evaluateMergeAuthority(p, frontierCfg);
     expect(v.authorized).toBe(true);
     expect(v.reason).toMatch(/authorized/);
+  });
+
+  it('current defaults do not widen an existing grant for older versions', () => {
+    for (const engine of ['codex', 'claude'] as const) {
+      const model = resolveConcreteModel(engine, frontierCfg);
+      const verdict = evaluateMergeAuthority(makeProposal({ engineTier: 'frontier', engineModel: `${engine}:${model}` }), frontierCfg);
+      expect(verdict.authorized).toBe(false);
+    }
   });
 
   it('codex:default is still REJECTED (old broken path — no regression)', () => {

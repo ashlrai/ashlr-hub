@@ -450,7 +450,6 @@ const CODEX_DOCUMENTED_MODELS: readonly CodexCatalogEntry[] = [
   ['gpt-5.6-sol', 'GPT-5.6 Sol', 872_000],
   ['gpt-5.6-terra', 'GPT-5.6 Terra', 872_000],
   ['gpt-5.6-luna', 'GPT-5.6 Luna', 872_000],
-  ['gpt-5.5', 'GPT-5.5', 272_000],
 ].map(([slug, displayName, max]) => ({
   slug: slug as string,
   displayName: displayName as string,
@@ -647,6 +646,8 @@ function documentedOption(engine: VerseEngine, model: string): VerseModelOption 
       return spec ? claudeOption(spec, null) : null;
     }
     case 'codex':
+      // Hidden in current native catalogs; preserve old sessions' documented allocation.
+      if (wanted === 'gpt-5.5') return codexOption({ ...CODEX_DOCUMENTED_MODELS[0]!, slug: 'gpt-5.5', displayName: 'GPT-5.5', maxContextWindow: 272_000 }, 'documented');
       return codexModelOptions(null).find((m) => canonicalModelId(m.id) === wanted) ?? null;
     case 'grok':
       return grokModelOptions(null).find((m) => canonicalModelId(m.id) === wanted) ?? null;

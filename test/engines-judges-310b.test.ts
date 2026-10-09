@@ -512,7 +512,7 @@ describe('Claude judge runs restricted (SPEC-310B §1)', () => {
     hoisted.engineInstalled = (engine) => engine === 'claude';
     const client = resolveFrontierJudgeClient({ models: { ollama: 'http://127.0.0.1:9' }, foundry: { claude5: { fable: false } } } as unknown as AshlrConfig,
       { producerModel: 'grok-cli:grok-4.7', requireIndependent: true });
-    expect(client?.model).toBe('claude-opus-4-8');
+    expect(client?.model).toBe('claude-opus-5-5');
     return client!;
   }
 

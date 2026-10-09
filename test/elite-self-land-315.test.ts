@@ -317,3 +317,10 @@ describe('the decisions view says so', () => {
     expect(view.decisions[0]!.eliteModel).toBeUndefined();
   });
 });
+
+
+it('recognizes the current exact Codex model without reinterpreting older model restrictions', () => {
+  expect(matchEliteModel('codex:gpt-6.1-sol')?.entry.id).toBe('gpt-6.1-sol');
+  expect(matchEliteModel('codex:gpt-6.1-sol', ['gpt-6-sol'])).toBeNull();
+  expect(matchEliteModel('devin-cli:gpt-6.1-sol')).toBeNull();
+});

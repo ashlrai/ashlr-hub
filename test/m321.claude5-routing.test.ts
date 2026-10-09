@@ -184,7 +184,7 @@ describe('M321 Sonnet 5 workhorse (claude5 default on)', () => {
 // ---------------------------------------------------------------------------
 
 describe('M321 quality fast-path (preferStrong)', () => {
-  it('substantive issue on quality policy → claude-fable-5 (fable default on)', () => {
+  it('substantive issue on quality policy → current native Fable (fable default on)', () => {
     const item = makeItem({ source: 'issue', effort: 3, score: 6 });
     const cfg = withFoundry({
       allowedBackends: ['claude', 'codex', 'builtin'] as never[],
@@ -192,7 +192,7 @@ describe('M321 quality fast-path (preferStrong)', () => {
     });
     const result = routeTask(item, cfg, ALL_ENGINES_CTX);
     expect(result.engine).toBe('claude');
-    expect(result.model).toBe('claude-fable-5');
+    expect(result.model).toBe('claude-fable-5-1');
     expect(result.reason).toMatch(/quality policy/i);
     expect(result.reason).toContain('fable-5');
   });
@@ -206,11 +206,11 @@ describe('M321 quality fast-path (preferStrong)', () => {
     });
     const result = routeTask(item, cfg, ALL_ENGINES_CTX);
     expect(result.engine).toBe('claude');
-    expect(result.model).toBe('opus');
+    expect(result.model).toBe('claude-opus-5-5');
     expect(result.reason).toContain('opus');
   });
 
-  it('implementation-heavy substantive (feature) still prefers codex gpt-5.5', () => {
+  it('implementation-heavy substantive (feature) prefers the current Codex model', () => {
     const item = makeItem({ source: 'feature', effort: 4, score: 8 });
     const cfg = withFoundry({
       allowedBackends: ['claude', 'codex', 'builtin'] as never[],
@@ -219,10 +219,10 @@ describe('M321 quality fast-path (preferStrong)', () => {
     const result = routeTask(item, cfg, ALL_ENGINES_CTX);
     // preferredFrontierEngine for implementation-heavy sources is codex
     if (result.engine === 'codex') {
-      expect(result.model).toBe('gpt-5.5');
+      expect(result.model).toBe('gpt-6.1-sol');
     } else {
       // claude fallback path — must be the strong pick, not sonnet-5
-      expect(['claude-fable-5', 'opus']).toContain(result.model);
+      expect(['claude-fable-5-1', 'claude-opus-5-5']).toContain(result.model);
     }
   });
 });
@@ -239,7 +239,7 @@ describe('M321 rollback parity (claude5.enabled:false)', () => {
     const cfg = withFoundry({ allowedBackends: ALL_BACKENDS, ...off });
     const result = routeTask(item, cfg, ALL_ENGINES_CTX);
     expect(result.engine).toBe('claude');
-    expect(result.model).toBe('opus');
+    expect(result.model).toBe('claude-opus-5-5');
   });
 
   it('balanced medium → legacy sonnet tag (pre-M321)', () => {
@@ -260,7 +260,7 @@ describe('M321 rollback parity (claude5.enabled:false)', () => {
     });
     const result = routeTask(item, cfg, ALL_ENGINES_CTX);
     expect(result.engine).toBe('claude');
-    expect(result.model).toBe('opus');
+    expect(result.model).toBe('claude-opus-5-5');
     expect(result.reason).toContain('opus (reasoning/architecture)');
   });
 

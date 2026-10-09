@@ -53,7 +53,7 @@ import { recordSandboxEvidenceUnknown } from '../authority/rollout.js';
 import { withToolEnv } from '../env-bridge.js';
 import { peekBackendAvailability } from '../fabric/resource-monitor.js';
 import {
-  CLAUDE5_FABLE_API_ID,
+  CLAUDE5_FABLE_API_ID, DEFAULT_FABLE_MODEL_ID, DEFAULT_CLAUDE_MODEL_ID, DEFAULT_CODEX_MODEL_ID,
   DEFAULT_LOCAL_MODEL_TAG,
   GROK_CLI_DEFAULT_MODEL,
   fableEnabled,
@@ -1129,16 +1129,15 @@ async function ollamaDirectComplete(
 
 /**
  * M320: default model for the Claude CLI judge when cfg.foundry.managerJudgeModel
- * does not specify an explicit claude model. Fable 5 (Mythos-class — the
- * strongest available judge; its quality compounds through every auto-merge
- * decision) when cfg.foundry.claude5.fable is on; Opus 4.8 otherwise. Fable
+ * does not specify an explicit claude model. Current Fable
+ * (the configured higher-tier judge, measured through auto-merge outcomes) when cfg.foundry.claude5.fable is on; current Opus otherwise. Fable
  * calls that fail, are refused, or return empty retry once on the Opus
  * fallback inside buildClaudeCliComplete — a judge pass never dies because
  * Fable is unavailable on this account.
  */
-const CLAUDE_JUDGE_FALLBACK_MODEL = 'claude-opus-4-8';
+const CLAUDE_JUDGE_FALLBACK_MODEL = DEFAULT_CLAUDE_MODEL_ID;
 function defaultClaudeJudgeModel(cfg: AshlrConfig): string {
-  return fableEnabled(cfg) ? CLAUDE5_FABLE_API_ID : CLAUDE_JUDGE_FALLBACK_MODEL;
+  return fableEnabled(cfg) ? DEFAULT_FABLE_MODEL_ID : CLAUDE_JUDGE_FALLBACK_MODEL;
 }
 
 /**
@@ -1172,12 +1171,12 @@ function buildClaudeCliComplete(
   stats?: JudgeCallStats,
 ): JudgeComplete {
   const primary = buildClaudeCliCompleteSingle(cfg, model, stats);
-  // M320: Fable 5 judge calls fall back to Opus 4.8 when the primary call
+  // M320: Fable judge calls fall back to current Opus when the primary call
   // fails, is refused by safety classifiers, or returns empty — the empty
   // string is the never-throw failure signal of the single-shot path, so
   // `|| fallback(...)` covers all three. Non-Fable models keep the exact
   // pre-M320 single-shot behavior.
-  if (model !== CLAUDE5_FABLE_API_ID) return primary;
+  if (model !== CLAUDE5_FABLE_API_ID && model !== DEFAULT_FABLE_MODEL_ID) return primary;
   const fallback = buildClaudeCliCompleteSingle(cfg, CLAUDE_JUDGE_FALLBACK_MODEL, stats);
   return async (system: string, user: string, signal?: AbortSignal, selectedOutcomeAdmission?: () => boolean): Promise<string> => {
     const out = await primary(system, user, signal, selectedOutcomeAdmission);
@@ -1641,12 +1640,12 @@ function resolveJudgeClient(
   }
 
   // Step 2: M300 Codex CLI judge — explicit 'codex' setting OR auto + claude exhausted.
-  // codex is a genuine frontier model (gpt-5.5); its judge attestations pass isFrontierJudge.
+  // The current concrete Codex model is a qualified frontier model; its judge attestations pass isFrontierJudge.
   const useCodex = wantCodex || (wantClaude && claudeUnavailableByResource);
   if (useCodex && codexAllowedForJudge && engineInstalled('codex', cfg)) {
     // Use managerJudgeModel if it looks like a codex/gpt model, else the registry default.
-    const isCodexModel = judgeModel.startsWith('gpt-') || judgeModel.startsWith('codex-') || judgeModel === 'gpt-5.5';
-    const codexDefaultModel = 'gpt-5.5';
+    const isCodexModel = judgeModel.startsWith('gpt-') || judgeModel.startsWith('codex-');
+    const codexDefaultModel = DEFAULT_CODEX_MODEL_ID;
     const codexModel = isCodexModel ? judgeModel : codexDefaultModel;
     return {
       complete: buildCodexCliComplete(cfg, codexModel, stats),
@@ -1986,7 +1985,7 @@ export async function runManager(
         if (configuredEngine !== undefined && configuredEngine !== 'auto') return null;
 
         const targetModel = producerFamily === 'claude'
-          ? 'gpt-5.5'
+          ? DEFAULT_CODEX_MODEL_ID
           : defaultClaudeJudgeModel(cfg);
         const targetBackend = producerFamily === 'claude' ? 'codex' : 'claude';
         const targetProvider = producerFamily === 'claude' ? 'openai' : 'anthropic';

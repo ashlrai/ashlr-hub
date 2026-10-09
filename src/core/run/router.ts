@@ -584,7 +584,7 @@ function routeTaskUnenforced(
       if (!producerScores || producerScores.size === 0) return null;
       const cands = KNOWN_MODELS.filter(
         (m) =>
-          m.engine === engine &&
+          !m.historical && m.engine === engine &&
           (!capability || m.capabilities.includes(capability)) &&
           m.minEffort <= effortCap &&
           !c5Excludes.has(m.id),

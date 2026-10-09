@@ -403,3 +403,14 @@ the daemon and the comms poller from running the same slot twice.
 is pending, or the last memo is over 36 hours old), `down` (no seat, or the
 retries are spent) or `unknown` (never run), with the seats tried and when the
 next run is due. Phantom does not show the health state yet.
+
+
+Model availability comes from each connected account's native catalog. Current
+native defaults are Opus 5.5, Fable 5.1 and GPT-6.1 Sol; routing can select the
+other eligible variants on that same account. A published API model does not
+prove native CLI access. Hidden models are excluded from new automatic choices;
+older exact model tags remain readable and do not authorize newer versions.
+[OpenAI model details](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+and [Claude model details](https://platform.claude.com/docs/en/models/overview)
+provide public API price estimates. Those prices do not replace subscription
+allowance, native context allocation or verified funding observations.
