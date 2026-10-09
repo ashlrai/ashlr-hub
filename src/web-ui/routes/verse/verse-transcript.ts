@@ -228,10 +228,15 @@ function buildSegment(
   const orphanResults: string[] = [];
   const toolUseIds: string[] = [];
   let pending: PendingText | null = null;
+  // Local inline reasoning is finalized after its answer streamed. Keep the
+  // flushed provisional bubble identifiable until that exact answer completes;
+  // completed messages (including repeated prose) are never deduplicated.
+  let reasoningStream: { index: number; turnId: string; text: string } | null = null;
   let liveEffect: boolean | null = null;
   let usage: VerseUsage | null = null;
 
   const flushPending = () => {
+    reasoningStream = null;
     if (!pending) return;
     items.push({ kind: 'assistant', key: pending.key, turnId: pending.turnId, at: pending.at, text: pending.text, streaming: false });
     pending = null;
@@ -257,9 +262,11 @@ function buildSegment(
         break;
       }
       case 'turn-started':
+        reasoningStream = null;
         liveEffect = true;
         break;
       case 'text-delta':
+        reasoningStream = null;
         if (pending && pending.turnId !== e.turnId) flushPending();
         if (!pending) pending = { turnId: e.turnId, at: e.at, text: '', key: `d-${e.seq}` };
         pending.text += e.text;
@@ -267,10 +274,19 @@ function buildSegment(
       case 'assistant-message':
         // The complete message supersedes whatever deltas streamed before it.
         pending = null;
+        if (reasoningStream?.turnId === e.turnId && reasoningStream.text === e.text) {
+          items.splice(reasoningStream.index, 1);
+        }
+        reasoningStream = null;
         items.push({ kind: 'assistant', key: `a-${e.seq}`, turnId: e.turnId, at: e.at, text: e.text, streaming: false });
         break;
       case 'thinking': {
+        const streamed = pending?.turnId === e.turnId ? pending : null;
+        const streamIndex = items.length;
         flushPending();
+        if (e.kind === 'raw' && streamed) {
+          reasoningStream = { index: streamIndex, turnId: streamed.turnId, text: streamed.text };
+        }
         const measured = stats?.get(e.seq);
         items.push({
           kind: 'thinking',
@@ -304,6 +320,7 @@ function buildSegment(
         });
         break;
       case 'tool-result': {
+        reasoningStream = null;
         const idx = toolIndex.get(e.toolUseId);
         const existing = idx === undefined ? undefined : items[idx];
         if (existing && existing.kind === 'tool') {

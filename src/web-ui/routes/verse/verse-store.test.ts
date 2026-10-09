@@ -22,6 +22,8 @@ import {
 } from './verse-store.js';
 import { formatTokens, lastTurnActivityAt } from './verse-readouts.js';
 import { buildTranscript, createTranscriptCache, getVerseTranscript, groupTranscriptItems } from './verse-transcript.js';
+import { createAnthropicStreamParser } from '../../../core/verse/adapters/claude.js';
+import { VERSE_TRANSIENT_EVENT_TYPES } from '../../../core/verse/types.js';
 
 /** A transient frame: it carries the last PERSISTED seq (wire rule, core/verse/types.ts). */
 function transient(seq: number, e: Record<string, unknown>): VerseEvent {
@@ -29,6 +31,86 @@ function transient(seq: number, e: Record<string, unknown>): VerseEvent {
 }
 
 describe('buildTranscript', () => {
+  function localReasoningStream(): VerseEvent[] {
+    const parser = createAnthropicStreamParser('local-turn');
+    const raw = '<think>Check the fixture.</think>\nOne fixture answer.';
+    const wire = (event: unknown) => ({ type: 'stream_event', event });
+    const frames = [
+      { type: 'system', subtype: 'init', model: 'qwen3.8:27b' },
+      wire({ type: 'message_start', message: { id: 'local-call', model: 'qwen3.8:27b' } }),
+      wire({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+      wire({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: raw } }),
+      { type: 'assistant', message: { id: 'local-call', model: 'qwen3.8:27b', content: [{ type: 'text', text: raw }] } },
+      wire({ type: 'content_block_stop', index: 0 }),
+      wire({ type: 'message_stop' }),
+    ];
+    return frames.flatMap(frame => parser.push(JSON.stringify(frame))).concat(parser.finish(0))
+      .filter(event => !VERSE_TRANSIENT_EVENT_TYPES.has(event.type))
+      .map((event, index) => ({ ...event, seq: index + 1, at: stamp(index + 1) }));
+  }
+
+  it('renders a native local inline-reasoning stream as one complete answer after reasoning', () => {
+    const events = localReasoningStream();
+    expect(events.map(event => event.type)).toEqual(['text-delta', 'thinking', 'assistant-message']);
+    const transcript = buildTranscript(events);
+    expect(transcript.items.map(item => item.kind)).toEqual(['thinking', 'assistant']);
+    expect(transcript.items[1]).toMatchObject({ key: 'a-3', text: 'One fixture answer.', streaming: false });
+  });
+
+  it('reconciles that provisional answer when completion arrives in a later cached update, identically to cold replay', () => {
+    const events = localReasoningStream();
+    const cache = createTranscriptCache();
+    const streamed = buildTranscript(events.slice(0, 1), { cache });
+    expect(streamed.items[0]).toMatchObject({ kind: 'assistant', text: 'One fixture answer.' });
+    const thinking = buildTranscript(events.slice(0, 2), { cache });
+    expect(thinking.items.map(item => item.kind)).toEqual(['assistant', 'thinking']);
+    const completed = buildTranscript(events, { cache });
+    expect(completed).toEqual(buildTranscript(events));
+    expect(completed.items.map(item => item.kind)).toEqual(['thinking', 'assistant']);
+    // Rebuilding the final segment must not mutate snapshots a subscriber saw.
+    expect(thinking.items.map(item => item.kind)).toEqual(['assistant', 'thinking']);
+    expect(buildTranscript(events, { cache })).toEqual(completed);
+  });
+
+  it.each(['Answer', 'Answer ', ' Answer', 'Different'])('preserves distinct complete messages and exact text differences: %s', answer => {
+    const transcript = buildTranscript([
+      ev(1, 'assistant-message', { turnId: 't1', text: 'Answer' }),
+      ev(2, 'text-delta', { turnId: 't1', text: 'Answer' }),
+      ev(3, 'thinking', { turnId: 't1', text: 'Reasoning', kind: 'raw' }),
+      ev(4, 'assistant-message', { turnId: 't1', text: answer }),
+      ev(5, 'user-message', { turnId: 't2', text: 'Again' }),
+      ev(6, 'assistant-message', { turnId: 't2', text: 'Answer' }),
+    ]);
+    expect(transcript.items.filter(item => item.kind === 'assistant').map(item => item.text))
+      .toEqual(answer === 'Answer' ? ['Answer', 'Answer', 'Answer'] : ['Answer', 'Answer', answer, 'Answer']);
+  });
+
+  it.each(['tool-use', 'tool-result', 'text-delta', 'cancelled', 'turn-done'] as const)('keeps an interrupted provisional answer across a %s boundary', type => {
+      const boundary = type === 'tool-use' ? { toolUseId: 'tool', name: 'Read', input: {} }
+        : type === 'tool-result' ? { toolUseId: 'tool', output: 'Fixture', isError: false }
+          : type === 'text-delta' ? { text: 'New stream' }
+            : type === 'turn-done' ? { ok: false, durationMs: 1 } : {};
+      const transcript = buildTranscript([
+        ev(1, 'text-delta', { turnId: 't1', text: 'Answer' }),
+        ev(2, 'thinking', { turnId: 't1', text: 'Reasoning', kind: 'raw' }),
+        ev(3, type, { turnId: 't1', ...boundary }),
+        ev(4, 'assistant-message', { turnId: 't1', text: 'Answer' }),
+      ]);
+      expect(transcript.items.filter(item => item.kind === 'assistant').map(item => item.text)).toEqual(['Answer', 'Answer']);
+    });
+
+  it('preserves streamed text without completion and never matches a different turn or non-local reasoning', () => {
+    for (const [kind, turnId] of [['raw', 't2'], ['summary', 't1'], [undefined, 't1']] as const) {
+      const events = [
+        ev(1, 'text-delta', { turnId: 't1', text: 'Answer' }),
+        ev(2, 'thinking', { turnId: 't1', text: 'Reasoning', ...(kind ? { kind } : {}) }),
+      ];
+      expect(buildTranscript(events).items[0]).toMatchObject({ kind: 'assistant', text: 'Answer' });
+      const completed = buildTranscript([...events, ev(3, 'assistant-message', { turnId, text: 'Answer' })]);
+      expect(completed.items.filter(item => item.kind === 'assistant')).toHaveLength(2);
+    }
+  });
+
   it('accumulates text-deltas into a streaming bubble and replaces it with the assistant-message', () => {
     const streaming = buildTranscript([
       ev(1, 'user-message', { turnId: 't1', text: 'hi' }),
