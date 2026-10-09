@@ -29,6 +29,14 @@ The 3.25.2 archives were published and verified, but its macOS updater client re
 
 ## Canonical release
 
+Prepare candidate metadata from the repository root with
+`node scripts/sync-candidate-version.mjs X.Y.Z`, then run
+`node scripts/sync-candidate-version.mjs --check X.Y.Z` to detect drift without
+editing files. The helper synchronizes the package, root lock, desktop package,
+Tauri version and main-window cache key, and this app's Cargo version and lock
+entry. It preserves dependency versions and historical release records. This
+local preparation does not publish a release or update installed applications.
+
 The source candidate is 3.27.0; publication and installation are pending qualification and public byte verification.
 
 The published 3.26.0 release uses `ashlrai/phantom` and `@ashlr/phantom`.
