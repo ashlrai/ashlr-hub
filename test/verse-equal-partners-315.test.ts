@@ -98,7 +98,7 @@ describe('one tier model', () => {
     expect(costBasisOf('claude')).toBe('subscription');
     expect(costBasisOf('claude', { cloud: true })).toBe('credits');
     expect(costBasisOf('devin', { cloud: true })).toBe('credits');
-    expect(costBasisOf('devin', { modelId: 'swe' })).toBe('free');
+    expect(costBasisOf('devin', { modelId: 'swe' })).toBe('subscription');
     expect(costBasisOf('local')).toBe('free');
     expect(costBasisOf('codex', { apiKey: true })).toBe('per-token');
   });
@@ -119,7 +119,7 @@ describe('one tier model', () => {
       models: [{ id: 'devin', label: 'Devin default', contextWindow: null, windowSource: 'fallback' }, { id: 'swe', label: 'SWE', contextWindow: null, windowSource: 'fallback' }] };
     expect(capacityFromSeat(cloud)).toMatchObject({ engine: 'devin', tier: 'elite', costBasis: 'credits', windowless: true, free: false });
     expect(capacityFromSeat(cli)).toMatchObject({ tier: 'elite', costBasis: 'subscription', windowless: true });
-    expect(capacityFromSeat(cli, undefined, 'swe')).toMatchObject({ tier: 'fast', costBasis: 'free' });
+    expect(capacityFromSeat(cli, undefined, 'swe')).toMatchObject({ tier: 'fast', costBasis: 'subscription', free:false });
   });
 });
 
@@ -128,18 +128,18 @@ describe('one tier model', () => {
 // ---------------------------------------------------------------------------
 
 describe('routeSeat — equal partners', () => {
-  it('inside the elite tier, headroom picks — Claude, Codex or Devin, whichever has room', () => {
+  it('headroom ranks all eligible providers without default family quality', () => {
     expect(routeSeat(interactive, [claude(20), codex('codex-personal', 60), grok(0)], POLICY, opts).candidates)
-      .toEqual(['claude', 'codex-personal', 'grok']);
+      .toEqual(['grok', 'claude', 'codex-personal']);
     expect(routeSeat(interactive, [claude(80), codex('codex-personal', 10), grok(0)], POLICY, opts).candidates)
-      .toEqual(['codex-personal', 'claude', 'grok']);
+      .toEqual(['grok', 'codex-personal', 'claude']);
   });
 
   it('Devin is a candidate for Mason’s own work: a windowless seat ranks as neutral headroom, not the worst', () => {
     const d = routeSeat(interactive, [claude(70), devinCli(), grok(0)], POLICY, opts);
     // Claude has 30% left; Devin has no window (neutral 50%) → Devin first, then Claude, then the fast tier.
-    expect(d.candidates).toEqual(['devin-cli', 'claude', 'grok']);
-    expect(d.why).toMatch(/prefers the elite tier/);
+    expect(d.candidates).toEqual(['grok', 'devin-cli', 'claude']);
+    expect(d.why).toContain('quality and comparable latency are unmeasured');
     // A roomier Claude wins back.
     expect(routeSeat(interactive, [claude(10), devinCli()], POLICY, opts).seatId).toBe('claude');
   });
@@ -164,12 +164,12 @@ describe('routeSeat — equal partners', () => {
     const qwen = cap('local:qwen3.8:27b-ctx64k', 'local', [], { tier: 'elite' });
     const d = routeSeat({ task: 'code', difficulty: 'high', autonomous: true }, [claude(10), grok(0), qwen], POLICY, opts);
     expect(d.candidates[0]).toBe('local:qwen3.8:27b-ctx64k');
-    expect(d.candidates.at(-1)).toBe('grok');
+    expect(d.candidates).toContain('grok');
   });
 
   it('handoff alternatives include Devin like any other seat', () => {
     const alts = rankAlternatives('claude', [claude(100), grok(0), devinCli(), codex('codex-cmp', 50)], POLICY, opts);
-    expect(alts).toEqual(['devin-cli', 'codex-cmp', 'grok']);
+    expect(alts).toEqual(['grok', 'devin-cli', 'codex-cmp']);
   });
 });
 
@@ -188,23 +188,31 @@ describe('adviseSeat — Devin is an equal partner', () => {
   it('hard work can land on Devin when it has the room', () => {
     const a = adviseSeat({
       classification: classifyPrompt('architect the new billing system'),
-      seats: [advisor(claude(90)), advisor(codex('codex-personal', 95)), advisor(devinCli(), { label: 'Devin (CLI)' }), advisor(grok(0))],
+      seats: [advisor(claude(90)), advisor(codex('codex-personal', 95)), advisor(devinCli(), { label: 'Devin (CLI)' }), advisor(grok(95))],
       policy: POLICY, mode: 'auto', nowMs: NOW,
     });
     expect(a.choice?.seatId).toBe('devin-cli');
     expect(a.choice?.tier).toBe('elite');
-    expect(a.why).toBe('Devin (CLI) — architecture planning needs the strongest model; subscription · no usage window reported.');
+    expect(a.why).toBe('Devin (CLI) — architecture planning — eligible task fit; model quality is unmeasured; subscription · no usage window reported.');
   });
 
-  it('cheap work uses a seat’s cheaper-tier model: Devin CLI on its free SWE', () => {
+  it('cheap work can use an explicitly supplied independently included model variant', () => {
     const cli = devinCli();
     const seat = advisor(cli, { label: 'Devin (CLI)', model: 'devin', cheaper: { model: 'swe', capacity: { ...cli, tier: 'fast', costBasis: 'free' } } });
-    const a = adviseSeat({ classification: classifyPrompt('what does this regex match?'), seats: [advisor(claude(10)), seat], policy: POLICY, mode: 'auto', nowMs: NOW });
+    const a = adviseSeat({ classification: classifyPrompt('what does this regex match?'), seats: [advisor(claude(90)), seat], policy: POLICY, mode: 'auto', nowMs: NOW });
     expect(a.choice).toMatchObject({ seatId: 'devin-cli', model: 'swe', tier: 'fast' });
     expect(a.choice?.note).toBe('free on your plan');
     // Hard work on the same seat uses its elite default.
     const hard = adviseSeat({ classification: classifyPrompt('architect the new billing system'), seats: [advisor(claude(99)), seat], policy: POLICY, mode: 'auto', nowMs: NOW });
     expect(hard.choice).toMatchObject({ seatId: 'devin-cli', model: 'devin', tier: 'elite' });
+  });
+
+  it('a raw SWE family label cannot mint free funding or substitute the configured default', () => {
+    const cli=devinCli();
+    const seat=advisor(cli,{model:'configured-default',cheaper:{model:'swe',capacity:{...cli,tier:'fast'}}});
+    const advice=adviseSeat({classification:classifyPrompt('what is this?'),seats:[seat],policy:POLICY,mode:'auto',nowMs:NOW});
+    expect(advice.choice).toMatchObject({seatId:'devin-cli',model:'configured-default',note:'subscription · no usage window reported'});
+    expect(costBasisOf('devin',{modelId:'swe'})).toBe('subscription');
   });
 
   it('eligible elite local Qwen competes for cheap and hard work without assumed hosted speed', () => {
@@ -215,13 +223,13 @@ describe('adviseSeat — Devin is an equal partner', () => {
     const hard = adviseSeat({ classification: classifyPrompt('architect the new billing system'), seats, policy: POLICY, mode: 'auto', nowMs: NOW });
     expect(hard.choice?.seatId).toBe('local:qwen3.8:27b-ctx64k');
     expect(hard.why).not.toMatch(/answers faster|slower/);
-    expect(hard.alternatives[0]?.seatId).toBe('claude');
+    expect(hard.alternatives[0]?.seatId).toBe('grok');
     // A local-only repo still keeps it on this Mac.
     const priv = adviseSeat({ classification: classifyPrompt('architect the new billing system'), seats, policy: POLICY, mode: 'auto', nowMs: NOW, localOnly: { on: true, reason: null } });
     expect(priv.choice?.seatId).toBe('local:qwen3.8:27b-ctx64k');
   });
 
-  it('hard-work locality does not override pins, measured latency or actual eligibility', () => {
+  it('pins and actual eligibility remain authoritative while provider latency means are diagnostic', () => {
     const qwen = advisor(cap('local:qwen3.8:27b-ctx64k', 'local', [], { tier: 'elite', costBasis: 'free' }));
     const hosted = advisor(claude(40));
     const base = { classification: classifyPrompt('architect the new billing system'), seats: [hosted, qwen], policy: POLICY, mode: 'auto' as const, nowMs: NOW };
@@ -230,7 +238,7 @@ describe('adviseSeat — Devin is an equal partner', () => {
       local: { dispatches: 20, shipRate: null, avgLatencyMs: 60_000 },
       claude: { dispatches: 20, shipRate: null, avgLatencyMs: 1_000 },
     } });
-    expect(measured.choice?.seatId).toBe('claude');
+    expect(measured.choice?.seatId).toBe(qwen.seatId);
     expect(measured.why).not.toMatch(/answers faster|slower/);
     for (const capacity of [
       { ...qwen.capacity, contextWindow: 8 },

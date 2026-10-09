@@ -96,9 +96,10 @@ tokens while its input or cache counts remain unknown. Only qualified output
 counts and a completed turn duration establish its end-to-end token rate.
 
 Missing measurements remain unknown, and visible ages retain the original
-observation time. The router uses reported allowance, context, serving capacity
-and recorded fleet latency. Sidebar CPU, RAM and exact-model task-speed readings
-are currently descriptive; they do not yet drive model selection or concurrency.
+observation time. The router uses reported allowance, task/context fit, qualified
+funding and explicit preferences. Unqualified provider-wide latency remains
+diagnostic. Sidebar CPU, RAM and exact-model task-speed readings are currently
+descriptive; they do not yet drive model selection or concurrency.
 
 Context windows also carry provenance: a server-reported allocation, model
 catalog value and configured/default estimate are different evidence. Inspect
@@ -108,11 +109,24 @@ and per-slot context are distinct.
 
 ## Routing tiers and roles
 
-Elite, Fast and Free are configured routing tiers, not measured model quality,
-speed or prices. Current defaults group Grok and Devin SWE in Fast, local
-Qwen 3.8 27B in Elite and other local models in Free. These priors affect ranking
-alongside task fit, headroom, cost and recorded latency. They do not establish
-that one provider's model is always better, cheaper or faster.
+Elite, Fast and Free remain legacy display groups, not measurements of model
+quality, speed or price. Default shared seat selection, Leader model-variant
+selection and the chat Auto adviser do not use inferred provider or model-family
+tiers as quality or cost ranks. They rank eligible resources by current headroom
+and independent funding category, preserving configured runnable model order
+when the evidence ties. Unknown quality and comparable latency stay unknown;
+an unspecified funding category is neutral, not a zero-dollar cost.
+
+Explicit model selections, pins and recorded operator preferences remain distinct
+from catalog labels. A caller can supply an explicit invocation tier preference;
+automatic catalog metadata does not create one. Provider-wide ship rates and
+latency averages remain diagnostics, rather than exact account/model/task
+measurements. A Devin SWE name does not prove included funding. Account-bound
+native pricing and execution checks still apply.
+
+This scope does not replace every legacy worker selection policy or establish
+measured-quality learning. See the shared [seat router](../src/core/routing/router.ts)
+and [Auto adviser](../src/core/verse/multimodel/advisor.ts).
 
 Leader, Manager and worker eligibility is checked separately through the
 available account-bound adapter, context, current funding evidence and authority.

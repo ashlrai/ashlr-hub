@@ -15,8 +15,8 @@ import { buildGrokCliHeadlessCommand, extractGrokStreamText, restrictClaudeComma
 import { assertPermitted, endpointPermitted, enginePermitted } from '../policy/local-only.js';
 import type { BudgetPolicy, RoutingRequest, SeatDecision } from '../routing/types.js';
 import type { SeatCapacity } from '../routing/headroom.js';
-import { seatTier, tierRank } from '../routing/tiers.js';
-import { tierPreference } from '../routing/router.js';
+import { seatTier } from '../routing/tiers.js';
+import { rankEligibleCapacities } from '../routing/router.js';
 import type { NativeRoleEngine, RoleCompletionMetrics } from '../run/role-completion.js';
 import type { AgentActionEvent } from '../fleet/agent-action-ledger.js';
 import type { LocalLeaderCompletionMetrics, LocalLeaderBinding } from './local-leader-transport.js';
@@ -224,10 +224,6 @@ async function routeLeader(
   };
   // Inspect every source-discovered option without creating virtual quota
   // seats. Pick one fitting option per real account, then rank accounts.
-  const preference=tierPreference(policy.mode,request);
-  const rank=(c:SeatCapacity):number => preference.by === 'tier'
-    ? preference.order.indexOf(c.tier ?? seatTier(c.engine))
-    : preference.order.indexOf(c.free || c.costBasis === 'free' ? 'free' : c.tier ?? seatTier(c.engine));
   const selected:LeaderSeatCandidate[]=[];
   const capacity:SeatCapacity[]=[];
   for(const candidate of eligible){
@@ -241,9 +237,9 @@ async function routeLeader(
       capacity:{...base,contextWindow:model.contextWindow,tier:seatTier(candidate.seat.engine,model.id),
         ...(candidate.seat.engine === 'devin' && candidate.seat.id === 'devin-cli' && peekDevinCliExecutionBinding(model.id)
           ? {free:true,costBasis:'free' as const,contextWindow:peekDevinCliExecutionBinding(model.id)!.contextTokens} : {})},
-    })).filter(variant => deps.route(request,[variant.capacity],policy,nowMs).seatId !== null)
-      .sort((a,b)=>rank(a.capacity)-rank(b.capacity) || tierRank(a.capacity.tier)-tierRank(b.capacity.tier));
-    const variant=variants[0];
+    })).filter(variant => deps.route(request,[variant.capacity],policy,nowMs).seatId !== null);
+    const ranked = rankEligibleCapacities(request, variants.map(variant => variant.capacity), policy, { nowMs });
+    const variant = variants.find(row => row.capacity === ranked[0]);
     if(variant){selected.push(variant.candidate);capacity.push(variant.capacity);}
     else {capacity.push({...base,contextWindow:models[0]?.contextWindow ?? 0});selected.push({...candidate,seat:{...candidate.seat,models:models.slice(0,1)}});}
   }

@@ -1,17 +1,6 @@
-/**
- * The seat router's λ objective weights (routing/router.ts `seatScore`).
- *
- *   - At the defaults (= BASELINE_HARNESS_CONFIG.routing) the ranking is
- *     exactly the explicit order: TIER (3.15 — elite · fast · free, never a
- *     provider), then more headroom, then the caller's order, then id —
- *     checked against a reference implementation over a generated grid of
- *     fleets, modes and requests.
- *   - Table-driven: moving one λ moves the ranking in the documented
- *     direction (cost → cheaper / pricier, pressure → headroom counts more /
- *     less, latency → faster seats win ties, then more).
- *
- * Pure: no I/O, no model calls, fixed clock.
- */
+/** Independent funding-category and headroom weights. Unqualified provider
+ * latency and family labels are not comparable performance evidence.
+ * Pure: no I/O or model calls, fixed clock. */
 import { describe, expect, it } from 'vitest';
 
 import { assessSeat, type CapacityWindow, type SeatCapacity } from '../src/core/routing/headroom.js';
@@ -20,12 +9,10 @@ import {
   DEFAULT_ROUTER_WEIGHTS,
   ROUTER_LAMBDA_MAX,
   routeSeat,
-  tierPreference,
   type RouteOptions,
   type RouterWeights,
 } from '../src/core/routing/router.js';
 import { BASELINE_HARNESS_CONFIG, HARNESS_CONFIG_BOUNDS } from '../src/core/learn/harness-registry.js';
-import { engineTier } from '../src/core/routing/tiers.js';
 import type { BudgetMode, BudgetPolicy, RoutingRequest } from '../src/core/routing/types.js';
 
 const NOW = Date.parse('2026-09-24T12:00:00.000Z');
@@ -78,24 +65,21 @@ function route(
 }
 
 // ---------------------------------------------------------------------------
-// Defaults keep the explicit order
+// Defaults preserve eligible headroom order
 // ---------------------------------------------------------------------------
 
-/** The explicit ranking, restated independently: tier order, more headroom, caller order, id. */
+/** Independent reference: more headroom, caller order, id; this grid uses identical unknown funding for paid rows and local rows have full headroom. */
 function legacyOrder(req: RoutingRequest, capacity: readonly SeatCapacity[], policy: BudgetPolicy, eligible: readonly string[]): string[] {
-  // Hand-built seats carry no tier fields, so a seat's tier and its cost
-  // rung coincide (engineTier) whichever ladder the mode ranks by.
-  const { order } = tierPreference(policy.mode, req);
   const rows = capacity
     .map((c, index) => {
       const seatPolicy = req.autonomous
         ? effectiveSeatPolicy(policy, c.seatId, c.engine)
         : { seatId: c.seatId, enabled: true, reservePercent: 0 };
       const headroom = assessSeat(c, seatPolicy, { nowMs: NOW }).headroom.autonomyHeadroomPercent ?? -1;
-      return { id: c.seatId, pos: order.indexOf(engineTier(c.engine)), headroom, index };
+      return { id: c.seatId, headroom, free:c.free, index };
     })
     .filter((r) => eligible.includes(r.id));
-  rows.sort((a, b) => a.pos - b.pos || b.headroom - a.headroom || a.index - b.index || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  rows.sort((a, b) => b.headroom - a.headroom || Number(b.free)-Number(a.free) || a.index - b.index || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return rows.map((r) => r.id);
 }
 
@@ -141,13 +125,13 @@ const REQUESTS: RoutingRequest[] = [
   { task: 'code', difficulty: 'medium', autonomous: false },
 ];
 
-describe('λ weights at their defaults keep the explicit order', () => {
+describe('λ weights preserve eligibility and neutral headroom ordering', () => {
   it('DEFAULT_ROUTER_WEIGHTS is the harness baseline (one fact, two places)', () => {
     const { lambdaCost, lambdaPressure, lambdaLatency } = BASELINE_HARNESS_CONFIG.routing;
     expect(DEFAULT_ROUTER_WEIGHTS).toEqual({ lambdaCost, lambdaPressure, lambdaLatency });
   });
 
-  it('matches the pre-λ ranking over a generated grid of fleets, modes and requests', () => {
+  it('matches independently assessed headroom across fleets, modes and requests without provider priors', () => {
     const rand = prng(20260925);
     let compared = 0;
     for (let i = 0; i < 120; i += 1) {
@@ -174,7 +158,7 @@ describe('λ weights at their defaults keep the explicit order', () => {
     expect(same.why).toBe(plain.why);
     expect(plain.why).not.toMatch(/routing weights/);
     const tuned = routeSeat(auto('code', 'medium'), fleet, policyFor('balanced'), { nowMs: NOW, weights: { lambdaCost: 3 } });
-    expect(tuned.why).toMatch(/routing weights cost ×3, headroom ×1, latency ×0\.25/);
+    expect(tuned.why).toMatch(/routing weights cost ×3, headroom ×1, retained latency weight ×0\.25 is inactive/);
   });
 
   it('ROUTER_LAMBDA_MAX is the harness registry bound (one fact, two places)', () => {
@@ -182,7 +166,7 @@ describe('λ weights at their defaults keep the explicit order', () => {
   });
 
   it('clamps a λ above the bound, so every score stays finite and ordered', () => {
-    // Unclamped, (1e308 − 1) · costStep overflows to Infinity; two seats of
+    // Unclamped, 1e308 times a score term can overflow; two seats of
     // one engine would then compare Infinity − Infinity = NaN and headroom
     // would stop ordering them.
     const fleet = [claude('claude', 10, 10), grok(80), grok(20, 'grok-b'), local('qwen3.8:27b-ctx64k')];
@@ -241,94 +225,51 @@ interface WeightCase {
   after: string[];
 }
 
+function funded(c: SeatCapacity, costBasis: SeatCapacity['costBasis']): SeatCapacity {
+  return {...c,costBasis};
+}
 const LOCAL = 'local:qwen3.8:27b-ctx64k';
 
 const CASES: WeightCase[] = [
-  // ── cost ──────────────────────────────────────────────────────────────
   {
-    name: 'lambdaCost up: hard work (quality-first) leans to the cheaper engines',
-    req: auto('code', 'high'),
-    fleet: [claude('claude', 10, 10), grok(10), local('qwen3.8:27b-ctx64k')],
-    policy: policyFor('balanced'),
-    weights: { lambdaCost: 3 },
-    before: ['claude', 'grok', LOCAL],
-    // claude 0 + 2·3, grok 2 + 2·1, local 3 + 0 → local, grok, claude.
-    after: [LOCAL, 'grok', 'claude'],
+    name:'higher cost weight favors confirmed subscription over credits',
+    req:auto('code','high'),fleet:[funded(grok(0),'credits'),funded(claude('claude',30,30),'subscription')],
+    policy:policyFor('all-in'),weights:{lambdaCost:3},before:['grok','claude'],after:['claude','grok'],
   },
   {
-    name: 'lambdaCost down: low-difficulty work (cheap-first) leans to the pricier engines',
-    req: auto('code', 'low'),
-    fleet: [claude('claude', 10, 10), grok(10), local('qwen3.8:27b-ctx64k')],
-    policy: policyFor('all-in'),
-    weights: { lambdaCost: 0 },
-    before: [LOCAL, 'grok', 'claude'],
-    // λcost = 0 cancels a pure cost ladder: every engine ties and headroom
-    // decides — local (100% left) first, then Claude and Grok (90% each) in
-    // caller order, so Claude climbs above Grok.
-    after: [LOCAL, 'claude', 'grok'],
+    name:'zero cost weight lets more headroom decide across known funding categories',
+    req:auto('code','low'),fleet:[funded(grok(10),'credits'),funded(claude('claude',20,20),'subscription')],
+    policy:policyFor('all-in'),weights:{lambdaCost:0},before:['claude','grok'],after:['grok','claude'],
   },
   {
-    name: 'lambdaCost down past zero influence: medium work pulls Claude above local',
-    req: auto('code', 'medium'),
-    fleet: [local('qwen3.8:27b-ctx64k'), claude('claude', 10, 10), grok(10)],
-    policy: policyFor('balanced'),
-    weights: { lambdaCost: 0 },
-    before: ['grok', LOCAL, 'claude'],
-    // grok 0 − 1, claude 3 − 3, local 1 − 0 → grok, claude, local.
-    after: ['grok', 'claude', LOCAL],
-  },
-  // ── headroom (pressure) ───────────────────────────────────────────────
-  {
-    name: 'lambdaPressure up: a nearly full preferred seat yields to an emptier next engine',
-    req: auto('code', 'medium'),
-    fleet: [grok(70), local('qwen3.8:27b-ctx64k')],
-    // Balanced medium work: Grok, then local (all-in would put local last).
-    policy: policyFor('balanced'),
-    weights: { lambdaPressure: 5 },
-    before: ['grok', LOCAL],
-    // Grok has 30% left for autonomy: 0 + 5·0.5·(100 − 30)/101 ≈ 1.73 is
-    // over local's 1 + 0 → local first (at λ = 1 it is 0.35, under 1).
-    after: [LOCAL, 'grok'],
+    name:'unknown funding is neutral, not a fabricated free resource',
+    req:auto('code','medium'),fleet:[grok(10),funded(claude('claude',10,10),'subscription')],
+    policy:policyFor('all-in'),weights:{lambdaCost:0},before:['claude','grok'],after:['grok','claude'],
   },
   {
-    name: 'lambdaPressure zero: headroom stops ordering seats of one engine (caller order decides)',
-    req: auto('code', 'medium'),
-    fleet: [grok(70), grok(5, 'grok-b')],
-    policy: policyFor('all-in'),
-    weights: { lambdaPressure: 0 },
-    before: ['grok-b', 'grok'],
-    after: ['grok', 'grok-b'],
-  },
-  // ── latency ───────────────────────────────────────────────────────────
-  {
-    name: 'lambdaLatency default: a faster seat wins a headroom tie',
-    req: auto('code', 'medium'),
-    fleet: [grok(20), grok(20, 'grok-b')],
-    policy: policyFor('all-in'),
-    latencyMs: { grok: 9_000, 'grok-b': 3_000 },
-    weights: {},
-    before: ['grok-b', 'grok'],
-    after: ['grok-b', 'grok'],
+    name:'higher pressure weight favors substantially more confirmed headroom',
+    req:auto('code','medium'),fleet:[funded(grok(10),'credits'),funded(claude('claude',20,20),'subscription')],
+    policy:policyFor('all-in'),weights:{lambdaPressure:5},before:['claude','grok'],after:['grok','claude'],
   },
   {
-    name: 'lambdaLatency up: a much faster seat beats a little more headroom',
-    req: auto('code', 'medium'),
-    fleet: [grok(20), grok(30, 'grok-b')],
-    policy: policyFor('all-in'),
-    latencyMs: { grok: 9_000, 'grok-b': 3_000 },
-    weights: { lambdaLatency: 10 },
-    before: ['grok', 'grok-b'],
-    after: ['grok-b', 'grok'],
+    name:'zero pressure uses caller order for equal funding',req:auto('code','medium'),
+    fleet:[grok(70),grok(5,'grok-b')],policy:policyFor('all-in'),weights:{lambdaPressure:0},
+    before:['grok-b','grok'],after:['grok','grok-b'],
   },
   {
-    name: 'lambdaLatency at the maximum still never crosses an engine step',
-    req: auto('code', 'medium'),
-    fleet: [grok(20), local('qwen3.8:27b-ctx64k')],
-    policy: policyFor('all-in'),
-    latencyMs: { grok: 60_000, [LOCAL]: 1_000 },
-    weights: { lambdaLatency: 10 },
-    before: ['grok', LOCAL],
-    after: ['grok', LOCAL],
+    name:'unqualified latency does not alter a tie at default weights',req:auto('code','medium'),
+    fleet:[grok(20),grok(20,'grok-b')],policy:policyFor('all-in'),
+    latencyMs:{grok:9000,'grok-b':3000},weights:{},before:['grok','grok-b'],after:['grok','grok-b'],
+  },
+  {
+    name:'unqualified latency cannot override headroom at maximum weight',req:auto('code','medium'),
+    fleet:[grok(20),grok(30,'grok-b')],policy:policyFor('all-in'),
+    latencyMs:{grok:9000,'grok-b':3000},weights:{lambdaLatency:10},before:['grok','grok-b'],after:['grok','grok-b'],
+  },
+  {
+    name:'unqualified cross-provider latency cannot invent comparable speed',req:auto('code','medium'),
+    fleet:[grok(20),local('qwen3.8:27b-ctx64k')],policy:policyFor('all-in'),
+    latencyMs:{grok:1000,[LOCAL]:60000},weights:{lambdaLatency:10},before:[LOCAL,'grok'],after:[LOCAL,'grok'],
   },
 ];
 
@@ -340,7 +281,7 @@ describe('changing one λ moves the ranking in the expected direction', () => {
     expect(tuned).toEqual(c.after);
   });
 
-  it('a 1-point headroom gap beats any latency gap at the default λ (latency is only a tie-breaker)', () => {
+  it('a 1-point headroom gap is unchanged by unqualified legacy latency', () => {
     const fleet = [grok(20), grok(21, 'grok-b')];
     const latencyMs = { grok: 60_000, 'grok-b': 1_000 };
     // grok has 1 more point of headroom; grok-b is 60× faster.

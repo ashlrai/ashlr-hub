@@ -1,42 +1,12 @@
-/**
- * The ONE tier model every resource surface shares (3.15, "equal partners").
- *
- * Mason, 2026-09-27: Claude, Codex and Devin are all elite and all a
- * commodity — different models for different things, but none of them is the
- * house favourite. The configured quality priors below originated in that
- * preference; they are not measured performance. They affect ranking without
- * restricting which providers can serve eligible roles:
- *
- *   elite  Claude Code, Codex (every account), Devin (cloud and CLI), and
- *          the local Qwen 3.8 27B (the operator's configured preference)
- *   fast   Grok, and Devin's SWE models
- *   free   every other local model (Ollama / LM Studio / llama-server)
- *
- * A seat's tier is per MODEL: the same Devin CLI seat is elite on its default
- * model and fast on SWE, and the built-in local preference is elite for Qwen
- * 3.8 27B. Tier is a ranking prior; cost basis is a separate billing category.
- * Neither alone proves current model quality, price or funding eligibility.
- *
- * Inside a tier nothing here prefers one provider over another: the seat
- * router (router.ts) orders a tier by headroom, marginal cost and latency, and
- * the Resources drawer orders it by status. Reserves and budget modes stay per
- * SEAT (policy.ts) — Mason's reserve on Claude is a configured reserve, not a
- * provider preference.
- *
- * Cost basis is what one more turn costs:
- *   subscription  a flat plan; a turn only spends its usage window
- *   credits       a metered balance (Claude cloud credits, Devin ACUs)
- *   per-token     billed per token by an API key
- *   free          nothing (local models, a plan's included free model)
- *
- * BROWSER-SAFE and PURE: plain consts and type-only imports. The router, the
- * Auto seat (in the browser), the New chat picker and the Resources drawer all
- * read the same table, so they can never disagree about a seat's tier.
- */
+/** Legacy resource display groups and independent funding categories.
+ * Provider/model-family tiers are configured historical priors, not measured
+ * quality, speed or price. Default SeatRouter, Leader variants and Auto ignore
+ * inferred tiers; explicit operator preferences remain available separately.
+ * Browser-safe and pure. Native account/funding proof remains independent. */
 
 export type ResourceTier = 'elite' | 'fast' | 'free';
 
-/** Best-first. The router's QUALITY order; CHEAP order is its reverse. */
+/** Historical best-first preference order; not a default quality measurement. */
 export const RESOURCE_TIERS: readonly ResourceTier[] = ['elite', 'fast', 'free'];
 
 export const TIER_LABELS: Readonly<Record<ResourceTier, string>> = Object.freeze({
@@ -47,9 +17,9 @@ export const TIER_LABELS: Readonly<Record<ResourceTier, string>> = Object.freeze
 
 /** One line per tier, for the drawer's group headings and tooltips. */
 export const TIER_BLURBS: Readonly<Record<ResourceTier, string>> = Object.freeze({
-  elite: 'Resources in the Elite routing tier. Eligible providers are equal partners; this grouping does not restrict Leader or Manager roles.',
-  fast: 'Resources in the Fast routing tier. This is a configured preference, not a measured speed or price.',
-  free: 'Local resources in this routing tier. Inference runs on this computer; connected tools can use network services.',
+  elite: 'Resources in the legacy Elite display group. Eligible providers are equal partners; this grouping does not restrict Leader or Manager roles.',
+  fast: 'Resources in the legacy Fast display group. This label does not establish measured speed or price.',
+  free: 'Local resources in this display group. Inference runs on this computer; connected tools can use network services.',
 });
 
 export type CostBasis = 'subscription' | 'credits' | 'per-token' | 'free';
@@ -61,11 +31,9 @@ export const COST_BASIS_LABELS: Readonly<Record<CostBasis, string>> = Object.fre
   free: 'free',
 });
 
-/**
- * Marginal cost rank of one more turn, 0 = nothing. A subscription turn
- * spends a window that refills; credits and per-token turns spend money.
- * Used by the router only INSIDE a tier, as a tie-breaker below headroom.
- */
+/** Coarse funding category rank. Subscription usage consumes an allowance;
+ * credits and per-token consume a balance. No dollar cost or billing authority
+ * is inferred here; local tools may still contact external services. */
 export const COST_BASIS_RANK: Readonly<Record<CostBasis, number>> = Object.freeze({
   free: 0,
   subscription: 0,
@@ -91,9 +59,9 @@ const DEVIN_FAST_MODEL_RE = /^swe(?:$|[-_.\d])/i;
 
 /**
  * Local models configured as ELITE (2026-09-27): Qwen 3.8 27B — the house
- * default `qwen3.8:27b-ctx64k` and any other context build of it. Still free
- * and still local (cost basis `free`); it simply competes for elite work
- * instead of waiting behind it. Other local tags stay in the free tier.
+ * default `qwen3.8:27b-ctx64k` and any other context build of it. This is
+ * legacy display grouping only; it does not move neutral default ranking.
+ * Local funding category and actual execution capability remain separate.
  */
 const ELITE_LOCAL_MODEL_RE = /(?:^|[/:])qwen3\.8[^/]*?[:_-]27b(?:$|[^0-9])/i;
 
@@ -155,8 +123,7 @@ export function costBasisOf(engine: string, hints: CostBasisHints = {}): CostBas
   if (engine === 'local') return 'free';
   if (hints.apiKey) return 'per-token';
   if (hints.cloud) return 'credits';
-  // A plan's included free model (Devin SWE) costs nothing more than the plan.
-  if (engine === 'devin' && seatTier(engine, hints.modelId) === 'fast') return 'free';
+  // Model names alone cannot establish included/free native funding.
   return 'subscription';
 }
 
