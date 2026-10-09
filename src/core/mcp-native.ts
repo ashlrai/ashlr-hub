@@ -1139,6 +1139,10 @@ export async function callNativeTool(name: string, rawArgs: unknown): Promise<Na
   try {
     const payload = await tool.handler(args, cfg);
     auditNativeCall(`${tool.name} keys=${argKeys} — ok`, 'ok');
+    if (tool.name === 'phm_task_context') {
+      const { renderOutcomeTaskContextText } = await import('./verse/outcome-task-context-output.js');
+      return { content: [{ type: 'text', text: renderOutcomeTaskContextText(payload as import('./verse/outcome-task-context.js').OutcomeTaskContextResult) }] };
+    }
     return textResult(payload);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -6,6 +6,7 @@ import { appendTaskContextEvent, createTaskContextEvent } from '../src/core/cont
 import { OutcomeCoordinator } from '../src/core/goals/outcome-coordinator.js';
 import { outcomeDirectory } from '../src/core/goals/outcome-runtime.js';
 import { OutcomeStore } from '../src/core/goals/outcome-store.js';
+import { outcomeDigest } from '../src/core/goals/outcome-types.js';
 import { readOutcomeTaskContext, outcomeTaskContextRef, outcomeTaskPublicId, LOCAL_CONTEXT_ACCOUNT } from '../src/core/verse/outcome-task-context.js';
 import * as actions from '../src/core/fleet/agent-action-ledger.js';
 import { callNativeTool, nativeToolSafety } from '../src/core/mcp-native.js';
@@ -84,6 +85,82 @@ describe('actual outcome task context boundary', () => {
     expect(result.context.coverage).toMatchObject({ complete: false, stopReasons: expect.arrayContaining(['agent-action-ledger:byte-limit']) });
     expect(result.context.current.find(item => item.source.objectRef.startsWith('agent-action:'))!.content).toContain('started');
     expect(result.context.current.find(item => item.source.objectRef.startsWith('agent-action:'))!.content).not.toContain('complete');
+  });
+  it('marks healthy-source historical queries incomplete and labels present metadata as current-read', () => {
+    const f = fixture(), taskRef = outcomeTaskContextRef('one', f.node.id);
+    const record = createTaskContextEvent({ taskRef,
+      source: { kind: 'project-memory', provider: 'phantom', accountRef: LOCAL_CONTEXT_ACCOUNT, objectRef: 'past-note', revisionRef: 'one' },
+      sourceRefs: ['phantom:memory:past-note:one'], occurredAt: '2026-10-08T09:00:00Z', observedAt: '2026-10-08T09:01:00Z',
+      validFrom: null, validUntil: null, kind: 'upsert', epistemic: 'recorded', content: 'Recorded past note.', supersedes: [] });
+    expect(appendTaskContextEvent({ root: dirname(dirname(outcomeDirectory('one'))), event: record, stillAuthorized: () => true })).toBe('recorded');
+    vi.spyOn(actions, 'readAgentActionsDetailed').mockReturnValue({ events: [], sourceState: 'healthy', sourcePresent: true,
+      complete: true, stopReasons: [], filesRead: 0, bytesRead: 0, rowsScanned: 0, invalidRows: 0, unreadableFiles: 0 });
+    for (const cutoffs of [{ asOf: '2026-10-08T12:00:00Z' }, { observedThrough: '2026-10-08T12:00:00Z' }]) {
+      const result = readOutcomeTaskContext({ ...f.input, ...cutoffs });
+      expect(result.ok).toBe(true); if (!result.ok) continue;
+      expect(result.context.sources.every(source => source.sourceState === 'healthy')).toBe(true);
+      expect(result.context.coverage).toMatchObject({ complete: false, stopReasons: expect.arrayContaining([
+        'outcome:unrecorded-historical-observation', 'agent-action-ledger:unrecorded-historical-observation']) });
+      expect(result.context).toMatchObject({ metadataTemporalScope: 'current-read', outcomeRevision: 2, active: true });
+      expect(result.context.snapshotObservedAt > '2026-10-08T12:00:00.000Z').toBe(true);
+      expect(result.context.current.some(event => event.content === 'Recorded past note.')).toBe(true);
+      if ('observedThrough' in cutoffs) expect(result.context.current.some(event => event.source.objectRef === taskRef)).toBe(false);
+      else expect(result.context.current.find(event => event.source.objectRef === taskRef)).toMatchObject({ occurredAt: null, temporalResolution: 'unknown' });
+    }
+    const current = readOutcomeTaskContext(f.input);
+    expect(current.ok).toBe(true); if (current.ok) expect(current.context.coverage.complete).toBe(true);
+  });
+  it('does not correlate repo A with the run or proposal identity from repo B, even with a matching work item', () => {
+    const f = fixture(), otherRepo = join(home, 'other-repo'); mkdirSync(otherRepo);
+    writeFileSync(join(home, '.ashlr', 'enrollment.json'), JSON.stringify({ repos: [repo, otherRepo] }), { mode: 0o600 });
+    expect(f.coordinator.linkMaterialization({ commandId: 'link', expectedRevision: 2 }, f.node.id, f.node.materialization.goalId,
+      f.node.materialization.milestoneId, { stillAuthorized: () => true, matchesPersistedGoal: () => true }).ok).toBe(true);
+    expect(f.coordinator.claimRunReady({ commandId: 'claim', expectedRevision: 3 }, f.node.id, repo, 'run-a',
+      { stillAuthorized: () => true, executionRepoAllowed: () => true }).ok).toBe(true);
+    // Valid saved attempt histories may contain distinct repository executions. No provider is contacted by this fixture.
+    expect(f.store.transact('history', 4, { kind: 'fixture-history' }, state => {
+      if (!state) return null;
+      const node = state.nodes[f.node.id]!, first = node.attempts[0]!;
+      first.state = 'proposed'; first.terminalRunId = 'run-a'; first.proposalId = 'proposal-a';
+      const id = outcomeDigest('second-attempt');
+      node.attempts.push({ ...first, id, executionRepo: otherRepo, generationId: `outcome:v1:${outcomeDigest([node.id, id])}`,
+        runId: 'run-b', providerRunIds: ['run-b'], terminalRunId: 'run-b', proposalId: 'proposal-b' });
+      return state;
+    }).ok).toBe(true);
+    vi.spyOn(actions, 'readAgentActionsDetailed').mockImplementation(options => {
+      const base: actions.AgentActionEvent = { schemaVersion: 1, ts: '2026-10-08T10:00:00Z', actor: 'agent', kind: 'dispatch',
+        outcome: 'started', action: 'dispatch', summary: 'Recorded receipt.', repo };
+      const rows = [{ ...base, runId: 'run-a' }, { ...base, repo: otherRepo, proposalId: 'proposal-b' },
+        { ...base, runId: 'run-b' }, { ...base, proposalId: 'proposal-b' },
+        { ...base, repo: otherRepo, runId: 'run-a' }, { ...base, repo: otherRepo, proposalId: 'proposal-a' },
+        { ...base, itemId: `goal:${f.node.materialization.goalId}:${f.node.materialization.milestoneId}`, runId: 'run-b' },
+        { ...base, runId: 'run-a', proposalId: 'proposal-b' }];
+      return { events: rows.filter(options!.filter!), sourceState: 'healthy', sourcePresent: true, complete: true,
+        stopReasons: [], filesRead: 1, bytesRead: 20, rowsScanned: rows.length, invalidRows: 0, unreadableFiles: 0 };
+    });
+    const result = readOutcomeTaskContext(f.input); expect(result.ok).toBe(true); if (!result.ok) return;
+    const receipts = result.context.current.filter(event => event.source.objectRef.startsWith('agent-action:'));
+    expect(receipts).toHaveLength(2);
+    expect(receipts.map(event => JSON.parse(event.content))).toEqual(expect.arrayContaining([
+      expect.objectContaining({ repo, runId: 'run-a', proposalId: null }),
+      expect.objectContaining({ repo: otherRepo, runId: null, proposalId: 'proposal-b' })]));
+  });
+  it('returns a valid bounded native projection of a large fact with explicit partial coverage and source references', async () => {
+    const f = fixture(); loadConfig();
+    const record = createTaskContextEvent({ taskRef: outcomeTaskContextRef('one', f.node.id),
+      source: { kind: 'project-memory', provider: 'phantom', accountRef: LOCAL_CONTEXT_ACCOUNT, objectRef: 'large-note', revisionRef: 'one' },
+      sourceRefs: ['phantom:memory:large-note:one'], occurredAt: null, observedAt: new Date().toISOString(), validFrom: null,
+      validUntil: null, kind: 'upsert', epistemic: 'recorded', content: 'Large scoped fact with useful words. '.repeat(1800), supersedes: [] });
+    expect(appendTaskContextEvent({ root: dirname(dirname(outcomeDirectory('one'))), event: record, stillAuthorized: () => true })).toBe('recorded');
+    const response = await callNativeTool('phm_task_context', { ...f.input, taskId: outcomeTaskPublicId(f.node.id) });
+    expect(response.isError).not.toBe(true);
+    const text = response.content[0]!.text, value = JSON.parse(text);
+    expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(32 * 1024);
+    expect(value.context).toMatchObject({ coverage: { complete: false, stopReasons: expect.arrayContaining(['native-output-byte-limit']) },
+      outputProjection: { partial: true, excerptedContents: 1 } });
+    expect(value.context.current.find((event: { eventId: string }) => event.eventId === record.eventId)).toMatchObject({
+      sourceRefs: record.sourceRefs, contentComplete: false });
+    expect(text).not.toContain('output truncated');
   });
   it('provides native read-only context under Stop without auditing private contents or changing local source files', async () => {
     const f = fixture();

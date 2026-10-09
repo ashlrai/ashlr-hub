@@ -29,6 +29,9 @@ export interface OutcomeTaskContextView extends TaskTemporalContextV1 {
   taskId: string;
   outcomeRevision: number;
   active: boolean;
+  /** Revision and active state describe the current authorized read, not a reconstructed historical snapshot. */
+  snapshotObservedAt: string;
+  metadataTemporalScope: 'current-read';
   sources: Array<TaskContextCoverage & { source: 'outcome' | 'private-task-context' | 'agent-action-ledger' }>;
 }
 export type OutcomeTaskContextResult = { ok: true; context: OutcomeTaskContextView } |
@@ -82,13 +85,13 @@ export function readOutcomeTaskContext(input: OutcomeTaskContextRequest): Outcom
         node.basis.definition.repo !== null && !enrollment.repos.includes(node.basis.definition.repo) ||
         node.attempts.some(attempt => !enrollment.repos.includes(attempt.executionRepo))) return { ok: false, reason: 'unenrolled' };
     const privateContext = readTaskTemporalContext({ ...query, root: dirname(dirname(directory)) });
-    const runIds = new Set(node.attempts.flatMap(attempt => attempt.providerRunIds));
-    const proposalIds = new Set(node.attempts.flatMap(attempt => attempt.proposalId ? [attempt.proposalId] : []));
     const attempts = node.attempts;
     const actions = readAgentActionsDetailed({ inspectionOnly: true, limit: input.maxEvents ?? 1000, stopAfterLimit: true,
       filter: event => !!event.repo && attempts.some(attempt => attempt.executionRepo === event.repo &&
-        (event.itemId === attempt.workItemId || !!event.runId && runIds.has(event.runId) ||
-          !!event.proposalId && proposalIds.has(event.proposalId))) });
+        !!(event.itemId || event.runId || event.proposalId) &&
+        (!event.itemId || event.itemId === attempt.workItemId) &&
+        (!event.runId || attempt.providerRunIds.includes(event.runId)) &&
+        (!event.proposalId || event.proposalId === attempt.proposalId)) });
     const record = createTaskContextEvent({ taskRef,
       source: { kind: 'phantom', provider: 'phantom', accountRef: LOCAL_CONTEXT_ACCOUNT,
         objectRef: taskRef, revisionRef: `${state.revision}` },
@@ -97,11 +100,17 @@ export function readOutcomeTaskContext(input: OutcomeTaskContextRequest): Outcom
       occurredAt: null, observedAt: now, validFrom: null, validUntil: null, kind: 'upsert', epistemic: 'recorded',
       content: outcomeCanonical({ desiredOutcome: state.scope.desiredOutcome, task: node.basis.definition,
         active: state.activeNodeIds.includes(node.id), attempts: node.attempts, completion: node.completion }), supersedes: [] });
+    // Neither current outcome revisions nor ledger reads retain their historical observation time.
+    // Healthy files cannot establish what was known at an earlier cutoff. Keep actual read times.
+    const historical = input.asOf !== undefined && taskContextTimestamp(input.asOf)! < now ||
+      input.observedThrough !== undefined && taskContextTimestamp(input.observedThrough)! < now;
+    const historyReasons = historical ? ['unrecorded-historical-observation'] : [];
     const sources: OutcomeTaskContextView['sources'] = [
-      { source: 'outcome', sourceState: 'healthy', complete: true, stopReasons: [] },
+      { source: 'outcome', sourceState: 'healthy', complete: !historical, stopReasons: historyReasons },
       { source: 'private-task-context', ...privateContext.coverage },
       { source: 'agent-action-ledger', sourceState: actions.sourceState,
-        complete: actions.sourceState === 'healthy' && actions.complete, stopReasons: actions.stopReasons },
+        complete: actions.sourceState === 'healthy' && actions.complete && !historical,
+        stopReasons: [...actions.stopReasons, ...historyReasons] },
     ];
     const privateEvents = [...privateContext.current, ...privateContext.history].map(({ status: _status,
       temporalResolution: _resolution, replacedBy: _replacedBy, ...event }) => event);
@@ -118,6 +127,7 @@ export function readOutcomeTaskContext(input: OutcomeTaskContextRequest): Outcom
         node.basis.definition.repo !== null && !latestEnrollment.repos.includes(node.basis.definition.repo) ||
         node.attempts.some(attempt => !latestEnrollment.repos.includes(attempt.executionRepo))) return { ok: false, reason: 'unknown-source' };
     return { ok: true, context: { ...projected, outcomeId: state.id, taskId: outcomeTaskPublicId(node.id),
-      outcomeRevision: state.revision, active: state.activeNodeIds.includes(node.id), sources } };
+      outcomeRevision: state.revision, active: state.activeNodeIds.includes(node.id),
+      snapshotObservedAt: now, metadataTemporalScope: 'current-read', sources } };
   } catch { return { ok: false, reason: 'unknown-source' }; }
 }
