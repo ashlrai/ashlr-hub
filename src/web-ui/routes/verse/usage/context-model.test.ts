@@ -187,7 +187,7 @@ describe('picker and dialog wording', () => {
 });
 
 describe('context fit', () => {
-  it('a 300k working set needs expansive on GPT-6 and must be split on a 64k local model', () => {
+  it('a 300k whole-project estimate needs expansive on GPT-6 and exceeds a 64k local context', () => {
     expect(modelFit(300_000, GPT6, 'standard', 'codex')).toBe('expansive');
     expect(modelFit(300_000, LOCAL, 'standard', 'local')).toBe('split');
     expect(modelFit(300_000, FABLE, 'standard', 'claude')).toBe('tight');
@@ -199,21 +199,31 @@ describe('context fit', () => {
     expect(modelFit(Number.NaN, FABLE, 'standard', 'claude')).toBeNull();
   });
 
-  it('explains every verdict, and says HOW to split', () => {
+  it('distinguishes every whole-project verdict from relevant-file retrieval', () => {
     expect(fitExplanation({ verdict: 'fits', tokens: 100_000, option: FABLE, mode: 'standard' }))
-      .toBe('All ~100k tokens of tracked code fits well inside this model\'s budget (compacts ≈370k), with room left for the conversation.');
+      .toBe('Project inventory estimate: ~100k tokens. Reading it all at once would fit well inside this model\'s budget (compacts ≈370k), with room left for the conversation.');
     expect(fitExplanation({ verdict: 'tight', tokens: 300_000, option: FABLE, mode: 'standard' })).toMatch(/under the ≈370k compaction point/);
     const needs = fitExplanation({ verdict: 'expansive', tokens: 300_000, option: GPT6, mode: 'standard' });
-    expect(needs).toContain('only Expansive (≈780k) takes it all');
-    expect(needs).toContain('Switch to Expansive');
+    expect(needs).toContain('but fits Expansive (≈780k)');
+    expect(needs).toContain('A focused task can read only relevant files.');
     expect(fitExplanation({ verdict: 'tight', tokens: 300_000, option: FABLE, mode: 'standard' }))
-      .toContain('Expansive (≈970k) would hold it with room to spare.');
+      .toContain('Expansive (≈970k) would leave more room.');
     expect(fitExplanation({ verdict: 'tight', tokens: 300_000, option: HAIKU, mode: 'standard' })).not.toContain('Expansive');
     const split = fitExplanation({ verdict: 'split', tokens: 2_000_000, option: FABLE, mode: 'standard', floor: true });
-    expect(split).toMatch(/^At least ~2M tokens/);
-    expect(split).toContain('even Expansive (≈970k)');
-    expect(split).toContain('fan it out across several chats');
-    expect(split).toContain('narrow this chat');
+    expect(split).toMatch(/^Project inventory estimate: at least ~2M tokens/);
+    expect(split).toContain('including Expansive (≈970k)');
+    expect(split).toContain('A focused task can still use this model');
+    expect(split).toContain('reading relevant files as needed');
+  });
+
+  it('does not infer a whole-project fit from a partial inventory that fits or is tight', () => {
+    for (const verdict of ['fits', 'tight'] as const) {
+      const text = fitExplanation({verdict,tokens:100_000,option:FABLE,mode:'standard',floor:true});
+      expect(text).toContain('at least ~100k tokens');
+      expect(text).toContain('Reading the scanned files at once');
+      expect(text).toContain('The scan is partial; the whole-project fit is unconfirmed.');
+      expect(text).not.toContain('Reading it all at once');
+    }
   });
 
   it('judges a chat set to Expansive against the budget it will actually run with', () => {
@@ -224,9 +234,9 @@ describe('context fit', () => {
     // No expansive budget: the mode resolves to Standard, and so does the verdict.
     expect(modelFit(300_000, HAIKU, 'expansive', 'claude')).toBe('split');
     expect(fitExplanation({ verdict: 'fits', tokens: 300_000, option: FABLE, mode: 'expansive' }))
-      .toBe("All ~300k tokens of tracked code fits well inside this model's Expansive budget (compacts ≈970k), with room left for the conversation.");
+      .toBe("Project inventory estimate: ~300k tokens. Reading it all at once would fit well inside this model's Expansive budget (compacts ≈970k), with room left for the conversation.");
     expect(fitExplanation({ verdict: 'tight', tokens: 700_000, option: FABLE, mode: 'expansive' }))
-      .toMatch(/fits under the ≈970k compaction point of the Expansive budget/);
+      .toMatch(/fit under the ≈970k compaction point of the Expansive budget/);
   });
 
   it('adds the seat engine’s estimated fixed prompt, not one flat figure', () => {
@@ -245,7 +255,10 @@ describe('context fit', () => {
     expect(fitMethodNote('local')).toContain('an estimated ~15k of fixed prompt for Claude Code');
     expect(fitMethodNote('codex')).toContain('an estimated ~15k of fixed prompt for Codex CLI');
     expect(fitMethodNote('claude')).toContain('an estimated ~25k');
-    expect(fitMethodNote(null)).toContain('an estimated ~25k of fixed prompt that every chat');
+    expect(fitMethodNote(null)).toContain('an estimated ~25k of fixed prompt');
+    expect(fitMethodNote('local')).toContain('not the prompt or current chat context');
+    expect(fitMethodNote('local')).toContain('Includes code, docs and tests');
+    expect(fitMethodNote('local')).not.toContain('upper bound');
   });
 
   it('treats a truncated root as a floor', () => {

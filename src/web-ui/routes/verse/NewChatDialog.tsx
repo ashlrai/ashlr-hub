@@ -35,8 +35,8 @@
  *    if the preference changed underneath the open dialog.
  *  - CONTEXT FIT. The chosen folders (or saved project) are sized by
  *    GET /context-fit — git ls-files, bytes ÷ 4, zero spend — and every model
- *    row says whether that code would fit, with the chosen model's verdict
- *    explained in words ("split" says how: fan out, or narrow the folders).
+ *    row compares the tracked project inventory against one context. This is
+ *    advisory: a focused task can read relevant files without loading it all.
  *    Suggests, never switches: nothing here changes the mode on its own.
  *  - SEAT FACTS. The chosen seat's pinned CLI version and its own notes
  *    (binary skew, catalog not fetched yet) are shown in visible text; a
@@ -877,7 +877,7 @@ function ContextChoice({
             : fitState.status === 'error' ? <p className={styles.hint}>Could not size the chosen folders: {fitState.message}</p>
               : verdict === null ? (
                 <p className={styles.hint}>
-                  ~{formatTokens(fitState.fit.totalEstTokens)} tokens of tracked code; this model&rsquo;s budget is unknown, so no fit is claimed.
+                  Project inventory estimate: {fitIsFloor(fitState.fit) ? 'at least ' : ''}~{formatTokens(fitState.fit.totalEstTokens)} tokens. This model&rsquo;s budget is unknown, so no fit is claimed. This estimate is not the prompt or current chat context.
                 </p>
               ) : (
                 <>
