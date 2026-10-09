@@ -48,6 +48,13 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+// The injected children are inert; launcher metadata must not probe the host CLI.
+vi.mock('../src/core/verse/local-harness.js', () => ({
+  LOCAL_HARNESS_UNAVAILABLE: 'Claude Code is required to run local tool sessions. Install it or refresh Apps & Accounts after updating your PATH.',
+  localHarnessInvocation: () => ({ executable: '/opt/fake/bin/fake-cli', path: '/opt/fake/bin' }),
+  discoverLocalHarness: async () => ({ executable: '/opt/fake/bin/fake-cli', path: '/opt/fake/bin' }),
+}));
+
 // killSwitchOn is mocked so this suite tests the LOCAL-ONLY refusal rather than
 // the (correctly, separately) engaged autonomy kill switch on this machine.
 // assertMayMutate is never reached — every path under test refuses before it.
