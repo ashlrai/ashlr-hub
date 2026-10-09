@@ -160,6 +160,8 @@ describe('M30 CI workflow', () => {
       'test/m479.release-workflow-policy.test.ts',
       'test/m522.production-promotion-docs.test.ts',
       'test/m468.release-desktop-workflow-policy.test.ts',
+      'test/authority-codeowners-310b.test.ts',
+      'test/m30.ci.test.ts',
     ].join(' '));
     expect(ciYml.match(/run: npm run check:release/g)).toHaveLength(1);
     for (const [id, condition] of [
@@ -721,6 +723,8 @@ describe('M30 CI workflow', () => {
       'test/m479.release-workflow-policy.test.ts',
       'test/m522.production-promotion-docs.test.ts',
       'test/m468.release-desktop-workflow-policy.test.ts',
+      'test/authority-codeowners-310b.test.ts',
+      'test/m30.ci.test.ts',
     ].sort());
     expect(windowsPortabilityThree).toContain('--reporter=dot');
     expect(windowsPortabilityOverflow).toContain('--reporter=dot');
@@ -734,6 +738,8 @@ describe('M30 CI workflow', () => {
       (file, index) => declaredFiles.indexOf(file) !== index,
     );
     expect([...duplicateFiles].sort()).toEqual([
+      // The source preflight and shared ownership gate both run this whole module.
+      'test/authority-codeowners-310b.test.ts',
       ...Array<string>(4).fill('test/m342.dispatch-production-ledger.test.ts'),
       terminalRetentionTest,
       observerSchedulerTest,
