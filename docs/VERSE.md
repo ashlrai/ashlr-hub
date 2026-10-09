@@ -1298,6 +1298,10 @@ picker and the Resources drawer all read it.
     each logo.
   Hover or focus a row for every window and its reset, the reserve and when a spent account comes back. Click a row
   to open the drawer. **Hide resource bar** (drawer footer, or ⌘K) brings back the single capacity ring.
+  Select **Resources** at the top of the labelled bar to toggle compact rows.
+  Compact rows keep the name and usage together; focus or hover for the full
+  account name, separate credit balance and reset details. The preference and
+  resource order survive reloads. It changes presentation, not usage or routing.
 - **Provider marks.** Engine tiles, the seat chip, the chat header, ⌘K, the tasks pane and chart lane labels show
   the provider's own mark: Anthropic's Claude, OpenAI, xAI's Grok or Ollama (path data from @lobehub/icons, MIT).
   The account's name is always written beside the mark.

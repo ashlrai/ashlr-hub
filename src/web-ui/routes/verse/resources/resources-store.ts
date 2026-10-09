@@ -28,6 +28,8 @@ export interface ResourcesUiState {
   pinned: boolean;
   /** The always-on resource bar in the rail foot (3.11.1). On by default; persisted. */
   bar: boolean;
+  /** Presentation only: one-line resource rows, with full details on focus/hover. */
+  compact: boolean;
   /**
    * The handle's dot, written by the lazily loaded summary probe
    * (resources-summary.tsx). NOT persisted; null until the probe has read.
@@ -39,9 +41,9 @@ function load(): ResourcesUiState {
   try {
     const raw = JSON.parse(localStorage.getItem(RESOURCES_STORAGE_KEY) ?? 'null') as Partial<ResourcesUiState> | null;
     const pinned = raw?.pinned === true;
-    return { pinned, open: pinned && raw?.open === true, bar: raw?.bar !== false, summary: null };
+    return { pinned, open: pinned && raw?.open === true, bar: raw?.bar !== false, compact: raw?.compact === true, summary: null };
   } catch {
-    return { open: false, pinned: false, bar: true, summary: null };
+    return { open: false, pinned: false, bar: true, compact: false, summary: null };
   }
 }
 
@@ -50,12 +52,12 @@ const listeners = new Set<() => void>();
 
 function patch(delta: Partial<ResourcesUiState>): void {
   const next = { ...state, ...delta };
-  if (next.open === state.open && next.pinned === state.pinned && next.bar === state.bar && next.summary === state.summary) return;
-  const persist = next.open !== state.open || next.pinned !== state.pinned || next.bar !== state.bar;
+  if (next.open === state.open && next.pinned === state.pinned && next.bar === state.bar && next.compact === state.compact && next.summary === state.summary) return;
+  const persist = next.open !== state.open || next.pinned !== state.pinned || next.bar !== state.bar || next.compact !== state.compact;
   state = next;
   if (persist) {
     try {
-      localStorage.setItem(RESOURCES_STORAGE_KEY, JSON.stringify({ open: next.open, pinned: next.pinned, bar: next.bar }));
+      localStorage.setItem(RESOURCES_STORAGE_KEY, JSON.stringify({ open: next.open, pinned: next.pinned, bar: next.bar, ...(next.compact ? { compact: true } : {}) }));
     } catch {
       /* best-effort */
     }
@@ -86,6 +88,10 @@ export function setResourcesPinned(pinned: boolean): void {
 /** Show or hide the always-on resource bar in the rail foot. */
 export function setResourcesBar(bar: boolean): void {
   patch({ bar });
+}
+
+export function setResourcesCompact(compact: boolean): void {
+  patch({ compact });
 }
 
 export function setResourcesSummary(summary: ResourcesSummary | null): void {
