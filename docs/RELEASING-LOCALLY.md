@@ -63,7 +63,9 @@ release after merging a different source tree.
 The publisher rehashes the transferred original tarball, publishes once under a
 run-specific `qualified` tag, and verifies public registry bytes, SRI, provenance
 and an isolated installed CLI before moving `latest`. An uncertain publish is
-reconciled from public state rather than replayed. A mismatched previous
+reconciled from public state rather than replayed. Public readback checks immediately,
+then backs off for up to 15 minutes when npm is still processing an accepted publish;
+a ready registry proceeds immediately. A mismatched previous
 publication or unknown registry state holds promotion. npm provenance identifies
 the publisher workflow; the original CI qualification retains the producer
 lineage. Read back `latest` and the successful workflow before reporting release

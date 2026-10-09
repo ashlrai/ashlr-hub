@@ -108,7 +108,7 @@ jobs:
   publish:
     needs: admit
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     # One top-level workflow binds npm's publisher identity. No reusable callers.
     environment: phantom-npm
     permissions:

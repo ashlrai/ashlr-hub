@@ -1,10 +1,10 @@
-import {describe, it, expect} from 'vitest';
+import {describe, it, expect, vi} from 'vitest';
 import {createHash} from 'node:crypto';
 import {mkdtempSync, writeFileSync, rmSync, symlinkSync, readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {parse} from 'yaml';
-import {publisherInput, bindAttestedArtifact, acceptPackageIdentity, verifyHandoff, assertRegistryPackage, assertLatestPromotion, verifyCanonicalProvenance} from '../scripts/canonical-npm-publisher.mjs';
+import {publisherInput, bindAttestedArtifact, acceptPackageIdentity, verifyHandoff, assertRegistryPackage, assertLatestPromotion, verifyCanonicalProvenance, reconcileRegistry} from '../scripts/canonical-npm-publisher.mjs';
 const hash = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 const env = {GITHUB_REPOSITORY: 'ashlrai/phantom', GITHUB_REPOSITORY_ID: '1263526319', GITHUB_REPOSITORY_OWNER_ID: '258113726',
   GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/master', GITHUB_SHA: '1'.repeat(40), CANDIDATE_SHA: '2'.repeat(40),
@@ -94,5 +94,35 @@ describe('canonical publication recovery', () => {
     expect(() => verifyCanonicalProvenance(accepted, audit, '3'.repeat(40), '9', '2', read)).toThrow();
     const failedAdmission = (endpoint: string) => endpoint.endsWith('/jobs?per_page=100') ? {total_count: 1, jobs: [{name: 'admit', conclusion: 'failure', head_sha: env.GITHUB_SHA}]} : read(endpoint);
     expect(() => verifyCanonicalProvenance(accepted, audit, env.GITHUB_SHA, '9', '2', failedAdmission)).toThrow();
+  });
+});
+
+
+describe('public registry processing', () => {
+  it('waits for a pending version, then accepts only the original bytes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'phantom-registry-test-'));
+    const accepted = acceptPackageIdentity(input, pkg, receipt, bytes);
+    const metadata = {name: accepted.name, version: accepted.version, dist: {tarball: `https://registry.npmjs.org/@ashlr/phantom/-/phantom-${accepted.version}.tgz`, integrity: accepted.integrity, attestations: {provenance: {predicateType: 'https://slsa.dev/provenance/v1'}}}};
+    vi.useFakeTimers();
+    const read = vi.fn().mockResolvedValueOnce(new Response('', {status: 404}))
+      .mockResolvedValueOnce(Response.json(metadata)).mockResolvedValueOnce(new Response(bytes));
+    vi.stubGlobal('fetch', read);
+    try {
+      const pending = reconcileRegistry(accepted, dir);
+      await vi.runAllTimersAsync(); await pending;
+      expect(JSON.parse(readFileSync(join(dir, 'registry-metadata.json'), 'utf8'))).toEqual(metadata);
+      expect(read).toHaveBeenCalledTimes(3);
+    } finally {vi.useRealTimers(); vi.unstubAllGlobals(); rmSync(dir, {recursive: true, force: true});}
+  });
+  it('holds corrupt metadata immediately rather than waiting for eventual consistency', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'phantom-registry-test-'));
+    vi.useFakeTimers();
+    const read = vi.fn().mockResolvedValue(Response.json({dist: {tarball: 'https://attacker.example/package.tgz'}}));
+    vi.stubGlobal('fetch', read);
+    try {
+      await expect(reconcileRegistry(acceptPackageIdentity(input, pkg, receipt, bytes), dir)).rejects.toThrow();
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {vi.useRealTimers(); vi.unstubAllGlobals(); rmSync(dir, {recursive: true, force: true});}
   });
 });

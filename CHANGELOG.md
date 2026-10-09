@@ -9,7 +9,35 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.27.0] — Unreleased
+## [3.28.0] — Unreleased
+
+### Added
+
+- Shared account-bound Leader, Manager and worker invocation for prepared
+  Claude Code, Codex, Grok, included native Devin and local resources.
+- Qualified original-artifact npm trusted publishing, separate consumer checks
+  and public reconciliation before stable promotion; owner commissioning remains
+  required before this workflow can publish.
+- Optional host-owned website publication with durable Auto/Pause controls,
+  exact staged-deployment reconciliation and preserved public configuration.
+- One candidate-version synchronization command and clear installed-desktop
+  versus interface-build versions in Settings and About.
+
+### Changed
+
+- Admit useful documentation, CI, dependency and maintenance improvements;
+  size ordered goal plans to the work rather than padding or truncating them.
+- Include eligible Codex resources in balanced routing; preserve manual choices
+  and explicit account permissions. Optional Leader run limits remain explicit.
+- Format Telegram dates in the operator's timezone and use concise Phantom
+  wording for generated briefs while preserving user text and technical records.
+- Use writable isolated Cargo runtime state and reuse unchanged source hashes
+  during maintainer verification without repeating locked dependency preparation.
+
+These entries describe successor source. Publication, installation, website
+commissioning and provider activation are verified separately.
+
+## [3.27.0] — 2026-10-09
 
 ### Added
 

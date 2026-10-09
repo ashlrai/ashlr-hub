@@ -167,16 +167,44 @@ export function verifyCanonicalProvenance(record, audit, revision, currentRun, c
   return {runId, runAttempt};
 }
 
+class RegistryReadPending extends Error {}
+async function registryFetch(url) {
+  let response;
+  try {response = await fetch(url, {redirect: 'error', signal: AbortSignal.timeout(30_000)});}
+  catch {throw new RegistryReadPending('Public registry read unavailable');}
+  if ([404, 408, 429].includes(response.status) || response.status >= 500) {
+    throw new RegistryReadPending('Public registry is still processing or unavailable');
+  }
+  assert.equal(response.status, 200);
+  return response;
+}
+
 async function registry(record, directory) {
-  const response = await fetch(`https://registry.npmjs.org/@ashlr%2Fphantom/${record.version}`, {signal: AbortSignal.timeout(30_000)});
-  assert.equal(response.status, 200); const metadata = await response.json();
+  const response = await registryFetch(`https://registry.npmjs.org/@ashlr%2Fphantom/${record.version}`);
+  const metadata = await response.json();
   const url = new URL(metadata.dist?.tarball);
   assert.equal(url.origin, 'https://registry.npmjs.org');
   assert.equal(url.pathname, `/@ashlr/phantom/-/phantom-${record.version}.tgz`);
-  const archive = await fetch(url, {signal: AbortSignal.timeout(30_000)}); assert.equal(archive.status, 200);
+  const archive = await registryFetch(url);
   const bytes = Buffer.from(await archive.arrayBuffer());
   assertRegistryPackage(record, metadata, bytes);
   fs.writeFileSync(join(directory, 'registry-metadata.json'), JSON.stringify(metadata), {mode: 0o600});
+}
+
+/** Wait only for transient public reads; substituted bytes or metadata hold immediately. */
+export async function reconcileRegistry(record, directory) {
+  // npm may accept HTTP 202 well before public visibility. This never republishes.
+  const deadline = Date.now() + 15 * 60_000;
+  let delay = 2000;
+  for (;;) {
+    try {await registry(record, directory); return;}
+    catch (error) {
+      const remaining = deadline - Date.now();
+      if (!(error instanceof RegistryReadPending) || remaining <= 0) throw error;
+      await new Promise(done => setTimeout(done, Math.min(delay, remaining)));
+      delay = Math.min(delay * 2, 30_000);
+    }
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -188,10 +216,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${record.version}\nfilename=${record.filename}\nintegrity=${record.integrity}\n`);
   } else if (command === 'registry') {
     const record = verifyHandoff(directory, process.env.ADMISSION_SHA256, process.env.PACKAGE_SHA256);
-    // Public eventual consistency is retried; npm publish itself is never retried.
-    let failure;
-    for (let i = 0; i < 12; i++) {try {await registry(record, process.env.RUNNER_TEMP); failure = null; break;} catch (e) {failure = e; await new Promise(r => setTimeout(r, 5000));}}
-    if (failure) throw failure;
+    await reconcileRegistry(record, process.env.RUNNER_TEMP);
   } else if (command === 'provenance') {
     const record = verifyHandoff(directory, process.env.ADMISSION_SHA256, process.env.PACKAGE_SHA256);
     console.log(JSON.stringify(verifyCanonicalProvenance(record, readBoundedJson(join(process.env.RUNNER_TEMP, 'phantom-signatures.json')), process.env.GITHUB_SHA, process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT)));

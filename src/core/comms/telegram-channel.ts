@@ -924,7 +924,7 @@ async function settingsText(timeZone?: string): Promise<string> {
       lines.push('  none set (lane and router defaults apply)');
     } else {
       lines.push(`  grok lanes: ${d.grokLanes ?? 'default'}`);
-      lines.push(`  codex lanes: ${d.codexEnabled === null ? 'default (off)' : d.codexEnabled ? 'on' : 'off'}`);
+      lines.push(`  codex lanes: ${d.codexEnabled === null ? 'budget default' : d.codexEnabled ? 'on' : 'off'}`);
       const tuning = d.routerTuning ? Object.entries(d.routerTuning).map(([k, v]) => `${k}=${String(v)}`).join(', ') : '';
       lines.push(`  router tuning: ${tuning || 'none'}`);
       lines.push(`  updated ${leaderDisplayText(d.updatedAt, Date.now(), timeZone)}`);
