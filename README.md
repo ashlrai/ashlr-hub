@@ -29,7 +29,7 @@ phm verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 For a reproducible install of the published release verified on 2026-10-09,
-use `npm install -g @ashlr/phantom@3.29.3`. General release discovery is at
+use `npm install -g @ashlr/phantom@3.29.5`. General release discovery is at
 [GitHub releases](https://github.com/ashlrai/phantom/releases/latest).
 
 Find current desktop artifacts at [GitHub releases](https://github.com/ashlrai/phantom/releases/latest):
@@ -43,9 +43,10 @@ not Apple Developer ID notarized. The CLI includes the browser console on macOS,
 See [desktop installation](#the-desktop-app-macos) or the
 [first-run guide](docs/QUICKSTART.md#open-verse).
 
-As checked on 2026-10-09, [phm.dev](https://phm.dev) presents the separate
-[Phantom Secrets](https://github.com/ashlrai/phantom-secrets) credential tool.
-Use this repository and its versioned releases to install the Phantom workbench.
+[phm.dev](https://phm.dev) introduces the Phantom workbench;
+[phm.dev/secrets](https://phm.dev/secrets) introduces Phantom Secrets.
+Use this repository and its qualified releases to install the workbench.
+Website availability does not establish installed fleet or hosted-service readiness.
 
 ![Phantom 3.24.3 Work with me: read-only Demo chat with labeled sample accounts and provider-inactive conversation.](https://raw.githubusercontent.com/ashlrai/phantom/master/docs/images/verse-work-with-me-3.24.3-demo.jpg)
 

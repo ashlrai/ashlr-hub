@@ -15,9 +15,10 @@ The verified 3.25.3 compatibility release remains `@ashlr/hub`.
 Local routes remain `/verse/`, and the published macOS app is `Phantom.app`. See
 [the product naming guide](PHANTOM-BRAND.md).
 
-As checked on 2026-10-09, [phm.dev](https://phm.dev) presents the separate
-[Phantom Secrets](https://github.com/ashlrai/phantom-secrets) credential tool.
-Use the workbench release links below for this guide.
+[phm.dev](https://phm.dev) introduces the Phantom workbench;
+[phm.dev/secrets](https://phm.dev/secrets) introduces Phantom Secrets.
+Use the qualified workbench release links below to install. Website availability
+does not establish installed fleet or hosted-service readiness.
 
 <a id="open-verse"></a>
 
