@@ -114,8 +114,8 @@ function withFoundry(foundry: NonNullable<AshlrConfig['foundry']>): AshlrConfig 
 /**
  * V3.10: the fabric gateway is an AUTONOMOUS dispatch path (daemon +
  * concurrent fleet dispatch), so its subscription gate fails closed on
- * unknown usage and applies the operator budget — whose default keeps Codex
- * OFF for autonomy (Mason, 2026-09-24). Tests about RESOURCE demotion (not
+ * unknown usage and applies the operator's reserves and explicit Off settings.
+ * Tests about RESOURCE demotion (not
  * about the unknown-usage gate) therefore grant explicit autonomy headroom in
  * the tmp HOME: a budget that switches Codex on at 0% reserve, plus a fresh,
  * low reading for Claude and Codex in the Verse capacity snapshot — exactly
@@ -1225,7 +1225,7 @@ describe('M252 Gateway — V3.10 autonomy subscription gate', () => {
     expect(decision.reason).toContain('balanced budget');
   });
 
-  it('default budget: codex is OFF for autonomy even with a fresh, low local reading', async () => {
+  it('balanced defaults allow fresh Codex headroom without a provider-specific enable action', async () => {
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue({
         primary: { usedPercent: 5, windowMinutes: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 },
@@ -1233,8 +1233,23 @@ describe('M252 Gateway — V3.10 autonomy subscription gate', () => {
     }));
     const decision = await decideHardItemOn('codex');
     expect(decision.backend).toBe('codex');
+    expect(decision.reason).toMatch(/^frontier:/);
+    expect(decision.trace.some((t) => t.stage === 'subscriptionThrottle')).toBe(false);
+  });
+
+  it('explicit saved Codex Off still throttles fresh low subscription usage', async () => {
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue({
+        primary: { usedPercent: 5, windowMinutes: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 },
+      }),
+    }));
+    const { updateBudgetPolicy } = await import('../src/core/routing/budget-store.js');
+    updateBudgetPolicy({ seatId: 'codex', policy: { enabled: false } });
+    const decision = await decideHardItemOn('codex');
+    expect(decision.backend).toBe('codex');
     expect(decision.reason).toMatch(/^throttled: subscription window/);
     expect(decision.reason).toContain('switched off for autonomy');
+    expect(decision.trace.some((t) => t.stage === 'subscriptionThrottle')).toBe(true);
   });
 });
 

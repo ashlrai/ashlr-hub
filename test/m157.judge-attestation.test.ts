@@ -48,6 +48,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { DEFAULT_FABLE_MODEL_ID, DEFAULT_CODEX_MODEL_ID } from '../src/core/run/model-catalog.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -688,8 +689,12 @@ describe('M157 manager.ts signing path — attestation in recordDecision', () =>
     const openAiProducerReview = judgedEntries.find(
       (entry) => entry.proposalId === openAiProposal.id,
     );
-    expect(claudeProducerReview?.model ?? claudeProducerReview?.engine).toMatch(/gpt-5|codex/i);
-    expect(openAiProducerReview?.model ?? openAiProducerReview?.engine).toMatch(/claude/i);
+    expect(claudeProducerReview?.model).toBe(DEFAULT_CODEX_MODEL_ID);
+    expect(claudeProducerReview?.engine).toBe(DEFAULT_CODEX_MODEL_ID);
+    // Auto review uses the configured default Fable primary; ledger identity
+    // must name the exact model that answered, not the Opus fallback.
+    expect(openAiProducerReview?.model).toBe(DEFAULT_FABLE_MODEL_ID);
+    expect(openAiProducerReview?.engine).toBe(DEFAULT_FABLE_MODEL_ID);
     expect(claudeProducerReview?.judgeAttestation).toHaveLength(64);
     expect(openAiProducerReview?.judgeAttestation).toHaveLength(64);
 
@@ -715,8 +720,7 @@ describe('M157 manager.ts signing path — attestation in recordDecision', () =>
     );
     expect(answeringEngines).toEqual(new Set(['claude', 'codex']));
     expect(report.judgeEngine).toMatch(/^mixed:/);
-    expect(report.judgeEngine).toMatch(/claude/i);
-    expect(report.judgeEngine).toMatch(/gpt-5/i);
+    expect(report.judgeEngine).toBe(`mixed:${[DEFAULT_FABLE_MODEL_ID, DEFAULT_CODEX_MODEL_ID].sort().join(',')}`);
   });
 
   it('[M1e] escalation cannot displace an existing valid independent judged authority', async () => {
