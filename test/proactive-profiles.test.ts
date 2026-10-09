@@ -10,7 +10,7 @@ import { createProactiveAgentsApi } from '../src/core/verse/proactive-agents-api
 import type { VerseApiContext } from '../src/core/verse/verse-api.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import { createProactiveProfile, deleteProactiveProfile, listProactiveProfiles, updateProactiveProfile } from '../src/core/proactive/tools.js';
-import { nativeToolSafety } from '../src/core/mcp-native.js';
+import { callNativeTool, nativeToolSafety } from '../src/core/mcp-native.js';
 
 let root: string, directory: string, store: ProactiveProfilesStore;
 let previousHome: string | undefined;
@@ -130,6 +130,44 @@ describe('proactive profile API and native tools', () => {
     expect((await request(`${base}/dispatch`, 'POST', {})).status).toBe(404);
     expect((await request(`${base}-other`)).handled).toBe(false);
     expect((await store.list()).profiles).toEqual([]);
+  });
+  it('paginates real native Unicode output by full scrubbed UTF-8 bytes without missing or repeating identities', async () => {
+    const accountId = '漢'.repeat(256), identities = new Set<string>();
+    for (let index = 0; index < 10; index++) {
+      const profile = await createProactiveProfile({ profile: {
+        identity: { provider: 'openai-dot', accountId, agentId: '語'.repeat(254) + `${index}` },
+        displayName: '名'.repeat(120), responsibility: '事'.repeat(4000),
+        computer: { kind: 'hosted', label: '機'.repeat(120), providerComputerId: '電'.repeat(256) },
+        fundingReference: { kind: 'subscription', accountId, poolId: '資'.repeat(256) },
+      } }) as { profile: { id: string } };
+      identities.add(profile.profile.id);
+    }
+    const seen: string[] = []; let offset = 0, pages = 0;
+    while (true) {
+      const response = await callNativeTool('phm_proactive_agents_list', { offset, limit: 50 });
+      expect(response.isError).not.toBe(true);
+      const text = response.content[0]!.text;
+      expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(32 * 1024);
+      expect(text).not.toContain('output truncated');
+      const page = JSON.parse(text) as { profiles: Array<{ id: string }>; total: number; nextOffset: number | null };
+      expect(page.total).toBe(identities.size); expect(page.profiles.length).toBeGreaterThan(0);
+      seen.push(...page.profiles.map(profile => profile.id)); pages++;
+      if (page.nextOffset === null) break;
+      expect(page.nextOffset).toBe(offset + page.profiles.length); expect(page.nextOffset).toBeGreaterThan(offset);
+      offset = page.nextOffset; expect(pages).toBeLessThanOrEqual(10);
+    }
+    expect(pages).toBeGreaterThan(1); expect(seen).toHaveLength(10); expect(new Set(seen)).toEqual(identities);
+  });
+  it('fits the actual scrubbed pretty envelope and safely returns one maximum summary', async () => {
+    const secret = `sk-${'Ab1c'.repeat(24)}`, created = await createProactiveProfile({ profile: { ...input,
+      responsibility: `Useful context ${secret}`, computer: { kind: 'hosted', label: '機'.repeat(120), providerComputerId: '電'.repeat(256) } } }) as { profile: { id: string } };
+    const response = await callNativeTool('phm_proactive_agents_list', { limit: 1 });
+    const text = response.content[0]!.text, page = JSON.parse(text);
+    expect(response.isError).not.toBe(true); expect(text).not.toContain(secret);
+    expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(32 * 1024);
+    expect(page.profiles.map((profile: { id: string }) => profile.id)).toEqual([created.profile.id]);
+    expect(page.nextOffset).toBeNull();
+    expect((await getProactiveProfilesStore().list()).profiles[0]!.responsibility).toContain(secret);
   });
   it('shares saved metadata and stale-write behavior through native tools with explicit read/write safety', async () => {
     expect(nativeToolSafety('phm_proactive_agents_list')).toBe('read');

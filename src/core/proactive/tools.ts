@@ -1,6 +1,7 @@
 /** Native metadata tools share the UI store and its stale-write checks. */
 import { getProactiveProfilesStore, ProactiveProfileError } from './profiles.js';
 import { PROACTIVE_PROVIDERS, type ProactiveProfile } from './types.js';
+import { scrubSecrets } from '../knowledge/index.js';
 
 function args(value: Record<string, unknown>, keys: string[]): void {
   if (Object.keys(value).some(key => !keys.includes(key))) throw new ProactiveProfileError('INVALID_INPUT', 'Unexpected proactive profile tool argument.');
@@ -23,10 +24,16 @@ export async function listProactiveProfiles(value: Record<string, unknown>): Pro
     (value['accountId'] === undefined || profile.identity.accountId === value['accountId']) &&
     (value['provider'] === undefined || profile.identity.provider === value['provider']));
   const profiles = all.slice(Number(offset), Number(offset) + Number(limit)).map(summary);
-  // Fit the native tool's output limit without turning an incomplete page into a full list.
-  while (profiles.length > 1 && JSON.stringify(profiles, null, 2).length > 28 * 1024) profiles.pop();
-  const nextOffset = Number(offset) + profiles.length;
-  return { schemaVersion: 1, profiles, total: all.length, nextOffset: nextOffset < all.length ? nextOffset : null };
+  const page = () => {
+    const nextOffset = Number(offset) + profiles.length;
+    return { schemaVersion: 1, profiles, total: all.length, nextOffset: nextOffset < all.length ? nextOffset : null };
+  };
+  // Match native serialization exactly: scrub the full pretty-JSON envelope before measuring UTF-8 bytes.
+  // Individual summaries fit this existing transport allowance; shrinking the page preserves honest continuation.
+  const bytes = () => Buffer.byteLength(scrubSecrets(JSON.stringify(page(), null, 2)), 'utf8');
+  while (profiles.length > 1 && bytes() > 32 * 1024) profiles.pop();
+  if (bytes() > 32 * 1024) throw new ProactiveProfileError('UNAVAILABLE', 'A proactive profile summary cannot fit the native reply.');
+  return page();
 }
 export async function createProactiveProfile(value: Record<string, unknown>): Promise<unknown> {
   args(value, ['profile']); return { profile: summary(await getProactiveProfilesStore().create(value['profile'])) };
