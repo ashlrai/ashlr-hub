@@ -432,4 +432,6 @@ it('end-to-end warm speed includes body generation instead of stopping at respon
     ollamaBaseUrl: 'http://127.0.0.1:11434', anthropicBaseUrl: 'http://127.0.0.1:8099' },
   { now: () => clock, fetchImpl: (async () => response) as typeof fetch });
   expect(result).toMatchObject({ ms: 1400, tokPerSec: 10 / 1.4, tokPerSecScope: 'warm-end-to-end' });
+  expect(lastThroughput({ seatId: 'local:test', model: 'test', endpoint: 'http://127.0.0.1:8099', contextWindow: 65_536 }))
+    .toEqual({ tokPerSec: 10 / 1.4, source: 'warm', scope: 'warm-end-to-end', at: new Date(clock).toISOString() });
 });
