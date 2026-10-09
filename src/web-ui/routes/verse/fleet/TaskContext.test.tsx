@@ -12,7 +12,7 @@ const evidence: TaskContextEvidence = { schemaVersion: 1, eventId: 'event-one', 
   sourceRefs: ['phantom:source:one'], occurredAt: null, observedAt: '2026-10-09T08:00:00.000Z', validFrom: null, validUntil: null,
   kind: 'upsert', epistemic: 'recorded', content: 'A saved observation', supersedes: [], status: 'current', temporalResolution: 'unknown', replacedBy: [] };
 function context(over: Partial<OutcomeTaskContextView> = {}): OutcomeTaskContextView {
-  return { schemaVersion: 1, outcomeId: 'outcome-one', taskId: 'task-one', taskRef: 'task-one', outcomeRevision: 2, active: true,
+  return { schemaVersion: 1, snapshotObservedAt: '2026-10-09T09:00:00.000Z', metadataTemporalScope: 'current-read', outcomeId: 'outcome-one', taskId: 'task-one', taskRef: 'task-one', outcomeRevision: 2, active: true,
     asOf: '2026-10-09T09:00:00.000Z', observedThrough: '2026-10-09T09:00:00.000Z',
     coverage: { sourceState: 'healthy', complete: true, stopReasons: [] }, current: [evidence], history: [], conflicts: [],
     sources: [{ source: 'outcome', sourceState: 'healthy', complete: true, stopReasons: [] }], ...over };
@@ -37,6 +37,7 @@ describe('task context evidence', () => {
     await screen.findByText('Context is incomplete. Missing records and current facts remain unknown.');
     expect(screen.getByText('No current records available; coverage is incomplete.')).toBeInTheDocument();
     expect(screen.queryByText('No current records in this projection.')).not.toBeInTheDocument();
+    expect(screen.getByText('No historical records available; coverage is incomplete.')).toBeInTheDocument();
   });
   it('separates canceled history, conflicts and retired task state from current records', async () => {
     installFetch(() => json(context({ active: false, current: [], history: [{ ...evidence, status: 'canceled' }], conflicts: [{ kind: 'unknown-effective-time', eventIds: ['event-one'] }] })));
@@ -65,6 +66,14 @@ describe('task context evidence', () => {
     expect(screen.getByText('First source claim')).toBeInTheDocument();
     expect(screen.getByText('Different source claim')).toBeInTheDocument();
     expect(screen.getByText('phantom:source:two')).toBeInTheDocument();
+  });
+  it('distinguishes current outcome status observation from the evidence time scope', async () => {
+    installFetch(() => json({ ...context({ asOf: '2026-10-08T09:00:00.000Z', coverage: { sourceState: 'degraded', complete: false, stopReasons: ['historical-query-partial'] } }),
+      snapshotObservedAt: '2026-10-09T10:00:00.000Z', metadataTemporalScope: 'current-read' }));
+    render(<TaskContext outcomeId="outcome-one" taskId="task-one" title="Task" />);
+    expect(await screen.findByText(/Outcome revision 2 · status observed.*current read/)).toBeInTheDocument();
+    expect(screen.getByText('Context is incomplete. Missing records and current facts remain unknown.')).toBeInTheDocument();
+    expect(screen.getByText('No historical records available; coverage is incomplete.')).toBeInTheDocument();
   });
   it('renders context as text with retained source references rather than executing instructions or markup', async () => {
     const content = '<script>steal()</script>';

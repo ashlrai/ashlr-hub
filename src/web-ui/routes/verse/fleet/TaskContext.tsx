@@ -7,6 +7,9 @@ import { useQuery, useRefetch } from '../../../data/hooks.js';
 import type { QueryDef } from '../../../data/queries.js';
 import styles from './TaskContext.module.css';
 
+// Additive current-read metadata is absent on older servers; never guess its observation time.
+type ContextView = Omit<OutcomeTaskContextView, 'snapshotObservedAt' | 'metadataTemporalScope'> & { snapshotObservedAt?: string; metadataTemporalScope?: 'current-read' };
+
 function time(value: string | null): string {
   if (!value) return 'Unknown';
   const ms = Date.parse(value);
@@ -47,11 +50,13 @@ function Evidence({ evidence }: { evidence: TaskContextEvidence }) {
   </li>;
 }
 export function TaskContext({ outcomeId, taskId, title }: { outcomeId: string; taskId: string; title: string }) {
-  const query = useMemo<QueryDef<OutcomeTaskContextView>>(() => ({
+  const query = useMemo<QueryDef<ContextView>>(() => ({
     key: `verse-task-context:${outcomeId}:${taskId}`,
     async fetch(signal) {
-      const result = await apiGet<OutcomeTaskContextView>(`/api/verse/outcomes/${encodeURIComponent(outcomeId)}/tasks/${encodeURIComponent(taskId)}/context`, signal);
+      const result = await apiGet<ContextView>(`/api/verse/outcomes/${encodeURIComponent(outcomeId)}/tasks/${encodeURIComponent(taskId)}/context`, signal);
       if (!result || result.schemaVersion !== 1 || result.outcomeId !== outcomeId || result.taskId !== taskId || typeof result.active !== 'boolean'
+        || (result.metadataTemporalScope !== undefined || result.snapshotObservedAt !== undefined) && (result.metadataTemporalScope !== 'current-read'
+          || typeof result.snapshotObservedAt !== 'string' || !Number.isFinite(Date.parse(result.snapshotObservedAt)))
         || !result.coverage || !['healthy', 'missing', 'degraded'].includes(result.coverage.sourceState) || typeof result.coverage.complete !== 'boolean'
         || !texts(result.coverage.stopReasons) || typeof result.taskRef !== 'string' || !Number.isSafeInteger(result.outcomeRevision)
         || !Array.isArray(result.current) || !result.current.every(item => evidenceValid(item, result.taskRef))
@@ -73,6 +78,7 @@ export function TaskContext({ outcomeId, taskId, title }: { outcomeId: string; t
       : !value ? <p role="status" aria-busy="true">Reading task context…</p> : <>
         {!value.active ? <p role="status">This task belongs to an earlier outcome revision.</p> : null}
         {value.coverage.sourceState !== 'healthy' || !value.coverage.complete ? <p role="status">Context is incomplete. Missing records and current facts remain unknown.</p> : null}
+        <p className={styles.times}>Outcome revision {value.outcomeRevision} · {value.metadataTemporalScope === 'current-read' ? `status observed ${time(value.snapshotObservedAt ?? null)} (current read)` : 'status observation time unknown'}</p>
         <p className={styles.times}>As of {time(value.asOf)} · observed through {time(value.observedThrough)}</p>
         {value.conflicts.length ? <p role="status">Conflicting or unresolved evidence: {value.conflicts.map(conflict => conflict.kind.replaceAll('-', ' ')).join(', ')}.</p> : null}
         <h5>Current records</h5>{value.current.length ? <ul className={styles.list}>{value.current.map(evidence => <Evidence key={evidence.eventId} evidence={evidence} />)}</ul>
@@ -83,7 +89,7 @@ export function TaskContext({ outcomeId, taskId, title }: { outcomeId: string; t
               <pre>{alternative.content}</pre><ul aria-label="Conflicting source references">{alternative.sourceRefs.map(reference => <li key={reference}>{reference}</li>)}</ul></div>)}</div> : null)}
         </details> : null}
         <details><summary>History and coverage</summary>
-          {value.history.length ? <ul className={styles.list}>{value.history.map(evidence => <Evidence key={evidence.eventId} evidence={evidence} />)}</ul> : <p>No historical records in this projection.</p>}
+          {value.history.length ? <ul className={styles.list}>{value.history.map(evidence => <Evidence key={evidence.eventId} evidence={evidence} />)}</ul> : <p>{value.coverage.complete && value.coverage.sourceState === 'healthy' ? 'No historical records in this projection.' : 'No historical records available; coverage is incomplete.'}</p>}
           <ul aria-label="Context source coverage">{value.sources.map(source => <li key={source.source}>{source.source.replaceAll('-', ' ')}: {source.sourceState}, {source.complete ? 'complete' : 'incomplete'}{source.stopReasons.length ? ` — ${source.stopReasons.join(', ')}` : ''}</li>)}</ul>
         </details>
       </>}
