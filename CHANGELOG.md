@@ -18,6 +18,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   stay unknown rather than borrowing Build or API usage.
 - Explain account-usage collection holds separately from sign-in readiness,
   preserving existing readings and provider-specific diagnostics.
+- Record local Leader completion tokens, duration and immutable model/runtime
+  bindings when actually reported; distinguish missing counters from zero usage.
 
 ### Changed
 
@@ -26,6 +28,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   physical occupancy is unknown. CPU and RAM remain descriptive host metrics.
 - Remove the hidden daily Leader conversation cap and propagate cancellation to
   native replies. Existing funding rules and explicit stop controls remain.
+- Separate project inventory estimates from the context a particular task needs,
+  so a large repository does not prevent creating a narrow local-model task.
+- Explain resource evidence and configured routing priors without presenting
+  estimated context, hardware readings or configured tiers as measured capability.
 - Update release guidance for the commissioned original-artifact trusted publisher.
 - Increase the desktop first-paint baseline from 353 to 354 KiB for 43 additional
   bytes of lazy preload metadata; phone size and its 250 KiB limit are unchanged.
@@ -41,6 +47,13 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   Bot funding, local measurement scope and subscription evidence in documentation.
 - Show the original age of retained local runtime and readiness observations;
   keep refresh failures visible during retries until a real successful read.
+- Bind local context availability to validated runtime metadata instead of the
+  requested configuration; forward caller cancellation through local Leader reads.
+- Keep unchanged authority-alert arrival times stable across fresh status checks,
+  allowing Jev's existing advisory cache to reuse unchanged inputs. Substantive
+  changes, recovery and recurrence still invalidate the observation.
+- Classify the durable OutcomeStore tests in the existing real-I/O lane, retaining
+  every case and complete platform coverage without changing production deadlines.
 - Synchronize explicit candidate lines in the README, quickstart and desktop
   guide with package/native metadata. Preserve verified publication records and
   reject missing or duplicate markers before writing any file.
