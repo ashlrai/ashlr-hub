@@ -285,6 +285,20 @@ describe('runLeader', () => {
 });
 
 describe('prompt', () => {
+  it('routes engineering work by eligible capacity and evidence without turning larger tasks into paid-provider requirements', () => {
+    const prompt = buildLeaderSystemPrompt();
+    expect(prompt).toContain('Let the model router and load balancer select eligible accounts and models');
+    expect(prompt).toContain('task fit, measured quality, available capacity, cost and latency');
+    expect(prompt).toContain('Do not assign a role or PR-sized work to a provider by brand.');
+    expect(prompt).toContain('explicitly paid session actions, not prerequisites for larger tasks');
+    expect(prompt).toContain('Never infer permission to spend purchased credits or incur paid overages');
+    expect(prompt).toContain('unknown balance or expiry');
+    expect(prompt).toContain('known usable allowance');
+    expect(prompt).not.toContain('local / grok fleet');
+    expect(prompt).not.toContain('only after Codex usage resets');
+    expect(prompt).not.toContain('PR-sized work → cloud.launch');
+  });
+
   it('names no real person and wraps all evidence as untrusted data', async () => {
     expect(LEADER_SYSTEM_PROMPT).not.toMatch(/elon|musk/i);
     expect(LEADER_SYSTEM_PROMPT).toMatch(/Visionary/);
