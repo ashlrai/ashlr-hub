@@ -5,7 +5,7 @@
  *     and C3's new-chat defaults through the token dialog;
  *   - Desktop renders from what the desktop app REPORTS (C8), never from what
  *     was asked: a chord another app holds shows as not active, with why;
- *     an unsigned build says banners come from Script Editor; a browser says
+ *     script delivery says banners come from Script Editor; a browser says
  *     it needs the desktop app and offers no switch;
  *   - Keyboard is the catalog's own table (it cannot drift from the keys);
  *   - the page holds at 375 in dark mode.
@@ -277,7 +277,7 @@ describe('Settings ▸ Desktop', () => {
     expect(within(desktop).queryByText(/Press ⌃⌥Space in any app/)).not.toBeInTheDocument();
   });
 
-  it('an unsigned build says banners arrive as Script Editor', () => {
+  it('script delivery says banners arrive as Script Editor', () => {
     installBridge(desktopState({ notifications: { delivery: 'script' } }));
     renderSettings();
     expect(within(panel('Desktop')).getByText(/banners appear as Script Editor/)).toBeInTheDocument();
