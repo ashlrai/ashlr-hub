@@ -105,8 +105,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  width: var(--space-10);
+  height: var(--space-10);
   margin-bottom: var(--space-1);
   color: var(--accent-500);
 }
