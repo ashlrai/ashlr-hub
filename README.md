@@ -18,16 +18,16 @@
 
 ## Install
 
-Phantom 3.28.0 is published as `@ashlr/phantom` from `ashlrai/phantom`.
-Install the version-pinned canonical release. The development branch prepares
-3.29.0; those successor changes are not yet published:
+Phantom 3.29.2 is published as `@ashlr/phantom` from `ashlrai/phantom`.
+Install the version-pinned canonical release.
+The source candidate is 3.29.3; preparing it does not publish or install it.
 
 ```sh
-npm install -g @ashlr/phantom@3.28.0   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
+npm install -g @ashlr/phantom@3.29.2   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
 phm verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
-The [v3.28.0 release](https://github.com/ashlrai/phantom/releases/tag/v3.28.0)
+The [v3.29.2 release](https://github.com/ashlrai/phantom/releases/tag/v3.29.2)
 provides a signed macOS arm64 app archive and paired update manifest; it has no
 DMG. Existing installations use the qualified signed-update flow. Maintainer
 artifact installation requires the original qualified bundle and prior

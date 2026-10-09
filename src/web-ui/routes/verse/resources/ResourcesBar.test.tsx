@@ -238,6 +238,21 @@ describe('barRows', () => {
     expect(barRows([cloud], { healthRead: true, now: NOW + 400_000, devinConsumption: consumption })[0]!.value).toBe('3.1 ACUs consumed · last');
   });
 
+  it('labels retained local readiness without changing native quota or guessing observation age', () => {
+    const local = row({ seatId: 'local', label: 'Local', engine: 'local', kind: 'local', windows: [], cls: 'ready', checkedAt: new Date(NOW - 120_000).toISOString() });
+    const native = row({});
+    const [retained, account] = barRows([local, native], { healthRead: true, now: NOW, localReadFailed: true });
+    expect(retained).toMatchObject({ value: 'last ready', level: 'unknown', leftPercent: null });
+    expect(retained!.detail).toContain('Readiness observation · 2 min ago');
+    expect(retained!.detail).toContain('Retained readiness; current availability is unconfirmed.');
+    expect(account).toEqual(barRows([native], { healthRead: true, now: NOW })[0]);
+    for (const checkedAt of [null, 'bad-time', new Date(NOW + 1).toISOString()]) {
+      expect(barRows([{ ...local, checkedAt }], { healthRead: true, now: NOW, localReadFailed: true })[0]!.detail)
+        .toContain('Readiness observation · age unavailable');
+    }
+    expect(barRows([local], { healthRead: true, now: NOW, localReadFailed: false })[0]).toMatchObject({ value: 'ready', level: 'idle' });
+  });
+
   it('gives local models a full idle battery and no percentage', () => {
     const local = row({ seatId: 'local', label: 'Local', engine: 'local', kind: 'local', localCount: 3, windows: [], summary: 'ready' });
     const [l] = barRows([local], { healthRead: true, now: NOW });

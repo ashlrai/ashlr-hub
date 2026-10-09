@@ -15,12 +15,20 @@
  *   - short sentences for the serving runtime and each local model's context.
  */
 import { CLOUD_BALANCE_URL, type CloudOverviewResponse } from '../../../../core/cloud/types.js';
-import { formatMetricUsd } from '../../../components/charts/format-metric.js';
+import { formatMetric, formatMetricUsd } from '../../../components/charts/format-metric.js';
 import { costBasisOf, seatTier, tierRank, type CostBasis, type ResourceTier } from '../../../../core/routing/tiers.js';
 import type { ServingRuntimeSnapshot, VerseSeat } from '../../../data/api-types.js';
 import { accountStatus, accountStatusRank, type AccountStatusKind, type CapacityRow } from '../usage/capacity-strip-model.js';
 import { modelNameInText, type LocalModelRow } from '../usage/local-model.js';
 import { formatContextWindow } from '../verse-model.js';
+
+/** Original local observation time, never cache refresh time or inferred freshness. */
+export function localObservationAge(at: string | null | undefined, now: number): string {
+  const elapsed = now - Date.parse(at ?? '');
+  if (!Number.isFinite(elapsed) || elapsed < 0) return 'age unavailable';
+  return elapsed < 60_000 ? 'just measured' : elapsed < 3_600_000 ? `${formatMetric(elapsed / 60_000)} min ago`
+    : elapsed < 86_400_000 ? `${formatMetric(elapsed / 3_600_000)} h ago` : `${formatMetric(elapsed / 86_400_000)} d ago`;
+}
 
 // ---------------------------------------------------------------------------
 // The handle's dot

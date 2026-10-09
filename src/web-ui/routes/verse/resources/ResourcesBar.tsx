@@ -30,7 +30,7 @@ import { ACCOUNT_CLOCK_MS, useCapacityData } from '../usage/CapacityStrip.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
 import { bindingLeftPercent } from '../usage/binding-left.js';
 import { accountStatus, buildCapacityRows, type AccountStatus, type CapacityRow } from '../usage/capacity-strip-model.js';
-import { formatUsd } from './resources-model.js';
+import { formatUsd, localObservationAge } from './resources-model.js';
 import { cloudCreditsQuery } from './resources-queries.js';
 import { creditPoolsQuery } from './credit-pools-query.js';
 import { apiGrantDisplay, apiGrantUsdDecimal } from './credit-pool-model.js';
@@ -74,7 +74,7 @@ const LEVEL_OF_STATUS: Readonly<Record<AccountStatus['kind'], Level>> = {
 };
 
 /** Pure: capacity rows → bar rows (exported for tests). */
-export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolean; now: number; pendingSeatIds?: readonly string[]; devinConsumption?: unknown }): BarRow[] {
+export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolean; now: number; localReadFailed?: boolean; pendingSeatIds?: readonly string[]; devinConsumption?: unknown }): BarRow[] {
   const out: BarRow[] = [];
   for (const row of rows) {
     const surfaceLabel = row.engine === 'grok' && row.label !== 'Grok Build' ? ' · Grok Build' : '';
@@ -94,10 +94,10 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
         leftPercent: null,
         // An unread runtime is not "ready": the battery must say what the
         // hover summary does ("readiness not reported"), as Command's strip does.
-        level: row.cls === 'blocked' ? 'out' : row.cls === 'unread' ? 'unknown' : 'idle',
-        value: row.cls === 'blocked' ? 'offline' : row.cls === 'unread' ? 'not reported' : 'ready',
-        summary: `${row.label}: ${row.summary}`,
-        detail: ['No metered usage — runs on this Mac.', ...row.notes],
+        level: opts.localReadFailed ? 'unknown' : row.cls === 'blocked' ? 'out' : row.cls === 'unread' ? 'unknown' : 'idle',
+        value: row.cls === 'unread' ? 'not reported' : `${opts.localReadFailed ? 'last ' : ''}${row.cls === 'blocked' ? 'offline' : 'ready'}`,
+        summary: `${row.label}: ${opts.localReadFailed ? 'Last readiness · latest refresh failed' : row.summary}`,
+        detail: ['No metered usage — runs on this Mac.', `Readiness observation · ${localObservationAge(row.checkedAt, opts.now)}`, ...(opts.localReadFailed ? ['Retained readiness; current availability is unconfirmed.'] : []), ...row.notes],
       });
       continue;
     }
@@ -260,8 +260,8 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   usePollWhileVisible(() => setClock(Date.now()), ACCOUNT_CLOCK_MS);
   const now = Date.now();
   const rows = useMemo(
-    () => (data.loading ? [] : barRows(buildCapacityRows(data.seats, { health: data.health, budget: data.budget, local: 'collapse', now }), { healthRead: data.health !== null, now, pendingSeatIds: data.pendingSeatIds, devinConsumption: devin?.consumption })),
-    [data.loading, data.seats, data.health, data.budget, data.pendingSeatIds, now, devin?.consumption],
+    () => (data.loading ? [] : barRows(buildCapacityRows(data.seats, { health: data.health, budget: data.budget, local: 'collapse', now }), { healthRead: data.health !== null, now, localReadFailed: data.localReadFailed, pendingSeatIds: data.pendingSeatIds, devinConsumption: devin?.consumption })),
+    [data.loading, data.seats, data.health, data.budget, data.localReadFailed, data.pendingSeatIds, now, devin?.consumption],
   );
   const cloud = cloudRead.data?.credits ?? null;
   const cloudLeft = cloud && cloud.totalUsd > 0 ? (cloud.remainingUsd / cloud.totalUsd) * 100 : null;

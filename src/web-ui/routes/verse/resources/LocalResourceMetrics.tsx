@@ -4,14 +4,8 @@ import { formatContextWindow } from '../verse-model.js';
 import { localSpeedReadout } from '../multimodel/local-speed-readout.js';
 import { formatBytes, localStaleness, type LocalModelsView } from '../usage/local-model.js';
 import type { LocalModelsSnapshot } from '../usage/usage-contract.js';
+import { localObservationAge } from './resources-model.js';
 import styles from './ResourcesDrawer.module.css';
-
-function age(at: string | null | undefined, now: number): string {
-  const elapsed = now - Date.parse(at ?? '');
-  if (!Number.isFinite(elapsed) || elapsed < 0) return 'age unavailable';
-  return elapsed < 60_000 ? 'just measured' : elapsed < 3_600_000 ? `${formatMetric(elapsed / 60_000)} min ago`
-    : elapsed < 86_400_000 ? `${formatMetric(elapsed / 3_600_000)} h ago` : `${formatMetric(elapsed / 86_400_000)} d ago`;
-}
 
 /** Do not join speed to installed-model labels: only the backend knows its endpoint binding. */
 export function speedEvidence(raw: unknown): LocalModelBadge[] {
@@ -43,10 +37,10 @@ export function LocalResourceMetrics({ snapshot, view, local, speedAvailable, no
   const stale = localStaleness(view?.runtimes ?? []);
   const speeds = speedEvidence(local);
   return <div aria-label="Local resource metrics">
-    <p className={styles.subtle}>Host RAM · {formatBytes(snapshot?.memoryBudgetBytes ?? null)} total · {formatBytes(snapshot?.freeMemoryBytes ?? null)} OS free · {age(snapshot?.sampledAt, now)}</p>
+    <p className={styles.subtle}>Host RAM · {formatBytes(snapshot?.memoryBudgetBytes ?? null)} total · {formatBytes(snapshot?.freeMemoryBytes ?? null)} OS free · {localObservationAge(snapshot?.sampledAt, now)}</p>
     <p className={styles.subtle}>Host CPU · {snapshot?.cpu
       ? `${formatMetric(snapshot.cpu.usedPercent)}% across all cores · ${formatMetric(snapshot.cpu.intervalMs / 1000)} s interval`
-      : 'not measured yet'} · {age(snapshot?.sampledAt, now)}</p>
+      : 'not measured yet'} · {localObservationAge(snapshot?.sampledAt, now)}</p>
     <p className={styles.subtle}>Model residency · {view === null || !view.reachable || view.residentBytes === null
       ? 'unknown' : `${formatBytes(view.residentBytes)} reported by Ollama / LM Studio`}
       {stale.stale ? ` · retained reading (${stale.staleForMs === null ? 'age unavailable' : `${formatMetric(stale.staleForMs / 1000)} s old`})` : ''}</p>
@@ -61,7 +55,7 @@ export function LocalResourceMetrics({ snapshot, view, local, speedAvailable, no
             <p className={styles.subtle}>{badge.contextWindow !== null && ['warm-decode', 'warm-end-to-end', 'turn-end-to-end'].includes(badge.tokPerSecScope ?? '')
               ? localSpeedReadout(badge, new Date(now).toISOString()) : 'speed not measured yet (binding or measurement scope unavailable)'}</p>
             {turn ? <>
-              <p className={styles.subtle}>Recorded turn · {formatMetric(turn.durationMs / 1000)} s · {age(turn.observedAt, now)}</p>
+              <p className={styles.subtle}>Recorded turn · {formatMetric(turn.durationMs / 1000)} s · {localObservationAge(turn.observedAt, now)}</p>
               <p className={styles.subtle}>Tokens · {formatMetric(turn.inputTokens)} input · {formatMetric(turn.outputTokens)} output · {formatMetric(turn.cacheReadTokens)} cache read · {formatMetric(turn.cacheCreationTokens)} cache write</p>
             </> : <p className={styles.subtle}>Completed-turn details unavailable.</p>}
           </li>;

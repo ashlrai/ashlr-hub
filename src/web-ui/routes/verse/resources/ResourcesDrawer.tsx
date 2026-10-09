@@ -425,6 +425,7 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
                       <LocalResources
                         key={entry.key}
                         facts={entry.facts}
+                        readinessRetained={data.localReadFailed}
                         status={localRow ? accountStatus(localRow, { healthRead, now }) : null}
                         onOpenUsage={() => go('usage')}
                         now={fixedNow}

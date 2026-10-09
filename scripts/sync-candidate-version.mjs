@@ -9,6 +9,8 @@ const files = [
   'package.json', 'package-lock.json', 'desktop/package.json',
   'desktop/src-tauri/tauri.conf.json', 'desktop/src-tauri/Cargo.toml',
   'desktop/src-tauri/Cargo.lock',
+  'desktop/README.md',
+  'README.md', 'docs/QUICKSTART.md',
 ];
 
 function replaceOne(text, pattern, replace, label) {
@@ -76,6 +78,15 @@ export function syncCandidateVersion(root, version, { check = false } = {}) {
   replacements.set('desktop/src-tauri/tauri.conf.json', updatedTauri);
   replacements.set('desktop/src-tauri/Cargo.toml', ownCargoVersion(sources.get('desktop/src-tauri/Cargo.toml'), version, false));
   replacements.set('desktop/src-tauri/Cargo.lock', ownCargoVersion(sources.get('desktop/src-tauri/Cargo.lock'), version, true));
+  // Only the explicit candidate line moves; published and historical versions stay intact.
+  replacements.set('desktop/README.md', replaceOne(sources.get('desktop/README.md'),
+    /^(The source candidate is )\d+\.\d+\.\d+(; publication and installation are pending qualification and public byte verification\.)$/gm,
+    (_line, before, after) => `${before}${version}${after}`, 'desktop candidate documentation'));
+  for (const file of ['README.md', 'docs/QUICKSTART.md']) {
+    replacements.set(file, replaceOne(sources.get(file),
+      /^(The source candidate is )\d+\.\d+\.\d+(; preparing it does not publish or install it\.)$/gm,
+      (_line, before, after) => `${before}${version}${after}`, `${file} candidate documentation`));
+  }
   const changed = files.filter((file) => sources.get(file) !== replacements.get(file));
   // Validate the entire plan before touching any file. --check is strictly read-only.
   if (!check) for (const file of changed) writeFileSync(resolve(root, file), replacements.get(file));

@@ -26,7 +26,7 @@ import { buildLocalModelsView } from '../usage/local-model.js';
 import { projectLocalModels } from '../usage/usage-contract.js';
 import { verseLocalModelsQuery } from '../usage/usage-queries.js';
 import type { ReadinessFix, ResourceReadinessRow } from '../../../../core/routing/readiness-types.js';
-import { LOCAL_MODELS_SHOWN, localRuntimeLines, modelContextText, runtimeView } from './resources-model.js';
+import { LOCAL_MODELS_SHOWN, localObservationAge, localRuntimeLines, modelContextText, runtimeView } from './resources-model.js';
 import { RESOURCES_POLL_MS } from './resources-queries.js';
 import { ReadinessLines } from './ReadinessLines.js';
 import { ResourceFacts } from './ResourceFacts.js';
@@ -43,6 +43,8 @@ const RUNTIME_LABEL: Readonly<Record<string, string>> = { ollama: 'Ollama', lmst
 
 export interface LocalResourcesProps {
   status: AccountStatus | null;
+  /** A retained roster/health reading is not current local availability. */
+  readinessRetained?: boolean;
   onOpenUsage: () => void;
   /** Fixed observation clock for tests; normal query updates read the current clock. */
   now?: number;
@@ -53,7 +55,7 @@ export interface LocalResourcesProps {
   facts?: ResourceFactsView | null;
 }
 
-export function LocalResources({ status, onOpenUsage, now: fixedNow, readiness = null, onReadinessAction, facts = null }: LocalResourcesProps) {
+export function LocalResources({ status, onOpenUsage, now: fixedNow, readinessRetained = false, readiness = null, onReadinessAction, facts = null }: LocalResourcesProps) {
   const models = useQuery(verseLocalModelsQuery);
   const runtimeRead = useQuery(servingRuntimeQuery);
   const speedQuery = multimodelContextQuery({ projectPath: null });
@@ -74,6 +76,10 @@ export function LocalResources({ status, onOpenUsage, now: fixedNow, readiness =
   const view = buildLocalModelsView(snapshot, now);
   const runtimes = models.data?.available ? localRuntimeLines(models.data.raw) : [];
   const runtime = runtimeView(runtimeRead.data?.value ?? null);
+  const runtimeFailed = runtimeRead.error !== undefined || runtimeRead.status === 'error';
+  const modelsFailed = models.error !== undefined || models.status === 'error';
+  const displayedStatus = status !== null && readinessRetained ? { ...status, kind: 'unavailable' as const,
+    label: 'Last readiness', detail: 'latest refresh failed · current availability unconfirmed', tone: 'neutral' as const } : status;
   const modelsLoading = models.data === undefined && models.status !== 'error';
   const rows = view?.rows ?? [];
   const shown = rows.slice(0, LOCAL_MODELS_SHOWN);
@@ -104,7 +110,7 @@ export function LocalResources({ status, onOpenUsage, now: fixedNow, readiness =
   };
 
   return (
-    <li className={styles.card} data-resource="local" data-status={status?.kind}>
+    <li className={styles.card} data-resource="local" data-status={displayedStatus?.kind}>
       <div className={styles.cardHead}>
         <MonogramTile monogram="L" engine="local" size="sm" />
         <h4 className={styles.cardName}>
@@ -113,34 +119,37 @@ export function LocalResources({ status, onOpenUsage, now: fixedNow, readiness =
         </h4>
       </div>
       {facts ? <ResourceFacts facts={facts} /> : null}
-      {status !== null ? (
-        <StatusLine status={status} />
+      {displayedStatus !== null ? (
+        <StatusLine status={displayedStatus} />
       ) : view !== null && !view.reachable ? (
         <p className={styles.status} data-tone="neutral"><span className={styles.statusDot} aria-hidden="true" /><span className={styles.statusLabel}>No local runtime answering</span></p>
       ) : null}
 
       <ReadinessLines row={readiness} {...(onReadinessAction ? { onAction: onReadinessAction } : {})} />
+      {modelsFailed ? <p className={styles.subtle}>{snapshot ? 'Local metadata refresh failed · showing retained observations.' : 'Local metadata unavailable · refresh failed.'}</p> : null}
       <LocalResourceMetrics snapshot={snapshot} view={view} local={speeds.data?.local}
         speedAvailable={speeds.status !== 'error' && speeds.data !== undefined} now={now} />
 
       {runtimes.length > 0 ? (
         <ul className={styles.runtimes} aria-label="Local runtimes">
           {runtimes.map((line) => (
-            <li key={line.id} className={styles.runtimeRow} data-tone={line.tone} data-runtime={line.id} title={`${line.name}: ${line.word} — ${line.detail}`}>
+            <li key={line.id} className={styles.runtimeRow} data-tone={modelsFailed ? 'neutral' : line.tone} data-runtime={line.id} title={`${line.name}: ${modelsFailed ? 'Last reading · ' : ''}${line.word} — ${line.detail}`}>
               <span className={styles.statusDot} aria-hidden="true" />
               <span className={styles.runtimeRowName}>{line.name}</span>
-              <span className={styles.runtimeRowDetail}>{`${line.word} · ${line.detail}`}</span>
+              <span className={styles.runtimeRowDetail}>{`${modelsFailed ? 'Last reading · ' : ''}${line.word} · ${line.detail}`}</span>
             </li>
           ))}
         </ul>
       ) : null}
 
+      {runtime === null && (runtimeFailed || runtimeRead.data !== undefined) ? <p className={styles.subtle}>Runtime observation unavailable.</p> : null}
       {runtime !== null ? (
         <div className={styles.runtime} data-runtime-state={runtime.state}>
           <p className={styles.runtimeHead}>
             <span className={styles.runtimeName}>{runtime.name}</span>
-            <span className={styles.pill} data-tone={runtime.tone}>{runtime.word}</span>
+            <span className={styles.pill} data-tone={runtimeFailed ? 'neutral' : runtime.tone}>{runtimeFailed ? `Last reading · ${runtime.word}` : runtime.word}</span>
           </p>
+          <p className={styles.subtle}>Runtime observation · {localObservationAge(runtimeRead.data?.value?.sampledAt, now)}{runtimeFailed ? ' · refresh failed; current state unconfirmed' : ''}</p>
           {runtime.detail !== null ? <p className={styles.subtle} title={runtime.detail}>{runtime.detail}</p> : null}
           {runtime.canStart || runtime.canStop ? (
             <div className={styles.cardActions}>

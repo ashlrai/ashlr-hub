@@ -9,7 +9,45 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.29.2] — Unreleased
+## [3.29.3] — Unreleased
+
+### Added
+
+- Saved Grok Bot profiles appear separately in the reorderable resource sidebar.
+  Declared account and agent identities remain unverified; Bot allowance and reset
+  stay unknown rather than borrowing Build or API usage.
+- Explain account-usage collection holds separately from sign-in readiness,
+  preserving existing readings and provider-specific diagnostics.
+
+### Changed
+
+- Use fresh, complete llama runtime slot observations to schedule available local
+  capacity. Count experiment reservations once; retain configured behavior when
+  physical occupancy is unknown. CPU and RAM remain descriptive host metrics.
+- Remove the hidden daily Leader conversation cap and propagate cancellation to
+  native replies. Existing funding rules and explicit stop controls remain.
+- Update release guidance for the commissioned original-artifact trusted publisher.
+- Increase the desktop first-paint baseline from 353 to 354 KiB for 43 additional
+  bytes of lazy preload metadata; phone size and its 250 KiB limit are unchanged.
+  This is a documented size allowance, not a measured speed improvement.
+
+### Fixed
+
+- Forecast Manager context from the prepared prompt and harness instead of a
+  generic token estimate, then revalidate the actual dispatch before invocation.
+- Pin selected Codex launches to the chosen account, executable and profile across
+  Manager, worker and repair paths; preserve reported token provenance.
+- Clarify native Grok transport, standalone historical resource pools, independent
+  Bot funding, local measurement scope and subscription evidence in documentation.
+- Show the original age of retained local runtime and readiness observations;
+  keep refresh failures visible during retries until a real successful read.
+- Synchronize explicit candidate lines in the README, quickstart and desktop
+  guide with package/native metadata. Preserve verified publication records and
+  reject missing or duplicate markers before writing any file.
+
+Publication and installation of this candidate remain pending qualification.
+
+## [3.29.2] — 2026-10-09
 
 ### Added
 
@@ -37,7 +75,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   Preserve numeric totals; show unknown historical details rather than measured
   zero or an unsupported exact throughput rate.
 
-Publication and installation of this candidate remain pending qualification.
+Published `@ashlr/phantom@3.29.2` through the commissioned trusted publisher in
+[run 37944263148, attempt 1](https://github.com/ashlrai/phantom/actions/runs/37944263148/attempts/1).
+Signed GitHub desktop assets and local installation were verified separately.
+Website commissioning and resident provider activation remain incomplete.
 
 ## [3.29.0] — 2026-10-09
 

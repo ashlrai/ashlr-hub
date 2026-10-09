@@ -41,7 +41,8 @@ manual release does not gain provenance retroactively.
 ### Keep candidate versions consistent
 
 Run `npm run version:sync -- X.Y.Z` to update the workbench package, lockfile,
-desktop package, native version and desktop URL together. `npm run check:version`
+desktop package, native version, desktop URL and the README/quickstart source-candidate lines
+together. `npm run check:version`
 checks these fields without changing files and runs before every build.
 Dependency versions and release history remain unchanged. Website and article
 metadata instead use the latest freshly verified public release; preparing a
@@ -145,8 +146,8 @@ npm publish <tarball> --access public   # the path ship:local printed; see Publi
 ```
 
 Run `npm run check:release` before an expensive build or pushing release changes.
-It runs seven existing whole publication, documentation and CLI discovery contract
-modules against source files, using the hermetic test runner; it does not require
+It runs the existing whole publication, documentation and CLI discovery contract
+modules listed in `package.json` against source files, using the hermetic test runner; it does not require
 built `dist` output or provider credentials. Versioned installer links, release
 policy mismatches and missing help or completions fail here early. This focused
 check does not replace complete

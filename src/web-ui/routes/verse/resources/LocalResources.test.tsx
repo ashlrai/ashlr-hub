@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { evictAll, refetchQuery } from '../../../data/cache.js';
 import { installFetch, json } from '../context/context-fixtures.test-support.js';
 import { LocalResources } from './LocalResources.js';
+import { servingRuntimeQuery } from '../autonomy/fleet-queries.js';
 import { verseLocalModelsQuery } from '../usage/usage-queries.js';
 
 const NOW = Date.parse('2026-10-09T12:00:00Z');
@@ -70,6 +71,40 @@ describe('local resource metrics wiring', () => {
     expect(calls.map(call => call.method)).toEqual(['GET', 'GET', 'GET']);
     expect(calls.some(call => /warm|generate|chat\/completions/.test(call.path))).toBe(false);
   });
+  it('keeps original local samples visibly historical after independent runtime and metadata failures', async () => {
+    let failRuntime = false, failModels = false;
+    let sampledAt = new Date(NOW - 120_000).toISOString();
+    installFetch(call => {
+      if (call.path === '/api/verse/runtime') return failRuntime ? json({ error: 'failed' }, 401) : json({
+        kind: 'llama-server', state: 'running', endpoint: '127.0.0.1:8080', model: 'qwen:27b', slotsTotal: 4, slotsBusy: 2,
+        contextTokens: 65536, startedAt: null, parallel: { capable: true, refusal: null, slots: 4 }, reason: null, supervised: false, sampledAt });
+      if (call.path === '/api/verse/local-models') return failModels ? json({ error: 'failed' }, 401) : json({ sampledAt,
+        machine: { totalMemoryBytes: 64 * 1024 ** 3, freeMemoryBytes: 32 * 1024 ** 3, cpu: { usedPercent: 15, intervalMs: 30_000 } },
+        ollama: { reachable: true, models: [] } });
+      return json({ error: 'unavailable' }, 404);
+    });
+    const view = render(<ul><LocalResources status={null} now={NOW} onOpenUsage={() => {}} /></ul>);
+    expect(await screen.findByText('Runtime observation · 2 min ago')).toBeInTheDocument();
+    failRuntime = true;
+    await act(async () => { await refetchQuery(servingRuntimeQuery.key, () => servingRuntimeQuery.fetch()); });
+    expect(screen.getByText('Last reading · Running')).toBeInTheDocument();
+    expect(screen.getByText('Runtime observation · 2 min ago · refresh failed; current state unconfirmed')).toBeInTheDocument();
+    expect(screen.getByText('Host CPU · 15% across all cores · 30 s interval · 2 min ago')).toBeInTheDocument();
+    expect(screen.queryByText(/Local metadata refresh failed/)).not.toBeInTheDocument();
+    failModels = true;
+    await act(async () => { await refetchQuery(verseLocalModelsQuery.key, () => verseLocalModelsQuery.fetch()); });
+    expect(screen.getByText('Local metadata refresh failed · showing retained observations.')).toBeInTheDocument();
+    expect(screen.getByText('Host RAM · 64 GB total · 32 GB OS free · 2 min ago')).toBeInTheDocument();
+    failRuntime = false;
+    sampledAt = new Date(NOW + 1).toISOString();
+    await act(async () => { await refetchQuery(servingRuntimeQuery.key, () => servingRuntimeQuery.fetch()); });
+    expect(screen.getByText('Runtime observation · age unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('Last reading · Running')).not.toBeInTheDocument();
+    view.rerender(<ul><LocalResources status={{ kind: 'usable', label: 'Ready', detail: null, tone: 'success', usableAgain: null, coversConnection: false, checked: null, checkedTitle: null }} readinessRetained now={NOW} onOpenUsage={() => {}} /></ul>);
+    expect(screen.getByText('Last readiness')).toBeInTheDocument();
+    expect(screen.getByText(/latest refresh failed · current availability unconfirmed$/)).toBeInTheDocument();
+  });
+
   it('makes unavailable speed and RAM honest while older model metadata remains usable', async () => {
     installFetch(call => call.path === '/api/verse/local-models'
       ? json({ reachable: true, models: [{ name: 'qwen:27b', loaded: false, sizeBytes: 27 * 1024 ** 3 }] })
