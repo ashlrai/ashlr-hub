@@ -125,6 +125,17 @@ export async function readWebsitePublicBuildEnv(api: (endpoint: string) => Promi
   return values;
 }
 
+/** Prebuilt uploads have no Git checkout from which Vercel can infer runtime
+ * source identity. Bind only the operation's qualified merge, never a caller
+ * string or a project-global environment value shared by later deployments. */
+export function websiteStageArgs(op: Pick<WebsiteOperation, 'revision' | 'source'>): string[] {
+  const revision = sha(op.revision);
+  const merge = sha(op.source?.merge);
+  if (merge !== revision) throw new Error('Website qualified source does not match operation revision');
+  return ['deploy', '--prebuilt', '--prod', '--skip-domain', '--yes',
+    '--env', `VERCEL_GIT_COMMIT_SHA=${merge}`, '--meta', `phantomSourceSha=${merge}`];
+}
+
 export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?: AbortSignal): WebsiteHostAdapter {
   const host = defaultHostMergeDeps();
   const assertRepositoryReadBuild = (): void => {
@@ -323,13 +334,14 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
       return inventoryWebsiteOutput(output(op)).digest;
     },
     stage: async (op, authorize) => {
+      const args = websiteStageArgs(op);
       const fence = await acquireOutwardMutationFenceAsync(2_000, { signal }); if (!fence) throw new Error('Website upload mutation fence unavailable');
       try {
         assertWebsiteAuthority(commission);
         if (inventoryWebsiteOutput(output(op)).digest !== op.outputDigest) throw new Error('Website output changed before upload');
         if (fileDigest(join(dirname(output(op)), 'project.json')) !== createHash('sha256').update(projectMetadata).digest('hex')) throw new Error('Website upload project metadata changed');
         await authorize();
-        const url = await vc(['deploy', '--prebuilt', '--prod', '--skip-domain', '--yes'], join(operationRoot(op), 'upload'));
+        const url = await vc(args, join(operationRoot(op), 'upload'));
         const parsed = new URL(url); if (parsed.protocol !== 'https:' || !parsed.hostname.endsWith('.vercel.app') || parsed.pathname !== '/') throw new Error('Website upload returned no exact deployment URL');
         const observed = await api(`/v13/deployments/${encodeURIComponent(parsed.hostname)}`);
         return { id: string(observed['id']), url: parsed.origin };
