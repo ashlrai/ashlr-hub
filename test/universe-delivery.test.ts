@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -14,6 +14,7 @@ import { deliverUniverseEliteOwned, type UniverseDeliveryReceipt } from '../src/
 import { evaluateUniverseIntegration, readUniverseIntegrationEvaluation } from '../src/core/universe/integration-evaluate.js';
 import { deliverUniverseIntegration, readUniverseIntegrationDelivery } from '../src/core/universe/integration-delivery.js';
 import { handoffUniverseIntegration } from '../src/core/universe/integration-handoff.js';
+import * as fixedEvaluator from '../src/core/universe/fixed-evaluator.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -25,9 +26,12 @@ afterEach(() => {
   }
   for (const root of roots.splice(0)) { writable(root); rmSync(root, { recursive: true, force: true }); }
 });
-function fixture(evaluationScript = 'console.log(JSON.stringify({passed:true,score:1}))\n') {
+function fixture(evaluationScript = 'console.log(JSON.stringify({passed:true,score:1}))\n', neverEvaluates = false) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'universe-delivery-')));
   roots.push(root);
+  // Branch-only preparation still pins and freshly hashes an executable, but never runs it.
+  const evaluator = neverEvaluates && process.platform !== 'win32' ? join(root, 'never-executed-evaluator') : process.execPath;
+  if (evaluator !== process.execPath) writeFileSync(evaluator, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
   const repo = join(root, 'repo');
   mkdirSync(repo, { mode: 0o700 });
   const git = (args: string[]): string => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', repo, ...args],
@@ -41,7 +45,7 @@ function fixture(evaluationScript = 'console.log(JSON.stringify({passed:true,sco
   const manifest: UniverseManifest = { schemaVersion: 1, id: 'fixture', name: 'Delivery fixture', objective: 'Record an independently selected local change',
     seed: { repo, revision: git(['rev-parse', 'HEAD']) }, metric: { name: 'quality', direction: 'maximize', minImprovement: 0 },
     budget: { maxTrials: 1, maxDurationMs: 5000, trialTimeoutMs: 1000, maxParallel: 1 },
-    evaluation: { command: [process.execPath, 'eval.mjs'], timeoutMs: 1000 },
+    evaluation: { command: [evaluator, 'eval.mjs'], timeoutMs: 1000 },
     variants: [{ id: 'repair', niche: 'quality', hypothesis: 'Improve the source', command: [process.execPath, '-e', ''] }] };
   initUniverse(manifest, { root });
   const directory = join(root, 'universes', manifest.id);
@@ -392,10 +396,17 @@ console.log(JSON.stringify({passed:a+b<=3,score:a+b,metrics:{a,b}}));\n`);
 });
 
 describe('Universe local branch delivery', () => {
+  const branchFixture = () => fixture(undefined, true);
+  beforeEach(() => { vi.spyOn(fixedEvaluator, 'runFixedUniverseEvaluator'); });
+  afterEach(() => {
+    const evaluator = vi.mocked(fixedEvaluator.runFixedUniverseEvaluator);
+    try { expect(evaluator).not.toHaveBeenCalled(); }
+    finally { evaluator.mockRestore(); }
+  });
   it.each(['stopped', 'throw'] as const)('checks the enclosing %s guard under the real prepared ref lock', async (kind) => {
     // Existing fixture acceptance isolates publication mechanics; no evaluator
     // or provider invocation is claimed by this final-effect guard regression.
-    const f = fixture(); const trial = f.accept(); const branch = 'codex/parent-guard';
+    const f = branchFixture(); const trial = f.accept(); const branch = 'codex/parent-guard';
     const refLock = join(f.repo, '.git', 'refs', 'heads', `${branch}.lock`); let preparedChecks = 0;
     const index = readFileSync(join(f.repo, '.git', 'index')); const checkout = f.git(['status', '--porcelain=v1']);
     const isExecutionStopped = () => {
@@ -416,7 +427,7 @@ describe('Universe local branch delivery', () => {
   });
 
   it('plans exact disjoint delivered trees without writing objects, refs, records, index or checkout', async () => {
-    const f = fixture();
+    const f = branchFixture();
     const a = f.accept(1, false, (path) => writeFileSync(join(path, 'a.txt'), 'first change\n'));
     const first = await deliverUniverseElite('fixture', { root: f.root, trialId: a.id, branch: 'codex/input-a' });
     const b = f.accept(2, false, (path) => writeFileSync(join(path, 'b.txt'), 'second change\n'));
@@ -444,7 +455,7 @@ describe('Universe local branch delivery', () => {
   });
 
   it('holds divergent same-file deliveries and out-of-scope changes without combining either', async () => {
-    const f = fixture();
+    const f = branchFixture();
     const a = f.accept(1, false, (path) => writeFileSync(join(path, 'value.txt'), 'first\n'));
     const first = await deliverUniverseElite('fixture', { root: f.root, trialId: a.id, branch: 'codex/first' });
     const b = f.accept(2, false, (path) => writeFileSync(join(path, 'value.txt'), 'second\n'));
@@ -460,7 +471,7 @@ describe('Universe local branch delivery', () => {
   });
 
   it('delivers exact bytes, executable modes, additions and deletions while preserving dirty checkout and index', async () => {
-    const f = fixture(); const trial = f.accept();
+    const f = branchFixture(); const trial = f.accept();
     writeFileSync(join(f.repo, 'value.txt'), 'staged user work\n'); f.git(['add', 'value.txt']);
     writeFileSync(join(f.repo, 'value.txt'), 'unstaged user work\n');
     const index = readFileSync(join(f.repo, '.git', 'index'));
@@ -482,7 +493,7 @@ describe('Universe local branch delivery', () => {
   });
 
   it('records unchanged content without making a branch or new commit', async () => {
-    const f = fixture(); const trial = f.accept(1, false);
+    const f = branchFixture(); const trial = f.accept(1, false);
     const receipt = await deliverUniverseElite('fixture', { root: f.root, trialId: trial.id, branch: 'codex/no-op' });
     expect(receipt).toMatchObject({ status: 'unchanged', commit: f.manifest.seed.revision, changedFiles: [] });
     expect(f.git(['branch', '--list', 'codex/no-op'])).toBe('');
@@ -490,7 +501,7 @@ describe('Universe local branch delivery', () => {
   });
 
   it('reconciles an interrupted post-ref intent exactly once', async () => {
-    const f = fixture(); const trial = f.accept();
+    const f = branchFixture(); const trial = f.accept();
     const options = { root: f.root, trialId: trial.id, branch: 'codex/recover' };
     const receipt = await deliverUniverseElite('fixture', options);
     const file = join(f.directory, 'deliveries', 'records', `${receipt.id}.receipt.json`);
@@ -502,7 +513,7 @@ describe('Universe local branch delivery', () => {
   });
 
   it('reconciles a pre-ref intent without resetting its commit identity', async () => {
-    const f = fixture(); const trial = f.accept();
+    const f = branchFixture(); const trial = f.accept();
     const options = { root: f.root, trialId: trial.id, branch: 'codex/pre-ref' };
     const receipt = await deliverUniverseElite('fixture', options);
     unlinkSync(join(f.directory, 'deliveries', 'records', `${receipt.id}.receipt.json`));
@@ -513,13 +524,13 @@ describe('Universe local branch delivery', () => {
   });
 
   it('refuses a previously accepted but no-longer-current elite for a new branch', async () => {
-    const f = fixture(); const old = f.accept(); f.accept(2);
+    const f = branchFixture(); const old = f.accept(); f.accept(2);
     await expect(deliverUniverseElite('fixture', { root: f.root, trialId: old.id, branch: 'codex/stale' })).rejects.toThrow(/current/);
     expect(f.git(['branch', '--list', 'codex/stale'])).toBe('');
   });
 
   it.each(['missing', 'modified', 'symlink'] as const)('refuses a %s candidate artifact without exposing a ref', async (mode) => {
-    const f = fixture(); const trial = f.accept();
+    const f = branchFixture(); const trial = f.accept();
     const path = join(trial.artifact!.path, 'value.txt');
     chmodSync(trial.artifact!.path, 0o700);
     if (mode === 'modified') { chmodSync(path, 0o600); writeFileSync(path, 'tampered'); }
@@ -530,7 +541,7 @@ describe('Universe local branch delivery', () => {
   });
 
   it.each(['direct', 'symbolic', 'dangling-symbolic'] as const)('refuses a pre-existing %s ref', async (kind) => {
-    const f = fixture(); const trial = f.accept(); const name = 'refs/heads/codex/existing';
+    const f = branchFixture(); const trial = f.accept(); const name = 'refs/heads/codex/existing';
     if (kind === 'direct') f.git(['update-ref', name, f.manifest.seed.revision]);
     else f.git(['symbolic-ref', name, kind === 'symbolic' ? f.git(['symbolic-ref', 'HEAD']) : 'refs/heads/nonexistent']);
     await expect(deliverUniverseElite('fixture', { root: f.root, trialId: trial.id, branch: 'codex/existing' })).rejects.toThrow(/pre-existing|symbolic/);
@@ -538,7 +549,7 @@ describe('Universe local branch delivery', () => {
   });
 
   it('does not replace a dangling symbolic ref inserted at the publication boundary', async () => {
-    const f = fixture();
+    const f = branchFixture();
     const git = deliveryGit(f.repo);
     expect(git.ref('codex/raced')).toBeNull();
     f.git(['symbolic-ref', 'refs/heads/codex/raced', 'refs/heads/unrelated-dangling']);
@@ -552,14 +563,14 @@ describe('Universe local branch delivery', () => {
   });
 
   it('aborts a prepared transaction on end-of-input without publishing or retaining a lock', () => {
-    const f = fixture(); const git = deliveryGit(f.repo);
+    const f = branchFixture(); const git = deliveryGit(f.repo);
     git.invoke(['update-ref', '--stdin'], `start\noption no-deref\ncreate refs/heads/codex/eof ${f.manifest.seed.revision}\nprepare\n`);
     expect(git.ref('codex/eof')).toBeNull();
     expect(existsSync(join(f.repo, '.git', 'refs', 'heads', 'codex', 'eof.lock'))).toBe(false);
   });
 
   it('does not execute repository filters, hooks, signing or fsmonitor configuration', async () => {
-    const f = fixture(); const trial = f.accept(); const marker = join(f.root, 'MUST-NOT-RUN');
+    const f = branchFixture(); const trial = f.accept(); const marker = join(f.root, 'MUST-NOT-RUN');
     const script = join(f.root, 'hostile.sh');
     writeFileSync(script, `#!/bin/sh\nprintf bad > '${marker}'\ncat\n`, { mode: 0o700 });
     f.git(['config', 'filter.delivery-hostile.clean', script]);
@@ -574,7 +585,7 @@ describe('Universe local branch delivery', () => {
   });
 
   it('reports a delivered branch that drifts or disappears as degraded', async () => {
-    const f = fixture(); const trial = f.accept();
+    const f = branchFixture(); const trial = f.accept();
     const receipt = await deliverUniverseElite('fixture', { root: f.root, trialId: trial.id, branch: 'codex/drift' });
     f.git(['update-ref', `refs/heads/${receipt.branch}`, receipt.baseCommit, receipt.commit]);
     expect(readUniverseDeliveries('fixture', { root: f.root }).sourceState).toBe('degraded');
@@ -584,7 +595,7 @@ describe('Universe local branch delivery', () => {
   });
 
   it('does not steal active campaign ownership', async () => {
-    const f = fixture(); const trial = f.accept();
+    const f = branchFixture(); const trial = f.accept();
     await withUniverseExecution('fixture', { root: f.root }, async () => {
       await expect(deliverUniverseElite('fixture', { root: f.root, trialId: trial.id, branch: 'codex/busy' })).rejects.toThrow(/active execution owner/);
     });
