@@ -1,6 +1,6 @@
 /** Provider-neutral Leader routing: actual role/allowance/context gates remain,
  * while model quality and router rank replace brand and cadence bans. */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   claudeLeaderCommand,
@@ -113,7 +113,11 @@ describe('resolveLeaderSeat', () => {
       model: LOCAL.seat.models[0]!.id, servingModel: '/inert/weights', contextWindow: LOCAL.seat.contextWindow!,
       baseUrl: 'http://127.0.0.1:8080/v1', blobPath: '/inert/weights', manifestPath: '/inert/manifest', epoch: 'fixture',
     } } };
-    const result = await resolveLeaderSeat(deps({ candidates: [candidate], standing: null, llama: true, calls }), { deep: false, promptChars: 100 });
+    const source = deps({ candidates: [candidate], standing: null, llama: true, calls });
+    const original = source.transports.llama!;
+    const selected = vi.fn(original); source.transports.llama = selected;
+    const result = await resolveLeaderSeat(source, { deep: false, promptChars: 100 });
+    expect(selected.mock.calls[0]?.[2]).toEqual({seatId:candidate.seat.id});
     expect(result.ok).toBe(true); if (result.ok) await result.complete('s', 'u');
     expect(calls).toEqual(['llama http://127.0.0.1:8080/v1 /inert/weights']);
     for (const binding of [null, { ...candidate.localDispatch!.binding!, contextWindow: 1 }]) {

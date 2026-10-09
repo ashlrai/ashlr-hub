@@ -83,6 +83,9 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.doUnmock('../src/core/fleet/manager.js');
+  vi.doUnmock('../src/core/vision/local-leader-transport.js');
+  vi.doUnmock('../src/core/fleet/agent-action-ledger.js');
+  vi.useRealTimers();
   vi.resetModules();
 });
 
@@ -182,5 +185,33 @@ describe('loadJudgeCredentialHook', () => {
   it('the unmocked module import never throws', async () => {
     const fn = await loadJudgeCredentialHook(CFG);
     expect(fn === null || typeof fn === 'function').toBe(true);
+  });
+});
+
+
+describe('lazy local completion trace publication', () => {
+  it('returns before ledger loading and preserves the completion time and originally selected seat', async () => {
+    const original = '2026-10-09T10:00:00.000Z';let release!:()=>void, written!:()=>void;
+    const published=new Promise<void>(resolve=>{written=resolve;});
+    const recordAgentAction=vi.fn(()=>{written();});
+    const gate = new Promise<void>(resolve=>{release=resolve;});
+    vi.doMock('../src/core/fleet/agent-action-ledger.js',async()=>{await gate;return {recordAgentAction};});
+    vi.doMock('../src/core/vision/local-leader-transport.js',()=>({llamaLeaderTransport:(_binding:unknown,_cfg:unknown,_opts:unknown,_reader:unknown,record:(metric:unknown)=>void)=>async()=>{
+      record({runId:'local-invocation',finishedAt:original,model:'selected-model',contextWindow:65536,bindingHint:'a'.repeat(64),
+        elapsedMs:25,inferenceRequestStarted:true,tokensIn:12,tokensOut:3,outcome:'completed'});return 'plan';
+    }}));
+    const {defaultLeaderTransports:transports}=await import('../src/core/vision/leader-seat.js');
+    const invocation={seatId:'selected-before-load'};
+    const complete=transports(CFG).llama!({} as import('../src/core/vision/local-leader-transport.js').LocalLeaderBinding,{},invocation);
+    invocation.seatId='changed-after-selection';
+    expect(await complete('private system','private task')).toBe('plan');expect(recordAgentAction).not.toHaveBeenCalled();
+    vi.useFakeTimers();vi.setSystemTime(new Date('2026-10-10T10:00:00.000Z'));release();
+    await published;
+    expect(recordAgentAction).toHaveBeenCalledOnce();
+    const event=recordAgentAction.mock.calls[0]?.[0];
+    expect(event).toMatchObject({ts:original,runId:'local-invocation',model:'selected-model',counts:{tokensIn:12,tokensOut:3}});
+    const {createHash}=await import('node:crypto');
+    expect(event.tags).toContain(`seat-hint:${createHash('sha256').update('selected-before-load').digest('hex')}`);
+    expect(JSON.stringify(event)).not.toMatch(/private system|private task|changed-after-selection/);
   });
 });

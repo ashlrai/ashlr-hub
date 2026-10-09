@@ -1,6 +1,10 @@
 /** Local role identity comes from live runtime props plus the exact selected weights. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { performance } from 'node:perf_hooks';
+import { createHash } from 'node:crypto';
+import { localLeaderCompletionEvent } from '../src/core/vision/leader-seat.js';
+import { agentActionsDir, recordAgentActionResult } from '../src/core/fleet/agent-action-ledger.js';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AshlrConfig } from '../src/core/types.js';
@@ -8,7 +12,7 @@ const probe = vi.hoisted(() => vi.fn());
 vi.mock('../src/core/local-runtime/llama/health.js', () => ({ probeLlamaRuntime: probe }));
 import {
   bindLocalLeaderModel, llamaLeaderTransport, localLeaderBase, localLeaderBindingCurrent,
-  readLocalLeaderRuntime, type LocalLeaderRuntime, type LocalLeaderBinding,
+  readLocalLeaderRuntime, type LocalLeaderRuntime, type LocalLeaderBinding, type LocalLeaderCompletionMetrics,
 } from '../src/core/vision/local-leader-transport.js';
 
 let home: string, blob: string, manifest: string, cfg: AshlrConfig;
@@ -23,7 +27,7 @@ function success(model = blob): Response {
 }
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'phantom-local-leader-binding-'));
-  vi.stubEnv('HOME', home); vi.stubEnv('OLLAMA_MODELS', join(home, '.ollama', 'models'));
+  vi.stubEnv('HOME', home); vi.stubEnv('ASHLR_HOME', join(home, '.ashlr')); vi.stubEnv('OLLAMA_MODELS', join(home, '.ollama', 'models'));
   vi.stubEnv('LLAMA_SERVER_BASE_URL', '');
   const root = join(home, '.ollama', 'models');
   blob = join(root, 'blobs', 'sha256-' + 'a'.repeat(64));
@@ -35,7 +39,7 @@ beforeEach(() => {
   runtime = { baseUrl: 'http://127.0.0.1:8080/v1', servingModel: blob, contextWindow: 65536 };
   probe.mockReset();
 });
-afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); rmSync(home, { recursive: true, force: true }); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); rmSync(home, { recursive: true, force: true }); });
 
 describe('local Leader binding', () => {
   it('binds selected manifest weights, live serving path, context and configured base', () => {
@@ -172,5 +176,104 @@ describe('live local runtime metadata projection', () => {
     expect(await readLocalLeaderRuntime({ models: { llamaServer: { baseUrl: 'https://example.com/v1' } } } as unknown as AshlrConfig)).toBeNull();
     const controller = new AbortController(); controller.abort(); expect(await readLocalLeaderRuntime(cfg, controller.signal)).toBeNull();
     expect(probe).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('settled local Leader telemetry', () => {
+  function reported(input: number | null = 12, output: number | null = 3): Response {
+    const text = { model: blob, choices: [{index:0,delta:{content:'PRIVATE_RESPONSE_CANARY'},finish_reason:'stop'}] };
+    const usage = input === null || output === null ? '' : `data: ${JSON.stringify({model:blob,choices:[],usage:{prompt_tokens:input,completion_tokens:output}})}\n\n`;
+    return new Response(`data: ${JSON.stringify(text)}\n\n${usage}data: [DONE]\n\n`, {headers:{'content-type':'text/event-stream'}});
+  }
+  it('round trips an actual strict completion through private ledger and a cold read without private context', async () => {
+    const pinned = binding(), events: LocalLeaderCompletionMetrics[] = [];
+    let clock = 100; vi.spyOn(performance,'now').mockImplementation(() => clock);
+    const fetch = vi.fn(async () => { clock += 35; return reported(); }); vi.stubGlobal('fetch',fetch);
+    await llamaLeaderTransport(pinned,cfg,{timeoutMs:1000},async () => {clock+=15;return runtime;}, metrics => {events.push(metrics);})('PRIVATE_PROMPT_CANARY','PRIVATE_TASK_CANARY');
+    expect(events).toHaveLength(1);
+    const metric = events[0]!;
+    expect(metric).toMatchObject({model:'test-qwen:27b',contextWindow:65536,elapsedMs:50,tokensIn:12,tokensOut:3,inferenceRequestStarted:true,outcome:'completed'});
+    expect(metric.bindingHint).toBe(createHash('sha256').update(JSON.stringify(pinned)).digest('hex'));
+    expect(fetch).toHaveBeenCalledOnce();
+    const finished = metric.finishedAt;
+    vi.setSystemTime(new Date(Date.parse(finished)+60000));
+    const event = localLeaderCompletionEvent(metric,'selected-local-account');
+    expect(event.ts).toBe(finished);
+    expect(recordAgentActionResult(event,{sync:true})).toEqual({attempted:1,recorded:1});
+    const file = join(agentActionsDir(),finished.slice(0,10)+'.jsonl'), bytes = readFileSync(file,'utf8');
+    vi.resetModules();
+    const {readAgentActionsDetailed} = await import('../src/core/fleet/agent-action-ledger.js');
+    const read = readAgentActionsDetailed({inspectionOnly:true,requireComplete:true});
+    expect(read.complete).toBe(true); expect(read.events).toHaveLength(1);
+    expect(read.events[0]).toMatchObject({ts:finished,runId:metric.runId,backend:'llama-server',model:'test-qwen:27b',durationMs:50,
+      counts:{tokensIn:12,tokensOut:3,inferenceRequests:1,contextWindowTokens:65536}});
+    expect(read.events[0]?.tags).toEqual(expect.arrayContaining(['trace:local-leader-completion-v1','role:leader',`runtime-binding:${metric.bindingHint}`,
+      `seat-hint:${createHash('sha256').update('selected-local-account').digest('hex')}`]));
+    for(const secret of ['PRIVATE_PROMPT_CANARY','PRIVATE_TASK_CANARY','PRIVATE_RESPONSE_CANARY',blob,manifest,runtime.baseUrl,'selected-local-account']) expect(bytes).not.toContain(secret);
+    expect(readFileSync(file,'utf8')).toBe(bytes);
+  });
+  it('pins the selected binding for both execution and trace despite later caller mutation', async () => {
+    const selected = binding(), original = {...selected}, record = vi.fn();
+    const complete = llamaLeaderTransport(selected,cfg,{timeoutMs:1000},vi.fn().mockResolvedValue(runtime),record);
+    selected.baseUrl='http://127.0.0.1:9090/v1';selected.model='another-model';selected.contextWindow=131072;
+    const fetch=vi.fn().mockResolvedValue(reported());vi.stubGlobal('fetch',fetch);
+    expect(await complete('s','u')).toContain('PRIVATE_RESPONSE_CANARY');
+    expect(fetch.mock.calls[0]?.[0]).toBe(original.baseUrl+'/chat/completions');
+    expect(record.mock.calls[0]?.[0]).toMatchObject({model:original.model,contextWindow:original.contextWindow,
+      bindingHint:createHash('sha256').update(JSON.stringify(original)).digest('hex')});
+  });
+  it('settles a pre-contact deadline once with no inferred usage, even if the observer throws', async () => {
+    vi.useFakeTimers();const record=vi.fn(()=>{throw new Error('telemetry');}),fetch=vi.fn();vi.stubGlobal('fetch',fetch);
+    const failed=expect(llamaLeaderTransport(binding(),cfg,{timeoutMs:100},()=>new Promise(()=>{}),record)('s','u')).rejects.toThrow('Runtime metadata cancelled');
+    await vi.advanceTimersByTimeAsync(100);await failed;
+    expect(record).toHaveBeenCalledOnce();expect(record.mock.calls[0]?.[0]).toMatchObject({inferenceRequestStarted:false,tokensIn:null,tokensOut:null,outcome:'failed'});
+    expect(fetch).not.toHaveBeenCalled();expect(vi.getTimerCount()).toBe(0);
+  });
+  it('settles Stop after contact once with unknown usage, preserves refusal and never retries', async () => {
+    vi.useFakeTimers();const record=vi.fn(),fetch=vi.fn().mockResolvedValue(new Response(new ReadableStream({start(){}}),{headers:{'content-type':'text/event-stream'}}));vi.stubGlobal('fetch',fetch);
+    const failed=expect(llamaLeaderTransport(binding(),cfg,{timeoutMs:1000},vi.fn().mockResolvedValue(runtime),record)('s','u')).rejects.toThrow(/binding unavailable/);
+    await vi.advanceTimersByTimeAsync(1);mkdirSync(join(home,'.ashlr'),{recursive:true});writeFileSync(join(home,'.ashlr','KILL'),'Stop');
+    await vi.advanceTimersByTimeAsync(100);await failed;
+    expect(record).toHaveBeenCalledOnce();expect(record.mock.calls[0]?.[0]).toMatchObject({inferenceRequestStarted:true,tokensIn:null,tokensOut:null,outcome:'unknown'});
+    expect(fetch).toHaveBeenCalledOnce();expect(vi.getTimerCount()).toBe(0);
+  });
+  it('keeps missing usage unknown, measured zero distinct and each request counted once', async () => {
+    const metrics: LocalLeaderCompletionMetrics[] = [];
+    const fetch = vi.fn().mockResolvedValueOnce(reported(null,null)).mockResolvedValueOnce(reported(0,0)); vi.stubGlobal('fetch',fetch);
+    const complete = llamaLeaderTransport(binding(),cfg,{timeoutMs:1000},vi.fn().mockResolvedValue(runtime),m => {metrics.push(m);});
+    await complete('s','u'); await complete('s','u');
+    expect(metrics.map(m => [m.tokensIn,m.tokensOut,m.inferenceRequestStarted])).toEqual([[null,null,true],[0,0,true]]);
+    expect(metrics[0]?.runId).not.toBe(metrics[1]?.runId); expect(fetch).toHaveBeenCalledTimes(2);
+  });
+  it('counts neither metadata refresh nor refused binding as an inference attempt', async () => {
+    const record = vi.fn(), fetch = vi.fn(); vi.stubGlobal('fetch',fetch);
+    await expect(llamaLeaderTransport(binding(),cfg,{timeoutMs:1000},vi.fn().mockResolvedValue({...runtime,contextWindow:131072}),record)('s','u')).rejects.toThrow(/changed/);
+    expect(fetch).not.toHaveBeenCalled(); expect(record).toHaveBeenCalledOnce();
+    expect(record.mock.calls[0]?.[0]).toMatchObject({inferenceRequestStarted:false,tokensIn:null,tokensOut:null,outcome:'failed'});
+  });
+  it('retains one attempted inference but unknown counts for a failed strict response without replay', async () => {
+    const record = vi.fn(), fetch = vi.fn().mockResolvedValue(new Response('data: broken\n\n',{headers:{'content-type':'text/event-stream'}}));vi.stubGlobal('fetch',fetch);
+    await expect(llamaLeaderTransport(binding(),cfg,{timeoutMs:1000},vi.fn().mockResolvedValue(runtime),record)('s','u')).rejects.toThrow();
+    expect(fetch).toHaveBeenCalledOnce(); expect(record).toHaveBeenCalledOnce();
+    expect(record.mock.calls[0]?.[0]).toMatchObject({inferenceRequestStarted:true,tokensIn:null,tokensOut:null,outcome:'unknown'});
+  });
+  it('retains returned usage but refuses success when final binding changes', async () => {
+    const pinned = binding(), record = vi.fn();
+    vi.stubGlobal('fetch',vi.fn().mockImplementation(async () => {
+      const result = reported(); const responseText = await result.text();
+      return new Response(new ReadableStream({start(c){c.enqueue(new TextEncoder().encode(responseText));writeFileSync(blob,'changed weights');c.close();}}),{headers:{'content-type':'text/event-stream'}});
+    }));
+    await expect(llamaLeaderTransport(pinned,cfg,{timeoutMs:1000},vi.fn().mockResolvedValue(runtime),record)('s','u')).rejects.toThrow(/binding/);
+    expect(record).toHaveBeenCalledOnce();expect(record.mock.calls[0]?.[0]).toMatchObject({tokensIn:12,tokensOut:3,outcome:'unknown'});
+  });
+  it('does not replace unknown elapsed time with zero or let sync/async observers change completion', async () => {
+    let clock = 100;vi.spyOn(performance,'now').mockImplementation(()=>clock);
+    const record = vi.fn(()=>{throw new Error('observer');});
+    vi.stubGlobal('fetch',vi.fn(async()=>{clock=50;return reported();}));
+    expect(await llamaLeaderTransport(binding(),cfg,{timeoutMs:1000},vi.fn().mockResolvedValue(runtime),record)('s','u')).toContain('PRIVATE_RESPONSE_CANARY');
+    expect(record.mock.calls[0]?.[0]).toMatchObject({elapsedMs:null,outcome:'completed'});
+    expect(await llamaLeaderTransport(binding(),cfg,{timeoutMs:1000},vi.fn().mockResolvedValue(runtime),async()=>{throw new Error('async observer');})('s','u')).toContain('PRIVATE_RESPONSE_CANARY');
+    await Promise.resolve();
   });
 });

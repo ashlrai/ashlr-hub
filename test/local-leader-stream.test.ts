@@ -41,6 +41,13 @@ describe('strict local Leader stream', () => {
     expect(init.headers).not.toHaveProperty('Authorization');
     expect(JSON.parse(String(init.body))).toMatchObject({ model, stream: true, max_tokens: 40, stream_options: { include_usage: true } });
   });
+  it('counts one POST dispatch attempt after preconditions, including an HTTP refusal, without retry', async () => {
+    const onRequestStart = vi.fn(), fetch = vi.fn().mockResolvedValue(new Response('', {status:503})); vi.stubGlobal('fetch',fetch);
+    await expect(client({onRequestStart},'https://example.com/v1').chatStream!(messages,undefined,()=>{})).rejects.toThrow();
+    expect(onRequestStart).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+    await expect(client({onRequestStart}).chatStream!(messages,undefined,()=>{})).rejects.toThrow(/HTTP 503/);
+    expect(onRequestStart).toHaveBeenCalledOnce(); expect(fetch).toHaveBeenCalledOnce();
+  });
   it('keeps absent usage unknown rather than estimating provider token counts', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(chunk('ok', 'stop') + done)));
     expect(await client().chatStream!(messages, undefined, () => {})).toMatchObject({ usageKnown: false });
