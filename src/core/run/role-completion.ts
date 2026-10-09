@@ -22,6 +22,7 @@ import { codexAdapter } from '../verse/adapters/codex.js';
 import { refreshDevinCliExecutionBinding, devinCliBindingCurrent, type DevinCliExecutionBinding } from '../devin/cli-admission.js';
 import { enginePermitted } from '../policy/local-only.js';
 import { observeRoleAccount, roleAccountEpoch } from './role-account.js';
+import { assertHostNativeAccountContext } from '../integrations/locus-job-env.js';
 
 export type NativeRoleEngine = 'claude' | 'codex' | 'grok' | 'devin';
 export type AgentRole = 'leader' | 'manager' | 'worker';
@@ -98,6 +99,7 @@ function cleanupUnconfirmed(result: SpawnEngineResult): boolean {
  * output cannot supply a launch, process environment, lease or credential. */
 export function nativeRoleCompletion(req: RoleCompletionRequest, record?: (metrics: RoleCompletionMetrics) => void): (system: string,user: string) => Promise<string> {
   return async (system,user) => {
+    assertHostNativeAccountContext();
     if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(req.model) || !Number.isFinite(req.timeoutMs) || req.timeoutMs <= 0 ||
         !enginePermitted(grantEngine[req.engine],req.cfg).permitted) throw new Error('Selected native role unavailable');
     const initialPolicy=policyEpoch(req);

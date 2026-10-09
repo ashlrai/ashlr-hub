@@ -69,6 +69,16 @@ export function assertLocusJobDispatch(): void {
   }
 }
 
+/** Host-owned native profiles are not qualified sealed-job account bindings.
+ * Refuse before reading them or launching their metadata probes; ordinary host
+ * invocations keep their existing exact-account admission and dispatch checks. */
+export function assertHostNativeAccountContext(): void {
+  assertLocusJobDispatch();
+  if (hasLocusJobEnv() || hasInheritedLocusSession()) {
+    throw new Error('Locus sealed jobs have no qualified host native-account metadata bridge');
+  }
+}
+
 /**
  * A captured job is the baseline, rather than the ambient daemon environment.
  * Containment/runtime additions are allowed; identity changes fail closed and

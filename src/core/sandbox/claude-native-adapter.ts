@@ -11,6 +11,7 @@ import { autonomousConfinementProfile, buildAutonomousSbplProfile, escapeSbplPat
 import { observeClaudeNativeBinding, readClaudeNativeBinding, sameClaudeNativeBinding, type ClaudeNativeBinding } from './claude-native-admission.js';
 import { claudeBrokerCommand, claudeBrokerNativeEnvironment, startClaudeNativeBroker, type ClaudeBrokerObservation } from './claude-native-broker.js';
 import { claudeBrokerToolExecutor } from './claude-broker-executor.js';
+import { assertHostNativeAccountContext } from '../integrations/locus-job-env.js';
 
 const NATIVE_AUTH_HELPERS = ['/usr/bin/security','/bin/sh'] as const;
 const cleanupUnknown = (r: SpawnEngineResult): boolean => r.terminationReason === 'error-exit' &&
@@ -64,6 +65,8 @@ export interface ClaudeNativeAdapterOptions {
 export async function runClaudeNativeAdapter(options: ClaudeNativeAdapterOptions): Promise<ClaudeNativeAdapterResult> {
   let providerContacted = false;
   const held = (reason: string): ClaudeNativeAdapterResult => ({ providerContacted,ok:false, output:'', error:reason, terminationReason:'error-exit',captureDenied:true });
+  try { assertHostNativeAccountContext(); }
+  catch (error) { return held(error instanceof Error ? error.message : 'Locus native-account context unavailable'); }
   if (options.signal === undefined) return held('Native Claude producer cancellation ownership unavailable');
   if (options.signal.aborted) return { ...held('run cancelled'), terminationReason:'cancelled' };
   if (!enginePermitted('claude', options.cfg).permitted || !options.admission()) return held('Selected Claude account authority unavailable');
