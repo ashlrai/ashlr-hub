@@ -1,3 +1,4 @@
+import { formatLeaderDisplayText } from '../../../../core/vision/leader-display-text.js';
 /**
  * routes/verse/command/LeaderCard.tsx — the Leader's latest memo on Command
  * (span 7; SPEC-310B §6 "Leader card: Bottleneck, The Move, a Veto chip on
@@ -26,8 +27,8 @@ export function vetoConfirm(action: Pick<LeaderAction, 'summary' | 'status'>): C
     title: 'Veto this action?',
     body:
       action.status === 'scheduled'
-        ? `“${action.summary}” will not apply. The Leader records the veto and learns from it.`
-        : `“${action.summary}” is undone exactly as it was applied. The Leader records the veto and learns from it.`,
+        ? `“${formatLeaderDisplayText(action.summary)}” will not apply. The Leader records the veto and learns from it.`
+        : `“${formatLeaderDisplayText(action.summary)}” is undone exactly as it was applied. The Leader records the veto and learns from it.`,
     confirmLabel: 'Veto',
     destructive: true,
   };
@@ -38,8 +39,8 @@ export function approveConfirm(action: Pick<LeaderAction, 'summary' | 'status'>)
     title: 'Approve this action?',
     body:
       action.status === 'scheduled'
-        ? `“${action.summary}” applies now instead of waiting out its veto window. You can still veto it afterwards.`
-        : `“${action.summary}” is outside the standing grant. Approving tells the Leader to go ahead; the server still checks it against your authority.`,
+        ? `“${formatLeaderDisplayText(action.summary)}” applies now instead of waiting out its veto window. You can still veto it afterwards.`
+        : `“${formatLeaderDisplayText(action.summary)}” is outside the standing grant. Approving tells the Leader to go ahead; the server still checks it against your authority.`,
     confirmLabel: 'Approve',
   };
 }
@@ -65,8 +66,8 @@ export function ActionRow({ action, actions, compact = false, approve = false, d
         {action.class}
       </span>
       <span className={styles.actionText}>
-        <span className={styles.actionSummary}>{action.summary}</span>
-        {!compact ? <span className={styles.actionWhy}>{action.why}</span> : null}
+        <span className={styles.actionSummary}>{formatLeaderDisplayText(action.summary)}</span>
+        {!compact ? <span className={styles.actionWhy}>{formatLeaderDisplayText(action.why)}</span> : null}
       </span>
       <span className={styles.actionState}>
         {dryRun ? (
@@ -81,8 +82,8 @@ export function ActionRow({ action, actions, compact = false, approve = false, d
             size="sm"
             variant="subtle"
             disabled={actions.busy || actions.readOnly}
-            aria-label={`Approve: ${action.summary}`}
-            onClick={() => actions.act(() => approveLeaderAction(action.id), `Approve “${action.summary}”`, { confirm: approveConfirm(action) })}
+            aria-label={`Approve: ${formatLeaderDisplayText(action.summary)}`}
+            onClick={() => actions.act(() => approveLeaderAction(action.id), `Approve “${formatLeaderDisplayText(action.summary)}”`, { confirm: approveConfirm(action) })}
           >
             Approve
           </Button>
@@ -93,8 +94,8 @@ export function ActionRow({ action, actions, compact = false, approve = false, d
             variant="ghost"
             className={styles.vetoChip}
             disabled={actions.busy || actions.readOnly}
-            aria-label={`Veto: ${action.summary}`}
-            onClick={() => actions.act(() => postLeader({ action: 'veto', actionId: action.id }), `Veto “${action.summary}”`, { confirm: vetoConfirm(action) })}
+            aria-label={`Veto: ${formatLeaderDisplayText(action.summary)}`}
+            onClick={() => actions.act(() => postLeader({ action: 'veto', actionId: action.id }), `Veto “${formatLeaderDisplayText(action.summary)}”`, { confirm: vetoConfirm(action) })}
           >
             Veto
           </Button>
@@ -138,12 +139,12 @@ export function LeaderCard({ read, loading, actions, seatNames }: { read: Option
           <dl className={styles.memo}>
             <div className={styles.memoRow}>
               <dt><MicroLabel>Bottleneck</MicroLabel></dt>
-              <dd className={styles.memoText}>{memo.bottleneck?.statement ?? '—'}</dd>
+              <dd className={styles.memoText}>{formatLeaderDisplayText(memo.bottleneck?.statement ?? '—')}</dd>
             </div>
             <div className={styles.memoRow}>
               <dt><MicroLabel>The move</MicroLabel></dt>
               <dd className={styles.memoText}>
-                {memo.move?.statement ?? '—'}
+                {formatLeaderDisplayText(memo.move?.statement ?? '—')}
                 {delta ? <span className={styles.delta}>{delta}</span> : null}
               </dd>
             </div>

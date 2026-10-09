@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { formatProductDisplayText } from '../src/core/vision/leader-display-text.js';
 import { escapeTelegramHtml, leaderDisplayText, telegramInstant } from '../src/core/integrations/telegram-format.js';
 
 const AT = '2026-10-09T06:15:00.123Z';
@@ -36,5 +37,21 @@ describe('Telegram operator-clock display', () => {
     expect(display).toBe(`Leader memo — Oct 9, 2:15 AM\n${literals}\n12345678901234567890, $200 & <status>`);
     expect(escapeTelegramHtml(display)).toContain('$200 &amp; &lt;status&gt;');
     expect(memo).toBe('lm-20261009061500-abcdef');
+  });
+});
+
+
+describe('saved product name display', () => {
+  it('projects recognized legacy names without rewriting identifiers or exact literals', () => {
+    const raw = 'Build Ashlrverse and Ashlr Verse; Ashlr Hub; ashlrverse.';
+    expect(formatProductDisplayText(raw)).toBe('Build Phantom and Phantom; Phantom; Phantom.');
+    expect(raw).toBe('Build Ashlrverse and Ashlr Verse; Ashlr Hub; ashlrverse.');
+    const exact = ["'Ashlr Verse'", '“Ashlrverse”', '‘Ashlr Hub’', '"Ashlr Verse"', '`Ashlrverse`',
+      '```text\nAshlr Verse\n```', 'https://example.com/Ashlrverse', '/repo/Ashlrverse',
+      'Ashlrverse.ts', 'Ashlrverse-id', 'Ashlrverse:tool', 'ashlr verse', String.raw`C:\Ashlrverse`, 'account@Ashlrverse',
+      'task 01234567-89ab-cdef-0123-456789abcdef', 'commit ' + 'a'.repeat(40), '2026-10-09T06:15:00.123Z'];
+    for (const value of exact) expect(formatProductDisplayText(value)).toBe(value);
+    expect(formatProductDisplayText('Ashlrverse: UI. Ashlr Verse!')).toBe('Phantom: UI. Phantom!');
+    expect(formatProductDisplayText("Ashlrverse’s tools and Ashlr Verse's fleet")).toBe("Phantom’s tools and Phantom's fleet");
   });
 });

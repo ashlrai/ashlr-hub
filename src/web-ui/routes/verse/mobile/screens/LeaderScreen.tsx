@@ -1,3 +1,4 @@
+import { formatLeaderDisplayText } from '../../../../../core/vision/leader-display-text.js';
 /**
  * routes/verse/mobile/screens/LeaderScreen.tsx — the Leader conversation on
  * a phone: the SAME thread as Mind on the Mac and Telegram, the standing
@@ -71,8 +72,8 @@ const APPROVE_FALLBACK = 'Runs the Leader’s action now instead of waiting for 
 export function approveConsequences(action: Pick<LeaderAction, 'summary' | 'status'> | null): string {
   if (!action) return APPROVE_FALLBACK;
   return action.status === 'scheduled'
-    ? `“${action.summary}” runs now instead of waiting out its veto window. You can still veto it afterwards.`
-    : `“${action.summary}” is outside the standing grant. Approving tells the Leader to go ahead; the server still checks it against your authority.`;
+    ? `“${formatLeaderDisplayText(action.summary)}” runs now instead of waiting out its veto window. You can still veto it afterwards.`
+    : `“${formatLeaderDisplayText(action.summary)}” is outside the standing grant. Approving tells the Leader to go ahead; the server still checks it against your authority.`;
 }
 
 /** One approvable action a message offers; `action` is null when the Leader's state did not answer. */
@@ -194,7 +195,7 @@ function Bubble({ message, ctx }: { message: LeaderThreadMessage; ctx: ThreadPro
         <ul className={styles.approvals} aria-label="Actions waiting">
           {approvables.map((item, i) => (
             <li key={item.id} className={styles.approval}>
-              {item.action ? <span className={styles.approvalText}>{item.action.summary}</span> : null}
+              {item.action ? <span className={styles.approvalText}>{formatLeaderDisplayText(item.action.summary)}</span> : null}
               <Button
                 variant="secondary"
                 disabled={ctx.offline}

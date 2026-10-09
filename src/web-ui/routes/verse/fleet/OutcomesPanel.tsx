@@ -1,3 +1,4 @@
+import { formatProductDisplayText } from '../../../../core/vision/leader-display-text.js';
 import { useRef, useState } from 'react';
 import { Button } from '../../../components/primitives/Button.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
@@ -118,7 +119,7 @@ export function OutcomesPanel({ actions }: { actions: SurfaceActions }) {
         <Button type="button" size="sm" variant="ghost" onClick={() => setEditor(null)}>Cancel outcome edit</Button></div>
     </form> : null}
     {read.status !== 'error' && value?.outcomes ? <div className={styles.list}>{value.outcomes.map(outcome => <details key={outcome.id} className={styles.row}>
-      <summary><strong>{outcome.scope.desiredOutcome}</strong><span data-status={outcome.status}>{LABEL[outcome.status]}</span></summary>
+      <summary><strong>{formatProductDisplayText(outcome.scope.desiredOutcome)}</strong><span data-status={outcome.status}>{LABEL[outcome.status]}</span></summary>
       <div className={styles.detail}>
         {outcome.status === 'waiting-plan' && !outcome.manager ? <p className={styles.note}>The desired result is saved. Waiting for the Leader to refine a plan.</p> : null}
         {outcome.status === 'plan-verified' ? <p className={styles.note}>All active plan tasks have verification or explicit gate evidence. Check the desired result against your acceptance criteria.</p> : null}
@@ -129,7 +130,7 @@ export function OutcomesPanel({ actions }: { actions: SurfaceActions }) {
         <p className={styles.note}>Revision {outcome.revision} · {outcome.scope.targetRepos.length} repositories</p>
         <ul>{outcome.scope.acceptance.map(item => <li key={item}>{item}</li>)}</ul>
         {outcome.tasks.length ? <ul aria-label="Outcome tasks">{outcome.tasks.map(task => <li key={task.key}>
-          <strong>{task.title}</strong><span>{task.state === 'claimed' ? 'Claimed; waiting to start' : task.state}</span>
+          <strong>{formatProductDisplayText(task.title)}</strong><span>{task.state === 'claimed' ? 'Claimed; waiting to start' : task.state}</span>
           {task.repo ? <small>{task.repo}</small> : null}
           {task.runId ? <small>Run {task.runId}</small> : null}
           {task.controllerRunId && task.controllerRunId !== task.runId ? <small>Controller run {task.controllerRunId}</small> : null}

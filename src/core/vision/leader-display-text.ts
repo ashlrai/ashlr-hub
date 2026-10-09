@@ -9,7 +9,15 @@ const DISPLAY_ID_ITEM = new RegExp(String.raw`(^|\n)([ \t]*[•-]\s*)(${LEADER_D
 const DISPLAY_UUID_LABEL = /\b(task|run|session|trajectory|proposal)\s+[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}(?![\w/-]|\.[\w])/gi;
 const DISPLAY_COMMIT = /\b(commit(?: SHA)?)\s+([a-f0-9]{40})(?![\w/-]|\.[\w])/gi;
 const DISPLAY_ISO = /(?<![\w./-])\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})(?![\w./-])/g;
-const DISPLAY_LITERAL = /(https?:\/\/[^\s]+|```[\s\S]*?```|`[^`\r\n]*`|"[^"\r\n]*")/g;
+const DISPLAY_LITERAL = /(https?:\/\/[^\s]+|```[\s\S]*?```|`[^`\r\n]*`|"[^"\r\n]*"|(?<![\w])'[^'\r\n]*'(?![\w])|“[^”\r\n]*”|‘[^’\r\n]*’)/g;
+// Recognized product prose only: filenames, paths and compatibility identifiers
+// are not names to rewrite. Lowercase `ashlr verse` remains an exact command.
+const LEGACY_PRODUCT_NAME = /(?<![\w./:\\@-])(?:Ashlr[ -]?[Vv]erse|ashlr[Vv]erse|Ashlr Hub)(?![\w/\\@-]|[.:][\w])/g;
+
+/** Display names only. Never feed this into editors, saved scope or model inputs. */
+export function formatProductDisplayText(text: string): string {
+  return text.split(DISPLAY_LITERAL).map((part, index) => index % 2 ? part : part.replace(LEGACY_PRODUCT_NAME, 'Phantom')).join('');
+}
 
 /**
  * Generated Leader prose only, at the display boundary. Human labels replace
@@ -41,7 +49,7 @@ export function formatLeaderDisplayText(text: string, formatInstant?: (iso: stri
     if (index % 2 === 1) return part;
     return part
       // Current product prose only; compatibility commands and literal history stay exact.
-      .replace(/\b(?:Ashlr[ -]?[Vv]erse|ashlr[Vv]erse)\b/g, 'Phantom')
+      .replace(LEGACY_PRODUCT_NAME, 'Phantom')
       .replace(DISPLAY_ID_LABEL, '$1')
       .replace(DISPLAY_UUID_LABEL, '$1')
       .replace(DISPLAY_COMMIT, (_match, label: string, sha: string) => `${label} ${sha.slice(0, 7)}`)

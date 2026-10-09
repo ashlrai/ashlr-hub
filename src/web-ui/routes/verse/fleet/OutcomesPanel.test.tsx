@@ -52,6 +52,22 @@ async function fill(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('Work for me outcome editor', () => {
+  it('displays old product names while preserving saved scope, task IDs and exact edit submission', async () => {
+    const saved = outcome(); saved.scope.desiredOutcome = 'Build Ashlrverse; keep "Ashlr Verse" and /repo/Ashlrverse';
+    saved.tasks = [{ id: 'task-' + Array(8).fill('01234567').join('.'), key: 'legacy', title: 'Improve Ashlr Verse', repo,
+      state: 'pending', runId: null, controllerRunId: null, proposalId: null, mergeIdentity: null }];
+    const original = JSON.stringify(saved); const { posts } = fixture([saved]);
+    const user = userEvent.setup(); render(<Host />);
+    await user.click(await screen.findByText('Build Phantom; keep "Ashlr Verse" and /repo/Ashlrverse'));
+    expect(screen.getByText('Improve Phantom')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Edit outcome' }));
+    expect(screen.getByLabelText('Desired outcome')).toHaveValue(saved.scope.desiredOutcome);
+    await user.click(screen.getByRole('button', { name: 'Save outcome' }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]!.body.scope).toEqual(saved.scope);
+    expect(JSON.stringify(saved)).toBe(original);
+  });
+
   it('starts a desired outcome once using exact repositories and no resource/model selector', async () => {
     const { posts } = fixture();
     const user = userEvent.setup(); render(<Host />);

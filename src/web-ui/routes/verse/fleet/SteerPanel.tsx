@@ -1,3 +1,4 @@
+import { formatProductDisplayText } from '../../../../core/vision/leader-display-text.js';
 /**
  * routes/verse/fleet/SteerPanel.tsx — edit and interject (3.15, the Fleet
  * control surface).
@@ -296,13 +297,13 @@ function GoalRow({ goal, paths, actions, onChanged }: { goal: QueueGoal; paths: 
     <li className={styles.row}>
       <div className={styles.rowHead}>
         <p className={styles.rowTitle}>
-          {goal.objective}
+          {formatProductDisplayText(goal.objective)}
           <span className={styles.rowMeta}> · {goal.status}{goal.missionBound ? ' · bound to a signed mission' : ''}</span>
         </p>
         <span className={styles.rowControls}>
           <Select
             size="sm"
-            aria-label={`Target repo for ${goal.objective}`}
+            aria-label={`Target repo for ${formatProductDisplayText(goal.objective)}`}
             value={goal.project ?? ''}
             disabled={actions.readOnly || goal.missionBound}
             onChange={(e) => {

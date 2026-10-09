@@ -1,3 +1,4 @@
+import { formatProductDisplayText } from '../src/core/vision/leader-display-text.js';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,7 +20,7 @@ import type { RunState } from '../src/core/types.js';
 const roots: string[] = [];
 afterEach(() => { vi.restoreAllMocks(); mocks.directory.mockReset(); mocks.run.mockReset(); mocks.proposal.mockReset(); mocks.enrollment.mockReset();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
-function fixture(interactive = false, selected: Partial<OutcomeManagerRoute> = {}) {
+function fixture(interactive = false, selected: Partial<OutcomeManagerRoute> = {}, desiredOutcome = 'Ship a useful verified improvement') {
   const route: OutcomeManagerRoute = { engine: 'codex', seatId: 'selected-native-seat', model: 'actual-frontier-model', tier: 'frontier', ...selected };
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'outcome-manager-dispatch-'))); roots.push(root);
   const repo = join(root, 'repo'); mkdirSync(repo);
@@ -35,7 +36,7 @@ function fixture(interactive = false, selected: Partial<OutcomeManagerRoute> = {
     routeAllowed: actual => actual.engine === route.engine && actual.model === route.model && actual.seatId === route.seatId && actual.tier === route.tier,
     routeCurrent: actual => actual.engine === route.engine && actual.model === route.model && actual.seatId === route.seatId && actual.tier === route.tier,
     sessionAllowed: id => id === 'chat-1', messageExists: () => true, planAllowed: () => true };
-  expect(work.start(command(), 'outcome', { desiredOutcome: 'Ship a useful verified improvement', targetRepos: [repo],
+  expect(work.start(command(), 'outcome', { desiredOutcome, targetRepos: [repo],
     acceptance: ['Actual protected merge and regression verification'] }).ok).toBe(true);
   expect(manager.configure(command(), { mode: interactive ? 'interactive' : 'resident', sessionId: interactive ? 'chat-1' : null }, admission).ok).toBe(true);
   if (interactive) expect(manager.interject(command(), { sessionId: 'chat-1', messageId: 'message-1', eventSeq: 1 }, admission).ok).toBe(true);
@@ -55,6 +56,15 @@ function fixture(interactive = false, selected: Partial<OutcomeManagerRoute> = {
     setRun: (value: RunState) => { run = value; }, run: () => run, revoke: () => { authorized = false; } };
 }
 describe('actual tool-capable manager host bridge', () => {
+  it('keeps the exact saved objective in manager context after display-only branding', () => {
+    const raw = 'Build Ashlrverse; keep "Ashlr Verse" and /repo/Ashlrverse';
+    const f = fixture(false, {}, raw); const state = JSON.stringify(f.state());
+    expect(formatProductDisplayText(f.state().scope.desiredOutcome)).toBe('Build Phantom; keep "Ashlr Verse" and /repo/Ashlrverse');
+    expect(f.dispatch().prompt()).toContain('Build Ashlrverse');
+    expect(f.state().scope.desiredOutcome).toBe(raw);
+    expect(JSON.stringify(f.state())).toBe(state);
+  });
+
   it('discovers exact saved scope and builds tool-capable full-acceptance prompts without launching', () => {
     const f = fixture(); expect(isOutcomeManagerWorkItem(f.item)).toBe(true);
     expect(isOutcomeManagerWorkItem({ id: 'outcome-manager:malformed', tags: [] })).toBe(true);
