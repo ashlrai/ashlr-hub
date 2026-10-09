@@ -10,7 +10,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import type { AshlrConfig, ProviderRegistry, PhantomStatus } from '../src/core/types.js';
 import type { LocusProbeResult } from '../src/core/integrations/locus.js';
 import {
-  copyFileSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, rmSync,
+  copyFileSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync, rmSync,
 } from 'node:fs';
 import { join, delimiter } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -751,19 +751,19 @@ describe('runDoctor — compatible CLI installation guidance', () => {
     installAshlrShim(tmpHome, 'phm');
     isolateCommandPath();
     const report = await runDoctor(makeConfig(tmpHome));
-    expect(report.checks.find(check => check.id === 'ashlr')).toMatchObject({
-      status: 'pass',
-      detail: join(tmpHome, 'bin', process.platform === 'win32' ? 'phm.cmd' : 'phm'),
-    });
+    const check = report.checks.find(check => check.id === 'ashlr');
+    expect(check?.status).toBe('pass');
+    expect(realpathSync(check!.detail!))
+      .toBe(realpathSync(join(tmpHome, 'bin', process.platform === 'win32' ? 'phm.cmd' : 'phm')));
   });
 
   it('still recognizes the compatible ashlr launcher', async () => {
     isolateCommandPath();
     const report = await runDoctor(makeConfig(tmpHome));
-    expect(report.checks.find(check => check.id === 'ashlr')).toMatchObject({
-      status: 'pass',
-      detail: join(tmpHome, 'bin', process.platform === 'win32' ? 'ashlr.cmd' : 'ashlr'),
-    });
+    const check = report.checks.find(check => check.id === 'ashlr');
+    expect(check?.status).toBe('pass');
+    expect(realpathSync(check!.detail!))
+      .toBe(realpathSync(join(tmpHome, 'bin', process.platform === 'win32' ? 'ashlr.cmd' : 'ashlr')));
   });
 
   it('recognizes phm when the compatible launcher is absent', async () => {

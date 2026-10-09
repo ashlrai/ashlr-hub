@@ -552,7 +552,7 @@ describe('M454 pinned upstream routing challenge', () => {
     for (const path of [
       'docs/RESIDENT-RUNTIME.md', 'docs/AUTHORITY.md', 'docs/STANDING-AUTHORITY.md',
       'docs/CLOUD.md', 'docs/LEADER.md', 'docs/DEVIN.md', 'docs/VERSE-CONTEXT.md',
-      'docs/VERSE-BROWSER.md', 'docs/JEV-INTEGRATION.md',
+      'docs/VERSE-BROWSER.md', 'docs/JEV-INTEGRATION.md', 'docs/COMPANIONS.md',
     ]) {
       const source = readFileSync(join(REPO_ROOT, path), 'utf8');
       for (const canary of consumerCanaries) expect(source).not.toContain(canary);
@@ -578,6 +578,7 @@ describe('M454 pinned upstream routing challenge', () => {
       'CHANGELOG.md',
       'docs/README.md',
       'docs/PHANTOM-BRAND.md',
+      'docs/COMPANIONS.md',
       'docs/QUICKSTART.md',
       'docs/AUTOMATIC-OUTCOMES.md',
       'docs/VERSE.md',
