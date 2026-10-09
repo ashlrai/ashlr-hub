@@ -56,11 +56,16 @@ consumer use. Usage labels distinguish these scopes and their reported weekly
 or monthly periods. Phantom does not copy the observation into a Bot profile
 or API wallet.
 
-[Grok Bot's included usage](https://cursor.com/help/grok-bot/plans) has a weekly
-meter on the linked Cursor account. On-demand usage is a separate paid pool;
-its monthly spending limit is not a hard stop during an active run. A linked
-SuperGrok plan grants Bot access without stacking another allowance on top of
-an existing eligible Cursor plan.
+Grok's Usage page can show separate weekly meters for Build/shared consumer
+use and Grok Bot, with independent resets. Verify the account behind each
+meter; subscription linkage alone does not establish that billing identity.
+
+[Cursor's Grok Bot plans](https://cursor.com/help/grok-bot/plans) describe Bot
+eligibility and on-demand billing, not the billing account behind a particular
+Grok usage-page meter. A linked SuperGrok plan grants Bot access without
+stacking another allowance on top of an existing eligible Cursor plan.
+On-demand usage is a separate paid pool; its monthly spending limit is not a
+hard stop during an active run.
 
 Current proactive profiles record the intended Bot account and responsibilities,
 not a verified remaining allowance or reset. Phantom has not qualified a native
