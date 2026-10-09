@@ -620,13 +620,15 @@ export function defaultLeaderTransports(cfg: AshlrConfig): LeaderTransports {
     llama: (binding, opts, invocation) => {
       const seatId = invocation?.seatId;
       const selectedBinding = Object.freeze({ ...binding });
-      return async (system, user) => {
+      return async (system, user, signal) => {
+        signal?.throwIfAborted();
         const { llamaLeaderTransport } = await import('./local-leader-transport.js');
+        signal?.throwIfAborted();
         return llamaLeaderTransport(selectedBinding, cfg, opts, undefined, metrics => {
           // Capture the event before lazy publication; import latency must not renew its time or identity.
           const event = localLeaderCompletionEvent(metrics, seatId);
           void import('../fleet/agent-action-ledger.js').then(({ recordAgentAction }) => recordAgentAction(event)).catch(() => {});
-        })(system, user);
+        })(system, user, signal);
       };
     },
     native: (seatId,engine,model,admitted,opts) => async(system,user,signal) => {

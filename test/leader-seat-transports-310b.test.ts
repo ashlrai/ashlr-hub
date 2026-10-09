@@ -190,6 +190,33 @@ describe('loadJudgeCredentialHook', () => {
 
 
 describe('lazy local completion trace publication', () => {
+  it('refuses an aborted caller before loading or constructing the local transport', async () => {
+    const load=vi.fn(),transport=vi.fn();
+    vi.doMock('../src/core/vision/local-leader-transport.js',()=>{load();return {llamaLeaderTransport:transport};});
+    const caller=new AbortController();caller.abort(new Error('cancelled before loading'));
+    const {defaultLeaderTransports:transports}=await import('../src/core/vision/leader-seat.js');
+    const complete=transports(CFG).llama!({} as import('../src/core/vision/local-leader-transport.js').LocalLeaderBinding,{});
+    await expect(complete('s','u',caller.signal)).rejects.toThrow('cancelled before loading');
+    expect(load).not.toHaveBeenCalled();expect(transport).not.toHaveBeenCalled();
+  });
+  it('refuses cancellation during lazy loading before constructing or contacting the transport', async () => {
+    let release!:()=>void,entered!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;}),loading=new Promise<void>(resolve=>{entered=resolve;});
+    const transport=vi.fn();
+    vi.doMock('../src/core/vision/local-leader-transport.js',async()=>{entered();await gate;return {llamaLeaderTransport:transport};});
+    const {defaultLeaderTransports:transports}=await import('../src/core/vision/leader-seat.js');
+    const caller=new AbortController(),complete=transports(CFG).llama!({} as import('../src/core/vision/local-leader-transport.js').LocalLeaderBinding,{});
+    const failed=expect(complete('s','u',caller.signal)).rejects.toThrow('cancelled during loading');
+    await loading;caller.abort(new Error('cancelled during loading'));release();await failed;
+    expect(transport).not.toHaveBeenCalled();
+  });
+  it('passes the exact caller signal through the lazy local wrapper', async () => {
+    const invocation=vi.fn().mockResolvedValue('plan'),transport=vi.fn(()=>invocation);
+    vi.doMock('../src/core/vision/local-leader-transport.js',()=>({llamaLeaderTransport:transport}));
+    const {defaultLeaderTransports:transports}=await import('../src/core/vision/leader-seat.js');
+    const caller=new AbortController(),complete=transports(CFG).llama!({} as import('../src/core/vision/local-leader-transport.js').LocalLeaderBinding,{});
+    expect(await complete('s','u',caller.signal)).toBe('plan');
+    expect(invocation).toHaveBeenCalledExactlyOnceWith('s','u',caller.signal);
+  });
   it('returns before ledger loading and preserves the completion time and originally selected seat', async () => {
     const original = '2026-10-09T10:00:00.000Z';let release!:()=>void, written!:()=>void;
     const published=new Promise<void>(resolve=>{written=resolve;});

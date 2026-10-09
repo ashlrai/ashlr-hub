@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { createHash } from 'node:crypto';
+import { getEventListeners } from 'node:events';
 import { localLeaderCompletionEvent } from '../src/core/vision/leader-seat.js';
 import { agentActionsDir, recordAgentActionResult } from '../src/core/fleet/agent-action-ledger.js';
 import { join } from 'node:path';
@@ -222,6 +223,56 @@ describe('settled local Leader telemetry', () => {
     expect(fetch.mock.calls[0]?.[0]).toBe(original.baseUrl+'/chat/completions');
     expect(record.mock.calls[0]?.[0]).toMatchObject({model:original.model,contextWindow:original.contextWindow,
       bindingHint:createHash('sha256').update(JSON.stringify(original)).digest('hex')});
+  });
+  it('refuses an already aborted caller before metadata or inference and settles once', async () => {
+    vi.useFakeTimers();const caller=new AbortController(),read=vi.fn(),fetch=vi.fn(),record=vi.fn();
+    vi.stubGlobal('fetch',fetch);caller.abort(new Error('caller cancelled before dispatch'));
+    await expect(llamaLeaderTransport(binding(),cfg,{timeoutMs:1000},read,record)('s','u',caller.signal))
+      .rejects.toThrow('caller cancelled before dispatch');
+    expect(read).not.toHaveBeenCalled();expect(fetch).not.toHaveBeenCalled();expect(record).toHaveBeenCalledOnce();
+    expect(record.mock.calls[0]?.[0]).toMatchObject({inferenceRequestStarted:false,tokensIn:null,tokensOut:null,outcome:'failed'});
+    expect(getEventListeners(caller.signal,'abort')).toHaveLength(0);expect(vi.getTimerCount()).toBe(0);
+  });
+  it('settles caller cancellation during stalled metadata without inference or retained listeners', async () => {
+    vi.useFakeTimers();const caller=new AbortController(),record=vi.fn(),fetch=vi.fn();let metadataSignal:AbortSignal|undefined,entered!:()=>void;
+    const reading=new Promise<void>(resolve=>{entered=resolve;});
+    const read=vi.fn((_cfg:AshlrConfig,signal?:AbortSignal)=>{metadataSignal=signal;entered();return new Promise<null>(()=>{});});
+    vi.stubGlobal('fetch',fetch);
+    const failed=expect(llamaLeaderTransport(binding(),cfg,{timeoutMs:1000},read,record)('s','u',caller.signal)).rejects.toThrow('Runtime metadata cancelled');
+    await reading;expect(getEventListeners(caller.signal,'abort')).toHaveLength(1);caller.abort(new Error('caller cancelled metadata'));
+    await failed;expect(metadataSignal?.aborted).toBe(true);expect(fetch).not.toHaveBeenCalled();expect(record).toHaveBeenCalledOnce();
+    expect(record.mock.calls[0]?.[0]).toMatchObject({inferenceRequestStarted:false,tokensIn:null,tokensOut:null,outcome:'failed'});
+    expect(getEventListeners(caller.signal,'abort')).toHaveLength(0);expect(vi.getTimerCount()).toBe(0);
+  });
+  it('forwards cancellation after POST to the active client and settles unknown usage once without replay', async () => {
+    vi.useFakeTimers();const caller=new AbortController(),record=vi.fn();let requestSignal:AbortSignal|undefined,entered!:()=>void;
+    const contacted=new Promise<void>(resolve=>{entered=resolve;});
+    const fetch=vi.fn(async(_url:unknown,init?:RequestInit)=>{requestSignal=init?.signal ?? undefined;entered();
+      return new Response(new ReadableStream({start(){}}),{headers:{'content-type':'text/event-stream'}});});
+    vi.stubGlobal('fetch',fetch);
+    const failed=expect(llamaLeaderTransport(binding(),cfg,{timeoutMs:1000},vi.fn().mockResolvedValue(runtime),record)('s','u',caller.signal))
+      .rejects.toThrow('caller cancelled response');
+    await contacted;await vi.advanceTimersByTimeAsync(0);caller.abort(new Error('caller cancelled response'));await failed;
+    expect(requestSignal?.aborted).toBe(true);expect(fetch).toHaveBeenCalledOnce();expect(record).toHaveBeenCalledOnce();
+    expect(record.mock.calls[0]?.[0]).toMatchObject({inferenceRequestStarted:true,tokensIn:null,tokensOut:null,outcome:'unknown'});
+    expect(getEventListeners(caller.signal,'abort')).toHaveLength(0);expect(vi.getTimerCount()).toBe(0);
+  });
+  it('removes a completed caller listener and keeps later invocations independently cancellable', async () => {
+    vi.useFakeTimers();const first=new AbortController(),second=new AbortController(),record=vi.fn();let entered!:()=>void;
+    const contacted=new Promise<void>(resolve=>{entered=resolve;});
+    const fetch=vi.fn().mockResolvedValueOnce(reported()).mockImplementationOnce(async()=>{
+      entered();return new Response(new ReadableStream({start(){}}),{headers:{'content-type':'text/event-stream'}});
+    });vi.stubGlobal('fetch',fetch);
+    const complete=llamaLeaderTransport(binding(),cfg,{timeoutMs:1000},vi.fn().mockResolvedValue(runtime),record);
+    expect(await complete('s','u',first.signal)).toContain('PRIVATE_RESPONSE_CANARY');
+    expect(getEventListeners(first.signal,'abort')).toHaveLength(0);expect(vi.getTimerCount()).toBe(0);
+    const failed=expect(complete('s','u',second.signal)).rejects.toThrow('second caller cancelled');
+    await contacted;await vi.advanceTimersByTimeAsync(0);first.abort(new Error('completed caller'));expect(record).toHaveBeenCalledOnce();
+    expect(getEventListeners(second.signal,'abort')).toHaveLength(1);second.abort(new Error('second caller cancelled'));await failed;
+    expect(fetch).toHaveBeenCalledTimes(2);expect(record).toHaveBeenCalledTimes(2);
+    expect(record.mock.calls[0]?.[0]).toMatchObject({tokensIn:12,tokensOut:3,outcome:'completed'});
+    expect(record.mock.calls[1]?.[0]).toMatchObject({tokensIn:null,tokensOut:null,outcome:'unknown'});
+    expect(getEventListeners(second.signal,'abort')).toHaveLength(0);expect(vi.getTimerCount()).toBe(0);
   });
   it('settles a pre-contact deadline once with no inferred usage, even if the observer throws', async () => {
     vi.useFakeTimers();const record=vi.fn(()=>{throw new Error('telemetry');}),fetch=vi.fn();vi.stubGlobal('fetch',fetch);

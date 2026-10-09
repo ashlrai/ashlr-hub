@@ -111,7 +111,7 @@ export function llamaLeaderTransport(inputBinding: LocalLeaderBinding, cfg: Ashl
   const binding = Object.freeze({ ...inputBinding });
   const selected = binding;
   const bindingHint = createHash('sha256').update(JSON.stringify(selected)).digest('hex');
-  return async (system, user) => {
+  return async (system, user, signal) => {
     const runId = randomUUID();
     let inferenceRequestStarted = false;
     let tokensIn: number | null = null, tokensOut: number | null = null;
@@ -120,7 +120,11 @@ export function llamaLeaderTransport(inputBinding: LocalLeaderBinding, cfg: Ashl
     const timer = setTimeout(() => controller.abort(new Error('Local Leader deadline elapsed')), opts.timeoutMs ?? 15 * 60_000);
     const watch = setInterval(() => { if (!localLeaderBindingCurrent(binding, cfg)) controller.abort(new Error('Local Leader binding unavailable')); }, 100);
     watch.unref(); const started = performance.now();
+    const onAbort = () => controller.abort(signal?.reason);
     try {
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+      controller.signal.throwIfAborted();
       if (!localLeaderBindingCurrent(binding, cfg)) throw new Error('Local Leader binding unavailable');
       const current = await metadataWait(readRuntime(cfg, controller.signal), controller.signal);
       const fresh = bindLocalLeaderModel(current, binding.model, binding.contextWindow);
@@ -142,6 +146,7 @@ export function llamaLeaderTransport(inputBinding: LocalLeaderBinding, cfg: Ashl
       outcome = 'completed';
       return result.content;
     } finally {
+      signal?.removeEventListener('abort', onAbort);
       controller.abort(); clearTimeout(timer); clearInterval(watch);
       const elapsed = performance.now() - started;
       const metrics = Object.freeze({ runId, finishedAt: new Date().toISOString(), model: selected.model,
