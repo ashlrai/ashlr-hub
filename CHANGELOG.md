@@ -33,6 +33,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   saved project targets. Resolve the same mapping for existing interactive chats.
 - Permit executable temporary build files in the isolated website builder and
   materialize validated internal Vercel output aliases before publication.
+- Bind website runtime metadata to the qualified source revision and read the
+  CLI's deployment response as JSON, verifying the staged deployment before promotion.
 - Use current provider-neutral CLI help and explicit local model tags instead of
   a stale example model recommendation.
 - Describe notification delivery from the actual delivery method rather than
