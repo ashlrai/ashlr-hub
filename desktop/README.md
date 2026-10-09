@@ -4,14 +4,14 @@ A Tauri v2 desktop app that wraps **Phantom** (the operator console at
 `/verse/`, see `../docs/VERSE.md`) in a native macOS window. Opening it starts
 the console; resident autonomy requires its separate local setup and grant.
 
-The published canonical 3.26.0 release includes `Phantom.app`, with
-`Phantom_3.26.0_aarch64.dmg` downloads and the stable `Ashlr Local` signing
+The published canonical 3.27.0 release includes `Phantom.app`, with
+`Phantom_3.27.0_aarch64.dmg` downloads and the stable `Ashlr Local` signing
 identity. The guarded installer migrates a single verified legacy installation;
 3.25.0 retains its historical `Ashlr.app` filename. Updated custody prompt
 wording requires its separately qualified helper release; installing the app
 does not replace the helper. Automatic updating is not activated by this filename change.
 
-The versioned [v3.26.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.0/Phantom_3.26.0_aarch64.dmg)
+The versioned [v3.27.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.27.0/Phantom_3.27.0_aarch64.dmg)
 is the verified published canonical download. Check the release artifacts
 and installed startup separately before granting resident authority.
 The app inside the DMG is locally signed, not Apple Developer ID notarized;
@@ -40,27 +40,27 @@ For routine drift detection, `node scripts/sync-candidate-version.mjs --check`
 uses the root package version as the expected value; writing still requires an
 explicit version.
 
-The source candidate is 3.27.0; publication and installation are pending qualification and public byte verification.
+The source candidate is 3.28.0; publication and installation are pending qualification and public byte verification.
 
-The published 3.26.0 release uses `ashlrai/phantom` and `@ashlr/phantom`.
+The published 3.27.0 release uses `ashlrai/phantom` and `@ashlr/phantom`.
 Its fixed discovery endpoint is
 `https://github.com/ashlrai/phantom/releases/latest/download/latest.json`.
 The commissioned public key, `ai.ashlr.desktop` bundle identifier, signer,
 sidecar and saved-data identities stay unchanged. The signed legacy and
 canonical profiles remain distinct; transport redirects do not choose a profile.
-The [v3.26.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.0/Phantom_3.26.0_aarch64.dmg)
+The [v3.27.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.27.0/Phantom_3.27.0_aarch64.dmg)
 has its own qualified original app and public-download evidence. Installed
 startup, automatic adoption and resident authority remain separate gates.
 
 ## Install
 
-Download the versioned [3.26.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.0/Phantom_3.26.0_aarch64.dmg)
+Download the versioned [3.27.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.27.0/Phantom_3.27.0_aarch64.dmg)
 or use the [npm/CLI quickstart](../docs/QUICKSTART.md) on macOS, Linux and Windows.
 Other desktop formats remain subject to the draft artifact policy below.
 
 | Platform | Availability |
 |----------|-----------------------|
-| macOS arm64 | Published canonical v3.26.0 `.dmg` |
+| macOS arm64 | Published canonical v3.27.0 `.dmg` |
 | Windows | `.msi` / `.exe` draft only |
 | Linux | Not produced while quarantined |
 
