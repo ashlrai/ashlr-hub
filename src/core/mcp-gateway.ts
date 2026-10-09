@@ -39,7 +39,7 @@ import { listNativeTools, isNativeTool, callNativeTool } from './mcp-native.js';
 import { listFirmResources, listFirmResourceTemplates, readFirmResource } from './mcp-firm-resources.js';
 import { hasSecretLikeArgv, redactedCommand } from './mcp-argv-safety.js';
 import { scrubSecrets } from './util/scrub.js';
-import { getLocusJobEnv, hasLocusJobEnv, withLocusJobChildEnv } from './integrations/locus-job-env.js';
+import { getLocusJobEnv, hasInheritedLocusSession, hasLocusJobEnv, withLocusJobChildEnv } from './integrations/locus-job-env.js';
 
 // ---------------------------------------------------------------------------
 // M105: Browser MCP probe + tool-call helpers
@@ -261,7 +261,7 @@ function downstreamEnv(spec: McpServerSpec, cfg?: ReturnType<typeof loadConfig>)
 }
 
 function refuseSharedJobGateway(): void {
-  if (hasLocusJobEnv()) throw new Error('Shared MCP gateway unavailable inside a delegated Locus job');
+  if (hasLocusJobEnv() || hasInheritedLocusSession()) throw new Error('Shared MCP gateway unavailable inside a delegated Locus job');
 }
 
 function safeErrorMessage(err: unknown): string {

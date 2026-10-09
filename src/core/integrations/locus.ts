@@ -1754,6 +1754,16 @@ export async function runWithLocusSessionIfConfigured<T>(
   opts?: RunWithLocusSessionOptions,
 ): Promise<T> {
   const env = opts?.env ?? getLocusJobEnv();
+  if (env.LOCUS_SESSION_ID !== undefined || env[EXECUTOR_CAPABILITY_ENV] !== undefined) {
+    if (!env.LOCUS_SESSION_ID || !env[EXECUTOR_CAPABILITY_ENV]) {
+      throw new LocusMintError("inherited session identity and executor authority must both be present");
+    }
+    const handle = validateExistingLocusSession(env);
+    const captured = { ...handle.env };
+    return runInLocusJobEnv(handle.env, () => fn(handle), () => {
+      validateExistingLocusSession(captured, handle.mint);
+    });
+  }
   // Consult ~/.ashlr locus.enforce / locus.firm when env LOCUS_ENFORCE is unset.
   const decision = decideLocusSessionRun(env, readLocusConfigFromAshlr());
 

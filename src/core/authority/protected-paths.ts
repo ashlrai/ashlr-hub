@@ -78,6 +78,9 @@ export interface ProtectedPathHit {
  *     adoption rests on — a fleet that could edit them could grade itself.
  */
 export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
+  // Captured delegated authority and child identity admission are owner-controlled.
+  'src/core/integrations/locus-job-env.ts',
+  'src/core/integrations/locus.ts',
   // Pure display projection imported by existing Tier-1 Telegram prose helpers.
   'src/core/vision/leader-display-text.ts',
   // Authority and daemon

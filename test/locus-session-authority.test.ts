@@ -65,6 +65,27 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); rmSync(home, { recursive: true, force: true }); });
 
 describe('actual Phantom Locus adapter live session contract', () => {
+  it.each([
+    { LOCUS_SESSION_ID: 'ses_012abc' },
+    { LOCUS_EXECUTOR_CAPABILITY: 'a'.repeat(64) },
+    { LOCUS_SESSION_ID: '', LOCUS_EXECUTOR_CAPABILITY: 'a'.repeat(64) },
+    { LOCUS_SESSION_ID: 'ses_012abc', LOCUS_EXECUTOR_CAPABILITY: '' },
+  ])('refuses partial or empty inherited authority before callbacks', async markers => {
+    const callback = vi.fn();
+    await expect(runWithLocusSessionIfConfigured(callback, { env: markers })).rejects.toThrow(/both be present/);
+    expect(callback).not.toHaveBeenCalled();
+    expect(mocked.spawn).not.toHaveBeenCalled();
+  });
+
+  it.each([' ', 'invalid-session', 'ses_012abc '])('refuses malformed inherited identity %j before callbacks', async session => {
+    const callback = vi.fn();
+    await expect(runWithLocusSessionIfConfigured(callback, { env: {
+      LOCUS_SESSION_ID: session, LOCUS_EXECUTOR_CAPABILITY: 'a'.repeat(64), LOCUS_ENFORCE: 'off',
+    } })).rejects.toThrow(/identity or executor authority is invalid/);
+    expect(callback).not.toHaveBeenCalled();
+    expect(mocked.spawn).not.toHaveBeenCalled();
+  });
+
   it('internal Locus probes use private job identity without ambient credential or control authority', async () => {
     const info = identity(); mocked.spawn.mockReturnValue(reply(info));
     vi.stubEnv('OPENAI_API_KEY', 'synthetic-ambient-key');

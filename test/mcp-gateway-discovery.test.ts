@@ -336,6 +336,13 @@ describe('gateway deadlines and termination', () => {
 });
 
 describe('delegated job gateway isolation', () => {
+  it.each(['LOCUS_SESSION_ID', 'LOCUS_EXECUTOR_CAPABILITY'])('refuses inherited %s before downstream or native startup without ALS', async key => {
+    vi.stubEnv(key, 'synthetic-unverified');
+    await expect(startGateway({ servers: [{ name: 'alpha', command: 'alpha', args: [], source: 'test' }] })).rejects.toThrow('delegated Locus job');
+    expect(state.server).toBeNull();
+    expect(state.attempts).toEqual([]);
+  });
+
   it('refuses persistent gateway startup before downstream or native effects in a delegated job', async () => {
     await runInLocusJobEnv({ HOME: '/synthetic-job-home', LOCUS_BINDING: 'synthetic-job' }, async () => {
       await expect(startGateway({ servers: [{ name: 'alpha', command: 'alpha', args: [], source: 'test' }] })).rejects.toThrow('delegated Locus job');

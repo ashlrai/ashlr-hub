@@ -161,7 +161,7 @@ import {
 } from '../sandbox/execution-leases.js';
 import { addUsage, newUsage, estCostUsd } from './budget.js';
 import { withToolEnv } from '../env-bridge.js';
-import { assertLocusJobDispatch, getLocusJobEnv, hasLocusJobEnv } from '../integrations/locus-job-env.js';
+import { assertLocusJobDispatch, getLocusJobEnv, hasInheritedLocusSession, hasLocusJobEnv } from '../integrations/locus-job-env.js';
 import { canonicalizeProposalDiff, scrubSecrets } from '../util/scrub.js';
 import { selectInboxStore } from '../seams/inbox.js';
 import {
@@ -3416,8 +3416,8 @@ export async function runApiModelSandboxed(
     ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
     : writeSandboxedRunAgentAction;
   const spec = resolveEngineSpec(engine, cfg);
-  if (hasLocusJobEnv() || !spec || spec.kind !== 'api-model' || !spec.api) {
-    const outcome = proposalOutcome('engine-unsupported', hasLocusJobEnv()
+  if (hasLocusJobEnv() || hasInheritedLocusSession() || !spec || spec.kind !== 'api-model' || !spec.api) {
+    const outcome = proposalOutcome('engine-unsupported', hasLocusJobEnv() || hasInheritedLocusSession()
       ? 'Locus sealed jobs require scoped child engines; in-process API providers have no qualified job credential contract'
       : `engine "${engine}" is not an api-model — cannot run in-process`);
     const unsupportedRunId = `run-${Date.now().toString(36)}`;

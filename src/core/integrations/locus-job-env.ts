@@ -42,6 +42,12 @@ export function hasLocusJobEnv(): boolean {
   return jobs.getStore() !== undefined;
 }
 
+/** Child processes lose ALS. Inherited delegation must be captured and verified before effects. */
+export function hasInheritedLocusSession(): boolean {
+  return process.env.LOCUS_SESSION_ID !== undefined ||
+    process.env.LOCUS_EXECUTOR_CAPABILITY !== undefined;
+}
+
 /** Read-only private snapshot for gates and child builders; never log or expose to a model. */
 export function getLocusJobEnv(): Readonly<NodeJS.ProcessEnv> {
   return jobs.getStore()?.env ?? process.env;
@@ -50,7 +56,12 @@ export function getLocusJobEnv(): Readonly<NodeJS.ProcessEnv> {
 /** Recheck live authority at dispatch, including work delayed by unrelated awaits. */
 export function assertLocusJobDispatch(): void {
   const context = jobs.getStore();
-  if (!context) return;
+  if (!context) {
+    if (hasInheritedLocusSession()) {
+      throw new Error('Inherited Locus session requires live verification before dispatch');
+    }
+    return;
+  }
   if (!context.active) throw new Error('Locus job has ended; refusing delayed dispatch');
   const result: unknown = context.validate?.();
   if (result && typeof (result as { then?: unknown }).then === 'function') {

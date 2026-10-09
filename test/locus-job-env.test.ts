@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { runInLocusJobEnv, getLocusJobEnv, assertLocusJobDispatch, withLocusJobChildEnv } from '../src/core/integrations/locus-job-env.js';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { runInLocusJobEnv, getLocusJobEnv, hasInheritedLocusSession, hasLocusJobEnv, assertLocusJobDispatch, withLocusJobChildEnv } from '../src/core/integrations/locus-job-env.js';
 import { withToolEnv } from '../src/core/env-bridge.js';
 import { spawnEngine } from '../src/core/run/engines.js';
 import { runApiModelSandboxed } from '../src/core/run/sandboxed-engine.js';
@@ -22,6 +25,36 @@ function deferred() {
 }
 
 describe('private Locus job environments', () => {
+  it('an actual child inheriting delegated markers refuses shared gateway startup without ALS', () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'locus-inherited-gateway-')));
+    const gatewayUrl = new URL('../src/core/mcp-gateway.ts', import.meta.url).href;
+    const code = `const {startGateway}=await import(${JSON.stringify(gatewayUrl)});try{await startGateway({servers:[]});throw Error('gateway started');}catch(error){if(!error.message.includes('delegated Locus job'))throw error;console.log(JSON.stringify({refused:true}));}`;
+    try {
+      const stdout = execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', code], {
+        env: { HOME: home, USERPROFILE: home, PATH: process.env.PATH, ASHLR_HOME: join(home, 'ashlr'),
+          XDG_CONFIG_HOME: join(home, 'config'), LOCUS_SESSION_ID: 'ses_synthetic',
+          LOCUS_EXECUTOR_CAPABILITY: 'a'.repeat(64), ASHLR_NO_HEAL: '1' },
+        encoding: 'utf8', timeout: 20_000, maxBuffer: 64 * 1024,
+      });
+      expect(JSON.parse(stdout)).toEqual({ refused: true });
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it.each([
+    ['LOCUS_SESSION_ID', 'synthetic-unverified-session'],
+    ['LOCUS_SESSION_ID', ''],
+    ['LOCUS_EXECUTOR_CAPABILITY', 'synthetic-unverified-executor'],
+    ['LOCUS_EXECUTOR_CAPABILITY', ''],
+  ])('refuses uncaptured inherited %s even when malformed or incomplete', (key, value) => {
+    vi.stubEnv(key, value);
+    try {
+      expect(hasLocusJobEnv()).toBe(false);
+      expect(hasInheritedLocusSession()).toBe(true);
+      expect(() => assertLocusJobDispatch()).toThrow('requires live verification');
+      expect(() => withLocusJobChildEnv()).toThrow('requires live verification');
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it('captures an immutable copy and strips control authority', async () => {
     const original = env('a');
     await runInLocusJobEnv(original, async () => {
@@ -137,6 +170,18 @@ describe('private Locus job environments', () => {
       expect(result.proposalOutcome?.reason).toContain('no qualified job credential contract');
       expect(result.state.usage.steps).toBe(0);
     });
+  });
+
+  it('refuses inherited API execution without ALS before sandbox creation or provider contact', async () => {
+    vi.stubEnv('LOCUS_EXECUTOR_CAPABILITY', 'synthetic-incomplete');
+    try {
+      const result = await runApiModelSandboxed('local-coder', 'must not dispatch', config,
+        { sourceRepo: '/synthetic/nonexistent-repo', deferTerminalAction: true });
+      expect(result.state.status).toBe('failed');
+      expect(result.proposalOutcome?.kind).toBe('engine-unsupported');
+      expect(result.proposalOutcome?.reason).toContain('no qualified job credential contract');
+      expect(result.state.usage.steps).toBe(0);
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it('omits unqualified daemon config paths even when supplied explicitly in the captured job', async () => {

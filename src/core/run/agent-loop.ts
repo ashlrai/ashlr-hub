@@ -31,7 +31,7 @@ import type {
   ChatResult,
   ToolExecutor,
 } from '../types.js';
-import { assertLocusJobDispatch, hasLocusJobEnv } from '../integrations/locus-job-env.js';
+import { assertLocusJobDispatch, hasInheritedLocusSession, hasLocusJobEnv } from '../integrations/locus-job-env.js';
 import { fitTaskContext } from './context-window.js';
 import { addUsage, overBudget, newUsage } from './budget.js';
 import { nullSink } from './streaming.js';
@@ -152,7 +152,7 @@ export async function runTask(
   // Never throws — session refuse/mint failures become task.status='failed'.
   try {
     return await runWithLocusSessionIfConfigured(async () => {
-      if (hasLocusJobEnv()) {
+      if (hasLocusJobEnv() || hasInheritedLocusSession()) {
         throw new LocusSessionConfigError(
           'Locus sealed jobs require scoped child engines; in-process provider clients have no qualified job credential contract',
         );
