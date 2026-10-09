@@ -37,7 +37,7 @@ function seatTierOf(seat: Pick<VerseSeat, 'engine' | 'models'>) {
 export const ENGINE_LABEL: Record<VerseEngine, string> = {
   claude: 'Claude',
   codex: 'Codex',
-  grok: 'Grok',
+  grok: 'Grok Build',
   local: 'Local',
   devin: 'Devin',
 };

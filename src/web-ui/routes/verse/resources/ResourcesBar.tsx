@@ -74,6 +74,7 @@ const LEVEL_OF_STATUS: Readonly<Record<AccountStatus['kind'], Level>> = {
 export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolean; now: number; pendingSeatIds?: readonly string[]; devinConsumption?: unknown }): BarRow[] {
   const out: BarRow[] = [];
   for (const row of rows) {
+    const surfaceLabel = row.engine === 'grok' && row.label !== 'Grok Build' ? ' · Grok Build' : '';
     if (row.engine === 'devin' && row.seatId === 'devin') {
       const consumption = devinConsumptionEvidence(opts.devinConsumption, opts.now);
       out.push({ key: row.seatId, engine: 'devin', name: row.label, leftPercent: null, level: 'unknown',
@@ -137,8 +138,9 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
         value: row.engine === 'codex' ? historicalValue : recordedLeft === null ? 'last reading' : `${usedPercentText(recordedLeft)} last`,
         ...(creditLabel === undefined ? {} : { creditLabel, creditHeld }),
         ...(exactCreditBalance === undefined ? {} : { exactCreditBalance }),
-        summary: `${row.label}: last known usage · current usage unconfirmed${creditSummary}`,
+        summary: `${row.label}${surfaceLabel}: last known usage · current usage unconfirmed${creditSummary}`,
         detail: [`Recorded ${new Date(history.observedAt).toLocaleString()}`, 'Historical reading; current availability and resets are unconfirmed.',
+          ...(row.engine === 'grok' ? ['Grok Build · native CLI; Grok Bot has a separate allowance.'] : []),
           ...history.windows.map(window => `${window.id}: ${window.limitReached ? 'limit was flagged' : window.usedPercent === null ? 'usage unknown' : `${usedPercentText(window.usedPercent)} used`}${window.resetsAt ? ` · recorded reset ${new Date(window.resetsAt).toLocaleString()}` : ''}`), ...creditDetail],
       });
       continue;
@@ -167,6 +169,7 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
       return `${w.label.charAt(0).toUpperCase()}${w.label.slice(1)}: ${used}${reset ? ` · resets ${reset}` : ''}`;
     });
     detail.push(...creditDetail);
+    if (row.engine === 'grok') detail.push('Grok Build · native CLI; Grok Bot has a separate allowance.');
     if (row.windows.length === 0) detail.push('Usage is not reported by this resource.');
     if (row.lastReading) detail.push('Last known usage · latest check failed.');
     if (row.reserve) detail.push(row.reserve.label);
@@ -181,7 +184,7 @@ export function barRows(rows: readonly CapacityRow[], opts: { healthRead: boolea
       value,
       ...(creditLabel === undefined ? {} : { creditLabel, creditHeld }),
         ...(exactCreditBalance === undefined ? {} : { exactCreditBalance }),
-      summary: `${row.label}: ${status.label}${status.detail ? ` · ${status.detail}` : ''}${row.engine === 'codex' ? ` · subscription ${value}` : ''}${creditSummary}${creditValue !== null ? ` · estimated credit value ${creditValue}` : ''}`,
+      summary: `${row.label}${surfaceLabel}: ${status.label}${status.detail ? ` · ${status.detail}` : ''}${row.engine === 'codex' ? ` · subscription ${value}` : ''}${creditSummary}${creditValue !== null ? ` · estimated credit value ${creditValue}` : ''}`,
       detail,
     });
   }

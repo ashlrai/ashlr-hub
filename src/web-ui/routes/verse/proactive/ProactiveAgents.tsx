@@ -122,6 +122,7 @@ export function ProactiveAgents() {
     {read.status !== 'error' ? <ul className={styles.list}>{profiles.map(profile => <li key={profile.id} className={styles.row}>
       <div className={styles.identity}><Avatar avatar={profile.avatar} /><div><h3>{profile.displayName}</h3><p>{PROVIDERS[profile.identity.provider]}</p></div></div>
       <p className={styles.responsibility}>{profile.responsibility || 'No responsibility added yet.'}</p>
+      {profile.identity.provider === 'grok-bot' ? <p className={styles.note}>Bot allowance and reset unknown · separate from Grok Build.</p> : null}
       <div className={styles.rowActions}><span className={styles.state}>{profile.enabled ? 'Planning preference on' : 'Planning preference off'}</span>
         <Button size="sm" variant="subtle" onClick={() => open(profile)} disabled={busy}>Edit {profile.displayName}</Button></div>
       <details className={styles.evidence}><summary>Connection and capabilities</summary>

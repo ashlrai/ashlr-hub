@@ -47,13 +47,15 @@ describe('proactive agent profiles', () => {
     expect(screen.queryByText('Connected')).not.toBeInTheDocument();
   });
   it('offers official provider setup while keeping profile metadata distinct from commissioned transport', async () => {
-    server([profile(), profile({ id: 'pa_grok', identity: { provider: 'grok-bot', accountId: 'account-grok', agentId: 'bot-one' } }),
+    const { calls } = server([profile(), profile({ id: 'pa_grok', identity: { provider: 'grok-bot', accountId: 'account-grok', agentId: 'bot-one' } }),
       profile({ id: 'pa_meta', identity: { provider: 'meta-muse', accountId: 'account-meta', agentId: 'muse-one' } })]);
     render(<ProactiveAgents />);
     expect(await screen.findByRole('link', { name: 'OpenAI plugin events setup ↗' })).toHaveAttribute('href', 'https://developers.openai.com/plugins/build/mcp-events');
     expect(screen.getByRole('link', { name: 'Grok Bot routine setup ↗' })).toHaveAttribute('href', 'https://cursor.com/help/grok-bot/routines');
     expect(screen.getByRole('link', { name: 'Meta Muse product guide ↗' })).toHaveAttribute('href', 'https://ai.meta.com/muse/');
     expect(screen.getByText(/Meta Model API funding does not connect your personal Muse/)).toBeInTheDocument();
+    expect(screen.getByText('Bot allowance and reset unknown · separate from Grok Build.')).toBeVisible();
+    expect(calls.every(call => call.method === 'GET' && call.path === '/api/verse/proactive-agents')).toBe(true);
   });
   it('refuses unsupported response versions instead of advertising an invented connection', async () => {
     server([], call => call.method === 'GET' ? json({ schemaVersion: 2, profiles: [profile()] }) : undefined);

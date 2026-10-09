@@ -298,6 +298,8 @@ describe('ResourcesDrawer — accounts', () => {
     expect(spent.getByRole('button', { name: 'Check again: Personal Codex' })).toBeInTheDocument();
 
     const out = within(cardOf('Grok'));
+    expect(out.getByText('Grok Build · native CLI')).toBeInTheDocument();
+    expect(within(cardOf('Cash Margin Partners')).queryByText('Grok Build · native CLI')).not.toBeInTheDocument();
     expect(out.getByText('Signed out')).toBeInTheDocument();
     expect(out.getByText('· reconnect to use it')).toBeInTheDocument();
     expect(out.getByRole('button', { name: 'Reconnect: Grok' })).toBeInTheDocument();
