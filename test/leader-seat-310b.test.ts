@@ -56,6 +56,7 @@ function deps(opts: {
   /** false = the judges' credential hook is not available in this build. */
   claudeHook?: boolean;
   native?: boolean;
+  llama?: boolean;
 }): LeaderSeatDeps {
   const calls = opts.calls ?? [];
   return {
@@ -73,6 +74,7 @@ function deps(opts: {
     capacityFromSeat: (s) => capacityFromSeat(s),
     recordDecision: () => undefined,
     transports: {
+      ...(opts.llama ? { llama: (binding: import('../src/core/vision/local-leader-transport.js').LocalLeaderBinding) => async () => { calls.push(`llama ${binding.baseUrl} ${binding.servingModel}`); return '{}'; } } : {}),
       ...(opts.native ? {native:(seatId:string,engine:string,model:string)=>async()=>{calls.push(`${engine} ${seatId} ${model}`);return '{}';}} : {}),
       local: (base, model) => async () => { calls.push(`local ${base} ${model}`); return '{}'; },
       grok: (launcher, model) => async () => { calls.push(`grok ${launcher.join(' ')} ${model}`); return '{}'; },
@@ -103,6 +105,22 @@ describe('resolveLeaderSeat', () => {
     // Grok with no fresh reading is ineligible (unknown usage is not headroom) → local.
     const stale = await resolveLeaderSeat(deps({ candidates: [LOCAL, GROK], snapshot: [] }), { deep: false, promptChars: 20_000 });
     expect(stale.ok && stale.choice.seatId).toBe(LOCAL.seat.id);
+  });
+
+  it('uses the explicitly bound llama transport instead of the legacy Ollama endpoint', async () => {
+    const calls: string[] = [];
+    const candidate: LeaderSeatCandidate = { ...LOCAL, localDispatch: { kind: 'llama-server', binding: {
+      model: LOCAL.seat.models[0]!.id, servingModel: '/inert/weights', contextWindow: LOCAL.seat.contextWindow!,
+      baseUrl: 'http://127.0.0.1:8080/v1', blobPath: '/inert/weights', manifestPath: '/inert/manifest', epoch: 'fixture',
+    } } };
+    const result = await resolveLeaderSeat(deps({ candidates: [candidate], standing: null, llama: true, calls }), { deep: false, promptChars: 100 });
+    expect(result.ok).toBe(true); if (result.ok) await result.complete('s', 'u');
+    expect(calls).toEqual(['llama http://127.0.0.1:8080/v1 /inert/weights']);
+    for (const binding of [null, { ...candidate.localDispatch!.binding!, contextWindow: 1 }]) {
+      const held = await resolveLeaderSeat(deps({ candidates: [{ ...candidate, localDispatch: { kind: 'llama-server', binding } }], standing: null, llama: true, calls }), { deep: false, promptChars: 100 });
+      expect(held.ok).toBe(false); if (!held.ok) expect(held.reason).toMatch(/binding/);
+    }
+    expect(calls).toHaveLength(1);
   });
 
   it('permits granted Claude for ordinary memos, check-ins and replies while retaining reserves', async () => {

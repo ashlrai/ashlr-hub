@@ -17,6 +17,7 @@ import type { SeatCapacity } from '../routing/headroom.js';
 import { seatTier, tierRank } from '../routing/tiers.js';
 import { tierPreference } from '../routing/router.js';
 import type { NativeRoleEngine, RoleCompletionMetrics } from '../run/role-completion.js';
+import type { LocalLeaderBinding } from './local-leader-transport.js';
 import { subscriptionOnlyCurrent } from '../routing/subscription-only.js';
 import { peekDevinCliExecutionBinding, refreshDevinCliExecutionBinding } from '../devin/cli-admission.js';
 import type { EffectivePolicy } from '../authority/types.js';
@@ -49,6 +50,8 @@ export interface LeaderSeatCandidate {
   launcher: string[] | null;
   /** Ollama base (no /v1) for local seats. */
   ollamaBaseUrl: string | null;
+  /** Source-owned actual local runtime binding; null is explicitly unavailable. */
+  localDispatch?: { kind: 'llama-server'; binding: LocalLeaderBinding | null };
 }
 
 /**
@@ -68,6 +71,7 @@ export type LeaderCallOptions = Partial<LeaderCallBudget>;
 
 export interface LeaderTransports {
   local(baseUrl: string, model: string, opts?: LeaderCallOptions): LeaderComplete;
+  llama?(binding: LocalLeaderBinding, opts?: LeaderCallOptions): LeaderComplete;
   grok(launcher: readonly string[], model: string, opts?: LeaderCallOptions): LeaderComplete;
   claude(launcher: readonly string[], model: string, credential: LeaderClaudeCredential, opts?: LeaderCallOptions): LeaderComplete;
   /** Host-issued account-bound dispatcher; absent older builds retain only their qualified legacy transports. */
@@ -258,8 +262,16 @@ function buildSeat(deps: LeaderSeatDeps, chosen: LeaderSeatCandidate, opts: { mo
   const budget = leaderCallBudget(engine, model, opts.mode, opts.promptChars);
   let complete: LeaderComplete;
   if (engine === 'local') {
-    if (!chosen.ollamaBaseUrl) return { ok: false, reason: 'The local seat has no endpoint.' };
-    complete = deps.transports.local(chosen.ollamaBaseUrl, model, budget);
+    if (chosen.localDispatch?.kind === 'llama-server') {
+      const binding = chosen.localDispatch.binding;
+      if (!binding || binding.model !== model || binding.contextWindow !== chosen.seat.contextWindow || !deps.transports.llama) {
+        return { ok: false, reason: 'The selected local model has no current llama-server model and context binding.' };
+      }
+      complete = deps.transports.llama(binding, budget);
+    } else {
+      if (!chosen.ollamaBaseUrl) return { ok: false, reason: 'The local seat has no endpoint.' };
+      complete = deps.transports.local(chosen.ollamaBaseUrl, model, budget);
+    }
   } else {
     const verdict = enginePermitted(engine, deps.cfg);
     if (!verdict.permitted) return { ok: false, reason: `Local-only mode refuses ${engine}.` };
@@ -591,6 +603,10 @@ const GROK_CLI_ENGINE = 'grok-cli';
 
 export function defaultLeaderTransports(cfg: AshlrConfig): LeaderTransports {
   return {
+    llama: (binding, opts) => async (system, user) => {
+      const { llamaLeaderTransport } = await import('./local-leader-transport.js');
+      return llamaLeaderTransport(binding, cfg, opts)(system, user);
+    },
     native: (seatId,engine,model,admitted,opts) => async(system,user) => {
       const {nativeRoleCompletion}=await import('../run/role-completion.js');
       const {readCapacitySnapshot}=await import('../routing/budget-store.js');
@@ -689,12 +705,17 @@ export async function loadDefaultLeaderSeatDeps(cfg: AshlrConfig): Promise<Leade
           await refreshDevinCliExecutionBinding(model.id,{admitted:()=>effective.currentStandingPolicy()?.spend.seats[devinSeat.id]?.roles.includes('leader') === true});
         }
       }
+      const llamaSelected = discovery.localRuntime.dispatch?.lane === 'llama-server';
+      const localTransport = llamaSelected ? await import('./local-leader-transport.js') : null;
+      const runtime = localTransport ? await localTransport.readLocalLeaderRuntime(cfg) : null;
       return discovery.seats.map((seat) => {
         const launch = discovery.launches.get(seat.id);
         return {
           seat,
           launcher: launch?.launcher ? [...launch.launcher] : null,
           ollamaBaseUrl: seat.engine === 'local' ? launch?.ollamaBaseUrl ?? null : null,
+          ...(seat.engine === 'local' && llamaSelected ? { localDispatch: { kind: 'llama-server' as const,
+            binding: localTransport!.bindLocalLeaderModel(runtime, seat.models[0]?.id ?? '', seat.contextWindow) } } : {}),
         };
       });
     },
