@@ -820,7 +820,7 @@ describe('M280 — Locus CI session isolation', () => {
     }
   });
 
-  it('overlays mint handle env on process.env for the sandboxed run only', async () => {
+  it('captures mint handle env privately for the sandboxed run only', async () => {
     const prev = snapshotLocusEnv();
     const seen: { sessionId?: string } = {};
     try {
@@ -837,8 +837,9 @@ describe('M280 — Locus CI session isolation', () => {
               binding: string;
               env: NodeJS.ProcessEnv;
             } | null) => Promise<unknown>,
-          ) =>
-            fn({
+          ) => {
+            const { runInLocusJobEnv } = await import('../src/core/integrations/locus-job-env.js');
+            const handle = {
               sessionId: 'sess-conductor-mint',
               binding: 'ci-acme',
               env: {
@@ -846,12 +847,14 @@ describe('M280 — Locus CI session isolation', () => {
                 LOCUS_BINDING: 'ci-acme',
                 LOCUS_HOME: '/tmp/locus-conductor-mint',
               },
-            }),
+            };
+            return runInLocusJobEnv(handle.env, () => fn(handle));
+          },
         };
       });
 
       mockRunEngineSandboxed.mockImplementation(async () => {
-        seen.sessionId = process.env.LOCUS_SESSION_ID;
+        seen.sessionId = (await import('../src/core/integrations/locus-job-env.js')).getLocusJobEnv().LOCUS_SESSION_ID;
         return {
           state: { id: 'run-locus-mint', status: 'done' },
           proposalId: 'prop-abc',
@@ -872,7 +875,7 @@ describe('M280 — Locus CI session isolation', () => {
       expect(result.proposalsFiled).toBe(1);
       expect(result.errors).toHaveLength(0);
       expect(seen.sessionId).toBe('sess-conductor-mint');
-      // Restored after sandboxed body — must not leak mint session into ambient env.
+      // The private context must never leak into ambient env.
       expect(process.env.LOCUS_SESSION_ID).toBeUndefined();
     } finally {
       restoreLocusEnv(prev);
