@@ -36,8 +36,11 @@ Dollar references are not invoices, purchased-credit prices, or attributed task 
 ## Grok Build and Grok Bot
 
 Grok Build's native account reading, Grok Bot's included allowance and xAI API
-credits are separate resources. Build reports its own billing window and reset;
-Phantom does not copy that observation into a Bot profile or API wallet.
+credits are separate resources. The native CLI reports a consumer billing
+window and reset, which can be Build-specific or shared across supported
+consumer use. Usage labels distinguish these scopes and their reported weekly
+or monthly periods. Phantom does not copy the observation into a Bot profile
+or API wallet.
 
 [Grok Bot's included usage](https://cursor.com/help/grok-bot/plans) has a weekly
 meter on the linked Cursor account. On-demand usage is a separate paid pool;
