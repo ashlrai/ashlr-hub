@@ -1,3 +1,4 @@
+import { formatProductDisplayText } from '../../../../core/vision/leader-display-text.js';
 /**
  * routes/verse/autonomy/GoalsBacklogPanel.tsx — read-only context for what the
  * loop is aiming at and what it has queued.
@@ -65,8 +66,8 @@ export function GoalsBacklogPanel() {
                   const done = goal.progress ? formatWholePercent(goal.progress.fractionDone) : UNKNOWN;
                   return (
                     <div className={styles.summaryRow} key={goal.id}>
-                      <span className={styles.summaryTitle} title={goal.objective}>
-                        {goal.objective}
+                      <span className={styles.summaryTitle} title={formatProductDisplayText(goal.objective)}>
+                        {formatProductDisplayText(goal.objective)}
                       </span>
                       <span className={styles.summaryMeta}>
                         {done} · {goal.status}

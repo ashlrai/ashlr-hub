@@ -17,12 +17,28 @@ import { SectionVisibilityProvider, usePollWhileVisible } from '../shell/section
 import { buildCapacityRows, type CapacityRow, type CapacityWindowRow } from '../usage/capacity-strip-model.js';
 import { capacity, nativeSeat, seatWindow } from '../seat-fixtures.test-support.js';
 import { barRows, ResourcesBar } from './ResourcesBar.js';
+import { ENGINE_LABEL, seatLabel } from '../verse-model.js';
 import { creditPoolsQuery } from './CreditPools.js';
 import type { CreditPoolsRead, CreditPoolsReadV2 } from '../../../../core/verse/credit-pools-api-types.js';
 import { getResourcesUi, reloadResourcesUiForTest, RESOURCES_STORAGE_KEY, setResourcesBar, openResources, closeResources } from './resources-store.js';
 import { reloadResourceOrderForTest, RESOURCE_ORDER_KEY } from './resource-order.js';
 
 const NOW = Date.parse('2026-09-25T02:00:00Z');
+
+describe('Grok Build display identity', () => {
+  it('names the built-in native surface without replacing saved account labels or quota', () => {
+    expect(ENGINE_LABEL.grok).toBe('Grok Build');
+    expect(seatLabel([], { seatId: 'grok-custom', engine: 'grok' })).toBe('Grok Build');
+    const saved = { ...nativeSeat(capacity({}), { id: 'grok-custom', engine: 'grok', label: 'Team research' }) };
+    expect(seatLabel([saved], { seatId: saved.id, engine: 'grok' })).toBe('Team research');
+    const projected = barRows([row({ seatId: saved.id, label: saved.label })], { healthRead: true, now: NOW });
+    expect(projected[0]).toMatchObject({ key: 'grok-custom', engine: 'grok', name: 'Team research', leftPercent: 72 });
+    expect(projected[0]!.summary).toContain('Team research · Grok Build');
+    expect(projected[0]!.detail).toContain('Grok Build · native CLI; Grok Bot has a separate allowance.');
+    expect(projected).toHaveLength(1);
+    expect(barRows([row({ label: 'Grok Build' })], { healthRead: true, now: NOW })[0]!.summary).not.toContain('Grok Build · Grok Build');
+  });
+});
 
 beforeEach(() => { localStorage.removeItem(RESOURCE_ORDER_KEY); reloadResourceOrderForTest(); });
 afterEach(() => { localStorage.removeItem(RESOURCE_ORDER_KEY); reloadResourceOrderForTest(); });

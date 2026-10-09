@@ -436,6 +436,8 @@ export interface LocalModelsSnapshot {
   memoryBudgetBytes: number | null;
   /** Machine memory reported free right now, or null. */
   freeMemoryBytes: number | null;
+  /** Optional host-wide counter interval; null/absent is not zero CPU. */
+  cpu?: { usedPercent: number; intervalMs: number } | null;
   reason: string | null;
   /** Per-runtime reachability and staleness. Empty on a flat legacy body. */
   runtimes: LocalRuntimeStatus[];
@@ -759,6 +761,14 @@ function projectRuntimeReport(
   };
 }
 
+function projectHostCpu(raw: unknown): LocalModelsSnapshot['cpu'] {
+  const value = record(raw);
+  if (!value) return null;
+  const usedPercent = num(value, 'usedPercent'), intervalMs = num(value, 'intervalMs');
+  return usedPercent !== null && usedPercent >= 0 && usedPercent <= 100 && intervalMs !== null && intervalMs > 0
+    ? { usedPercent, intervalMs } : null;
+}
+
 /**
  * Owner T reports local availability per RUNTIME (`ollama`, `lmStudio`) with a
  * shared `machine` budget. This panel answers one question — "what can I run
@@ -791,6 +801,7 @@ export function projectLocalModels(raw: unknown): LocalModelsSnapshot | null {
         num(root, 'memoryBudgetBytes') ??
         num(root, 'memoryBudget'),
       freeMemoryBytes: machine ? num(machine, 'freeMemoryBytes') : null,
+      cpu: projectHostCpu(machine?.['cpu']),
       reason: reachable
         ? null
         : (reports.map((x) => x.status.reason).find((x) => x !== null) ?? null),
@@ -807,6 +818,7 @@ export function projectLocalModels(raw: unknown): LocalModelsSnapshot | null {
     models: rawModels.map((m) => projectLocalModel(m, null)).filter((m): m is LocalModel => m !== null),
     memoryBudgetBytes: num(root, 'memoryBudgetBytes') ?? num(root, 'memoryBudget'),
     freeMemoryBytes: num(root, 'freeMemoryBytes'),
+    cpu: projectHostCpu(root['cpu']),
     reason: str(root, 'reason'),
     // A flat legacy body carries no per-runtime reachability, so there is
     // nothing to attribute and nothing to call stale. An empty list says that

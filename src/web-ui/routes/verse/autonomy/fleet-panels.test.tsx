@@ -14,6 +14,9 @@ import userEvent from '@testing-library/user-event';
 import { FleetPanel } from './FleetPanel.js';
 import { LocalOnlyPanel } from './LocalOnlyPanel.js';
 import { LocalRuntimePanel } from './LocalRuntimePanel.js';
+import { SteerPanel } from '../fleet/SteerPanel.js';
+import { FLEET_CONTROL_KEYS } from '../fleet/fleet-control-queries.js';
+import type { FleetControlQueueV1 } from '../../../../core/fleet/fleet-control-types.js';
 import { GoalsBacklogPanel } from './GoalsBacklogPanel.js';
 import { evictAll, getQuerySnapshot, runQuery } from '../../../data/cache.js';
 import { useFleetPolling } from './fleet-queries.js';
@@ -217,6 +220,25 @@ describe('GoalsBacklogPanel disclosures', () => {
     vi.stubGlobal('fetch', fetcher);
     return fetcher;
   }
+
+  it('projects a steering goal label without changing its stored objective or retarget identifier', async () => {
+    const queue: FleetControlQueueV1 = { v: 1, tasks: [], goals: [{ id: 'old-goal', objective: 'Improve Ashlr Verse',
+      status: 'active', project: null, missionBound: false }], targets: { paths: ['/repo'], repos: [] }, reason: null };
+    const original = JSON.stringify(queue);
+    await runQuery(FLEET_CONTROL_KEYS.queue, async () => ok(queue)); vi.stubGlobal('fetch', vi.fn());
+    render(<SteerPanel live={null} now={0} actions={{ act: vi.fn(), busy: false, error: null, clearError: vi.fn(), readOnly: true, dialogs: null }} />);
+    expect(await screen.findByRole('combobox', { name: 'Target repo for Improve Phantom' })).toBeDisabled();
+    expect(screen.getByText('Improve Phantom', { exact: false })).toBeInTheDocument();
+    expect(JSON.stringify(queue)).toBe(original);
+  });
+
+  it('uses current product names in old goal labels without altering the API projection', async () => {
+    const saved = { ...goal(1), objective: 'Improve Ashlrverse; keep `Ashlr Verse`' };
+    const original = JSON.stringify(saved); await seed([saved]); render(<GoalsBacklogPanel />);
+    expect(await screen.findByTitle('Improve Phantom; keep `Ashlr Verse`')).toHaveTextContent('Improve Phantom; keep `Ashlr Verse`');
+    expect(JSON.stringify(saved)).toBe(original);
+    expect(getQuerySnapshot<GoalSummary[]>('goals').data?.[0]?.objective).toBe(saved.objective);
+  });
 
   it('expands every open goal, counts statuses accurately and preserves source order and records', async () => {
     const user = userEvent.setup();

@@ -4,7 +4,7 @@ import {mkdtempSync, writeFileSync, rmSync, symlinkSync, readFileSync} from 'nod
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {parse} from 'yaml';
-import {publisherInput, bindAttestedArtifact, acceptPackageIdentity, verifyHandoff, assertRegistryPackage, assertLatestPromotion, verifyCanonicalProvenance, reconcileRegistry} from '../scripts/canonical-npm-publisher.mjs';
+import {publisherInput, bindAttestedArtifact, acceptPackageIdentity, verifyHandoff, assertRegistryPackage, assertLatestPromotion, verifyCanonicalProvenance, reconcileRegistry, reconcileLatest} from '../scripts/canonical-npm-publisher.mjs';
 const hash = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 const env = {GITHUB_REPOSITORY: 'ashlrai/phantom', GITHUB_REPOSITORY_ID: '1263526319', GITHUB_REPOSITORY_OWNER_ID: '258113726',
   GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/master', GITHUB_SHA: '1'.repeat(40), CANDIDATE_SHA: '2'.repeat(40),
@@ -71,6 +71,10 @@ describe('canonical npm publication admission', () => {
     expect(raw).not.toMatch(/\bnpm pack(?:\s|$)/);
     expect(raw).not.toContain('workflow_call');
     expect(workflow.jobs.publish.env.NODE_AUTH_TOKEN).toBe('');
+    const promotion = workflow.jobs.promote.steps.find((step: {name?: string}) => step.name === 'Promote accepted package and read back latest').run;
+    expect(promotion.match(/npm dist-tag add/g)).toHaveLength(1);
+    expect(promotion.indexOf('npm dist-tag add')).toBeLessThan(promotion.indexOf('latest-readback'));
+    expect(promotion).not.toContain('Latest readback differs');
   });
   it('initializes runner-local npm configuration after runner assignment', () => {
     const workflow = parse(readFileSync(new URL('../.github/workflows/publish-canonical-npm.yml', import.meta.url), 'utf8'));
@@ -112,6 +116,74 @@ describe('canonical publication recovery', () => {
 
 
 describe('public registry processing', () => {
+  const accepted = acceptPackageIdentity(input, pkg, receipt, bytes);
+  const packument = (latest: string) => ({name: accepted.name, 'dist-tags': {latest}});
+  it('reconciles a stale latest read without replaying publication or tag changes', async () => {
+    vi.useFakeTimers();
+    const read = vi.fn().mockResolvedValueOnce(Response.json(packument('3.26.1')))
+      .mockResolvedValueOnce(Response.json(packument(accepted.version)));
+    vi.stubGlobal('fetch', read);
+    try {
+      const pending = reconcileLatest(accepted);
+      await vi.runAllTimersAsync();
+      expect(await pending).toEqual(packument(accepted.version));
+      expect(read).toHaveBeenCalledTimes(2);
+      for (const [url, options] of read.mock.calls) {
+        expect(url).toBe('https://registry.npmjs.org/@ashlr%2Fphantom');
+        expect(options.redirect).toBe('error');
+        expect(options.method).toBeUndefined();
+        expect(options.body).toBeUndefined();
+      }
+    } finally {vi.useRealTimers(); vi.unstubAllGlobals();}
+  });
+  it('retries transient network and registry reads, then confirms exact latest', async () => {
+    vi.useFakeTimers();
+    const read = vi.fn().mockRejectedValueOnce(new Error('network unavailable'))
+      .mockResolvedValueOnce(new Response('', {status: 429}))
+      .mockResolvedValueOnce(new Response('', {status: 503}))
+      .mockResolvedValueOnce(Response.json(packument(accepted.version)));
+    vi.stubGlobal('fetch', read);
+    try {
+      const pending = reconcileLatest(accepted);
+      await vi.runAllTimersAsync();
+      expect(await pending).toEqual(packument(accepted.version));
+      expect(read).toHaveBeenCalledTimes(4);
+    } finally {vi.useRealTimers(); vi.unstubAllGlobals();}
+  });
+  it('bounds permanently stale readback and never reports successful promotion', async () => {
+    vi.useFakeTimers(); const started = Date.now();
+    const read = vi.fn().mockImplementation(() => Promise.resolve(Response.json(packument('3.26.1'))));
+    vi.stubGlobal('fetch', read);
+    try {
+      const rejected = expect(reconcileLatest(accepted)).rejects.toThrow('Latest promotion not confirmed');
+      await vi.runAllTimersAsync(); await rejected;
+      expect(Date.now() - started).toBe(120_000);
+      expect(read).toHaveBeenCalledTimes(7);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {vi.useRealTimers(); vi.unstubAllGlobals();}
+  });
+  it.each([
+    {name: '@other/phantom', 'dist-tags': {latest: '3.27.0'}},
+    {name: '@ashlr/phantom', 'dist-tags': {}},
+    packument('not-a-version'), packument('3.27.1'), packument('4.0.0'),
+  ])('holds corrupt, unknown or superseding latest immediately: %j', async metadata => {
+    vi.useFakeTimers(); const read = vi.fn().mockResolvedValue(Response.json(metadata));
+    vi.stubGlobal('fetch', read);
+    try {
+      await expect(reconcileLatest(accepted)).rejects.toThrow();
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {vi.useRealTimers(); vi.unstubAllGlobals();}
+  });
+  it('holds malformed public JSON immediately rather than treating it as stale success', async () => {
+    vi.useFakeTimers(); const read = vi.fn().mockResolvedValue(new Response('{', {status: 200}));
+    vi.stubGlobal('fetch', read);
+    try {
+      await expect(reconcileLatest(accepted)).rejects.toThrow();
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {vi.useRealTimers(); vi.unstubAllGlobals();}
+  });
   it('waits for a pending version, then accepts only the original bytes', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'phantom-registry-test-'));
     const accepted = acceptPackageIdentity(input, pkg, receipt, bytes);

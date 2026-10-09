@@ -83,12 +83,24 @@ describe('⌘K', () => {
   });
 });
 
-function LeaderCardHarness({ seatNames }: { seatNames?: ReadonlyMap<string, string> } = {}) {
+function LeaderCardHarness({ seatNames, state = leaderState('live') }: { seatNames?: ReadonlyMap<string, string>; state?: ReturnType<typeof leaderState> } = {}) {
   const actions = useSurfaceActions();
-  return <LeaderCard read={{ value: leaderState('live'), available: true, reason: null }} loading={false} actions={actions} seatNames={seatNames} />;
+  return <LeaderCard read={{ value: state, available: true, reason: null }} loading={false} actions={actions} seatNames={seatNames} />;
 }
 
 describe('Command’s Leader card', () => {
+  it('projects old generated memo/action branding without changing stored Leader state', () => {
+    stubSurfaceFetch({ routes: { '/api/verse/leader/thread': { messages: [] } } });
+    const state = leaderState('live'); state.latest!.bottleneck!.statement = 'Ashlrverse needs useful work';
+    state.latest!.move!.statement = 'Improve Ashlr Verse; keep "Ashlrverse"';
+    state.actions[0]!.summary = 'Build Ashlr Hub'; state.actions[0]!.why = 'Ashlrverse should improve';
+    const raw = JSON.stringify(state); render(<LeaderCardHarness state={state} />);
+    expect(screen.getByText('Phantom needs useful work')).toBeInTheDocument();
+    expect(screen.getByText('Improve Phantom; keep "Ashlrverse"')).toBeInTheDocument();
+    expect(screen.getByText('Build Phantom')).toBeInTheDocument();
+    expect(JSON.stringify(state)).toBe(raw);
+  });
+
   it('previews the Leader’s latest message and opens the composer on Mind', async () => {
     stubSurfaceFetch({ routes: { '/api/verse/leader/thread': { messages: [...threadMessages(), msg({ id: 'z', at: new Date().toISOString(), channel: 'telegram', text: '**Lanes** raised. See [memo](https://x).' })] } } });
     render(<LeaderCardHarness />);

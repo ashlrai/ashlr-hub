@@ -132,6 +132,48 @@ function graph(rows, objects, parsed) {
   return { index, nodes, closure };
 }
 
+// Vitest JSON spans the first through last test, not import/transform or whole
+// runner service time. These optional measurements cannot authorize inheritance.
+function reportTimings(raw, modules, lane) {
+  const laneStart = Date.parse(lane.startedAt); const laneEnd = Date.parse(lane.finishedAt);
+  const timestamp = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
+  return modules.map((module, index) => {
+    const result = raw.testResults[index]; const executedCases = module.cases.filter((row) => row.state === 'passed').length;
+    const start = result.startTime; const end = result.endTime;
+    let unknownReason = null;
+    if (!executedCases) unknownReason = 'no-executed-cases';
+    else if (start === undefined || end === undefined) unknownReason = 'timing-unreported';
+    else if (!timestamp(start) || !timestamp(end) || end < start) unknownReason = 'timing-invalid';
+    else if (start < laneStart || end > laneEnd) unknownReason = 'timing-outside-lane';
+    return { module: module.file, executedCases, testSpanMs: unknownReason === null ? end - start : null, unknownReason };
+  });
+}
+
+function timingSummary(head, descriptors) {
+  if (!head) return { scope: 'reporter-test-spans', moduleTimingCoverage: 'unobserved', laneElapsedMs: null,
+    moduleOccurrences: null, measuredModuleOccurrences: null, unknownModuleOccurrences: null,
+    testSpanSumMs: null, measuredUnchangedModuleOccurrences: null, observedUnchangedTestSpanSumMs: null, rankedModules: [] };
+  const comparisons = new Map(descriptors.map((row) => [row.module, row.inputComparison]));
+  const rows = head.reports.flatMap((report) => report.timings.map((row) => ({ report: report.file, ...row,
+    inputComparison: comparisons.get(row.module) ?? 'unknown' })));
+  const measured = rows.filter((row) => row.testSpanMs !== null);
+  const unchanged = measured.filter((row) => row.inputComparison === 'observed-inputs-unchanged');
+  const sumSpans = (items) => {
+    if (!items.length) return null;
+    const sum = items.reduce((total, row) => total + row.testSpanMs, 0);
+    return Number.isFinite(sum) && sum <= Number.MAX_SAFE_INTEGER ? sum : null;
+  };
+  return { scope: 'reporter-test-spans', moduleTimingCoverage: measured.length === 0 ? 'unknown' : measured.length === rows.length ? 'complete' : 'partial',
+    laneElapsedMs: Date.parse(head.finishedAt) - Date.parse(head.startedAt), moduleOccurrences: rows.length,
+    measuredModuleOccurrences: measured.length, unknownModuleOccurrences: rows.length - measured.length,
+    testSpanSumMs: sumSpans(measured),
+    measuredUnchangedModuleOccurrences: unchanged.length,
+    observedUnchangedTestSpanSumMs: sumSpans(unchanged),
+    // Distinct filtered report occurrences stay distinct. Totals can overlap;
+    // neither this ranking nor unchanged observed imports proves reusable tests.
+    rankedModules: measured.sort((a, b) => b.testSpanMs - a.testSpanMs || a.module.localeCompare(b.module) || a.report.localeCompare(b.report)).slice(0, 20) };
+}
+
 function readLane(directory, role, source, env) {
   const laneBytes = bytes(join(directory, 'lane.json')); const lane = JSON.parse(laneBytes);
   assert.equal(lane.schemaVersion, 1); assert.equal(lane.role, role); assert.equal(lane.exitCode, 0);
@@ -147,7 +189,7 @@ function readLane(directory, role, source, env) {
     const modules = normalizeReport(raw, source.root);
     assert.deepEqual(modules, report.modules, 'raw case projection differs');
     for (const module of modules) assert.ok(source.tracked.some((row) => row.path === module.file), 'untracked test module');
-    return { file: report.file, sha256: report.sha256, bytes: report.bytes, modules };
+    return { file: report.file, sha256: report.sha256, bytes: report.bytes, modules, timings: reportTimings(raw, modules, lane) };
   });
   return { source: lane.source, run: lane.run, nodeVersion: lane.nodeVersion, startedAt: lane.startedAt,
     finishedAt: lane.finishedAt, sha256: sha(laneBytes), reports };
@@ -204,7 +246,7 @@ export function collectShadow({ root, revision, baseRevision = null, role, laneD
     globalInputs, tools, toolDomainDigest: digest(tools), head: head ? { outcome: 'executed-at-head', ...head }
       : { outcome: 'unobserved', source: { revision, tree: initial.tree }, roleMembership: 'unobserved', reports: null, run: null },
     inputs: { head: [...headGraph.nodes.values()].sort((a, b) => a.path.localeCompare(b.path)), base: [...baseGraph.nodes.values()].sort((a, b) => a.path.localeCompare(b.path)) },
-    descriptors, summary: { observedModules: sourceOnly ? null : files.length, sourceCandidateModules: sourceOnly ? files.length : null, fullRequiredModules: files.length, eligibleModules: 0,
+    descriptors, timing: timingSummary(head, descriptors), summary: { observedModules: sourceOnly ? null : files.length, sourceCandidateModules: sourceOnly ? files.length : null, fullRequiredModules: files.length, eligibleModules: 0,
       headCaseOccurrences: cases?.length ?? null, headPassedOccurrences: cases?.filter((row) => row.state === 'passed').length ?? null,
       headSkippedOccurrences: cases?.filter((row) => row.state === 'skipped').length ?? null, headTodoOccurrences: cases?.filter((row) => row.state === 'todo').length ?? null,
       baseCaseOccurrences: null, inheritedCases: 0 } };
@@ -219,7 +261,8 @@ if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import
     fs.writeFileSync(join(directory, 'shadow.json'), JSON.stringify(report) + '\n', { mode: 0o600, flag: 'wx' });
     fs.appendFileSync(process.env.GITHUB_OUTPUT, `shadow_dir=${directory}\n`);
     if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-      `### Advisory impact shadow: ${report.role}\n\n${report.summary.observedModules} observed whole modules; all require full execution. Baseline qualified descriptors unavailable; zero inherited cases. Full platform gates remain authoritative.\n`);
+      `### Advisory impact shadow: ${report.role}\n\n${report.summary.observedModules} observed whole modules; all require full execution. Baseline qualified descriptors unavailable; zero inherited cases. Full platform gates remain authoritative.\n\n` +
+      `Reporter test-span timing: ${report.timing.measuredModuleOccurrences}/${report.timing.moduleOccurrences} module occurrences measured; lane elapsed ${report.timing.laneElapsedMs} ms. Spans exclude import/transform setup, may overlap, and are not wall-time savings. See the bounded ranking in shadow.json.\n`);
     console.log(`Advisory shadow: ${report.summary.observedModules} modules, 0 eligible; full-required`);
   } catch (error) { console.error(`Impact shadow unavailable; full qualification remains required: ${error.message}`); process.exitCode = 1; }
 }

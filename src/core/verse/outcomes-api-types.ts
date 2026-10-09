@@ -6,6 +6,8 @@ export const OUTCOMES_PATH = '/api/verse/outcomes';
 export const OUTCOME_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,78}[a-z0-9])?$/;
 export type OutcomeStatus = 'waiting-plan' | 'queued' | 'running' | 'waiting-verification' | 'failed' | 'paused' | 'plan-verified';
 export interface OutcomeTaskView {
+  /** Immutable node identity for exact task context retrieval. */
+  id: string;
   key: string;
   title: string;
   repo: string | null;

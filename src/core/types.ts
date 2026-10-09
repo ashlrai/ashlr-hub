@@ -809,12 +809,12 @@ export interface AshlrConfig {
      * the 'nim' engine is only active when ALL of the following hold:
      *   1. 'nim' is listed in cfg.foundry.allowedBackends, AND
      *   2. this `nim` block supplies promotion/model overrides when needed, AND
-     *   3. the API key resolves (NVIDIA_NIM_API_KEY via phantom vault or env).
+     *   3. the existing environment API key resolves (NVIDIA_NIM_API_KEY).
      * Absent ⇒ zero effect; the fleet behaves exactly as before.
      *
      * The API key is NEVER stored here and NEVER logged — only the env var NAME
-     * holding it is referenced. The key is resolved at dispatch time from the
-     * phantom vault (preferred) or process.env, exactly like other cloud engines.
+     * holding it is referenced. The key is resolved from the existing environment
+     * at dispatch; in-process vault transport is not qualified.
      */
     nim?: {
       /**
@@ -998,17 +998,11 @@ export interface AshlrConfig {
       allowRemoteEndpoint?: boolean;
     };
     /**
-     * M168: opt-in phantom-secret injection for fleet VERIFICATION/integration
-     * tasks (e.g. integration tests, deploy checks, browser verify against a
-     * real backend). DEFAULT false — no phantom calls unless explicitly enabled.
-     *
-     * When true, withPhantomSecrets() may inject the requested secret keys as
-     * env vars into a sandboxed child process for the duration of a verification
-     * run. Secret VALUES are EPHEMERAL: never logged, never returned, never
-     * written to proposals/diffs/genome. See core/integrations/phantom.ts for
-     * the invariant contract.
-     *
-     * Requires `phantom` CLI to be installed; degrades gracefully when absent.
+     * M168 compatibility flag: apply the existing result scrubber to requested
+     * environment keys in withPhantomSecrets and enable names-only vault
+     * inspection. Default false. No automatic vault value extraction; arbitrary
+     * callback logs/errors are not confined by this helper. Child proxy execution
+     * is separately managed by engines.ts.
      */
     usePhantom?: boolean;
     /**

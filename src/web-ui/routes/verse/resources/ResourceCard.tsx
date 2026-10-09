@@ -137,6 +137,7 @@ export function ResourceCard({ row, status, settled, mode, busy, onAction, readi
           {row.plan !== null ? <span className={styles.plan}>{row.plan}</span> : null}
         </h4>
       </div>
+      {row.engine === 'grok' ? <p className={styles.subtle}>Grok Build · native CLI</p> : null}
       <StatusLine status={status} />
       {row.credits !== null ? <p className={styles.subtle}>{row.credits}</p> : null}
       {status.checked !== null ? (

@@ -14,12 +14,13 @@ import type { OutcomeState } from '../goals/outcome-types.js';
 import { readEnrollmentRegistry } from '../sandbox/policy.js';
 import { inspectPrivateDirectory } from '../universe/artifacts.js';
 import { OUTCOME_ID_PATTERN, type OutcomeOperation, type OutcomeOperationResult, type OutcomesRead, type OutcomeView } from './outcomes-api-types.js';
+import { outcomeTaskPublicId } from './outcome-task-context.js';
 
 export function outcomeView(state: OutcomeState): OutcomeView {
   const tasks = state.activeNodeIds.map(id => {
     const node = state.nodes[id]!;
     const attempt = node.attempts.at(-1);
-    return { key: node.basis.definition.key, title: node.basis.definition.title, repo: node.basis.definition.repo,
+    return { id: outcomeTaskPublicId(node.id), key: node.basis.definition.key, title: node.basis.definition.title, repo: node.basis.definition.repo,
       state: node.completion ? 'complete' as const : node.humanApproval ? 'approved' as const : attempt?.state ?? 'pending' as const,
       runId: attempt?.terminalRunId ?? attempt?.runId ?? null, controllerRunId: attempt?.runId ?? null,
       proposalId: node.completion?.proposalId ?? attempt?.proposalId ?? null,

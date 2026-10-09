@@ -52,6 +52,22 @@ async function fill(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('Work for me outcome editor', () => {
+  it('displays old product names while preserving saved scope, task IDs and exact edit submission', async () => {
+    const saved = outcome(); saved.scope.desiredOutcome = 'Build Ashlrverse; keep "Ashlr Verse" and /repo/Ashlrverse';
+    saved.tasks = [{ id: 'task-' + Array(8).fill('01234567').join('.'), key: 'legacy', title: 'Improve Ashlr Verse', repo,
+      state: 'pending', runId: null, controllerRunId: null, proposalId: null, mergeIdentity: null }];
+    const original = JSON.stringify(saved); const { posts } = fixture([saved]);
+    const user = userEvent.setup(); render(<Host />);
+    await user.click(await screen.findByText('Build Phantom; keep "Ashlr Verse" and /repo/Ashlrverse'));
+    expect(screen.getByText('Improve Phantom')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Edit outcome' }));
+    expect(screen.getByLabelText('Desired outcome')).toHaveValue(saved.scope.desiredOutcome);
+    await user.click(screen.getByRole('button', { name: 'Save outcome' }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]!.body.scope).toEqual(saved.scope);
+    expect(JSON.stringify(saved)).toBe(original);
+  });
+
   it('starts a desired outcome once using exact repositories and no resource/model selector', async () => {
     const { posts } = fixture();
     const user = userEvent.setup(); render(<Host />);
@@ -121,7 +137,7 @@ describe('Work for me outcome editor', () => {
     expect(posts).toEqual([]);
   });
   it('labels verified tasks as a verified plan while keeping global acceptance visible', async () => {
-    fixture([{ ...outcome(), status: 'plan-verified', tasks: [{ key: 'a', title: 'Improve sidebar', repo,
+    fixture([{ ...outcome(), status: 'plan-verified', tasks: [{ id: `task-${Array(8).fill('aaaaaaaa').join('.')}`, key: 'a', title: 'Improve sidebar', repo,
       state: 'complete', runId: 'run-child', controllerRunId: 'run-controller', proposalId: 'proposal-1', mergeIdentity: 'merge-1' }] }]);
     const user = userEvent.setup(); render(<Host />);
     expect(await screen.findByText('Plan verified')).toBeInTheDocument();
@@ -131,6 +147,25 @@ describe('Work for me outcome editor', () => {
     expect(screen.getByText('Run run-child')).toBeInTheDocument();
     expect(screen.getByText('Controller run run-controller')).toBeInTheDocument();
     expect(screen.queryByText('Outcome achieved')).not.toBeInTheDocument();
+  });
+  it('opens context for the exact admitted task on demand without a mutation', async () => {
+    const taskId = `task-${Array(8).fill('aaaaaaaa').join('.')}`;
+    const row = { ...outcome(), tasks: [{ id: taskId, key: 'a', title: 'Improve sidebar', repo, state: 'pending' as const, runId: null, controllerRunId: null, proposalId: null, mergeIdentity: null }] };
+    const path = `/api/verse/outcomes/outcome-test/tasks/${taskId}/context`;
+    const fetch = vi.fn(async (input: RequestInfo | URL) => String(input) === path ? Response.json({ schemaVersion: 1,
+      outcomeId: 'outcome-test', taskId, taskRef: `outcome:outcome-test:node:${taskId}`, outcomeRevision: 1, active: true,
+      snapshotObservedAt: '2026-10-09T09:00:00.000Z', metadataTemporalScope: 'current-read',
+      asOf: '2026-10-09T09:00:00.000Z', observedThrough: '2026-10-09T09:00:00.000Z',
+      coverage: { sourceState: 'missing', complete: false, stopReasons: ['missing-source'] }, current: [], history: [], conflicts: [],
+      sources: [{ source: 'private-task-context', sourceState: 'missing', complete: false, stopReasons: ['missing-source'] }] })
+      : Response.json({ v: 1, sourceState: 'healthy', outcomes: [row], enrollment: { sourceState: 'healthy', repos: [repo] } }));
+    vi.stubGlobal('fetch', fetch);
+    const user = userEvent.setup(); render(<Host />);
+    await user.click(await screen.findByText('Improve the workbench'));
+    expect(fetch.mock.calls.some(call => String(call[0]) === path)).toBe(false);
+    await user.click(screen.getByRole('button', { name: 'View task context' }));
+    await screen.findByText('No current records available; coverage is incomplete.');
+    expect(fetch.mock.calls.filter(call => String(call[0]) === path)).toHaveLength(1);
   });
   it('handles an old or malformed server as unavailable without crashing', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({ outcomes: [{}] })));

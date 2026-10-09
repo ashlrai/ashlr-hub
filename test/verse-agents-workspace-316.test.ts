@@ -79,6 +79,7 @@ describe('agent workspaces (real git)', () => {
     expect(archived.ref).toBe(`${ARCHIVE_REF_PREFIX}feature`);
     expect(archived.headSha).toBe(head);
     expect(archived.sha).not.toBe(head);
+    expect(git(repo, 'show', '-s', '--format=%an|%cn', archived.sha!)).toBe('Phantom|Phantom');
     expect(archived.branchDeleted).toBe(true);
     expect(git(repo, 'rev-parse', archived.ref!)).toBe(archived.sha);
     // Private: not a branch, not a tag.

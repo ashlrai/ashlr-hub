@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { withFolderIo } from './folder-io.js';
 import type { OutcomeOperation, OutcomeOperationResult } from './outcomes-api-types.js';
+import type { OutcomeTaskContextRequest, OutcomeTaskContextResult } from './outcome-task-context.js';
 
 function workerEntrypoint(): URL {
   if (new URL(import.meta.url).pathname.endsWith('/outcomes-io.ts')) {
@@ -16,11 +17,11 @@ function workerEntrypoint(): URL {
 /** Existing folder-IO admission bounds metadata threads, not fleet work. Each
  * worker is terminated after its single result, including failures/timeouts.
  * Retrying an uncertain write must retain its command ID for durable replay. */
-export function runOutcomeOperation(operation: OutcomeOperation): Promise<OutcomeOperationResult> {
-  return withFolderIo(() => new Promise<OutcomeOperationResult>((resolve, reject) => {
+function runMetadataOperation<T>(operation: OutcomeOperation | { kind: 'task-context'; input: OutcomeTaskContextRequest }): Promise<T> {
+  return withFolderIo(() => new Promise<T>((resolve, reject) => {
     const worker = new Worker(workerEntrypoint(), { workerData: operation, execArgv: [] });
     let settled = false;
-    const finish = (value?: OutcomeOperationResult): void => {
+    const finish = (value?: T): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -31,10 +32,18 @@ export function runOutcomeOperation(operation: OutcomeOperation): Promise<Outcom
     };
     const timer = setTimeout(() => finish(), 60_000);
     worker.once('message', (message: unknown) => {
-      const result = message as { ok?: boolean; value?: OutcomeOperationResult } | null;
+      const result = message as { ok?: boolean; value?: T } | null;
       finish(result?.ok === true ? result.value : undefined);
     });
     worker.once('error', () => finish());
     worker.once('exit', () => finish());
   }));
+}
+
+export function runOutcomeOperation(operation: OutcomeOperation): Promise<OutcomeOperationResult> {
+  return runMetadataOperation(operation);
+}
+/** Reuse metadata workers so protected-folder reads never block the desktop HTTP loop. */
+export function runOutcomeTaskContext(input: OutcomeTaskContextRequest): Promise<OutcomeTaskContextResult> {
+  return runMetadataOperation({ kind: 'task-context', input });
 }

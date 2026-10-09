@@ -493,6 +493,7 @@
 /* ── Foot ───────────────────────────────────────────────────────────── */
 
 .foot {
+  flex-wrap: wrap;
   display: flex;
   gap: var(--space-4);
   padding: var(--space-2) var(--space-4);

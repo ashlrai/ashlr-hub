@@ -1,4 +1,5 @@
 import { localSpeedBinding, type LocalSpeedBinding } from './local-throughput.js';
+import { LOCAL_HARNESS_UNAVAILABLE, localHarnessInvocation } from './local-harness.js';
 /**
  * Verse session engine — owns session lifecycle, the durable store, and the
  * one-process-per-turn spawn (detached process group, SIGINT → grace → SIGKILL).
@@ -2228,8 +2229,10 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     // reason is the policy's OWN sentence, quoted verbatim — it already names
     // the seat, how the mode resolved, and how to turn it off.
     const verdict = verseSeatPermitted(session.engine, seatLaunch, loadCfg());
-    if (!verdict.permitted) {
-      const message = verdict.reason ?? 'local-only: refused';
+    const refusal = !verdict.permitted ? verdict.reason ?? 'local-only: refused'
+      : session.engine === 'local' && localHarnessInvocation().executable === null ? LOCAL_HARNESS_UNAVAILABLE : null;
+    if (refusal !== null) {
+      const message = refusal;
       emit(id, { type: 'error', turnId, message });
       emit(id, {
         type: 'turn-done',

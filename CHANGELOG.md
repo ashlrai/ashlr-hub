@@ -9,7 +9,39 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.28.0] — Unreleased
+## [3.29.0] — Unreleased
+
+### Added
+
+- Editable proactive-agent profiles with provider/account identity, setup links
+  and explicit readiness. These are saved preferences; external dispatch and
+  planner use are not implemented.
+- On-demand task context with local evidence, history and source coverage;
+  distinguish current metadata from incomplete historical observations.
+- Local host RAM and interval CPU readings, runtime residency and scoped model
+  speed evidence with its measurement type, context and age.
+
+### Changed
+
+- Show Phantom in saved work summaries and future snapshot labels while
+  preserving raw goals, editors, model inputs and technical identities.
+- Align Leader guidance with eligible provider-neutral routing; skip a redundant
+  backlog scan after empty invention and record actual stage timings.
+- Share small presentation helpers in a deferred chunk. Rank observed test spans
+  in advisory CI reports; every required suite still runs with fresh evidence.
+- Reconcile delayed npm `latest` visibility through bounded reads after the
+  existing single tag update, without replaying publication or downgrading.
+
+### Fixed
+
+- Remove unsupported Phantom Secrets extraction commands; retain existing valid
+  environment, private-file and native routes with accurate diagnostics. A
+  value-blind vault-backed provider transport remains a separate proposal.
+
+These entries describe unreleased successor source. The current published and
+installed release is 3.28.0; website and provider activation remain incomplete.
+
+## [3.28.0] — 2026-10-09
 
 ### Added
 
@@ -18,8 +50,7 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Shared account-bound Leader, Manager and worker invocation for prepared
   Claude Code, Codex, Grok, included native Devin and local resources.
 - Qualified original-artifact npm trusted publishing, separate consumer checks
-  and public reconciliation before stable promotion; owner commissioning remains
-  required before this workflow can publish.
+  and public reconciliation before stable promotion.
 - Optional host-owned website publication with durable Auto/Pause controls,
   exact staged-deployment reconciliation and preserved public configuration.
 - One candidate-version synchronization command and clear installed-desktop
@@ -46,8 +77,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Use writable isolated Cargo runtime state and reuse unchanged source hashes
   during maintainer verification without repeating locked dependency preparation.
 
-These entries describe successor source. Publication, installation, website
-commissioning and provider activation are verified separately.
+Published `@ashlr/phantom@3.28.0` through the commissioned trusted publisher in
+[run 37910835113, attempt 2](https://github.com/ashlrai/phantom/actions/runs/37910835113/attempts/2).
+Signed GitHub desktop assets and local installation were verified separately.
+Website commissioning and connected-provider activation remain incomplete.
 
 ## [3.27.0] — 2026-10-09
 

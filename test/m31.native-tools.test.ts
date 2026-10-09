@@ -55,7 +55,7 @@ function resultText(r: { content: { type: 'text'; text: string }[] }): string {
 // ---------------------------------------------------------------------------
 
 describe('native tool registry', () => {
-  it('exposes exactly the 23 contracted tools', () => {
+  it('exposes the contracted native tools', () => {
     const names = nativeToolDefs().map((t) => t.name).sort();
     expect(names).toEqual(
       [
@@ -82,6 +82,11 @@ describe('native tool registry', () => {
         'ashlr_status',
         'ashlr_website_publish',
         'ashlr_website_status',
+        'phm_proactive_agents_list',
+        'phm_proactive_agents_create',
+        'phm_proactive_agents_update',
+        'phm_proactive_agents_delete',
+        'phm_task_context',
       ].sort(),
     );
   });

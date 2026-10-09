@@ -37,6 +37,7 @@ import { closeSync, constants as fsConstants, fstatSync, openSync, readSync } fr
 import { freemem, homedir, totalmem } from 'node:os';
 import { join } from 'node:path';
 import { modelDisplayText } from './model-display-name.js';
+import { sampleHostCpu, type HostCpuReading } from './host-cpu.js';
 
 import {
   VERSE_DEFAULT_CONTEXT_WINDOWS,
@@ -188,6 +189,8 @@ export interface VerseLocalModelsSnapshot {
   machine: {
     totalMemoryBytes: number;
     freeMemoryBytes: number;
+    /** Activity across host cores, not model CPU; older snapshots omit it. */
+    cpu?: HostCpuReading | null;
   };
   ollama: VerseLocalRuntimeReport;
   lmStudio: VerseLocalRuntimeReport;
@@ -1079,7 +1082,7 @@ export async function collectVerseLocalModels(
 
   return {
     sampledAt: new Date().toISOString(),
-    machine: { totalMemoryBytes: totalmem(), freeMemoryBytes: freemem() },
+    machine: { totalMemoryBytes: totalmem(), freeMemoryBytes: freemem(), cpu: sampleHostCpu() },
     ollama,
     lmStudio,
     ...(llamaServer ? { llamaServer } : {}),

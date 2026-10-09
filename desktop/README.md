@@ -4,6 +4,15 @@ A Tauri v2 desktop app that wraps **Phantom** (the operator console at
 `/verse/`, see `../docs/VERSE.md`) in a native macOS window. Opening it starts
 the console; resident autonomy requires its separate local setup and grant.
 
+The current published release is [3.28.0](https://github.com/ashlrai/phantom/releases/tag/v3.28.0).
+It provides the signed arm64 app archive
+[`Phantom_3.28.0_aarch64.app.tar.gz`](https://github.com/ashlrai/phantom/releases/download/v3.28.0/Phantom_3.28.0_aarch64.app.tar.gz)
+and paired [`latest.json`](https://github.com/ashlrai/phantom/releases/download/v3.28.0/latest.json).
+No 3.28.0 DMG was published. These are update artifacts; downloading or unpacking
+them alone does not perform the qualified installation described below.
+
+### Historical DMG: 3.27.0
+
 The published canonical 3.27.0 release includes `Phantom.app`, with
 `Phantom_3.27.0_aarch64.dmg` downloads and the stable `Ashlr Local` signing
 identity. The guarded installer migrates a single verified legacy installation;
@@ -11,7 +20,8 @@ identity. The guarded installer migrates a single verified legacy installation;
 wording requires its separately qualified helper release; installing the app
 does not replace the helper. Automatic updating is not activated by this filename change.
 
-The versioned [v3.27.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.27.0/Phantom_3.27.0_aarch64.dmg)
+For the historical 3.27.0 release, the versioned
+[v3.27.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.27.0/Phantom_3.27.0_aarch64.dmg)
 is the verified published canonical download. Check the release artifacts
 and installed startup separately before granting resident authority.
 The app inside the DMG is locally signed, not Apple Developer ID notarized;
@@ -40,26 +50,39 @@ For routine drift detection, `node scripts/sync-candidate-version.mjs --check`
 uses the root package version as the expected value; writing still requires an
 explicit version.
 
-The source candidate is 3.28.0; publication and installation are pending qualification and public byte verification.
+The source candidate is 3.29.0; publication and installation are pending qualification and public byte verification.
 
-The published 3.27.0 release uses `ashlrai/phantom` and `@ashlr/phantom`.
+The published 3.28.0 release uses `ashlrai/phantom` and `@ashlr/phantom`.
 Its fixed discovery endpoint is
 `https://github.com/ashlrai/phantom/releases/latest/download/latest.json`.
 The commissioned public key, `ai.ashlr.desktop` bundle identifier, signer,
 sidecar and saved-data identities stay unchanged. The signed legacy and
 canonical profiles remain distinct; transport redirects do not choose a profile.
-The [v3.27.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.27.0/Phantom_3.27.0_aarch64.dmg)
+The historical [v3.27.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.27.0/Phantom_3.27.0_aarch64.dmg)
 has its own qualified original app and public-download evidence. Installed
 startup, automatic adoption and resident authority remain separate gates.
 
 ## Install
 
-Download the versioned [3.27.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.27.0/Phantom_3.27.0_aarch64.dmg)
-or use the [npm/CLI quickstart](../docs/QUICKSTART.md) on macOS, Linux and Windows.
+For current 3.28.0, use the [versioned release](https://github.com/ashlrai/phantom/releases/tag/v3.28.0)
+and the [signed idle update flow](#signed-idle-updates) in an eligible installed
+app. Maintainers can use `scripts/install-desktop-artifacts.mjs` with the exact
+qualified checkout, signed hosted bundle and private original finalizer output.
+Inspection is the default; `--apply` requires prior Stop, drained leases and
+normal Quit. The installer verifies original bytes without rebuilding, signing
+or resuming authority. See its `--help` and the
+[qualification procedure](../docs/RELEASING.md#qualified-ci-build-handoff).
+This is a maintainer path, not a drag-to-Applications installer.
+
+The historical [3.27.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.27.0/Phantom_3.27.0_aarch64.dmg)
+remains available. The table's DMG row describes that historical release.
+For the current browser workbench on macOS, Linux and Windows, install
+`@ashlr/phantom@3.28.0` and run `phm verse`.
 Other desktop formats remain subject to the draft artifact policy below.
 
 | Platform | Availability |
 |----------|-----------------------|
+| macOS arm64 current | Signed v3.28.0 app archive and paired update manifest; qualified installation required |
 | macOS arm64 | Published canonical v3.27.0 `.dmg` |
 | Windows | `.msi` / `.exe` draft only |
 | Linux | Not produced while quarantined |

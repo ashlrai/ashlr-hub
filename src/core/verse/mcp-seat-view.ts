@@ -31,7 +31,7 @@
  *     on, EVERY seat also loads exactly one Verse-owned server, `ashlr-verse`
  *     (verse-mcp-launch.ts): Claude/local through a private per-turn config
  *     file instead of the empty one, Codex through per-turn `-c` overrides,
- *     Grok through one entry Verse keeps in the account's private profile
+ *     Grok through one entry Phantom keeps in the account's private profile
  *     config.toml (it serves no tools to a turn Verse did not grant them).
  *
  * Reporting a machine-wide server list as "what this seat runs" would
@@ -174,13 +174,13 @@ export interface VerseMcpSnapshot {
 export const VERSE_MCP_ISOLATED_NOTE =
   'Every turn on this seat is launched with --strict-mcp-config and an empty --mcp-config, ' +
   'so it loads no MCP servers at all regardless of what any config file holds. ' +
-  "The one exception is Verse's own server (ashlr-verse: terminal and browser tools), on a chat where you switched agent tools on.";
+  "The one exception is Phantom’s own server (ashlr-verse: terminal and browser tools), on a chat where you switched agent tools on.";
 
 export const VERSE_MCP_TOML_NOTE =
   'This account keeps its MCP servers in a TOML config, which is read by the provider CLI ' +
-  'itself and is not parsed here. Hub does not change the servers listed there. ' +
-  "Verse's own server (ashlr-verse) reaches Codex per turn on the command line, and a Grok " +
-  "account through one entry Verse keeps in that account's private profile — only on chats " +
+  'itself and is not parsed here. Phantom does not change the servers listed there. ' +
+  "Phantom’s own server (ashlr-verse) reaches Codex per turn on the command line, and a Grok " +
+  "account through one entry Phantom keeps in that account's private profile — only on chats " +
   'where you switched agent tools on.';
 
 export const VERSE_MCP_PER_ACCOUNT_NOTE =
@@ -188,7 +188,7 @@ export const VERSE_MCP_PER_ACCOUNT_NOTE =
   'another account does not reach it.';
 
 export const VERSE_MCP_MACHINE_UNUSED_NOTE =
-  'These servers are configured in this machine\'s home-level configs. No Verse seat reads ' +
+  'These servers are configured in this machine\'s home-level configs. No Phantom account reads ' +
   'them: Claude and local seats are launched with an empty --mcp-config, and Codex and Grok ' +
   'seats read their own per-account config instead.';
 
@@ -494,7 +494,7 @@ function snapshotFrom(
   if (machine.configured && seats.every((seat) => seat.servers.length === 0)) {
     notes.push(
       `${machine.servers.length} MCP server${machine.servers.length === 1 ? ' is' : 's are'} configured ` +
-      'on this machine and no Verse seat loads any of them.',
+      'on this machine and no Phantom account loads any of them.',
     );
   }
 

@@ -153,6 +153,15 @@ a fifth job runs every isolated suite serially. Test deadlines remain unchanged.
 Actual Vitest reports retain passed, skipped and todo cases, including repeated
 parameterized titles. Failed or unfinished runs cannot qualify.
 
+Separate advisory impact-shadow artifacts compare observed source inputs and
+rank measured test spans from the already checksum-checked Vitest reports.
+Missing or invalid timing remains unknown. A reporter span runs from the first
+to last test; it excludes import/transform setup, may overlap another module's
+span, and is not a runner-time or savings estimate. Filtered report occurrences
+stay distinct. An unchanged observed import closure does not prove a complete
+input domain or reusable result: all release modules still execute, zero cases
+are inherited, and the attestor excludes shadow artifacts from release evidence.
+
 The first Ubuntu job captures `dist.tar`, its source/build manifest, the exact
 archive used by its successful npm installation smoke check, and the full web
 report. It creates the npm archive once after the build and checks it with the

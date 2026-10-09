@@ -127,7 +127,7 @@ describe('readable approval detail', () => {
   it('names the engine the same way for a partial run: "Partial Claude run", never "Partial claude run"', () => {
     expect(readableTitle('[partial] claude run: Add the breaker.').eyebrow).toBe('Partial Claude run');
     expect(readableTitle('[Partial] CODEX run: Rename the flag.')).toEqual({ eyebrow: 'Partial Codex run', text: 'Rename the flag.', truncated: false });
-    expect(readableTitle('[partial] grok run: x').eyebrow).toBe('Partial Grok run');
+    expect(readableTitle('[partial] grok run: x').eyebrow).toBe('Partial Grok Build run');
     expect(readableTitle('[partial] ollama run: x').eyebrow).toBe('Partial Ollama run');
     expect(readableTitle('local run: x').eyebrow).toBe('Local run');
   });

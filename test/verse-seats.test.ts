@@ -36,6 +36,7 @@ import {
 import { DEFAULT_LOCAL_MODEL_TAG } from '../src/core/run/model-catalog.js';
 import { resetModelWindowCaches } from '../src/core/verse/model-windows.js';
 import { discoverProjects } from '../src/core/verse/projects.js';
+import * as localHarness from '../src/core/verse/local-harness.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -201,6 +202,7 @@ let prevOllamaCtx: string | undefined;
 let ollama: FakeOllama | null = null;
 
 beforeEach(() => {
+  vi.spyOn(localHarness, 'discoverLocalHarness').mockResolvedValue({ executable: '/inert/claude', path: '/inert' });
   tmpHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-verse-seats-home-')));
   tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-verse-seats-root-')));
   prevHome = process.env.HOME;
@@ -212,6 +214,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   if (ollama) { await ollama.close(); ollama = null; }
   if (prevHome === undefined) delete process.env.HOME;
   else process.env.HOME = prevHome;

@@ -93,6 +93,8 @@ describe('snapshotWorkingTree', () => {
 
     const snap = await snapshotWorkingTree(repo);
     expect(snap.skipped).toEqual([]);
+    expect(git(repo, 'show', '-s', '--format=%an|%cn|%s', snap.commit).trim()).toBe('Phantom|Phantom|Phantom checkpoint');
+    expect(git(repo, 'show', '-s', '--format=%an', 'HEAD').trim()).toBe('t');
     expect(operatorState(repo)).toBe(before);
 
     const files = git(repo, 'ls-tree', '-r', '--name-only', snap.commit).trim().split('\n').sort();

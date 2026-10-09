@@ -43,6 +43,7 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/proactive-profiles.test.ts', // actual private metadata storage, stale-write races and symlink refusal
   'test/candidate-version-sync.test.ts', // real bounded CLI subprocesses; the subprocess case retains its original 5s deadline
   'test/locus-job-env.test.ts', // actual inert Node children and central engine dispatch prove concurrent sealed-job environment isolation
   'test/mcp-gateway-recovery-probe.test.ts', // real MCP SDK subprocess initialization/list/close against a disposable inert local protocol fixture

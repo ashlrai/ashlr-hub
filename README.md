@@ -6,7 +6,7 @@
 
 **Work with agents. Let agents work for you. One open-source workbench for your accounts, local models, chats and engineering fleet.**
 
-**[Get Phantom](https://github.com/ashlrai/phantom/releases/tag/v3.26.1) · [First-run guide](docs/QUICKSTART.md#open-verse)**
+**[Get Phantom](https://github.com/ashlrai/phantom/releases/tag/v3.28.0) · [First-run guide](docs/QUICKSTART.md#open-verse)**
 
 [Install](#install) · [See the workbench](#what-it-is) · [Benchmarks](#benchmarks-and-traces) · [Read the guide](https://github.com/ashlrai/phantom/blob/master/docs/VERSE.md) · [Explore the ecosystem](https://verse.ashlr.ai/ecosystem) · [Star Phantom on GitHub](https://github.com/ashlrai/phantom)
 
@@ -18,18 +18,22 @@
 
 ## Install
 
-Phantom 3.27.0 is published as `@ashlr/phantom` from `ashlrai/phantom`.
-Install the version-pinned canonical release:
+Phantom 3.28.0 is published as `@ashlr/phantom` from `ashlrai/phantom`.
+Install the version-pinned canonical release. The development branch prepares
+3.29.0; those successor changes are not yet published:
 
 ```sh
-npm install -g @ashlr/phantom@3.27.0   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
+npm install -g @ashlr/phantom@3.28.0   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
 phm verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
-On an Apple silicon Mac, download the
-[v3.27.0 desktop DMG](https://github.com/ashlrai/phantom/releases/download/v3.27.0/Phantom_3.27.0_aarch64.dmg).
-The app inside the DMG is locally signed; the DMG is unsigned. Neither is Apple
-notarized; macOS may require **Open Anyway** on first launch. The CLI includes the browser console on macOS, Linux and Windows.
+The [v3.28.0 release](https://github.com/ashlrai/phantom/releases/tag/v3.28.0)
+provides a signed macOS arm64 app archive and paired update manifest; it has no
+DMG. Existing installations use the qualified signed-update flow. Maintainer
+artifact installation requires the original qualified bundle and prior
+Stop/drain and Quit; downloading the archive alone is not that installation.
+See [desktop installation](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install). The app is locally signed,
+not Apple Developer ID notarized. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
 [first-run guide](docs/QUICKSTART.md#open-verse).
 
@@ -74,7 +78,7 @@ console is the Phantom kernel: the CLI, the Universe experiment runtime and
 account-aware resource pools.
 
 Phantom was formerly Ashlr Verse. The current source repository is `ashlrai/phantom`;
-the published 3.27.0 package is `@ashlr/phantom`. `phm` and compatible `ashlr`
+the published 3.28.0 package is `@ashlr/phantom`. `phm` and compatible `ashlr`
 share the same entrypoint. Published 3.25.3 remains `@ashlr/hub`; its existing
 SDK imports, including `@ashlr/hub/universe`, retain their original identity.
 The canonical package provides the same five SDK surfaces under `@ashlr/phantom`.
@@ -275,9 +279,11 @@ separate Node.js install to run.
 
 ### Install
 
-Use the [v3.27.0 release](https://github.com/ashlrai/phantom/releases/tag/v3.27.0)
-for the versioned arm64 DMG. The app inside is locally signed; the DMG is unsigned.
-Neither is Apple Developer ID notarized, so macOS may require **Open Anyway** on first launch. To build from source on a
+Use the [v3.28.0 release](https://github.com/ashlrai/phantom/releases/tag/v3.28.0)
+for the original signed arm64 app archive and paired update manifest. No 3.28.0
+DMG was published; use the [desktop installation guide](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install)
+for the qualified update or maintainer artifact path. The app is locally signed,
+not Apple Developer ID notarized, so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
 "Ashlr Local" code-signing identity. The prerequisites, exact build order and
 verification steps are in [Releasing without CI](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md)
@@ -363,18 +369,18 @@ check identity and quota, are in
 The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
-Published 3.27.0 provides `phm` as the primary CLI command. Both `phm` and
+Published 3.28.0 provides `phm` as the primary CLI command. Both `phm` and
 `ashlr` use the same workbench entrypoint; existing `ashlr` scripts keep working.
 When building from source, `./install.sh` installs both aliases and refuses
 unrelated files or links. The separate Phantom Secrets command remains `phantom`.
 
 ```sh
-npm install -g @ashlr/phantom@3.27.0
+npm install -g @ashlr/phantom@3.28.0
 phm --version
 phm verse                 # start the server and open http://127.0.0.1:7777/verse/
 ```
 
-The canonical 3.27.0 package exposes `@ashlr/phantom`, `@ashlr/phantom/core`,
+The canonical 3.28.0 package exposes `@ashlr/phantom`, `@ashlr/phantom/core`,
 `@ashlr/phantom/types`, `@ashlr/phantom/plugin` and `@ashlr/phantom/universe`.
 The published 3.25.3 compatibility package preserves the public SDK entrypoints `@ashlr/hub`,
 `@ashlr/hub/core`, `@ashlr/hub/types`, `@ashlr/hub/plugin` and `@ashlr/hub/universe`.
@@ -467,7 +473,9 @@ npm run gate          # minutes, not half an hour: static checks + the tests you
 npm run ship:local -- --native  # after a native build: guarded Phantom.app/current CLI migration; requires prior drain + normal Quit
 ```
 
-Then `npm publish` the tarball `ship:local` prints. `npm run gate:full` runs every suite. See
+For a canonical release, qualify one exact candidate and publish its original
+CI tarball through the commissioned trusted-publishing workflow. Finalizing and
+installing the signed desktop remains separate. `npm run gate:full` runs every suite. See
 [`docs/RELEASING-LOCALLY.md`](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md).
 
 ## The cloud and Devin lanes
@@ -550,11 +558,13 @@ switch, backends, sandboxing, the command reference, the safety model, the
 | **3.17** | Local module map, scalable account/model rosters, portable efficiency-plugin connection and phone reliability | [3.17.2 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.2) |
 | **3.16** | Native Agents workbench and guarded computer tools; optional authenticated phone gateway; reviewable learning evidence; Devin CLI SWE-2 High default; local signing and release fixes | [3.16.1 published](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.1) |
 
-CLI archives are built by hosted CI; the macOS app is finalized and publication is performed locally.
-The source also runs GitHub CI and dependency audit checks. The local build procedure is in [Releasing without CI](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md).
-npm publication is confirmed separately for the selected package and version.
-The 3.27.0 canonical release was verified through `@ashlr/phantom` public-byte readback;
-a legacy `@ashlr/hub` response does not prove canonical publication.
+CLI archives are built by hosted CI. The commissioned trusted publisher published
+`@ashlr/phantom@3.28.0` in [run 37910835113, attempt 2](https://github.com/ashlrai/phantom/actions/runs/37910835113/attempts/2),
+with public registry-byte, provenance, consumer and `latest` checks. The signed
+macOS app was finalized and installed separately from the same qualified source.
+See the [release procedure](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md).
+Website commissioning and connected-provider activation remain separate and incomplete.
+A legacy `@ashlr/hub` response does not prove canonical publication.
 GitHub release assets require their own public download and checksum verification;
 repository or changelog state alone is not publication evidence.
 

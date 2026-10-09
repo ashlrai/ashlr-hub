@@ -18,7 +18,7 @@ import { evictAll, getQuerySnapshot, runQuery } from '../../../data/cache.js';
 import { ApiError } from '../../../data/client.js';
 import { capacity, CLAUDE_TIGHT_SEAT, GROK_SEAT, LOCAL_SEAT_V2, nativeSeat, seatWindow } from '../seat-fixtures.test-support.js';
 import { resetGuard } from '../shell/guarded-action.js';
-import { getVerseUiState, resetVerseUi, setVerseActiveSession } from '../verse-ui-store.js';
+import { getVerseUiState, resetVerseUi, setVerseActiveSession, VERSE_ANCHOR_EVENT, type VerseAnchorRequest } from '../verse-ui-store.js';
 import { verseBootstrapQuery } from '../verse-queries.js';
 import { budgetQuery } from '../budget/budget-queries.js';
 import { ResourcesBar } from './ResourcesBar.js';
@@ -298,6 +298,8 @@ describe('ResourcesDrawer — accounts', () => {
     expect(spent.getByRole('button', { name: 'Check again: Personal Codex' })).toBeInTheDocument();
 
     const out = within(cardOf('Grok'));
+    expect(out.getByText('Grok Build · native CLI')).toBeInTheDocument();
+    expect(within(cardOf('Cash Margin Partners')).queryByText('Grok Build · native CLI')).not.toBeInTheDocument();
     expect(out.getByText('Signed out')).toBeInTheDocument();
     expect(out.getByText('· reconnect to use it')).toBeInTheDocument();
     expect(out.getByRole('button', { name: 'Reconnect: Grok' })).toBeInTheDocument();
@@ -695,6 +697,18 @@ describe('ResourcesDrawer — overlay', () => {
     expect(unpin).toHaveAttribute('aria-pressed', 'true');
     await user.click(unpin);
     expect(getResourcesUi().pinned).toBe(false);
+  });
+
+  it('opens proactive profiles from Resources without treating them as executable model seats', async () => {
+    const user = userEvent.setup();
+    openResources();
+    render(<ResourcesDrawer mode="overlay" now={NOW} />);
+    const reveal = vi.fn();
+    window.addEventListener(VERSE_ANCHOR_EVENT, reveal, { once: true });
+    await user.click(screen.getByRole('button', { name: 'Proactive agents' }));
+    expect(getResourcesUi().open).toBe(false);
+    expect(getVerseUiState().section).toBe('agents');
+    expect((reveal.mock.calls[0]![0] as CustomEvent<VerseAnchorRequest>).detail).toEqual({ section: 'agents', anchor: 'proactive-agents' });
   });
 
   it('closes a floating drawer when it navigates to Apps', async () => {

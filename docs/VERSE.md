@@ -113,6 +113,36 @@ verified, so Phantom does not treat a Dot as an executable seat. Likewise,
 seat and the xAI API engine; a connected CLI account does not establish a Bot
 integration.
 
+### Proactive agent profiles
+
+Saved proactive profiles describe personal Dots, Grok Bots, Muse agents or other
+persistent agents. They keep provider/account/agent identity separate from the
+editable name, avatar, responsibilities, computer and connected-service metadata.
+The profile is **configured**; saving it does not establish a working connection.
+Operation readiness shows what has been qualified, with no fabricated run result.
+Meta Model API remains a separate executable resource.
+
+The enabled field saves an intended planning preference. Current planners do not
+consume these profiles; it does not enable dispatch, change a provider account or
+authorize spending. A funding reference points to the
+same account; it supplies no balance, expiry or eligibility. Keep credentials and
+inbox contents out of profile metadata.
+
+The existing authenticated API serves `GET /api/verse/proactive-agents` and JSON
+`POST` requests to create a profile, update `/<id>` or delete `/<id>/delete`.
+Updates and deletes require the current `expectedVersion`; stale writes return
+409 so another edit cannot be overwritten. Native tools
+`phm_proactive_agents_list`, `phm_proactive_agents_create`,
+`phm_proactive_agents_update` and `phm_proactive_agents_delete` use the same store.
+The list tool pages summaries; the API returns complete saved metadata.
+
+Personal-agent transport still needs separate qualification. Dot plugin events
+require a provisioned authenticated plugin and event subscription; a Grok Bot
+routine requires its existing account-bound webhook and completion evidence.
+A provider accepting a task differs from running it, completing it and verifying
+its useful result. No personal Muse dispatch adapter is established by saving a
+profile. See [Dots beside Phantom](DOTS-COMPANION.md).
+
 - Build contracts: `docs/VERSE-CONTRACT-V1.md` (sessions) and
   `docs/VERSE-CONTRACT-V2.md` (redesign + control plane).
 - Context windows, compaction, modes, handoff and shared memory:
@@ -358,8 +388,11 @@ the session between **Standard** and **Expansive**, from the next turn:
 | Engine | Standard (default for new chats) | Expansive |
 |---|---|---|
 | Claude 1M models (Fable, Opus 5.x / 4.8, Sonnet 5) | compacts at ≈367k | compacts at ≈967k |
-| Codex GPT-6 / GPT-5.6 | 258.4k window, compacts at ≈245k | 828.4k window, compacts at ≈785k |
-| Grok, local, Claude 200k models, GPT-5.5 | their native window | not offered |
+| Codex GPT-6.1 Sol / GPT-6 / GPT-5.6 | 258.4k window, compacts at ≈245k | 828.4k window, compacts at ≈785k |
+| Grok, local, Claude 200k models | their native window | not offered |
+
+Saved GPT-5.5 sessions retain their native-window compatibility; it is not in
+the default model list. A seat's own catalog takes precedence over these defaults.
 
 Expansive costs more usage on **every** later turn, because each turn re-sends
 the whole conversation; it pays off for coupled, cross-cutting work that needs a
@@ -675,7 +708,7 @@ number comes from, is `docs/VERSE-CONTEXT.md` §1.
 |--------|----------------|----------------------|-----------------|
 | `claude` | Fable 5.1, Opus 5.5, Fable 5, Opus 5, Opus 4.8, Sonnet 5 | 1M · ≈367k (≈967k expansive) | `#c96442` |
 | `claude` | Opus 4.5, Haiku 4.5 | 200k · ≈167k | `#c96442` |
-| `codex` | the seat's own catalog — GPT-6 Astra / Sol / Luna, GPT-5.6 Sol / Terra / Luna, GPT-5.5 | 258.4k · ≈245k (828.4k · ≈785k expansive, not GPT-5.5) | `#10a37f` |
+| `codex` | the seat's own catalog — GPT-6.1 Sol, GPT-6 Astra / Sol / Luna, GPT-5.6 Sol / Terra / Luna | 258.4k · ≈245k (828.4k · ≈785k expansive) | `#10a37f` |
 | `grok` | the seat's own catalog — Grok 4.7, Grok 4.7 Fast, Grok 4.6, Grok 4.5 | 500k · 400k | `#6b7280` |
 | `local` | Ollama tags that support tool use | what the runner serves · window − 33k | `#7c5cff` |
 
@@ -891,9 +924,10 @@ reasoning, and writes a memo: the bottleneck, one move with an expected result
 and a date, goals, standards, and questions for you. It runs daily and after
 notable events, with three full runs a day by default and optional unlimited
 Leader preferences, plus check-ins every 2 hours in
-working hours when the evidence changed. Seats fall back Grok → fast local →
-large local, with Claude only for a weekly deep run that fits inside your
-reserve (or by opt-in), and never Codex. Failed runs retry at 15 minutes, 45
+working hours when the evidence changed. Eligible account-bound Claude,
+Codex, Grok, Devin and local resources share provider-neutral role selection;
+the standing grant, available usage, reserve settings and local-only mode
+determine which can run. Failed runs retry at 15 minutes, 45
 minutes and 2 hours. With no standing grant it runs on free local models or not
 at all.
 From the CLI, `ashlr leader tick` is the same pass the daemon makes: it applies
@@ -1269,6 +1303,28 @@ picker and the Resources drawer all read it.
   The account's name is always written beside the mark.
 - The rail head and public site use the first-party Phantom ghost. Published 3.26.0 provides
   `Phantom.app`; the existing native bundle identity and saved data stay compatible. See [the naming guide](PHANTOM-BRAND.md).
+
+### Local capacity and speed
+
+Open the Local card in Resources to see host RAM, CPU load and model residency.
+RAM shows the computer's total and OS free memory. CPU shows the measured load
+across all cores and its sampling interval; the first reading can be unavailable.
+Ollama and LM Studio report model residency separately. llama-server does not
+report resident memory here. These observations describe host capacity, not a
+model's GPU utilization or a guarantee that another task will fit.
+
+Expand **Measured local speed** for historical readings bound to the resource,
+model and context window. Warm decode speed and end-to-end turn speed measure
+different work; the latter includes prompt processing and other turn overhead.
+Each reading shows its age. Completed-turn details show recorded elapsed time
+and input, output, cache-read and cache-write token deltas from the same bound
+successful turn, with two significant figures. These details retain their own
+completion time even when a newer warm-up supplies the speed reading. Duration
+includes tools and other turn overhead; it is not time to first token. Missing
+recorded fields remain unknown, and stored zero counts do not prove that every
+provider originally reported that category. Older servers may omit these details.
+Opening Resources reads observations without warming a model or starting inference. Missing or conflicting measurements
+remain unavailable rather than being borrowed from another model.
 
 ## Cloud lane (3.11)
 
@@ -1646,9 +1702,12 @@ tray and the Dock badge are the reliable signals there. Details:
 
 ### Install it on this Mac
 
-The published canonical 3.26.0 release provides the [Phantom macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.0/Phantom_3.26.0_aarch64.dmg).
+The published canonical [3.28.0 release](https://github.com/ashlrai/phantom/releases/tag/v3.28.0)
+provides a signed arm64 app archive and paired update manifest. No 3.28.0 DMG was
+published. Use the signed-update flow in an eligible installed app or the
+maintainer artifact procedure below; unpacking an archive is not that installation.
 Publication does not install the app or activate resident authority.
-The 3.26.0 app is locally signed, not Apple Developer ID notarized; macOS may require
+The 3.28.0 app is locally signed, not Apple Developer ID notarized; macOS may require
 **Open Anyway** on first launch. Follow the [desktop installation guide](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install)
 for the supported path. Do not copy an app over an existing installation.
 

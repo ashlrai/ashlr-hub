@@ -31,6 +31,8 @@ import { RESOURCES_POLL_MS } from './resources-queries.js';
 import { ReadinessLines } from './ReadinessLines.js';
 import { ResourceFacts } from './ResourceFacts.js';
 import type { ResourceFactsView } from './resources-model.js';
+import { multimodelContextQuery } from '../multimodel/multimodel-queries.js';
+import { LocalResourceMetrics } from './LocalResourceMetrics.js';
 import { StatusLine } from './ResourceCard.js';
 import styles from './ResourcesDrawer.module.css';
 
@@ -53,14 +55,19 @@ export interface LocalResourcesProps {
 export function LocalResources({ status, onOpenUsage, now, readiness = null, onReadinessAction, facts = null }: LocalResourcesProps) {
   const models = useQuery(verseLocalModelsQuery);
   const runtimeRead = useQuery(servingRuntimeQuery);
+  const speedQuery = multimodelContextQuery({ projectPath: null });
+  const speeds = useQuery(speedQuery);
+  const refetchSpeeds = useRefetch(speedQuery);
   const refetchModels = useRefetch(verseLocalModelsQuery);
   const refetchRuntime = useRefetch(servingRuntimeQuery);
   usePollWhileVisible(refetchModels, RESOURCES_POLL_MS.local);
   usePollWhileVisible(refetchRuntime, RESOURCES_POLL_MS.runtime);
+  usePollWhileVisible(refetchSpeeds, RESOURCES_POLL_MS.local);
   const [note, setNote] = useState<{ tone: 'neutral' | 'danger'; text: string } | null>(null);
   const [busy, setBusy] = useState<'start' | 'stop' | null>(null);
 
-  const view = models.data?.available ? buildLocalModelsView(projectLocalModels(models.data.raw), now) : null;
+  const snapshot = models.data?.available ? projectLocalModels(models.data.raw) : null;
+  const view = buildLocalModelsView(snapshot, now);
   const runtimes = models.data?.available ? localRuntimeLines(models.data.raw) : [];
   const runtime = runtimeView(runtimeRead.data?.value ?? null);
   const modelsLoading = models.data === undefined && models.status !== 'error';
@@ -109,6 +116,8 @@ export function LocalResources({ status, onOpenUsage, now, readiness = null, onR
       ) : null}
 
       <ReadinessLines row={readiness} {...(onReadinessAction ? { onAction: onReadinessAction } : {})} />
+      <LocalResourceMetrics snapshot={snapshot} view={view} local={speeds.data?.local}
+        speedAvailable={speeds.status !== 'error' && speeds.data !== undefined} now={now} />
 
       {runtimes.length > 0 ? (
         <ul className={styles.runtimes} aria-label="Local runtimes">

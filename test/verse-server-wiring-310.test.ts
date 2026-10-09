@@ -25,6 +25,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 
+// The injected children are inert; launcher metadata must not probe the host CLI.
+vi.mock('../src/core/verse/local-harness.js', () => ({
+  LOCAL_HARNESS_UNAVAILABLE: 'Claude Code is required to run local tool sessions. Install it or refresh Apps & Accounts after updating your PATH.',
+  localHarnessInvocation: () => ({ executable: '/opt/fake/bin/fake-cli', path: '/opt/fake/bin' }),
+  discoverLocalHarness: async () => ({ executable: '/opt/fake/bin/fake-cli', path: '/opt/fake/bin' }),
+}));
+
 // Spread-mocked so everything else in web/api.ts stays real: only the push
 // verse-api.ts calls from the engine's session-list hook is observed.
 const notifySpy = vi.hoisted(() => vi.fn());

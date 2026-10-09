@@ -862,7 +862,7 @@ async function connectSet(args: string[]): Promise<number> {
     const stored = storePatViaPhantom(cfg, token);
     if (stored) {
       console.log(`${C.green}✓${C.reset} PAT stored in Phantom vault (key: ${CONNECT_PHANTOM_PAT_KEY})`);
-      console.log(`  ${C.dim}The token was passed directly to phantom and is not retained here.${C.reset}`);
+      console.log(`  ${C.dim}Stored only; current OTLP sending still needs the existing ${CONNECT_PHANTOM_PAT_KEY} environment route.${C.reset}`);
     } else {
       // Phantom unavailable — instruct env var path
       console.log(`${C.yellow}!${C.reset} Phantom not available. Set the token as an environment variable:`);
@@ -936,7 +936,7 @@ async function connectStatus(): Promise<number> {
   console.log(`${C.bold}  ashlr pulse — bridge status${C.reset}`);
   console.log('');
   console.log(`  Endpoint   ${endpoint ? `${C.green}configured${C.reset}  ${C.dim}${endpoint}${C.reset}` : `${C.yellow}not configured${C.reset}`}`);
-  console.log(`  PAT        ${hasPat ? `${C.green}available${C.reset}` : `${C.yellow}not found${C.reset}  ${C.dim}(set ASHLR_PULSE_TOKEN or use --token)${C.reset}`}`);
+  console.log(`  PAT        ${hasPat ? `${C.green}available${C.reset}` : `${C.yellow}not found${C.reset}  ${C.dim}(set the existing ASHLR_PULSE_TOKEN environment route)${C.reset}`}`);
   console.log(`  Active sink  ${C.cyan}${sinkName}${C.reset}`);
   console.log('');
 
@@ -1054,7 +1054,7 @@ function printConnectHelp(): void {
   console.log(`  ${C.bold}Usage:${C.reset}`);
   console.log('');
   console.log(`    ashlr pulse connect <endpoint>          Set OTLP endpoint`);
-  console.log(`    ashlr pulse connect --token <pat>       Store PAT (Phantom or env)`);
+  console.log(`    ashlr pulse connect --token <pat>       Store PAT in vault; sending needs env`);
   console.log(`    ashlr pulse connect --status            Show config + active sink`);
   console.log(`    ashlr pulse connect --test              Send one test span`);
   console.log(`    ashlr pulse connect --disconnect        Clear endpoint`);
@@ -1063,8 +1063,8 @@ function printConnectHelp(): void {
   console.log(`    ${DEFAULT_PULSE_ENDPOINT}`);
   console.log('');
   console.log(`  ${C.bold}PAT storage:${C.reset}`);
-  console.log(`    Preferred: Phantom vault (key: ${CONNECT_PHANTOM_PAT_KEY})`);
-  console.log(`    Fallback:  export ${CONNECT_PHANTOM_PAT_KEY}=<token>`);
+  console.log(`    Vault storage: Phantom (key: ${CONNECT_PHANTOM_PAT_KEY}); not a sending transport`);
+  console.log(`    Current sending: export ${CONNECT_PHANTOM_PAT_KEY}=<token>`);
   console.log(`    The token is NEVER printed, logged, or stored in config.json.`);
   console.log('');
   console.log(`  ${C.bold}Examples:${C.reset}`);

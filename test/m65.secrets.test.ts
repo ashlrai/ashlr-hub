@@ -1,62 +1,46 @@
-/**
- * M65 — phantom-vault provider-key resolution.
- *
- * Hermetic + portable: works whether or not phantom is installed (CI has none).
- * A bogus secret name is never in any vault, so revealSecret returns null and
- * resolveProviderKey falls back to env — exercising both paths without a fixture.
- */
-
-import { describe, it, expect, afterEach } from 'vitest';
-import { resolveProviderKey, revealSecret } from '../src/core/integrations/secrets.js';
+/** Environment credentials work without unsupported vault extraction. */
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { resolveProviderKey, revealSecret, explainProviderKey } from '../src/core/integrations/secrets.js';
 import type { AshlrConfig } from '../src/core/types.js';
+const subprocess = vi.hoisted(() => vi.fn(() => { throw new Error('credential subprocess forbidden'); }));
+vi.mock('node:child_process', () => ({ spawnSync: subprocess, execFileSync: subprocess, spawn: subprocess }));
+const cfg = (enabled: boolean): AshlrConfig => ({ phantom: { enabled } }) as AshlrConfig;
+const KEY = 'ASHLR_M65_TEST_KEY';
+afterEach(() => { vi.unstubAllEnvs(); subprocess.mockClear(); });
 
-const cfg = (phantomEnabled: boolean): AshlrConfig =>
-  ({ phantom: { enabled: phantomEnabled } }) as AshlrConfig;
-
-const KEY = `ASHLR_M65_TEST_${Math.random().toString(36).slice(2)}`;
-
-afterEach(() => {
-  delete process.env[KEY];
-});
-
-describe('M65 — resolveProviderKey', () => {
-  it('phantom OFF → returns the env value', () => {
-    process.env[KEY] = 'env-secret';
-    expect(resolveProviderKey(KEY, cfg(false))).toBe('env-secret');
+describe('M65 existing environment resolution', () => {
+  it.each([false, true])('preserves the exact valid environment value with enabled=%s', enabled => {
+    vi.stubEnv(KEY, ' env-secret ');
+    expect(resolveProviderKey(KEY, cfg(enabled))).toBe(' env-secret ');
+    expect(explainProviderKey(KEY, cfg(enabled))).toBe('environment-supported');
+    expect(subprocess).not.toHaveBeenCalled();
   });
-
-  it('phantom OFF + env absent → undefined', () => {
+  it.each([undefined, '', '  ', 'phm_placeholder_token', ' phm_placeholder_token '])('rejects missing/blank/placeholder %s', value => {
+    vi.stubEnv(KEY, value);
+    expect(resolveProviderKey(KEY, cfg(true))).toBeUndefined();
     expect(resolveProviderKey(KEY, cfg(false))).toBeUndefined();
+    expect(subprocess).not.toHaveBeenCalled();
   });
-
-  it('empty env-var name → undefined', () => {
+  it('retains environment on-demand resolution without mutation or caching', () => {
+    vi.stubEnv(KEY, 'first-key');
+    expect(resolveProviderKey(KEY, cfg(true))).toBe('first-key');
+    vi.stubEnv(KEY, 'second-key');
+    expect(resolveProviderKey(KEY, cfg(true))).toBe('second-key');
+    expect(process.env[KEY]).toBe('second-key');
+  });
+  it('empty names do not resolve', () => {
     expect(resolveProviderKey('', cfg(true))).toBeUndefined();
   });
-
-  it('phantom ON but key not phantom-managed → falls back to env (never throws)', () => {
-    process.env[KEY] = 'env-fallback';
-    // The random KEY is not in any vault, so revealSecret() is null → env wins.
-    // (Holds whether phantom is installed or not — the bogus name never resolves.)
-    expect(resolveProviderKey(KEY, cfg(true))).toBe('env-fallback');
+  it('diagnostics contain only known reasons, not credential values', () => {
+    vi.stubEnv(KEY, undefined);
+    expect(explainProviderKey(KEY, cfg(false))).toBe('environment-missing');
+    expect(explainProviderKey(KEY, cfg(true))).toBe('vault-transport-not-supported');
+    vi.stubEnv(KEY, ' phm_placeholder_token ');
+    expect(explainProviderKey(KEY, cfg(true))).toBe('placeholder-unusable');
   });
-
-  it('phantom OFF + env contains phantom placeholder token → undefined', () => {
-    process.env[KEY] = 'phm_placeholder_token_for_test';
-    expect(resolveProviderKey(KEY, cfg(false))).toBeUndefined();
-  });
-
-  it('phantom ON + vault absent + env contains phantom placeholder token → undefined', () => {
-    process.env[KEY] = ' phm_placeholder_token_for_test ';
-    expect(resolveProviderKey(KEY, cfg(true))).toBeUndefined();
-  });
-
-  it('phantom ON, nothing anywhere → undefined', () => {
-    expect(resolveProviderKey(KEY, cfg(true))).toBeUndefined();
-  });
-});
-
-describe('M65 — revealSecret', () => {
-  it('returns null for a nonexistent secret and never throws', () => {
-    expect(revealSecret(`ASHLR_NOT_A_SECRET_${Date.now()}`)).toBeNull();
+  it('keeps revealSecret inert even for an apparently managed name', () => {
+    expect(revealSecret('ANTHROPIC_API_KEY')).toBeNull();
+    expect(revealSecret('')).toBeNull();
+    expect(subprocess).not.toHaveBeenCalled();
   });
 });

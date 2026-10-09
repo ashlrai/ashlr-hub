@@ -18,7 +18,7 @@ import { resetGuard } from '../../shell/guard-store.js';
 import { MobileGuardSheet } from '../MobileGuardSheet.js';
 import { MobileToasts, resetMobileToastsForTest } from '../mobile-toast.js';
 import { json, permissionsFor, renderMobile, stubFetch, TOKEN } from '../mobile.test-support.js';
-import { LeaderScreen } from './LeaderScreen.js';
+import { LeaderScreen, approveConsequences } from './LeaderScreen.js';
 
 function Harness() {
   return (
@@ -60,6 +60,12 @@ afterEach(() => {
 });
 
 describe('LeaderScreen — states', () => {
+  it('uses current branding in generated approval prose while preserving quoted labels', () => {
+    const saved = { summary: 'Build Ashlrverse; keep "Ashlr Verse"', status: 'scheduled' as const };
+    expect(approveConsequences(saved)).toContain('“Build Phantom; keep "Ashlr Verse"”');
+    expect(saved.summary).toBe('Build Ashlrverse; keep "Ashlr Verse"');
+  });
+
   it('shows a skeleton while the thread loads', () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)));
     renderMobile(<LeaderScreen />);

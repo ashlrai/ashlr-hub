@@ -1758,6 +1758,13 @@ export const WORKBENCH_ROUTE_FAMILIES = [
     handler: 'handleAgentsApi',
     prefixes: ['/api/verse/agents'],
   },
+  {
+    id: 'proactive-agents',
+    owner: 'proactive-profiles',
+    module: 'src/core/verse/proactive-agents-api.ts',
+    handler: 'handleProactiveAgentsApi',
+    prefixes: ['/api/verse/proactive-agents'],
+  },
 ] as const satisfies readonly {
   id: string;
   owner: string;

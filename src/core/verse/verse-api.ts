@@ -463,6 +463,9 @@ const WORKBENCH_IMPORTS: Readonly<Record<WorkbenchRouteFamilyId, () => Promise<W
   agents: async () => {
     try { return (await import('./agents-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'agents-api.js'); }
   },
+  'proactive-agents': async () => {
+    try { return (await import('./proactive-agents-api.js' as string)) as Record<string, unknown>; } catch (err) { return notLandedOr(err, 'proactive-agents-api.js'); }
+  },
 };
 
 /** The importer table, for the contract test (every family has exactly one). */

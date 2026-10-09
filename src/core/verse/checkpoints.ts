@@ -294,9 +294,9 @@ async function withPrivateIndex<T>(fn: (indexFile: string) => Promise<T>): Promi
 
 /** Identity for checkpoint commits: never the operator's, never a prompt, never a signature. */
 const CHECKPOINT_IDENT: Record<string, string> = {
-  GIT_AUTHOR_NAME: 'Ashlr Verse',
+  GIT_AUTHOR_NAME: 'Phantom',
   GIT_AUTHOR_EMAIL: 'checkpoints@verse.ashlr.invalid',
-  GIT_COMMITTER_NAME: 'Ashlr Verse',
+  GIT_COMMITTER_NAME: 'Phantom',
   GIT_COMMITTER_EMAIL: 'checkpoints@verse.ashlr.invalid',
 };
 
@@ -370,7 +370,7 @@ export async function snapshotWorkingTree(gitRoot: string, opts: SnapshotOptions
     }
     if (built === null) throw new CheckpointError('VERSE_CHECKPOINT_FAILED', 'Git could not record a snapshot of this working tree.');
     const manifest = JSON.stringify({ v: 1, head, skipped: built.skipped });
-    const message = `${opts.label ?? 'Ashlr Verse checkpoint'}\n\n${MANIFEST_PREFIX}${manifest}\n`;
+    const message = `${opts.label ?? 'Phantom checkpoint'}\n\n${MANIFEST_PREFIX}${manifest}\n`;
     const commitArgs = ['commit-tree', '--no-gpg-sign', built.tree, ...(head ? ['-p', head] : []), '-F', '-'];
     const res = await run(gitRoot, commitArgs, { env: CHECKPOINT_IDENT, input: message });
     const commit = res.stdout.toString('utf8').trim();

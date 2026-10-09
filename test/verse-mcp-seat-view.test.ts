@@ -191,6 +191,7 @@ describe('deriveVerseMcpSeatView', () => {
     expect(view.reason).toBe('mcp-seat-isolated-by-adapter');
     // The reason is machine-readable; the NOTE is the sentence a human reads.
     expect(view.notes.join(' ')).toContain('--strict-mcp-config');
+    expect(view.notes.join(' ')).toContain('Phantom’s own server (ashlr-verse:');
   });
 
   it('refuses TOML rather than half-parsing it', () => {
@@ -203,6 +204,8 @@ describe('deriveVerseMcpSeatView', () => {
     );
     expect(view.reason).toBe('mcp-account-config-not-json');
     expect(view.configFormat).toBe('toml');
+    expect(view.notes.join(' ')).toContain('Phantom does not change');
+    expect(view.notes.join(' ')).toContain('Phantom’s own server (ashlr-verse)');
     expect(view.servers).toEqual([]);
   });
 
@@ -279,7 +282,7 @@ describe('one account never inherits another account\'s servers', () => {
     }
     // The whole point: a configured machine registry that no seat reads is
     // stated out loud rather than left for the operator to infer.
-    expect(snapshot.notes.join(' ')).toContain('no Verse seat loads any of them');
+    expect(snapshot.notes.join(' ')).toContain('no Phantom account loads any of them');
   });
 });
 

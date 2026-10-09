@@ -17,13 +17,20 @@
  * Real subprocesses (a real orphan reaped, a real preflight) are exercised
  * in test/verse-session-engine.test.ts, which is in the real-io lane.
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
+
+// Injected fake children never discover or execute a host CLI.
+vi.mock('../src/core/verse/local-harness.js', () => ({
+  LOCAL_HARNESS_UNAVAILABLE: 'Claude Code is required to run local tool sessions. Install it or refresh Apps & Accounts after updating your PATH.',
+  localHarnessInvocation: () => ({ executable: '/opt/fake/bin/fake-cli', path: '/opt/fake/bin' }),
+  discoverLocalHarness: async () => ({ executable: '/opt/fake/bin/fake-cli', path: '/opt/fake/bin' }),
+}));
 
 import type { VerseAdapter, VerseParsedEvent } from '../src/core/verse/adapters/index.js';
 import { __resetLocalOnlyLatchForTests } from '../src/core/policy/local-only.js';

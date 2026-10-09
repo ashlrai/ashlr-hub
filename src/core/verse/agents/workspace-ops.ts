@@ -44,7 +44,7 @@ import type { AgentArchiveRecord, AgentWorkspaceRecord } from './types.js';
 export const ARCHIVE_REF_PREFIX = 'refs/ashlr/verse-archive/';
 
 /** Identity for snapshot commits (a machine commit, not the operator's authorship). */
-const SNAPSHOT_IDENTITY = ['-c', 'user.name=Ashlr Verse', '-c', 'user.email=verse@ashlr.invalid'] as const;
+const SNAPSHOT_IDENTITY = ['-c', 'user.name=Phantom', '-c', 'user.email=verse@ashlr.invalid'] as const;
 
 export interface WorkspaceOpsOptions extends GitOpsOptions {
   /** Test seam: does this path exist (async)? */

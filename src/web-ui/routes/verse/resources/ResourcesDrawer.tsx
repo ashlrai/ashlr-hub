@@ -443,6 +443,7 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
       <footer className={styles.foot}>
         <button type="button" className={styles.linkButton} onClick={() => go('apps')}>Apps &amp; Accounts</button>
         <button type="button" className={styles.linkButton} onClick={() => go('usage')}>Usage</button>
+        <button type="button" className={styles.linkButton} onClick={() => go('agents', 'proactive-agents')}>Proactive agents</button>
         <BarToggle />
       </footer>
     </div>

@@ -6,13 +6,14 @@ import { Readable } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { handleOutcomesApiWithDeps } from '../src/core/verse/outcomes-api.js';
 import { executeOutcomeOperation, outcomeView } from '../src/core/verse/outcomes-operations.js';
-import { runOutcomeOperation } from '../src/core/verse/outcomes-io.js';
+import { runOutcomeOperation, runOutcomeTaskContext } from '../src/core/verse/outcomes-io.js';
 import { normalizeOutcomeOperation } from '../src/core/verse/outcomes-input.js';
 import type { OutcomeOperation, OutcomesRead } from '../src/core/verse/outcomes-api-types.js';
 import type { VerseApiContext } from '../src/core/verse/verse-api.js';
 import { outcomeDirectory } from '../src/core/goals/outcome-runtime.js';
 import { OutcomeStore } from '../src/core/goals/outcome-store.js';
 import { OutcomeCoordinator } from '../src/core/goals/outcome-coordinator.js';
+import { outcomeTaskPublicId } from '../src/core/verse/outcome-task-context.js';
 
 let home: string;
 let repo: string;
@@ -161,5 +162,33 @@ describe('durable outcome API', () => {
       expect(read.outcomes?.[0]?.revision).toBe(1);
       expect(ticks).toBeGreaterThan(0);
     } finally { clearInterval(timer); }
+  });
+  it('retrieves only an exact saved task through the authenticated read route and a real metadata worker', async () => {
+    assertWrite(executeOutcomeOperation(start()));
+    const store = new OutcomeStore(outcomeDirectory('outcome-test'));
+    const coordinator = new OutcomeCoordinator(store);
+    expect(coordinator.refinePlan({ commandId: 'plan-context', expectedRevision: 1 }, {
+      missionKey: 'outcome-test', title: 'Improve', objective: scope().desiredOutcome, createdAt: new Date().toISOString(),
+      nodes: [{ kind: 'work', key: 'a', title: 'Implement', objective: 'Build', deliverable: 'Change', riskClass: 'low',
+        targetRepo: repo, acceptance: ['Pass tests'], dependsOn: [] }],
+    }, { sourceState: 'healthy', complete: true, repos: [repo] }).ok).toBe(true);
+    const nodeId = store.read().state!.activeNodeIds[0]!;
+    const taskId = outcomeTaskPublicId(nodeId);
+    expect(outcomeView(store.read().state!).tasks[0]!.id).toBe(taskId);
+    let ticks = 0; const timer = setInterval(() => ticks++, 1);
+    try {
+      const result = await request(`/api/verse/outcomes/outcome-test/tasks/${taskId}/context?maxEvents=10`);
+      expect(result).toMatchObject({ status: 200, value: { schemaVersion: 1, taskId, outcomeRevision: 2,
+        coverage: { complete: false }, current: [{ occurredAt: null, temporalResolution: 'unknown' }] } });
+      expect(ticks).toBeGreaterThan(0);
+      expect(await request(`/api/verse/outcomes/outcome-test/tasks/${outcomeTaskPublicId('f'.repeat(64))}/context`)).toMatchObject({ status: 404 });
+      expect(await runOutcomeTaskContext({ outcomeId: 'outcome-test', taskId: nodeId, maxEvents: 0 })).toMatchObject({ ok: false, reason: 'invalid' });
+      context = { ...context, readSession: { id: 'expired', expiresAt: Date.now() - 1 } };
+      expect(await request(`/api/verse/outcomes/outcome-test/tasks/${taskId}/context`)).toMatchObject({ status: 401 });
+    } finally { clearInterval(timer); }
+  });
+  it.each(['maxEvents=0', 'maxEvents=100001', 'maxEvents=10&maxEvents=11', 'asOf=tomorrow',
+    'observedThrough=2026-02-29T10%3A00%3A00Z', 'accountRefs=another-account', 'provider=google'])('rejects ambiguous task context query %s', async query => {
+    expect(await request(`/api/verse/outcomes/outcome-test/tasks/${outcomeTaskPublicId('f'.repeat(64))}/context?${query}`)).toMatchObject({ status: 400 });
   });
 });

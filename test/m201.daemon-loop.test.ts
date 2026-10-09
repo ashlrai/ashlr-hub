@@ -640,7 +640,7 @@ beforeEach(() => {
   });
   mockDetectRegression.mockResolvedValue({ regressed: false, details: [] });
   mockBisectAndRevert.mockResolvedValue({ reverted: false });
-  mockRunInventCycle.mockResolvedValue({ invented: 0, items: [] });
+  mockRunInventCycle.mockResolvedValue({ invented: 0, enqueued: 0 });
   mockRunCounterfactualReplay.mockResolvedValue({ replayed: 0, proposals: [] });
   mockRecommendRoute.mockResolvedValue({ backend: 'builtin', tier: 'local', reason: 'mock' });
   mockRecoverWithinBudget.mockReturnValue({
@@ -2853,6 +2853,7 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
   });
 
   it('A1a2: empty backlog runs bounded invent only after self-heal refill stays empty', async () => {
+    mockRunInventCycle.mockResolvedValueOnce({ invented: 1, enqueued: 1 });
     const repo = fx.makeRepo();
     repo.enroll();
     const items = makeItems(repo.dir, 1);
@@ -2875,6 +2876,136 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
     expect(mockRunSelfHealCycle).toHaveBeenCalledTimes(1);
     expect(mockRunInventCycle).toHaveBeenCalledTimes(1);
     expect(mockRunSwarm).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { initial: 'empty', enqueued: 0 },
+    { initial: 'empty', enqueued: 1 },
+    { initial: 'self-heal', enqueued: 0 },
+    { initial: 'self-heal', enqueued: 1 },
+  ] as const)('A1a2 invention: $initial backlog refreshes only for $enqueued actual enqueued items', async ({ initial, enqueued }) => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const [stale, fresh, invented] = makeItems(repo.dir, 3);
+    const selfHeal = { ...stale!, source: 'self' as const, tags: ['self-heal', 'verify'] };
+    const beforeInvention = initial === 'empty' ? [] : [fresh!];
+    mockBuildBacklog
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: initial === 'empty' ? [] : [selfHeal] })
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: beforeInvention })
+      .mockResolvedValueOnce({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [invented!] });
+    // A generated suggestion can be deduplicated/rejected rather than enqueued.
+    mockRunInventCycle.mockResolvedValueOnce({ invented: 1, enqueued });
+
+    const result = await tick({ ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
+      foundry: { autonomyControlLoop: false, generative: true },
+    } as AshlrConfig, { dryRun: false });
+
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(2 + enqueued);
+    expect(mockRunInventCycle).toHaveBeenCalledTimes(1);
+    expect(initial === 'empty' ? mockRunSelfHealCycle : mockRunSelfHealCycleForRepos).toHaveBeenCalledTimes(1);
+    expect(result.producerMaintenance).toMatchObject({ selfHeal: true, invent: true, ancillary: true });
+    if (initial === 'empty' && enqueued === 0) {
+      expect(result.reason).toBe('no-backlog');
+      expect(mockRunSwarm).not.toHaveBeenCalled();
+    } else {
+      expect(result.reason).toBe('ok');
+      expect(result.dispatches?.[0]?.itemId).toBe(enqueued ? invented!.id : fresh!.id);
+    }
+    expect(readAgentActions().find(event => event.action === 'daemon:stage:invention:end'))
+      .toMatchObject({ kind: 'maintenance', outcome: 'ok', counts: { backlogItems: enqueued } });
+  });
+
+  it('A1a2 invention failure retains maintenance bookkeeping and skips an unchanged scan', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    mockBuildBacklog.mockResolvedValue({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [] });
+    mockRunInventCycle.mockRejectedValueOnce(new Error('fixture invention failure'));
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const result = await tick({ ...cfgBuiltin(), foundry: { autonomyControlLoop: false, generative: true } } as AshlrConfig,
+        { dryRun: false });
+      expect(result.reason).toBe('no-backlog');
+      expect(result.producerMaintenance).toMatchObject({ selfHeal: true, invent: true, ancillary: true });
+      expect(mockBuildBacklog).toHaveBeenCalledTimes(2);
+      expect(mockRunInventCycle).toHaveBeenCalledTimes(1);
+      const observation = readAgentActions().find(event => event.action === 'daemon:stage:invention:end');
+      expect(observation).toMatchObject({ outcome: 'failed' });
+      expect(observation?.counts).toBeUndefined();
+      expect(mockRunSwarm).not.toHaveBeenCalled();
+    } finally { warning.mockRestore(); }
+  });
+
+  it('A1a2 Stop during invention prevents another scan or dispatch despite enqueued work', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const controller = new AbortController();
+    mockBuildBacklog.mockResolvedValue({ generatedAt: new Date().toISOString(), repos: [repo.dir], items: [] });
+    mockRunInventCycle.mockImplementationOnce(async () => {
+      controller.abort();
+      return { invented: 1, enqueued: 1 };
+    });
+    const result = await tick({ ...cfgBuiltin(), foundry: { autonomyControlLoop: false, generative: true } } as AshlrConfig,
+      { dryRun: false, signal: controller.signal });
+    expect(result.itemsConsidered).toBe(0);
+    expect(mockBuildBacklog).toHaveBeenCalledTimes(2);
+    expect(mockRunInventCycle).toHaveBeenCalledTimes(1);
+    expect(mockRunSwarm).not.toHaveBeenCalled();
+  });
+
+  it('A1 stage observations never append settlement after tick ownership is lost', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const acquired = acquireDaemonLock();
+    expect(acquired.acquired).toBe(true);
+    if (!acquired.acquired) throw new Error('fixture lock unavailable');
+    mockBuildBacklog.mockImplementationOnce(async () => {
+      fs.writeFileSync(daemonLockPath(), JSON.stringify({
+        pid: process.pid, token: 'successor-token', hostname: 'successor-host',
+        acquiredAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(),
+      }));
+      return { generatedAt: new Date().toISOString(), repos: [repo.dir], items: [] };
+    });
+    try {
+      const result = await tick(cfgBuiltin(), { dryRun: false, ownerLock: acquired.lock });
+      expect(result.reason).toBe('shutdown-requested');
+      expect(readAgentActions().filter(event => event.action.startsWith('daemon:stage:backlog-refresh:')).map(event => event.action))
+        .toEqual(['daemon:stage:backlog-refresh:start']);
+      expect(mockRunSelfHealCycle).not.toHaveBeenCalled();
+      expect(mockRunSwarm).not.toHaveBeenCalled();
+    } finally {
+      releaseDaemonLock(acquired.lock);
+      fs.rmSync(daemonLockPath(), { force: true });
+    }
+  });
+
+  it('A1 stage observations timestamp actual scan start/end and pair repeated refreshes', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const markers: Array<{ start: number; end: number }> = [];
+    mockBuildBacklog.mockImplementation(async () => {
+      const start = Date.now();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      markers.push({ start, end: Date.now() });
+      return { generatedAt: new Date().toISOString(), repos: [repo.dir], items: [] };
+    });
+    await tick({ ...cfgBuiltin(), foundry: { autonomyControlLoop: false } } as AshlrConfig, { dryRun: false });
+    const events = readAgentActions().filter(event => event.action.startsWith('daemon:stage:backlog-refresh:'));
+    // The private ledger reader returns newest-first, unlike execution markers.
+    const starts = events.filter(event => event.action === 'daemon:stage:backlog-refresh:start')
+      .sort((left, right) => Date.parse(left.ts) - Date.parse(right.ts));
+    expect(starts).toHaveLength(2);
+    expect(new Set(starts.map(event => event.trajectoryId)).size).toBe(2);
+    starts.forEach((start, index) => {
+      const end = events.find(event => event.action === 'daemon:stage:backlog-refresh:end' && event.trajectoryId === start.trajectoryId)!;
+      expect(start.kind).toBe('maintenance');
+      expect(start.outcome).toBe('started');
+      expect(Date.parse(start.ts)).toBeLessThanOrEqual(markers[index]!.start);
+      expect(Date.parse(end.ts)).toBeGreaterThanOrEqual(markers[index]!.end);
+      expect(end.durationMs).toBeGreaterThanOrEqual(20);
+      expect(end.outcome).toBe('ok');
+      expect(end.spentUsd).toBeUndefined();
+      expect(end.model).toBeUndefined();
+    });
   });
 
   it('A1a2b: proposal repair maintenance can refill backlog before selection', async () => {

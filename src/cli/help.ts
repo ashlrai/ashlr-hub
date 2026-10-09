@@ -343,6 +343,11 @@ export function agentDocsText(): string {
     lines.push(c.description);
     lines.push('');
   }
+  lines.push('Private profile metadata tools: phm_proactive_agents_list, phm_proactive_agents_create,');
+  lines.push('phm_proactive_agents_update and phm_proactive_agents_delete. These save profiles and');
+  lines.push('planning preferences, not provider connections or verified dispatch capability.');
+  lines.push('phm_task_context reads current and historical task evidence for exact outcomeId and');
+  lines.push('taskId; inspect coverage, omitted counts and observation time before treating it as complete.');
   lines.push('Equivalent MCP tools (when wired via `ashlr wire`): ashlr_orient,');
   lines.push('ashlr_ask, ashlr_recall, ashlr_learn, ashlr_backlog, ashlr_health,');
   lines.push('ashlr_status, ashlr_impact, ashlr_pulse, ashlr_inbox_list,');

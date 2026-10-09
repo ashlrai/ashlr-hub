@@ -520,6 +520,17 @@ describe('M250 ResourceMonitor — NIM backoff store', () => {
     expect(state.backoffUntilMs).toBeNull();
   });
 
+  it('configured vault without a parent transport remains unavailable without provider contact', async () => {
+    const { getBackendResourceState } = await import('../src/core/fabric/resource-monitor.js');
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    try {
+      const state = await getBackendResourceState('nim', { ...baseCfg(), phantom: { enabled: true } });
+      expect(state.availability).toBe('unreachable');
+      expect(state.reason).toContain('vault-transport-not-supported');
+      expect(fetch).not.toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it('nim is open with a fake credential and no backoff', async () => {
     process.env['NVIDIA_NIM_API_KEY'] = FAKE_NIM_API_KEY;
     vi.doMock('../src/core/observability/codex-source.js', () => ({
@@ -546,6 +557,7 @@ describe('M250 ResourceMonitor — NIM backoff store', () => {
     const state = await getBackendResourceState('nim', baseCfg());
     expect(state.availability).toBe('unreachable');
     expect(state.reason).not.toContain('phm_placeholder_token');
+    expect(state.reason).toContain('placeholder-unusable');
   });
 
   it('recordBackoff marks nim as throttled or exhausted', async () => {
@@ -781,12 +793,9 @@ describe('M252 Gateway — resource-aware demote', () => {
     // routeBackend would fall through to 'builtin' (which then senses Ollama
     // unreachable and demotes). Force the frontiers "installed" so an OPEN
     // frontier is the routed base — exactly the scenario this test exercises.
-    vi.doMock('../src/core/run/engines.js', async () => ({
-      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
-        '../src/core/run/engines.js',
-      )),
-      engineInstalled: () => true,
-    }));
+    // This routing fixture needs presence only. Importing the actual execution
+    // module also initializes an unrelated worker graph on the first decision.
+    vi.doMock('../src/core/run/engines.js', () => ({ engineInstalled: () => true }));
 
     const { decide } = await import('../src/core/fabric/gateway.js');
     const cfg = withFoundry({
@@ -849,12 +858,9 @@ describe('M252 Gateway — resource-aware demote', () => {
         primary: { usedPercent: 20, windowMinutes: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 },
       }),
     }));
-    vi.doMock('../src/core/run/engines.js', async () => ({
-      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
-        '../src/core/run/engines.js',
-      )),
-      engineInstalled: () => true,
-    }));
+    // This routing fixture needs presence only. Importing the actual execution
+    // module also initializes an unrelated worker graph on the first decision.
+    vi.doMock('../src/core/run/engines.js', () => ({ engineInstalled: () => true }));
 
     const { getResourceSnapshot } = await import('../src/core/fabric/resource-monitor.js');
     const { decide } = await import('../src/core/fabric/gateway.js');
@@ -881,12 +887,9 @@ describe('M252 Gateway — resource-aware demote', () => {
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),
     }));
-    vi.doMock('../src/core/run/engines.js', async () => ({
-      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
-        '../src/core/run/engines.js',
-      )),
-      engineInstalled: () => true,
-    }));
+    // This routing fixture needs presence only. Importing the actual execution
+    // module also initializes an unrelated worker graph on the first decision.
+    vi.doMock('../src/core/run/engines.js', () => ({ engineInstalled: () => true }));
 
     const { decide } = await import('../src/core/fabric/gateway.js');
     const { routeBackend } = await import('../src/core/fleet/router.js');
@@ -939,12 +942,9 @@ describe('M252 Gateway — resource-aware demote', () => {
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),
     }));
-    vi.doMock('../src/core/run/engines.js', async () => ({
-      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
-        '../src/core/run/engines.js',
-      )),
-      engineInstalled: () => true,
-    }));
+    // This routing fixture needs presence only. Importing the actual execution
+    // module also initializes an unrelated worker graph on the first decision.
+    vi.doMock('../src/core/run/engines.js', () => ({ engineInstalled: () => true }));
 
     const { decide } = await import('../src/core/fabric/gateway.js');
     const cfg = withFoundry({
@@ -1014,12 +1014,9 @@ describe('M252 Gateway — resource-aware demote', () => {
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),
     }));
-    vi.doMock('../src/core/run/engines.js', async () => ({
-      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
-        '../src/core/run/engines.js',
-      )),
-      engineInstalled: () => true,
-    }));
+    // This routing fixture needs presence only. Importing the actual execution
+    // module also initializes an unrelated worker graph on the first decision.
+    vi.doMock('../src/core/run/engines.js', () => ({ engineInstalled: () => true }));
 
     const { decide } = await import('../src/core/fabric/gateway.js');
     const { routeBackend } = await import('../src/core/fleet/router.js');
@@ -1071,12 +1068,9 @@ describe('M252 Gateway — resource-aware demote', () => {
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),
     }));
-    vi.doMock('../src/core/run/engines.js', async () => ({
-      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
-        '../src/core/run/engines.js',
-      )),
-      engineInstalled: () => true,
-    }));
+    // This routing fixture needs presence only. Importing the actual execution
+    // module also initializes an unrelated worker graph on the first decision.
+    vi.doMock('../src/core/run/engines.js', () => ({ engineInstalled: () => true }));
 
     const { decide } = await import('../src/core/fabric/gateway.js');
     const { routeBackend } = await import('../src/core/fleet/router.js');
@@ -1110,12 +1104,9 @@ describe('M252 Gateway — resource-aware demote', () => {
         primary: { usedPercent: 20, windowMinutes: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 },
       }),
     }));
-    vi.doMock('../src/core/run/engines.js', async () => ({
-      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
-        '../src/core/run/engines.js',
-      )),
-      engineInstalled: () => true,
-    }));
+    // This routing fixture needs presence only. Importing the actual execution
+    // module also initializes an unrelated worker graph on the first decision.
+    vi.doMock('../src/core/run/engines.js', () => ({ engineInstalled: () => true }));
     vi.doMock('../src/core/run/learned-router.js', async () => {
       const actual = await vi.importActual<typeof import('../src/core/run/learned-router.js')>(
         '../src/core/run/learned-router.js',
@@ -1174,12 +1165,9 @@ describe('M252 Gateway — resource-aware demote', () => {
 
 describe('M252 Gateway — V3.10 autonomy subscription gate', () => {
   async function decideHardItemOn(engine: 'claude' | 'codex') {
-    vi.doMock('../src/core/run/engines.js', async () => ({
-      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
-        '../src/core/run/engines.js',
-      )),
-      engineInstalled: () => true,
-    }));
+    // This routing fixture needs presence only. Importing the actual execution
+    // module also initializes an unrelated worker graph on the first decision.
+    vi.doMock('../src/core/run/engines.js', () => ({ engineInstalled: () => true }));
     const { decide } = await import('../src/core/fabric/gateway.js');
     const cfg = withFoundry({
       allowedBackends: ['builtin', engine] as EngineId[],

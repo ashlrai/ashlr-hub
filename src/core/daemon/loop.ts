@@ -4045,6 +4045,31 @@ export async function tick(
     mode: dcfg.mode,
     ...(opts.drain ? { drain: opts.drain } : {}),
   });
+  // Stage timings are observations, not scheduling or successful-work evidence.
+  // A fresh trajectory pairs repeated scans without conflating them with ticks
+  // or model generation. Ownership loss must not append a retired writer's end.
+  const beginTickStageObservation = (stage: 'backlog-refresh' | 'self-heal' | 'invention') => {
+    const trajectoryId = `tick-stage:${randomUUID()}`;
+    const startedMs = performance.now();
+    const record = (outcome: AgentActionOutcome, counts?: Record<string, number>): void => {
+      if (!stillOwnsTick()) return;
+      recordAgentAction({
+        schemaVersion: 1,
+        ts: new Date().toISOString(),
+        actor: 'daemon',
+        kind: 'maintenance',
+        outcome,
+        action: `daemon:stage:${stage}:${outcome === 'started' ? 'start' : 'end'}`,
+        summary: `${stage}: ${outcome === 'started' ? 'started' : 'settled'}`,
+        reason: outcome,
+        trajectoryId,
+        ...(outcome !== 'started' ? { durationMs: Math.max(0, performance.now() - startedMs) } : {}),
+        ...(counts ? { counts } : {}),
+      });
+    };
+    record('started');
+    return (outcome: 'ok' | 'failed', counts?: Record<string, number>): void => record(outcome, counts);
+  };
   const startupTreatmentFlush = !opts.dryRun && !proposalOnlyActivation && !stopRequested()
     ? flushPendingRepairTreatmentOutcomes()
     : { complete: true, publicationFailed: false };
@@ -4490,6 +4515,8 @@ export async function tick(
   const runSelfHealMaintenance = async (targetRepos?: string[]): Promise<void> => {
     if (meteredUsdExhaustedForMaintenance || proposalOnlyActivation || opts.dryRun || stopRequested() || selfHealMaintenanceRan) return;
     selfHealMaintenanceRan = true;
+    const settleObservation = beginTickStageObservation('self-heal');
+    let observationOutcome: 'ok' | 'failed' = 'ok';
     try {
       if (targetRepos && targetRepos.length > 0) {
         await runSelfHealCycleForRepos(targetRepos, liveCfg);
@@ -4498,7 +4525,10 @@ export async function tick(
       }
     } catch (err) {
       // Best-effort — self-heal must never crash the tick.
+      observationOutcome = 'failed';
       console.warn('[ashlr] daemon:tick runSelfHealCycle failed:', (err as Error)?.message ?? err);
+    } finally {
+      settleObservation(observationOutcome);
     }
   };
   const runProposalRepairMaintenance = async (): Promise<ProposalRepairWorkResult | null> => {
@@ -4557,12 +4587,21 @@ export async function tick(
     if (directionPlan?.forceLocalOnly === true) return false;
     if ((liveCfg.foundry as Record<string, unknown>)?.generative !== true) return false;
     inventMaintenanceRan = true;
+    const settleObservation = beginTickStageObservation('invention');
+    let observationOutcome: 'ok' | 'failed' = 'ok';
+    let enqueued: number | undefined;
     try {
-      await runInventCycle(liveCfg);
-      return true;
+      const result = await runInventCycle(liveCfg);
+      enqueued = result.enqueued;
+      // Self-heal/repair changes already receive their own fresh scan. Invention
+      // only adds queue entries, so a completed zero-enqueue cycle needs none.
+      return enqueued > 0;
     } catch (err) {
+      observationOutcome = 'failed';
       console.warn('[ashlr] daemon:tick runInventCycle failed:', (err as Error)?.message ?? err);
       return false;
+    } finally {
+      settleObservation(observationOutcome, enqueued === undefined ? undefined : { backlogItems: enqueued });
     }
   };
   const runAncillaryMaintenance = async (): Promise<void> => {
@@ -4846,6 +4885,8 @@ export async function tick(
   };
   const refreshBacklogForTick = async (): Promise<WorkItem[]> => {
     if (stopRequested()) return [];
+    const settleObservation = beginTickStageObservation('backlog-refresh');
+    let observationOutcome: 'ok' | 'failed' = 'ok';
     try {
       const managerItems: WorkItem[] = [];
       if (!opts.dryRun) {
@@ -4894,8 +4935,11 @@ export async function tick(
       return applyTickConstraints(filterGeneratedRepairDispatch(resolution.dispatchable));
     } catch (err) {
       // buildBacklog never throws by contract; extra guard
+      observationOutcome = 'failed';
       console.warn('[ashlr] daemon:tick buildBacklog guard caught:', (err as Error)?.message ?? err);
       return [];
+    } finally {
+      settleObservation(observationOutcome);
     }
   };
   const prunableSelfHealRepos = (items: WorkItem[]): string[] => {

@@ -28,8 +28,7 @@ import { selectedOutcomeAdmissionCurrent } from '../run/outcome-admission.js';
  *      byte ceiling on the response so a pathological body cannot balloon
  *      memory. Both mirror `run/provider-client.ts`.
  *   5. NO SECRET EVER LEAVES THIS MODULE. The key is resolved on demand through
- *      `resolveProviderKey` (phantom vault wins when installed, else
- *      `process.env.TYPESAFE_API_KEY`), then the private 0600 file
+ *      `resolveProviderKey` (existing `process.env.TYPESAFE_API_KEY`), then the private 0600 file
  *      `~/.ashlr/secrets/typesafe.env`, used for exactly one Authorization
  *      header, and never returned, cached, or written to a result field. No
  *      result string in this file is built from the key.
@@ -54,7 +53,7 @@ import { resolveProviderKey } from '../integrations/secrets.js';
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Env var holding the credential. Resolved via phantom first — never read raw. */
+/** Env var holding the credential. Resolved privately from the existing environment or private file. */
 export const TYPESAFE_API_KEY_ENV = 'TYPESAFE_API_KEY';
 
 /** Set to "1"/"true" to hard-disable every classifier call process-wide. */
@@ -154,7 +153,7 @@ export interface TypeSafeUsage {
  * deterministic path".
  */
 export type TypeSafeUnavailableReason =
-  /** No credential resolvable (phantom vault empty and env unset). */
+  /** No credential resolvable from the existing environment/private file. */
   | 'no-key'
   /** Caller-owned outcome retired before provider contact. */
   | 'admission-refused'
@@ -233,8 +232,7 @@ export function typeSafeAvailable(cfg: AshlrConfig): boolean {
 }
 
 /**
- * Where the credential lives when it is neither in the phantom vault nor the
- * environment: `$ASHLR_HOME/secrets/typesafe.env` (default `~/.ashlr/...`),
+ * Existing private-file fallback when the environment credential is absent: `$ASHLR_HOME/secrets/typesafe.env` (default `~/.ashlr/...`),
  * one `TYPESAFE_API_KEY=...` line, mode 0600. Resolved per call so a test HOME
  * is honoured.
  */
@@ -279,8 +277,7 @@ function readTypeSafeKeyFile(): string | undefined {
 }
 
 /**
- * Phantom vault, then the environment (both via `resolveProviderKey`), then
- * the private secrets file. Never throws; never exported — the key does not
+ * Existing environment via `resolveProviderKey`, then the private secrets file. Never throws; never exported — the key does not
  * leave this module.
  */
 function resolveTypeSafeKey(cfg: AshlrConfig): string | undefined {
@@ -456,7 +453,7 @@ export async function askTypeSafe(
     return {
       ok: false,
       reason: 'no-key',
-      detail: `no ${TYPESAFE_API_KEY_ENV} in the phantom vault, the environment, or the secrets file`,
+      detail: `no ${TYPESAFE_API_KEY_ENV} in the environment or the secrets file`,
       durationMs: elapsed(),
     };
   }

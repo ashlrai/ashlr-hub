@@ -93,6 +93,11 @@ const VERSE_MOBILE_ROOT = fileURLToPath(new URL('./src/web-ui/app/VerseMobileApp
 const verseShellModules = new Set<string>();
 /** FIRST-PAINT CHUNKING §1b: the workbench shell's first-paint modules the phone app also reaches. */
 const verseSharedModules = new Set<string>();
+/** Small pure display helpers share one lazy request and one preload-map entry. */
+const presentationFormatModules = new Set([
+  fileURLToPath(new URL('./src/core/vision/leader-display-text.ts', import.meta.url)),
+  fileURLToPath(new URL('./src/web-ui/components/charts/format-metric.ts', import.meta.url)),
+]);
 /** chunk file name → the chunk file names it imports statically, as Vite's preload pass sees the bundle. */
 const staticChunkImports = new Map<string, readonly string[]>();
 
@@ -182,6 +187,12 @@ export default defineConfig(({ mode }) => {
         output: {
           codeSplitting: {
             groups: [
+              {
+                name: 'presentation-format',
+                test: (id: string) => presentationFormatModules.has(id),
+                // Exact zero-import helpers only; do not pull a feature's dependencies.
+                includeDependenciesRecursively: false,
+              },
               {
                 // FIRST-PAINT CHUNKING §1.
                 name: 'VerseConsoleApp',

@@ -207,18 +207,42 @@ describe('adviseSeat — Devin is an equal partner', () => {
     expect(hard.choice).toMatchObject({ seatId: 'devin-cli', model: 'devin', tier: 'elite' });
   });
 
-  it('the elite local Qwen wins cheap work but lines up behind hosted elite seats for hard work Mason is waiting on', () => {
+  it('eligible elite local Qwen competes for cheap and hard work without assumed hosted speed', () => {
     const qwen = advisor(cap('local:qwen3.8:27b-ctx64k', 'local', [], { tier: 'elite', costBasis: 'free' }), { label: 'Qwen 3.8 27B (local)' });
     const seats = [advisor(claude(40)), qwen, advisor(grok(0))];
     const cheap = adviseSeat({ classification: classifyPrompt('what is a monad?'), seats, policy: POLICY, mode: 'auto', nowMs: NOW });
     expect(cheap.choice?.seatId).toBe('local:qwen3.8:27b-ctx64k');
     const hard = adviseSeat({ classification: classifyPrompt('architect the new billing system'), seats, policy: POLICY, mode: 'auto', nowMs: NOW });
-    expect(hard.choice?.seatId).toBe('claude');
-    expect(hard.why).toMatch(/a hosted seat answers faster than Qwen 3\.8 27B \(local\)/);
-    expect(hard.alternatives[0]?.seatId).toBe('local:qwen3.8:27b-ctx64k');
+    expect(hard.choice?.seatId).toBe('local:qwen3.8:27b-ctx64k');
+    expect(hard.why).not.toMatch(/answers faster|slower/);
+    expect(hard.alternatives[0]?.seatId).toBe('claude');
     // A local-only repo still keeps it on this Mac.
     const priv = adviseSeat({ classification: classifyPrompt('architect the new billing system'), seats, policy: POLICY, mode: 'auto', nowMs: NOW, localOnly: { on: true, reason: null } });
     expect(priv.choice?.seatId).toBe('local:qwen3.8:27b-ctx64k');
+  });
+
+  it('hard-work locality does not override pins, measured latency or actual eligibility', () => {
+    const qwen = advisor(cap('local:qwen3.8:27b-ctx64k', 'local', [], { tier: 'elite', costBasis: 'free' }));
+    const hosted = advisor(claude(40));
+    const base = { classification: classifyPrompt('architect the new billing system'), seats: [hosted, qwen], policy: POLICY, mode: 'auto' as const, nowMs: NOW };
+    expect(adviseSeat({ ...base, pinnedSeatId: 'claude' }).choice?.seatId).toBe('claude');
+    const measured = adviseSeat({ ...base, seats: [advisor(claude(0)), qwen], roi: {
+      local: { dispatches: 20, shipRate: null, avgLatencyMs: 60_000 },
+      claude: { dispatches: 20, shipRate: null, avgLatencyMs: 1_000 },
+    } });
+    expect(measured.choice?.seatId).toBe('claude');
+    expect(measured.why).not.toMatch(/answers faster|slower/);
+    for (const capacity of [
+      { ...qwen.capacity, contextWindow: 8 },
+      { ...qwen.capacity, reachable: false },
+    ]) {
+      const advice = adviseSeat({ ...base, seats: [hosted, { ...qwen, capacity }], pinnedSeatId: qwen.seatId });
+      expect(advice.choice?.seatId).toBe('claude');
+      expect(advice.held.map(entry => entry.seatId)).toContain(qwen.seatId);
+    }
+    const spent = adviseSeat({ ...base, seats: [advisor(codex('codex-personal', 100)), qwen], pinnedSeatId: 'codex-personal' });
+    expect(spent.choice?.seatId).toBe(qwen.seatId);
+    expect(spent.held[0]?.reason).toContain('Auto does not select Codex credit-funded turns');
   });
 });
 

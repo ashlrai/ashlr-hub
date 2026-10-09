@@ -148,6 +148,41 @@ all resources are activated or every call has the same credential boundary.
 
 ## Evidence and recovery
 
+### Task context in the successor source
+
+Each saved task has a stable `id`. The authenticated read endpoint
+`GET /api/verse/outcomes/:outcomeId/tasks/:taskId/context` retrieves its saved
+definition, exact-attempt action receipts and authorized private task records.
+It checks the current outcome and enrolled repositories, runs filesystem reads
+off the desktop server's event loop, and creates no records during retrieval.
+
+Evidence retains its provider, account, object, revision and original source
+references. `occurredAt` and `observedAt` answer different questions: when the
+event happened and when Phantom observed it. Unknown event times remain `null`.
+Optional `asOf` and `observedThrough` parameters require explicit timezone
+offsets. `maxEvents` controls retrieval size; truncation remains visible in
+`coverage.complete` and `coverage.stopReasons`. Current outcome revisions and
+ledger reads do not retain historical observation snapshots, so historical
+queries explicitly report incomplete coverage. `outcomeRevision` and `active`
+describe the current authorized read, labeled by `metadataTemporalScope` and
+`snapshotObservedAt`; they do not establish the historical task state.
+
+Current and historical evidence retain superseded, canceled and expired states.
+Conflicting revisions remain visible instead of choosing whichever arrived last.
+Private content stays out of action telemetry. This first endpoint includes
+local Phantom evidence only. It does not import Gmail, calendars or global firm
+memory, or establish a connection to a personal proactive agent. Those sources
+need a qualified account-specific adapter. Missing and partial sources remain
+unknown; a dispatch receipt does not prove completion.
+
+Connected engineering agents can retrieve the same evidence with the read-only
+native MCP tool `phm_task_context`, using the saved `outcomeId` and task `id`.
+The tool validates the same scope and remains readable while work is stopped.
+Its reply stays valid JSON within 32 KiB of UTF-8 output. Large content can be
+excerpted with `contentComplete: false`; `outputProjection` reports excerpts and
+omitted records or conflicts, while coverage remains explicitly incomplete.
+Original private records are retained unchanged.
+
 Outcome revisions and task bindings are durable, private records. A replayed
 command does not launch another producer. Parallel candidates register their
 actual run identities before contact, and only the selected proposal can
