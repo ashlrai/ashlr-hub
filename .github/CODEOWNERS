@@ -741,6 +741,7 @@
 /test/outcome-manager.test.ts @masonwyatt23
 /test/outcome-proposal-admission.test.ts @masonwyatt23
 /test/outcome-runtime.test.ts @masonwyatt23
+/test/outcome-task-context.test.ts @masonwyatt23
 /test/outcomes-api.test.ts @masonwyatt23
 /test/overnight-api-310b.test.ts @masonwyatt23
 /test/playbooks-315.test.ts @masonwyatt23
@@ -812,6 +813,7 @@
 /test/store-unreadable-refusal-310.test.ts @masonwyatt23
 /test/subscription-budget-override-310.test.ts @masonwyatt23
 /test/task-source-310b.test.ts @masonwyatt23
+/test/task-temporal-context.test.ts @masonwyatt23
 /test/throughput-310b.test.ts @masonwyatt23
 /test/tick-hooks-defaults-310b.test.ts @masonwyatt23
 /test/tick-hooks-live-310b.test.ts @masonwyatt23
