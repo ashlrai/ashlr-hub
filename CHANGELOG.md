@@ -20,6 +20,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   authenticated learned choices without rerouting a task to another provider.
 - Add opt-in acceptance phase timings after test cleanup to diagnose preparation,
   proof, delivery and request costs without changing test deadlines or outcomes.
+- Hash evaluator executables with fresh, bounded streaming reads instead of a
+  whole-file buffer, preserving complete-byte and file-identity verification.
 
 ### Fixed
 
