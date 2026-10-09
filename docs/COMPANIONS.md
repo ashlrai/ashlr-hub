@@ -1,5 +1,8 @@
 # Inspect Phantom companions
 
+`phm companions` is available in the 3.28.0 source candidate. The currently
+published 3.27.0 package keeps its existing companion integrations.
+
 Phantom Secrets, Locus and Lexicon are separate tools with existing workbench
 clients. They are not bundled into this workbench package. Inspect installed
 executables without reading project configuration or starting a service:
