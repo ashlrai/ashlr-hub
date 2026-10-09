@@ -1827,6 +1827,15 @@ export async function startVerseAccountCollector(
       if (watchdog !== null) { clearInterval(watchdog); watchdog = null; }
       closed = true;
       await suspend();
+      // Cancellation can race the v5 child's independent registration before
+      // its parent callback. After every collector has settled, use the same
+      // exact-owner/boot/group-absence proof as generation recovery once. A
+      // missing registration or any uncertain proof keeps the fence intact.
+      if (cleanupUncertain && !publicationFailed && lease) {
+        try {
+          if (lease.reclaimNativeActivity().state !== 'blocked') cleanupUncertain = false;
+        } catch { /* Retain the existing cleanup hold. */ }
+      }
       state = 'stopped';
       try {
         // Preserve the durable pending fence when cleanup was not confirmed;
