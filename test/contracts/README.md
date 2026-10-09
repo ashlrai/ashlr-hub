@@ -24,8 +24,10 @@ The closed command set permits only `--version`, `env|unwrap|reveal|list|exec
 --help`, and three parser-rejection commands with synthetic arguments. Rejection
 requires clap exit code 2, empty stdout, and an argument/usage diagnostic;
 configuration or vault errors do not count as success.
-Before either key-shaped command runs, a help preflight requires the exact
-usage form with no positional arguments; a changed grammar stops that check.
+The suite's before-hook requires both exact help usage forms without any
+positional arguments before any negative probe. A changed grammar cancels the
+suite. The invocation helper independently requires both successful grammar
+reviews and an unchanged executable hash before every negative probe.
 The child environment is
 reconstructed without inherited credentials, proxy variables, session bearers,
 loader hooks, or user configuration paths. HOME, config/data/cache/state paths,
@@ -62,6 +64,17 @@ is unknown, despite both binaries reporting version 0.6.0.
 
 Both runs used Node v22.22.3 and left the synthetic fixture unchanged. The
 no-variable run visibly skipped the suite and executed zero checks.
+
+The separate synthetic safety lane runs without a Secrets binary:
+
+```sh
+node --test test/contracts/phantom-secrets-cli-safety.test.mjs
+```
+
+Its POSIX executable fixtures advertise changed `env <KEY>`, `unwrap <TARGET>`,
+and optional `env [SECRET]` grammar, plus a failing help command. All four prove
+the before-hook cancels the suite and the executable receives only version/help calls. Their only writes
+are disposable invocation records; they contain no real command handlers.
 
 Dirty source provenance at inspection:
 

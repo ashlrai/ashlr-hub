@@ -46,6 +46,7 @@ describe('Phantom Secrets real CLI grammar', {
   let initialSnapshot;
   let initialBinaryHash;
   let reportedVersion;
+  const reviewedGrammars = new Set();
 
   function invoke(args) {
     // Keep the invocation set closed: future edits cannot silently run a valid
@@ -56,6 +57,12 @@ describe('Phantom Secrets real CLI grammar', {
       ...rejectedCommands,
     ].some((candidate) => JSON.stringify(candidate) === JSON.stringify(args));
     assert.ok(permitted, 'Only the reviewed help/version/parser-rejection command set may run');
+    if (rejectedCommands.some((candidate) => JSON.stringify(candidate) === JSON.stringify(args))) {
+      assert.ok(reviewedGrammars.has('env') && reviewedGrammars.has('unwrap'),
+        'Both exact no-positional grammars must pass preflight before any negative probe');
+      assert.equal(hashFile(binary), initialBinaryHash,
+        'Binary changed after grammar review; refusing negative probe');
+    }
     const result = spawnSync(binary, args, {
       cwd: join(root, 'project'),
       env: environment,
@@ -114,6 +121,19 @@ describe('Phantom Secrets real CLI grammar', {
     assert.equal(version.status, 0, 'The explicit CLI must support --version');
     assert.match(version.stdout.trim(), /^phantom \d+\.\d+\.\d+\S*$/, 'Expected Secrets CLI version identity');
     reportedVersion = version.stdout.trim();
+    // A before-hook failure cancels the entire suite. Also gate invoke() so a
+    // future test cannot bypass this preflight or continue after a help error.
+    for (const command of ['env', 'unwrap']) {
+      const help = invoke([command, '--help']);
+      assert.equal(help.status, 0, 'Grammar preflight help must succeed');
+      const usageLines = help.stdout.split('\n').filter((line) => line.startsWith('Usage:'));
+      assert.equal(usageLines.length, 1, 'Grammar preflight requires exactly one Usage line');
+      assert.ok(
+        usageLines[0] === `Usage: phantom ${command} [OPTIONS]` || usageLines[0] === `Usage: phantom ${command}`,
+        'Grammar changed: review the new contract before invoking a key-shaped argument',
+      );
+      reviewedGrammars.add(command);
+    }
   });
 
   it('records the exact tested binary provenance', (context) => {
@@ -150,17 +170,6 @@ describe('Phantom Secrets real CLI grammar', {
 
   for (const args of rejectedCommands) {
     it(`${args.join(' ')} is rejected before command dispatch`, () => {
-      if (args[0] === 'env' || args[0] === 'unwrap') {
-        // Refuse to run the key-shaped form if a future binary advertises a
-        // positional argument. Help remains safe even when contracts drift.
-        const help = invoke([args[0], '--help']);
-        assert.equal(help.status, 0);
-        const usage = help.stdout.split('\n').find((line) => line.startsWith('Usage:'));
-        assert.ok(
-          usage === `Usage: phantom ${args[0]} [OPTIONS]` || usage === `Usage: phantom ${args[0]}`,
-          'Grammar changed: review the new contract before invoking a key-shaped argument',
-        );
-      }
       const result = invoke(args);
       assert.equal(result.status, 2, 'Expected clap argument rejection, not a vault/config/handler error');
       assert.equal(result.stdout, '', 'Parser failure must not return any value');
