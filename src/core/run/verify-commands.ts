@@ -111,6 +111,12 @@ export interface VerifyCommandResult {
   cancelled?: boolean;
   /** Present only for non-OK results; lets autonomous repair loops avoid infra false positives. */
   failureCategory?: VerifyFailureCategory;
+  /** Required by maintainer verification before owned temporary resources are removed. */
+  processGroupSettlement?: VerifySubprocessResult['processGroupSettlement'];
+  /** Diagnostic identity only; never restores authority to signal a recycled group. */
+  processGroupId?: number;
+  retainedVerificationHome?: string;
+  retainedConfinementRoot?: string;
 }
 
 export interface VerifyProcessGroupLifecycle {
@@ -168,6 +174,8 @@ export interface VerifySubprocessResult {
   cancelled: boolean;
   /** Opt-in owned-group receipt only; descendants escaping the group are excluded. */
   processGroupSettlement?: 'not-started' | 'group-exit-confirmed' | 'unconfirmed';
+  /** Original invocation group, for non-mutating absence inspection only. */
+  processGroupId?: number;
   /** Present only when either captured output stream exceeded its bound. */
   outputTruncated?: true;
   error?: string;
@@ -176,6 +184,8 @@ export interface VerifySubprocessResult {
 export interface RunVerifyCommandAsyncOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Fail closed and retain temporary resources without a process-group exit witness. */
+  requireProcessGroupExit?: boolean;
   /**
    * V3.10 G3: extra paths the command may READ while it runs confined under a
    * standing policy (beyond the worktree and the node_modules it symlinks to,
@@ -362,7 +372,7 @@ function formatVerifyCommand(vc: VerifyCommand, workspaceRoot: string): string {
     : command;
 }
 
-function makeIsolatedVerifyEnv(baseEnv: NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv; cleanup: () => void } {
+function makeIsolatedVerifyEnv(baseEnv: NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv; cleanup: () => boolean } {
   const home = mkdtempSync(join(tmpdir(), VERIFY_HOME_PREFIX));
   const realHome = baseEnv.HOME ?? baseEnv.USERPROFILE ?? '';
   const env: NodeJS.ProcessEnv = {
@@ -377,8 +387,10 @@ function makeIsolatedVerifyEnv(baseEnv: NodeJS.ProcessEnv): { env: NodeJS.Proces
     cleanup: () => {
       try {
         rmSync(home, { recursive: true, force: true });
+        return !existsSync(home);
       } catch {
-        // Best effort cleanup; the temp directory lives under the OS temp dir.
+        // Legacy callers remain best effort; strict callers reject missing cleanup.
+        return false;
       }
     },
   };
@@ -460,6 +472,7 @@ function linkedNodeModules(root: string): string | null {
 }
 
 interface OpenedVerifyConfinement {
+  resourceRoot: string;
   prefix: string[];
   env: NodeJS.ProcessEnv;
   home: string;
@@ -508,7 +521,7 @@ function openVerifyConfinement(
     } catch {
       home = process.env['HOME'] ?? homedir();
     }
-    return { prefix: [...confined.prefix], env: out, home, dispose: () => confined.dispose() };
+    return { resourceRoot: confined.runDir, prefix: [...confined.prefix], env: out, home, dispose: () => confined.dispose() };
   } catch (error) {
     confined.dispose();
     throw error;
@@ -1072,6 +1085,7 @@ export async function runVerifySubprocessAsync(
         result = {
           ...result,
           processGroupSettlement: receipt,
+          ...(originalPgid !== null ? { processGroupId: originalPgid } : {}),
           ...(lifecycleFailed ? { error: lifecycleError } : {}),
           ...(receipt === 'unconfirmed' && !result.error && !lifecycleFailed
             ? { error: 'required process-group exit receipt unconfirmed' } : {}),
@@ -1358,6 +1372,9 @@ export async function runVerifyCommandAsync(
   _cfg: AshlrConfig,
   opts?: RunVerifyCommandAsyncOptions,
 ): Promise<VerifyCommandResult> {
+  let processEvidence: Partial<VerifyCommandResult> = opts?.requireProcessGroupExit
+    ? { processGroupSettlement: 'not-started' } : {};
+  let resourcesSafe = true;
   const command = formatVerifyCommand(vc, workspaceRoot);
   const commandRoot = commandRootFor(vc, workspaceRoot);
   const timeout = Math.min(
@@ -1382,6 +1399,7 @@ export async function runVerifyCommandAsync(
       output,
       timedOut: false,
       failureCategory: 'invalid-command',
+      ...processEvidence,
     };
   }
   if (!commandRoot) {
@@ -1393,7 +1411,7 @@ export async function runVerifyCommandAsync(
       summary: `${vc.kind}: ${command} → invalid cwd`,
       result: 'error',
     });
-    return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'invalid-command' };
+    return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'invalid-command', ...processEvidence };
   }
   const executableError = verifyExecutablePathError(workspaceRoot, commandRoot, bin);
   if (executableError) {
@@ -1405,7 +1423,7 @@ export async function runVerifyCommandAsync(
       summary: `${vc.kind}: ${command} → invalid executable`,
       result: 'error',
     });
-    return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'invalid-command' };
+    return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'invalid-command', ...processEvidence };
   }
 
   if (opts?.signal?.aborted) {
@@ -1425,10 +1443,11 @@ export async function runVerifyCommandAsync(
       timedOut: false,
       cancelled: true,
       failureCategory: 'cancelled',
+      ...processEvidence,
     };
   }
 
-  let isolated: { env: NodeJS.ProcessEnv; cleanup: () => void } | null = null;
+  let isolated: { env: NodeJS.ProcessEnv; cleanup: () => boolean } | null = null;
   try {
     const baseOptions = spawnOptionsFor(commandRoot, timeout, bin, process.platform, {
       extraBinRoots: [workspaceRoot],
@@ -1460,15 +1479,23 @@ export async function runVerifyCommandAsync(
       try {
         confinement = openVerifyConfinement(workspaceRoot, commandRoot, isolated.env, opts?.confinementReadOnly ?? []);
       } catch (error) {
-        isolated.cleanup();
+        const home = isolated.env['HOME'];
+        if (!isolated.cleanup() && opts?.requireProcessGroupExit) processEvidence.retainedVerificationHome = home;
         isolated = null;
-        return confinementUnavailableResult(vc, command, workspaceRoot, error);
+        return { ...confinementUnavailableResult(vc, command, workspaceRoot, error), ...processEvidence };
       }
     }
     const runSubprocess = opts?._runSubprocess ?? runVerifySubprocessAsync;
     const commandEnv = confinement ? confinement.env : isolated.env;
     let subprocess: VerifySubprocessResult;
+    let confinementCleanupFailed = false;
+    let confinementCleanupError: unknown;
     try {
+      if (opts?.requireProcessGroupExit) {
+        resourcesSafe = false;
+        processEvidence = { processGroupSettlement: 'unconfirmed', retainedVerificationHome: isolated.env['HOME'],
+          ...(confinement ? { retainedConfinementRoot: confinement.resourceRoot } : {}) };
+      }
       subprocess = await runSubprocess(confinement ? [...confinement.prefix, ...argv] : argv, {
         cwd: commandRoot,
         env: useWindowsWrapper
@@ -1483,11 +1510,35 @@ export async function runVerifyCommandAsync(
         // sandbox prefix: the containment check still applies to what runs.
         verifyBoundary: { repoRoot: workspaceRoot, executable: bin },
         ...(opts?.signal ? { signal: opts.signal } : {}),
+        ...(opts?.requireProcessGroupExit ? { requireProcessGroupExit: true } : {}),
       });
+      if (opts?.requireProcessGroupExit) {
+        resourcesSafe = subprocess.processGroupSettlement === 'not-started' || subprocess.processGroupSettlement === 'group-exit-confirmed';
+        processEvidence = { processGroupSettlement: subprocess.processGroupSettlement ?? 'unconfirmed',
+          ...(subprocess.processGroupId !== undefined ? { processGroupId: subprocess.processGroupId } : {}),
+          ...(!resourcesSafe ? { retainedVerificationHome: isolated.env['HOME'],
+            ...(confinement ? { retainedConfinementRoot: confinement.resourceRoot } : {}) } : {}) };
+      }
     } finally {
-      confinement?.dispose();
+      if (resourcesSafe) {
+        try { confinement?.dispose(); }
+        catch (error) {
+          if (opts?.requireProcessGroupExit && confinement) processEvidence.retainedConfinementRoot = confinement.resourceRoot;
+          confinementCleanupFailed = true;
+          confinementCleanupError = error;
+        }
+      }
     }
-    isolated.cleanup();
+    if (confinementCleanupFailed) throw confinementCleanupError;
+    if (resourcesSafe) {
+      const home = isolated.env['HOME'];
+      const removed = isolated.cleanup();
+      isolated = null;
+      if (opts?.requireProcessGroupExit && !removed) {
+        processEvidence.retainedVerificationHome = home;
+        throw new Error('verification temporary HOME cleanup failed');
+      }
+    }
     isolated = null;
     if (confinement) {
       reportVerifyViolations({
@@ -1519,15 +1570,17 @@ export async function runVerifyCommandAsync(
         timedOut: false,
         cancelled: true,
         failureCategory: 'cancelled',
+        ...processEvidence,
       };
     }
 
-    if (subprocess.error) {
-      const output = renderToolText(`${command}\n${capturedOutput}\n${subprocess.error}`);
+    if (subprocess.error || !resourcesSafe) {
+      const subprocessError = subprocess.error ?? 'required process-group exit receipt unconfirmed';
+      const output = renderToolText(`${command}\n${capturedOutput}\n${subprocessError}`);
       const failureCategory = verifyFailureCategory(output, {
         exitCode: subprocess.exitCode,
         timedOut,
-        error: new Error(subprocess.error),
+        error: new Error(subprocessError),
       });
       audit({
         action: 'verify:command',
@@ -1543,6 +1596,7 @@ export async function runVerifyCommandAsync(
         output,
         timedOut,
         failureCategory,
+        ...processEvidence,
       };
     }
 
@@ -1568,9 +1622,13 @@ export async function runVerifyCommandAsync(
       output,
       timedOut,
       ...(failureCategory ? { failureCategory } : {}),
+      ...processEvidence,
     };
   } catch (err) {
-    isolated?.cleanup();
+    if (resourcesSafe && isolated) {
+      const home = isolated.env['HOME'];
+      if (!isolated.cleanup() && opts?.requireProcessGroupExit) processEvidence.retainedVerificationHome = home;
+    }
     const msg = err instanceof Error ? err.message : String(err);
     const output = renderToolText(`${command}\n${msg}`);
     audit({
@@ -1580,6 +1638,6 @@ export async function runVerifyCommandAsync(
       summary: `${vc.kind}: ${command} → threw: ${msg}`,
       result: 'error',
     });
-    return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'infra' };
+    return { ok: false, command, exitCode: -1, output, timedOut: false, failureCategory: 'infra', ...processEvidence };
   }
 }

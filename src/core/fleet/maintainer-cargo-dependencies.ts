@@ -26,12 +26,20 @@ export interface MaintainerCargoReceipt {
   receiptSha256: string;
 }
 export interface MaintainerCargoAttachment {
+  readonly resourceRoot: string;
   readonly receipt: MaintainerCargoReceipt;
   readonly cargoHome: string;
   readonly vendor: string;
   readonly toolchainBin: string;
   assertCurrent(worktree: string): void;
   close(): void;
+}
+/** Preparation lost its process witness; callers must preserve the matching worktree too. */
+export class MaintainerCargoSettlementError extends Error {
+  constructor(readonly resourceRoot: string, readonly processGroupId?: number) {
+    super('Cargo preparation process-group exit unconfirmed; owned resources retained for absence inspection');
+    this.name = 'MaintainerCargoSettlementError';
+  }
 }
 const admitted = new WeakSet<MaintainerCargoAttachment>();
 export function requireMaintainerCargoAttachment(value: MaintainerCargoAttachment): void {
@@ -199,6 +207,8 @@ export async function prepareMaintainerCargoDependencies(input: { worktree: stri
   const preparationHome = join(root, 'prepare'); const cargoHome = join(root, 'cargo-home'); const vendor = join(root, 'vendor');
   for (const path of [preparationHome, cargoHome]) mkdirSync(path, { mode: 0o700 });
   let closed = false;
+  let preparationSettled = true;
+  let processGroupId: number | undefined;
   const close = (): void => { if (!closed) { rmSync(root, { recursive: true, force: true }); closed = true; } };
   try {
     const cache = join(preparationHome, 'registry', 'cache', INDEX); mkdirSync(cache, { recursive: true, mode: 0o700 });
@@ -220,10 +230,13 @@ export async function prepareMaintainerCargoDependencies(input: { worktree: stri
     }
     // Official Cargo vendor fetches only the validated crates.io/workspace recipe.
     // No candidate hooks/build scripts execute; no host config or credentials survive.
+    preparationSettled = false;
     const produced = await runVerifySubprocessAsync([join(tools.bin, 'cargo'), 'vendor', '--locked', '--versioned-dirs', vendor], {
       cwd: worktree, env: { HOME: preparationHome, CARGO_HOME: preparationHome, PATH: `${tools.bin}:/usr/bin:/bin`, RUSTC: join(tools.bin, 'rustc'), RUSTDOC: join(tools.bin, 'rustdoc'), LANG: 'en_US.UTF-8', CARGO_REGISTRIES_CRATES_IO_PROTOCOL: 'sparse' },
       timeoutMs: 300_000, signal: input.signal, requireProcessGroupExit: true,
     });
+    processGroupId = produced.processGroupId;
+    preparationSettled = produced.processGroupSettlement === 'not-started' || produced.processGroupSettlement === 'group-exit-confirmed';
     await input.assertAuthorized();
     if (produced.exitCode !== 0 || produced.error || produced.cancelled || produced.timedOut || produced.processGroupSettlement !== 'group-exit-confirmed') fail('official vendor preparation failed or did not settle');
     if (sourceInputs(worktree).digest !== initial.digest) fail('source changed during preparation');
@@ -249,12 +262,15 @@ export async function prepareMaintainerCargoDependencies(input: { worktree: stri
     const configIdentity = treeIdentities(cargoHome);
     const toolIdentity = (): string => digest(JSON.stringify(['cargo', 'rustc', 'rustdoc', 'rustfmt', 'cargo-fmt', 'cargo-clippy', 'clippy-driver'].map((name) => [name, fileIdentity(join(tools.bin, name))])));
     rmSync(preparationHome, { recursive: true, force: true });
-    const attachment: MaintainerCargoAttachment = Object.freeze({ receipt, cargoHome, vendor, toolchainBin: tools.bin,
+    const attachment: MaintainerCargoAttachment = Object.freeze({ receipt, cargoHome, vendor, toolchainBin: tools.bin, resourceRoot: root,
       assertCurrent(currentWorktree: string): void {
         if (closed || realpathSync(currentWorktree) !== worktree || sourceInputs(worktree).digest !== initial.digest || toolIdentity() !== tools.identity ||
             treeIdentities(cargoHome) !== configIdentity || treeIdentities(vendor) !== vendorIdentity) fail('dependency attachment or source changed');
       }, close });
     await input.assertAuthorized(); if (input.signal?.aborted) fail('preparation cancelled');
     admitted.add(attachment); attachment.assertCurrent(worktree); return attachment;
-  } catch (error) { close(); throw error; }
+  } catch (error) {
+    if (!preparationSettled) throw new MaintainerCargoSettlementError(root, processGroupId);
+    close(); throw error;
+  }
 }

@@ -2320,6 +2320,8 @@ export interface StandingVerificationConfinement {
   runSubprocess: VerifySubprocessRunner;
   /** Remove the run's private temp dir (ephemeral HOME, TMPDIR, caches). Idempotent. */
   close: () => void;
+  /** Host-created root, exposed only to report retained resources after failed settlement. */
+  readonly resourceRoot?: string;
 }
 
 function isInsideDir(child: string, parent: string): boolean {
@@ -2527,7 +2529,7 @@ export async function openStandingVerificationConfinement(
       }
       return runVerifySubprocessAsync([launcher.bin, ...launcher.prefixArgs, ...command], { ...subprocessOpts, env });
     };
-    return { runSubprocess, close };
+    return { runSubprocess, close, resourceRoot: runTmpDir };
   } catch (error) {
     close();
     if (error instanceof VerificationConfinementError) throw error;

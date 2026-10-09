@@ -3,7 +3,8 @@ import { constants, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, re
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { maintainerCargoPackages, prepareMaintainerCargoDependencies, requireMaintainerCargoAttachment } from '../src/core/fleet/maintainer-cargo-dependencies.js';
+import { MaintainerCargoSettlementError, maintainerCargoPackages, prepareMaintainerCargoDependencies, requireMaintainerCargoAttachment } from '../src/core/fleet/maintainer-cargo-dependencies.js';
+import * as verifySubprocess from '../src/core/run/verify-commands.js';
 import { openStandingVerificationConfinement } from '../src/core/inbox/merge.js';
 
 vi.mock('../src/core/sandbox/audit.js', () => ({ audit: vi.fn() }));
@@ -26,6 +27,28 @@ function fixture(): string {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 describe('locked Cargo preparation admission', () => {
+  it.skipIf(process.platform === 'win32')('retains host-created preparation roots when the official vendor runner returns unconfirmed settlement', async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'maintainer-synthetic-toolchain-'))); roots.push(home);
+    vi.stubEnv('HOME', home);
+    const host = `${process.arch === 'arm64' ? 'aarch64' : 'x86_64'}-${process.platform === 'darwin' ? 'apple-darwin' : 'unknown-linux-gnu'}`;
+    const bin = join(home, '.rustup/toolchains', `1.95.0-${host}`, 'bin'); mkdirSync(bin, { recursive: true });
+    for (const name of ['cargo', 'rustc', 'rustdoc', 'rustfmt', 'cargo-fmt', 'cargo-clippy', 'clippy-driver']) {
+      writeFileSync(join(bin, name), '# synthetic tool identity; never executed\n');
+    }
+    const runner = vi.spyOn(verifySubprocess, 'runVerifySubprocessAsync').mockResolvedValue({
+      stdout: '', stderr: '', exitCode: -1, signal: null, timedOut: true, cancelled: false,
+      processGroupSettlement: 'unconfirmed', error: 'synthetic ownership loss',
+    });
+    let retained: MaintainerCargoSettlementError | undefined;
+    try { await prepareMaintainerCargoDependencies({ worktree: fixture(), sourceTree, assertAuthorized: vi.fn() }); }
+    catch (error) { expect(error).toBeInstanceOf(MaintainerCargoSettlementError); retained = error as MaintainerCargoSettlementError; }
+    expect(retained).toBeDefined(); roots.push(retained!.resourceRoot);
+    expect(existsSync(join(retained!.resourceRoot, 'prepare'))).toBe(true);
+    expect(existsSync(join(retained!.resourceRoot, 'cargo-home'))).toBe(true);
+    expect(runner).toHaveBeenCalledOnce();
+    expect(runner.mock.calls[0]![1]).toMatchObject({ requireProcessGroupExit: true, timeoutMs: 300_000 });
+    // The injected runner never starts a child; fixture teardown may remove its synthetic roots.
+  });
   it('selects exact crates.io checksums and excludes workspace packages', () => {
     expect(maintainerCargoPackages(lock())).toEqual([{ name: 'libc', version: '0.2.185', checksum: 'b'.repeat(64) }]);
   });

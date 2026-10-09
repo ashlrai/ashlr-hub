@@ -14,7 +14,7 @@ import { withRepoLease, withVerificationSlot } from '../sandbox/execution-leases
 import { mirrorLeaseKey } from './mirrors.js';
 import type { MaintainerPrPins, MaintainerRunEvidence } from './maintainer-pr-verification.js';
 import { runSafeGitSync, verifyGitTarget, type SafeGitTarget } from '../sandbox/safe-git.js';
-import { needsMaintainerCargo, prepareMaintainerCargoDependencies, type MaintainerCargoAttachment } from './maintainer-cargo-dependencies.js';
+import { MaintainerCargoSettlementError, needsMaintainerCargo, prepareMaintainerCargoDependencies, type MaintainerCargoAttachment } from './maintainer-cargo-dependencies.js';
 
 const OID = /^[0-9a-f]{40}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -176,6 +176,7 @@ export async function runMaintainerPr(input: MaintainerRunInput, _deps: Partial<
   let worktree: string | null = null;
   let confined: Awaited<ReturnType<typeof openStandingVerificationConfinement>> = null;
   let cargo: MaintainerCargoAttachment | null = null;
+  let resourcesSafe = true;
   try {
     if (![input.diffSha256, input.contractSha256].every((digest) => DIGEST.test(digest)) || !OID.test(input.mergeBaseSha)) throw new Error('invalid verification binding');
     await deps.slot(input.mirrorPath, async () => {
@@ -207,9 +208,15 @@ export async function runMaintainerPr(input: MaintainerRunInput, _deps: Partial<
         await input.assertAuthorized();
         cargo?.assertCurrent(worktree!);
         const startedAt = new Date().toISOString(); const started = performance.now();
-        const commandResult = await deps.runCommand(command, worktree!, input.cfg, { signal: input.signal, _runSubprocess: confined.runSubprocess });
+        resourcesSafe = false;
+        const commandResult = await deps.runCommand(command, worktree!, input.cfg, { signal: input.signal, _runSubprocess: confined.runSubprocess, requireProcessGroupExit: true });
+        resourcesSafe = commandResult.processGroupSettlement === 'not-started' || commandResult.processGroupSettlement === 'group-exit-confirmed';
+        if (!resourcesSafe) result.cleanupRetention = { reason: 'process-group-exit-unconfirmed', recovery: 'observe-group-absence-before-owned-cleanup',
+          verificationHome: commandResult.retainedVerificationHome, confinementRoot: commandResult.retainedConfinementRoot,
+          processGroupId: commandResult.processGroupId };
         executed.push({ command, result: commandResult, startedAt, durationMs: performance.now() - started, outputSha256: hash(commandResult.output) });
         cargo?.assertCurrent(worktree!);
+        if (!resourcesSafe) throw new Error('verification process-group exit unconfirmed; owned resources retained for absence inspection');
         if (!commandResult.ok) throw new Error(`required command failed: ${command.id ?? command.kind}`);
       }
       await input.assertAuthorized();
@@ -222,21 +229,36 @@ export async function runMaintainerPr(input: MaintainerRunInput, _deps: Partial<
       result.ok = result.commands.length === prepared.expectedCommands.length && result.commands.length > 0;
     }, input.signal);
   } catch (error) {
+    if (error instanceof MaintainerCargoSettlementError) {
+      resourcesSafe = false;
+      result.dependenciesRemoved = false;
+      result.cleanupRetention = { reason: 'process-group-exit-unconfirmed', recovery: 'observe-group-absence-before-owned-cleanup',
+        dependencyRoot: error.resourceRoot, processGroupId: error.processGroupId };
+    }
     result.ok = false; result.reason = scrubSecrets(error instanceof Error ? error.message : String(error));
   } finally {
-    try { (confined as Awaited<ReturnType<typeof openStandingVerificationConfinement>>)?.close(); }
-    catch (error) { result.ok = false; result.reason = `confinement cleanup failed: ${scrubSecrets(error instanceof Error ? error.message : String(error))}`; }
-    try {
-      if (cargo) { (cargo as MaintainerCargoAttachment).close(); result.dependenciesRemoved = true; }
-    } catch (error) { result.ok = false; result.reason = `dependency cleanup failed: ${scrubSecrets(error instanceof Error ? error.message : String(error))}`; }
-    try {
-      if (worktree && !result.worktreeRemoved) await deps.lease(input.mirrorPath, async () => {
-        removeScratchWorktree(input.mirrorPath, worktree!); result.worktreeRemoved = true;
-      });
-      if (worktree) scratchTargets.delete(worktree);
-      if (scratch) rmSync(scratch, { recursive: true, force: true });
-    } catch (error) {
-      result.ok = false; result.reason = `verification cleanup failed: ${scrubSecrets(error instanceof Error ? error.message : String(error))}`;
+    if (!resourcesSafe) {
+      const retainedConfinement = confined as Awaited<ReturnType<typeof openStandingVerificationConfinement>>;
+      result.ok = false;
+      result.reason = 'verification process-group exit unconfirmed; inspect recorded group absence before cleaning retained owned resources; no signalling authority is retained';
+      result.cleanupRetention = { reason: 'process-group-exit-unconfirmed', recovery: 'observe-group-absence-before-owned-cleanup', ...result.cleanupRetention,
+        ...(worktree ? { worktree } : {}), ...(cargo ? { dependencyRoot: (cargo as MaintainerCargoAttachment).resourceRoot } : {}),
+        ...(retainedConfinement?.resourceRoot ? { confinementRoot: retainedConfinement.resourceRoot } : {}) };
+    } else {
+      try { (confined as Awaited<ReturnType<typeof openStandingVerificationConfinement>>)?.close(); }
+      catch (error) { result.ok = false; result.reason = `confinement cleanup failed: ${scrubSecrets(error instanceof Error ? error.message : String(error))}`; }
+      try {
+        if (cargo) { (cargo as MaintainerCargoAttachment).close(); result.dependenciesRemoved = true; }
+      } catch (error) { result.ok = false; result.reason = `dependency cleanup failed: ${scrubSecrets(error instanceof Error ? error.message : String(error))}`; }
+      try {
+        if (worktree && !result.worktreeRemoved) await deps.lease(input.mirrorPath, async () => {
+          removeScratchWorktree(input.mirrorPath, worktree!); result.worktreeRemoved = true;
+        });
+        if (worktree) scratchTargets.delete(worktree);
+        if (scratch) rmSync(scratch, { recursive: true, force: true });
+      } catch (error) {
+        result.ok = false; result.reason = `verification cleanup failed: ${scrubSecrets(error instanceof Error ? error.message : String(error))}`;
+      }
     }
   }
   return result;

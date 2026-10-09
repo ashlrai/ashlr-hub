@@ -2,12 +2,13 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AshlrConfig } from '../src/core/types.js';
-import { runVerifyCommandAsync, runVerifySubprocessAsync } from '../src/core/run/verify-commands.js';
+import { __setVerifyConfinementForTests, runVerifyCommandAsync, runVerifySubprocessAsync } from '../src/core/run/verify-commands.js';
 import { safeGitCommand } from '../src/core/sandbox/safe-git.js';
 import { prepareMaintainerRun, runMaintainerPr, type MaintainerRunContext } from '../src/core/fleet/maintainer-pr-runner.js';
+import { MaintainerCargoSettlementError } from '../src/core/fleet/maintainer-cargo-dependencies.js';
 
 vi.mock('../src/core/sandbox/audit.js', () => ({ audit: vi.fn() }));
 // Synthetic admission only; the real launcher/profile/child process are not mocked.
@@ -17,6 +18,19 @@ vi.mock('../src/core/authority/effective-config.js', async (importOriginal) => (
   currentStandingPolicy: () => standing.policy,
 }));
 const repositories: string[] = [];
+const retainedRuns: Awaited<ReturnType<typeof runMaintainerPr>>[] = [];
+async function groupAbsent(pgid: number): Promise<void> {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    try { process.kill(-pgid, 0); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+      throw error;
+    }
+    await new Promise((done) => setTimeout(done, 25));
+  }
+  throw new Error('synthetic process group did not settle; retain fixture resources');
+}
 function git(repo: string, ...args: string[]): string {
   const result = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Verifier', '-c', 'user.email=verifier@example.test', ...args], { cwd: repo, encoding: 'utf8' });
   if (result.status !== 0) throw new Error(result.stderr);
@@ -48,9 +62,23 @@ const deps = {
   // Unit-only launcher: real harmless Node execution, without mutating live authority.
   openConfinement: async () => ({ runSubprocess: runVerifySubprocessAsync, close: vi.fn() }),
 };
-afterEach(() => {
+afterEach(async () => {
   standing.policy = null;
+  __setVerifyConfinementForTests(null);
   vi.unstubAllEnvs();
+  for (const run of retainedRuns.splice(0)) {
+    const retained = run.cleanupRetention!;
+    if (retained.processGroupId !== undefined) await groupAbsent(retained.processGroupId);
+    // Only this synthetic fixture's matching mirror/worktree is cleaned, after absence.
+    const mirror = repositories.find((repo) => git(repo, 'worktree', 'list', '--porcelain').includes(`worktree ${retained.worktree}\n`));
+    if (mirror && retained.worktree) {
+      git(mirror, 'worktree', 'remove', '--force', retained.worktree);
+      rmSync(dirname(retained.worktree), { recursive: true, force: true });
+    }
+    for (const root of [retained.verificationHome, retained.confinementRoot, retained.dependencyRoot]) {
+      if (root) rmSync(root, { recursive: true, force: true });
+    }
+  }
   for (const repo of repositories.splice(0)) {
     expect(git(repo, 'worktree', 'list', '--porcelain').match(/^worktree /gm)).toHaveLength(1);
     rmSync(repo, { recursive: true, force: true });
@@ -58,6 +86,140 @@ afterEach(() => {
 });
 
 describe('host exact-tree maintainer runner', () => {
+  it.skipIf(process.platform === 'win32')('reports failed HOME cleanup when confinement preparation rejects before any child starts', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'verify-preparation-cleanup-failure-fixture-')));
+    let home: string | undefined;
+    standing.policy = {};
+    __setVerifyConfinementForTests(({ baseEnv }) => {
+      home = baseEnv['HOME'];
+      writeFileSync(join(home!, 'fixture-file'), 'synthetic'); chmodSync(home!, 0o500);
+      throw new Error('synthetic confinement unavailable');
+    });
+    try {
+      const result = await runVerifyCommandAsync({ kind: 'test', cmd: ['node', '-e', 'true'] }, root, {} as AshlrConfig,
+        { requireProcessGroupExit: true });
+      expect(result).toMatchObject({ ok: false, processGroupSettlement: 'not-started', retainedVerificationHome: home });
+      expect(result.output).toContain('confinement unavailable'); expect(result.processGroupId).toBeUndefined();
+      expect(existsSync(home!)).toBe(true);
+    } finally {
+      // The no-start witness permits only this synthetic HOME's cleanup.
+      if (home && existsSync(home)) { chmodSync(home, 0o700); rmSync(home, { recursive: true, force: true }); }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  it.skipIf(process.platform === 'win32')('reports standalone cleanup failure after the real child group settled', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-cleanup-failure-fixture-')));
+    const confinementRoot = join(root, 'confine'); mkdirSync(confinementRoot);
+    const dispose = vi.fn(() => { throw new Error('synthetic confinement cleanup failed'); });
+    standing.policy = {};
+    __setVerifyConfinementForTests(({ baseEnv }) => ({ prefix: ['/usr/bin/env'], env: baseEnv, runDir: confinementRoot, dispose }));
+    const result = await runVerifyCommandAsync({ kind: 'test', cmd: ['node', '-e', 'true'] }, root, {} as AshlrConfig,
+      { requireProcessGroupExit: true });
+    expect(result).toMatchObject({ ok: false, processGroupSettlement: 'group-exit-confirmed', retainedConfinementRoot: confinementRoot });
+    expect(result.output).toContain('confinement cleanup failed');
+    expect(existsSync(confinementRoot)).toBe(true); expect(dispose).toHaveBeenCalledOnce();
+    await groupAbsent(result.processGroupId!); rmSync(root, { recursive: true, force: true });
+  });
+  it.skipIf(process.platform === 'win32')('rejects temporary HOME removal failure rather than attesting successful cleanup', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'verify-home-cleanup-failure-fixture-')));
+    const marker = join(root, 'owned-home');
+    const script = `const fs=require('node:fs'); const path=require('node:path');const home=process.env.HOME;
+      fs.writeFileSync(${JSON.stringify(marker)},home);fs.writeFileSync(path.join(home,'fixture-file'),'synthetic');fs.chmodSync(home,0o500);`;
+    const result = await runVerifyCommandAsync({ kind: 'test', cmd: ['node', '-e', script] }, root, {} as AshlrConfig,
+      { requireProcessGroupExit: true, _runSubprocess: runVerifySubprocessAsync });
+    const home = readFileSync(marker, 'utf8');
+    try {
+      expect(result).toMatchObject({ ok: false, processGroupSettlement: 'group-exit-confirmed', retainedVerificationHome: home });
+      expect(result.output).toContain('temporary HOME cleanup failed');
+      expect(existsSync(home)).toBe(true);
+    } finally {
+      await groupAbsent(result.processGroupId!);
+      if (existsSync(home)) { chmodSync(home, 0o700); rmSync(home, { recursive: true, force: true }); }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  it.skipIf(process.platform === 'win32')('reports the actual standalone confinement root after a real child outlives its leader', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-retained-fixture-')));
+    const confinementRoot = join(root, 'confine'); mkdirSync(confinementRoot);
+    const dispose = vi.fn(() => rmSync(confinementRoot, { recursive: true, force: true }));
+    standing.policy = {};
+    __setVerifyConfinementForTests(({ baseEnv }) => ({ prefix: ['/usr/bin/env'], env: baseEnv, runDir: confinementRoot, dispose }));
+    const script = `const {spawn}=require('node:child_process');
+      const child=spawn(process.execPath,['-e','setTimeout(()=>process.exit(0),2500)'],{stdio:'ignore',env:process.env});child.unref();process.exit(0);`;
+    const result = await runVerifyCommandAsync({ kind: 'test', cmd: ['node', '-e', script] }, root, {} as AshlrConfig,
+      { requireProcessGroupExit: true });
+    expect(result).toMatchObject({ ok: false, processGroupSettlement: 'unconfirmed',
+      retainedConfinementRoot: confinementRoot, retainedVerificationHome: expect.any(String), processGroupId: expect.any(Number) });
+    expect(existsSync(confinementRoot)).toBe(true); expect(existsSync(result.retainedVerificationHome!)).toBe(true);
+    expect(dispose).not.toHaveBeenCalled();
+    await groupAbsent(result.processGroupId!);
+    dispose(); rmSync(result.retainedVerificationHome!, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }, 12_000);
+  it.skipIf(process.platform === 'win32')('retains all owned trees when the real timeout leader exits before its surviving child', async () => {
+    const context = fixture();
+    const script = `const {spawn}=require('node:child_process'); const fs=require('node:fs');
+      const child=spawn(process.execPath,['-e', ${JSON.stringify("const fs=require('node:fs');process.on('SIGTERM',()=>{});fs.writeFileSync('child-ready','ready');setTimeout(()=>{fs.writeFileSync('child-finished',String(fs.existsSync(process.env.HOME)));process.exit(0)},2500);")}],{stdio:'ignore',env:process.env});
+      child.unref(); process.on('SIGTERM',()=>process.exit(0)); setInterval(()=>{},1000);`;
+    const declared = JSON.parse(contract(script)); declared.commands[0].timeoutMs = 1000;
+    writeFileSync(join(context.mirrorPath, 'ashlr.verify.json'), JSON.stringify(declared));
+    git(context.mirrorPath, 'add', '.'); git(context.mirrorPath, 'commit', '-m', 'synthetic timeout contract');
+    context.baseSha = git(context.mirrorPath, 'rev-parse', 'HEAD'); context.mergeBaseSha = context.baseSha;
+    writeFileSync(join(context.mirrorPath, 'code.txt'), 'candidate timeout fixture');
+    git(context.mirrorPath, 'add', '.'); git(context.mirrorPath, 'commit', '-m', 'synthetic candidate');
+    context.headSha = git(context.mirrorPath, 'rev-parse', 'HEAD'); context.treeSha = git(context.mirrorPath, 'rev-parse', 'HEAD^{tree}');
+    const confinementRoot = realpathSync(mkdtempSync(join(tmpdir(), 'maintainer-retained-fixture-')));
+    const close = vi.fn(() => rmSync(confinementRoot, { recursive: true, force: true }));
+    const prepared = await prepareMaintainerRun(context, deps);
+    const result = await runMaintainerPr(prepared, { ...deps, openConfinement: async () => ({ close, resourceRoot: confinementRoot,
+      runSubprocess: (argv, opts) => runVerifySubprocessAsync(argv, { ...opts, _terminationGraceMs: 50, _terminationDrainMs: 50 }),
+    }) });
+    retainedRuns.push(result);
+    expect(result).toMatchObject({ ok: false, worktreeRemoved: false, cleanupRetention: {
+      reason: 'process-group-exit-unconfirmed', recovery: 'observe-group-absence-before-owned-cleanup', confinementRoot,
+      processGroupId: expect.any(Number), verificationHome: expect.any(String), worktree: expect.any(String),
+    } });
+    expect(result.commands[0]!.result).toMatchObject({ timedOut: true, processGroupSettlement: 'unconfirmed' });
+    expect(result.commands[0]!.result.output).toContain('ownership identity lost after leader exit');
+    const retained = result.cleanupRetention!;
+    expect(existsSync(join(retained.worktree!, 'child-ready'))).toBe(true);
+    expect(existsSync(retained.verificationHome!)).toBe(true);
+    expect(existsSync(confinementRoot)).toBe(true); expect(close).not.toHaveBeenCalled();
+    await groupAbsent(retained.processGroupId!);
+    expect(readFileSync(join(retained.worktree!, 'child-finished'), 'utf8')).toBe('true');
+    // The runner never retrospectively claims cleanup merely because a later observer sees absence.
+    expect(result.worktreeRemoved).toBe(false);
+  }, 12_000);
+  it('retains worktree when a command runner throws without a settlement witness', async () => {
+    const prepared = await prepareMaintainerRun(fixture(), deps);
+    const close = vi.fn();
+    const result = await runMaintainerPr(prepared, { ...deps, openConfinement: async () => ({ close, runSubprocess: runVerifySubprocessAsync }),
+      runCommand: async () => { throw new Error('synthetic unknown settlement'); } });
+    retainedRuns.push(result);
+    expect(result).toMatchObject({ ok: false, worktreeRemoved: false, cleanupRetention: { reason: 'process-group-exit-unconfirmed' } });
+    expect(existsSync(result.cleanupRetention!.worktree!)).toBe(true); expect(close).not.toHaveBeenCalled();
+  });
+  it('retains the matching worktree when Cargo preparation loses its settlement witness', async () => {
+    const context = fixture();
+    const declared = JSON.parse(contract()); declared.commands[0].cmd = ['cargo', 'test'];
+    writeFileSync(join(context.mirrorPath, 'ashlr.verify.json'), JSON.stringify(declared));
+    git(context.mirrorPath, 'add', '.'); git(context.mirrorPath, 'commit', '-m', 'synthetic cargo contract');
+    context.baseSha = git(context.mirrorPath, 'rev-parse', 'HEAD'); context.mergeBaseSha = context.baseSha;
+    writeFileSync(join(context.mirrorPath, 'code.txt'), 'synthetic candidate');
+    git(context.mirrorPath, 'add', '.'); git(context.mirrorPath, 'commit', '-m', 'synthetic candidate');
+    context.headSha = git(context.mirrorPath, 'rev-parse', 'HEAD'); context.treeSha = git(context.mirrorPath, 'rev-parse', 'HEAD^{tree}');
+    const dependencyRoot = realpathSync(mkdtempSync(join(tmpdir(), 'maintainer-preparation-retained-fixture-')));
+    const prepared = await prepareMaintainerRun(context, deps);
+    const runCommand = vi.fn(); const openConfinement = vi.fn();
+    const result = await runMaintainerPr(prepared, { ...deps, openConfinement, runCommand,
+      prepareCargo: async () => { throw new MaintainerCargoSettlementError(dependencyRoot); } });
+    retainedRuns.push(result);
+    expect(result).toMatchObject({ ok: false, worktreeRemoved: false, dependenciesRemoved: false, cleanupRetention: {
+      reason: 'process-group-exit-unconfirmed', dependencyRoot, worktree: expect.any(String),
+    } });
+    expect(existsSync(dependencyRoot)).toBe(true); expect(existsSync(result.cleanupRetention!.worktree!)).toBe(true);
+    expect(openConfinement).not.toHaveBeenCalled(); expect(runCommand).not.toHaveBeenCalled();
+  });
   it('runs the real base command on exact head, captures evidence and removes scratch worktrees', async () => {
     const context = fixture();
     const prepared = await prepareMaintainerRun(context, deps);
@@ -139,7 +301,7 @@ describe('host exact-tree maintainer runner', () => {
     const prepared = await prepareMaintainerRun(fixture(), deps);
     const runCommand = vi.fn(async (_command, directory: string) => {
       writeFileSync(join(directory, 'code.txt'), 'changed by test\n');
-      return { ok: true, command: 'node', exitCode: 0, output: '', timedOut: false };
+      return { ok: true, command: 'node', exitCode: 0, output: '', timedOut: false, processGroupSettlement: 'not-started' as const };
     });
     const result = await runMaintainerPr(prepared, { ...deps, runCommand });
     expect(result).toMatchObject({ ok: false, sourceUnchanged: false, worktreeRemoved: true }); expect(result.reason).toContain('source changed');
@@ -151,7 +313,7 @@ describe('host exact-tree maintainer runner', () => {
   });
   it('treats cancellation after a command as failure and removes its worktree', async () => {
     const controller = new AbortController(); const prepared = await prepareMaintainerRun({ ...fixture(), signal: controller.signal }, deps);
-    const runCommand = vi.fn(async () => { controller.abort(); return { ok: true, command: 'node', exitCode: 0, output: '', timedOut: false }; });
+    const runCommand = vi.fn(async () => { controller.abort(); return { ok: true, command: 'node', exitCode: 0, output: '', timedOut: false, processGroupSettlement: 'not-started' as const }; });
     expect(await runMaintainerPr(prepared, { ...deps, runCommand })).toMatchObject({ ok: false, sourceUnchanged: false, worktreeRemoved: true });
   });
   it('passes cancellation into preparation and head-creation lease waits before execution', async () => {
@@ -171,7 +333,7 @@ describe('host exact-tree maintainer runner', () => {
     const controller = new AbortController(); const signals: (AbortSignal | undefined)[] = [];
     const lease = async <T>(_repo: string, fn: () => Promise<T>, signal?: AbortSignal): Promise<T> => { signals.push(signal); return fn(); };
     const prepared = await prepareMaintainerRun({ ...fixture(), signal: controller.signal }, { ...deps, lease });
-    const runCommand = vi.fn(async () => { controller.abort(); return { ok: false, command: 'node', exitCode: -1, output: '', timedOut: false, cancelled: true }; });
+    const runCommand = vi.fn(async () => { controller.abort(); return { ok: false, command: 'node', exitCode: -1, output: '', timedOut: false, cancelled: true, processGroupSettlement: 'not-started' as const }; });
     const result = await runMaintainerPr(prepared, { ...deps, lease, runCommand });
     expect(result).toMatchObject({ ok: false, worktreeRemoved: true });
     expect(signals).toEqual([controller.signal, controller.signal, controller.signal, undefined]);
