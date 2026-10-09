@@ -106,7 +106,10 @@ conversation. Directives steer its judgement; they never widen the grant. See
   permit it. A reply sees the last 30 messages. Missing capacity or a failed
   invocation produces a clear unavailable response.
 - **Limits:** your message up to 4,000 characters; replies time out after 120
-  seconds.
+  seconds and cancel the owned native invocation. Conversation calls have no
+  hidden daily ceiling. Attempts for replies, extractions and brief narratives
+  are counted separately from memo/check-in runs. Explicit `foundry.leaderPreferences` limits still
+  govern memo/check-in cadence; they do not create a second conversation cap.
 - A reply goes to Telegram only when you wrote from Telegram. Memos, questions
   and updates are sent to Telegram as well as shown in the thread.
 
