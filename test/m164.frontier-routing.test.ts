@@ -184,7 +184,7 @@ describe('M164 invariant 1 — substantive sources → frontier under quality po
     const result = routeTask(item, qualityCfg(), ALL_CTX);
 
     expect(result.engine).toBe('claude');
-    expect(result.model).toBe('opus');
+    expect(result.model).toBe('claude-opus-5-5');
     expect(result.reason).toMatch(/quality policy/i);
   });
 
@@ -193,7 +193,7 @@ describe('M164 invariant 1 — substantive sources → frontier under quality po
     const result = routeTask(item, qualityCfg(), ALL_CTX);
 
     expect(result.engine).toBe('claude');
-    expect(result.model).toBe('opus');
+    expect(result.model).toBe('claude-opus-5-5');
     expect(result.reason).toMatch(/quality policy/i);
   });
 
@@ -202,7 +202,7 @@ describe('M164 invariant 1 — substantive sources → frontier under quality po
     const result = routeTask(item, qualityCfg(), ALL_CTX);
 
     expect(result.engine).toBe('claude');
-    expect(result.model).toBe('opus');
+    expect(result.model).toBe('claude-opus-5-5');
     expect(result.reason).toMatch(/quality policy/i);
   });
 
@@ -211,7 +211,7 @@ describe('M164 invariant 1 — substantive sources → frontier under quality po
     const result = routeTask(item, qualityCfg(), ALL_CTX);
 
     expect(result.engine).toBe('codex');
-    expect(result.model).toBe('gpt-5.5');
+    expect(result.model).toBe('gpt-6.1-sol');
     expect(result.reason).toMatch(/quality policy/i);
   });
 

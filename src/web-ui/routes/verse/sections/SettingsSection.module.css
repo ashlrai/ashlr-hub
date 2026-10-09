@@ -137,6 +137,8 @@
 /* ---------------------------------------------------------------------------
  * Accent controls
  * ------------------------------------------------------------------------- */
+.ghostAccent { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+.ghostPreview { display: inline-flex; align-items: center; color: var(--accent-500); flex: none; }
 .swatches {
   display: flex;
   flex-wrap: wrap;

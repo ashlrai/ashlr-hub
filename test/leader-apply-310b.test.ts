@@ -720,9 +720,11 @@ describe('goal-history retention does not invent finite-quota capacity', () => {
 
 
 describe('live operator Grok maximum preference', () => {
-  it('keeps default4, accepts larger explicit/null preferences as B, and preserves authority', () => {
+  it('defaults to no preference cap, honors a finite maximum, and preserves authority', () => {
     const change = draft('lanes.grok', { slots: 17 });
-    expect(classifyLeaderAction(change, ctx()).verdict).toBe('refused');
+    expect(classifyLeaderAction(change, ctx())).toMatchObject({ class: 'B', verdict: 'ok' });
+    const finite = resolveLeaderPreferences({ foundry: { leaderPreferences: { maxGrokLanes: 4 } } });
+    expect(classifyLeaderAction(change, ctx({ leaderPreferences: finite })).verdict).toBe('refused');
     for (const maxGrokLanes of [20, null]) {
       const leaderPreferences = resolveLeaderPreferences({ foundry: { leaderPreferences: { maxGrokLanes } } });
       expect(classifyLeaderAction(change, ctx({ leaderPreferences }))).toMatchObject({ class: 'B', verdict: 'ok' });

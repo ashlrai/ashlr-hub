@@ -28,6 +28,10 @@ import {
   CLAUDE5_CATALOG_IDS,
   CLAUDE5_SONNET_API_ID,
   CLAUDE5_FABLE_API_ID,
+  DEFAULT_FABLE_MODEL_ID,
+  DEFAULT_CLAUDE_MODEL_ID,
+  DEFAULT_CODEX_MODEL_ID,
+  catalogFor,
   CLAUDE_OPUS_API_ID,
 } from '../src/core/run/model-catalog.js';
 import { evaluateMergeAuthority } from '../src/core/inbox/merge.js';
@@ -102,15 +106,15 @@ describe('M320 catalog entries', () => {
 });
 
 // ---------------------------------------------------------------------------
-// pickModel — default exclusion (byte-identical legacy behavior)
+// pickModel — default exclusion (historical tags preserved, current defaults qualified)
 // ---------------------------------------------------------------------------
 
 describe('M320 pickModel exclusion + preferStrong', () => {
-  it('excludes Claude 5 ids by default — legacy call sites unchanged', () => {
+  it('excludes Claude 5 ids by default — current native Opus remains the default', () => {
     const picked = pickModel({ engine: 'claude', maxEffort: 3 });
     expect(picked).not.toBeNull();
     expect(CLAUDE5_CATALOG_IDS.has(picked!.id)).toBe(false);
-    expect(picked!.id).toBe('claude:opus'); // large tier still wins, opus only large
+    expect(picked!.id).toBe('claude:claude-opus-5-5'); // large tier still wins, opus only large
   });
 
   it('opted-in caller (claude5 enabled) gets sonnet-5 as cheapest-large', () => {
@@ -128,15 +132,15 @@ describe('M320 pickModel exclusion + preferStrong', () => {
       maxEffort: 3,
       excludeIds: claude5ExcludeIds(cfgWith({ enabled: false })),
     });
-    expect(picked!.id).toBe('claude:opus');
+    expect(picked!.id).toBe('claude:claude-opus-5-5');
   });
 
   it('preferStrong at effort 5 picks fable-5; at effort 3 picks opus', () => {
     const none = claude5ExcludeIds(cfgWith());
     const strong5 = pickModel({ engine: 'claude', maxEffort: 5, preferStrong: true, excludeIds: none });
-    expect(strong5!.id).toBe('claude:fable-5');
+    expect(strong5!.id).toBe('claude:claude-fable-5-1');
     const strong3 = pickModel({ engine: 'claude', maxEffort: 3, preferStrong: true, excludeIds: none });
-    expect(strong3!.id).toBe('claude:opus'); // fable filtered by minEffort, opus outranks sonnet-5
+    expect(strong3!.id).toBe('claude:claude-opus-5-5'); // fable filtered by minEffort, opus outranks sonnet-5
   });
 
   it('fable:false excludes only fable-5 — sonnet-5 still routable', () => {
@@ -144,7 +148,7 @@ describe('M320 pickModel exclusion + preferStrong', () => {
     expect(excludes.has('claude:fable-5')).toBe(true);
     expect(excludes.has('claude:sonnet-5')).toBe(false);
     const strong = pickModel({ engine: 'claude', maxEffort: 5, preferStrong: true, excludeIds: excludes });
-    expect(strong!.id).toBe('claude:opus');
+    expect(strong!.id).toBe('claude:claude-opus-5-5');
   });
 });
 
@@ -166,10 +170,10 @@ describe('M320 flags', () => {
     expect(fableEnabled(cfgWith({ enabled: false, fable: true }))).toBe(false);
   });
 
-  it('defaultStrategistModel: fable-5 when on, opus-4-8 otherwise', () => {
-    expect(defaultStrategistModel(cfgWith())).toBe(CLAUDE5_FABLE_API_ID);
-    expect(defaultStrategistModel(cfgWith({ fable: false }))).toBe(CLAUDE_OPUS_API_ID);
-    expect(defaultStrategistModel(cfgWith({ enabled: false }))).toBe(CLAUDE_OPUS_API_ID);
+  it('defaultStrategistModel: current Fable when on, current Opus otherwise', () => {
+    expect(defaultStrategistModel(cfgWith())).toBe(DEFAULT_FABLE_MODEL_ID);
+    expect(defaultStrategistModel(cfgWith({ fable: false }))).toBe(DEFAULT_CLAUDE_MODEL_ID);
+    expect(defaultStrategistModel(cfgWith({ enabled: false }))).toBe(DEFAULT_CLAUDE_MODEL_ID);
   });
 });
 
@@ -244,5 +248,24 @@ describe('M320 evaluateMergeAuthority spelling safety', () => {
     const cfg = authorityCfg([{ engine: 'claude', model: 'default' }]);
     const v = evaluateMergeAuthority(makeProposal('frontier', 'claude:default'), cfg);
     expect(v.authorized).toBe(false);
+  });
+});
+
+
+describe('current native catalog and exact historical semantics', () => {
+  it('uses current concrete defaults and published API estimates without rewriting old tags', () => {
+    expect(DEFAULT_CODEX_MODEL_ID).toBe('gpt-6.1-sol');
+    expect(costOf(`codex:${DEFAULT_CODEX_MODEL_ID}`)).toBe(6);
+    expect(costOf(`claude:${DEFAULT_CLAUDE_MODEL_ID}`)).toBe(12);
+    expect(canonicalModelTag('claude', 'claude-opus-4-8')).toBe('opus');
+    expect(canonicalModelTag('claude', DEFAULT_CLAUDE_MODEL_ID)).toBe(DEFAULT_CLAUDE_MODEL_ID);
+    expect(canonicalModelTag('claude', 'claude-fable-5')).toBe('fable-5');
+    expect(canonicalModelTag('claude', DEFAULT_FABLE_MODEL_ID)).toBe(DEFAULT_FABLE_MODEL_ID);
+  });
+  it('keeps hidden models available for old exact metadata but not new automatic work', () => {
+    expect(KNOWN_MODELS.find(m => m.id === 'codex:gpt-5.5')?.historical).toBe(true);
+    expect(costOf('codex:gpt-5.5')).toBe(20);
+    expect(catalogFor('codex').map(m => m.id)).not.toContain('codex:gpt-5.5');
+    expect(pickModel({ engine: 'codex', maxEffort: 5 })?.id).toBe(`codex:${DEFAULT_CODEX_MODEL_ID}`);
   });
 });

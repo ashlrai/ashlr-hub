@@ -10,7 +10,7 @@ import { HUB_REPOSITORY_IDENTITY } from '../src/core/authority/repository-bindin
 import { enqueueTask, readTaskQueue, recordTaskDispatch, taskQueuePath } from '../src/core/fleet/task-source.js';
 import { configureReleaseArticles, importProposedRelease, publicArticleDraft, readReleaseArticles, releaseArticlePaths,
   RELEASE_ARTICLE_REPO, RELEASE_TEASER_REPO, defaultReleaseArticlesDeps, syncReleaseArticles, type ReleaseArticlesDeps } from '../src/core/release-articles.js';
-import { parseProposedRelease, RELEASE_CI_JOBS, releaseRequiredSteps, releaseRequiredLabels, verifyPublishedRelease, defaultReleasePublicReader, type ReleasePublicReader } from '../src/core/release-public-facts.js';
+import { parseProposedRelease, RELEASE_CI_JOBS, releaseRequiredSteps, releaseRequiredLabels, verifyPublishedRelease, verifyLatestWorkbenchRelease, publicWorkbenchRelease, defaultReleasePublicReader, type ReleasePublicReader } from '../src/core/release-public-facts.js';
 import { runReleaseArticlesCli } from '../src/cli/release-articles.js';
 
 const home = useTmpHome();
@@ -72,6 +72,39 @@ function deps(reader = fixtureReader()): ReleaseArticlesDeps {
 beforeEach(() => home.setup()); afterEach(() => { vi.restoreAllMocks(); home.teardown(); });
 
 describe('fresh public facts are data, not saved release authority', () => {
+  it('projects only a fully verified canonical release and brackets latest discovery', async () => {
+    const reader = fixtureReader(undefined, { repository: 'ashlrai/phantom', packageName: '@ashlr/phantom' });
+    const record = await verifyLatestWorkbenchRelease(reader, NOW);
+    expect(record).toMatchObject({ product: 'workbench', version: '3.24.3', packageName: '@ashlr/phantom',
+      releaseUrl: 'https://github.com/ashlrai/phantom/releases/tag/v3.24.3', installCommand: 'npm install -g @ashlr/phantom@3.24.3', macDownloadUrl: null });
+    expect(record.factsDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect((reader.github as ReturnType<typeof vi.fn>).mock.calls.filter(([path]) => path.endsWith('/releases/latest'))).toHaveLength(2);
+    expect(() => publicWorkbenchRelease({ ...record } as never)).toThrow();
+  });
+  it('withholds public metadata if latest moves or registry verification fails', async () => {
+    let latest = 0;
+    const reader = fixtureReader((endpoint, value) => endpoint.endsWith('/releases/latest') && ++latest === 2
+      ? { ...(value as object), tag_name: 'v3.24.4' } : value, { repository: 'ashlrai/phantom', packageName: '@ashlr/phantom' });
+    await expect(verifyLatestWorkbenchRelease(reader, NOW)).rejects.toThrow('changed during verification');
+    const unavailable = fixtureReader(undefined, { repository: 'ashlrai/phantom', packageName: '@ashlr/phantom' });
+    unavailable.npm = async () => { throw new Error('Registry visibility unavailable'); };
+    await expect(verifyLatestWorkbenchRelease(unavailable, NOW)).rejects.toThrow('Registry visibility unavailable');
+  });
+  it('catches replacement of the same latest tag or its asset set after full verification', async () => {
+    for (const mutation of [{ id: 999 }, { assets: [] }]) {
+      let latest = 0;
+      const reader = fixtureReader((endpoint, value) => endpoint.endsWith('/releases/latest') && ++latest === 2
+        ? { ...(value as object), ...mutation } : value, { repository: 'ashlrai/phantom', packageName: '@ashlr/phantom' });
+      await expect(verifyLatestWorkbenchRelease(reader, NOW)).rejects.toThrow('changed during verification');
+    }
+  });
+  it('exports metadata through the existing CLI without enabling automation or enqueueing work', async () => {
+    const ports = deps(); ports.reader = fixtureReader(undefined, { repository: 'ashlrai/phantom', packageName: '@ashlr/phantom' });
+    const print = vi.fn();
+    expect(await runReleaseArticlesCli(['metadata', '--json'], ports, print)).toBe(0);
+    expect(JSON.parse(print.mock.calls[0]![0])).toMatchObject({ product: 'workbench', version: '3.24.3' });
+    expect(readReleaseArticles().enabled).toBe(false); expect(ports.enqueue).not.toHaveBeenCalled();
+  });
   it('accepts only a minimal proposed version and refuses the operational index', () => {
     expect(parseProposedRelease(proposed)).toEqual(proposed);
     for (const input of [{ ...proposed, evidence: { npm: { path: '/private/receipt' } } }, { ...proposed, success: true },

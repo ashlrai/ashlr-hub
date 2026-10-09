@@ -75,8 +75,9 @@ export function OnboardingPanel() {
           <dt>Add tools and companions</dt>
           <dd>
             Connect MCP servers and CLIs. Phantom Secrets manages credentials, and configured Locus checks account and
-            session readiness; protection depends on the setup and execution path. Meta Muse is an opt-in API provider.
-            Dots and Grok Bot are separate products, not connected execution resources here.
+            session readiness; protection depends on the setup and execution path. Meta Model API offers Muse Spark as
+            an opt-in API resource. The personal Muse agent, Dots and Grok Bot are separate products, not connected
+            execution resources here.
           </dd>
         </dl>
         <p>Connections, model capabilities and current permissions determine which resources can run each task.</p>

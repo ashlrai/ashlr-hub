@@ -1,6 +1,6 @@
 <a id="ashlr-universe--north-star"></a>
 
-# Ashlrverse — North Star
+# Phantom — North Star
 
 > Build for a factory whose models become ten times more capable. The objective
 > should become more ambitious without replacing the factory.
@@ -12,7 +12,7 @@
 
 ## Vision
 
-**Build Ashlrverse into an agent-native operating system for engineers and builders: a self-improving engineering fleet optimizing verified engineering yield—useful accepted changes per token and hour.**
+**Build Phantom into an agent-native operating system for engineers and builders: a self-improving engineering fleet optimizing verified engineering yield—useful accepted changes per token and hour.**
 
 Give it an idea, a starting portfolio, resources, and the scope of work it may
 undertake. It should discover worthwhile opportunities, design experiments,
@@ -25,11 +25,11 @@ challenge its own plans, discover better features and methods, and carry useful
 work through integration and operation. It should improve its harnesses and
 coordination through the same evidence-led process it applies to products.
 
-Hub is the local execution and observation kernel. Ashlrverse is the wider
-product vision: continuing search, resource allocation, and organizational
-learning above it. Universe remains the name of the existing experiment runtime
-and its compatibility interfaces. Subscription
-capacity, cloud models, and local compute are resources to allocate according to
+Phantom unifies the interactive workbench, execution and observation kernel,
+and autonomous fleet: continuing search, resource allocation, and organizational
+learning across connected resources. Universe remains the name of the existing
+experiment runtime and its compatibility interfaces. Subscription capacity,
+cloud models, and local compute are resources to allocate according to
 measured usefulness and provider limits. More tokens spent is not itself progress.
 Preserve operator reserves and compare outcomes before spending more; idle
 capacity is useful only when the next task can produce value.
@@ -45,9 +45,10 @@ capacity is useful only when the next task can produce value.
    same loop. Evaluate product outcomes, not only code quantity or benchmark wins.
 
 3. **The composition platform.** Independently valuable projects become stronger through shared interfaces and evidence.
-   Hub, Cortex, Phantom, Locus, Plugin, Stack, and Core Efficiency retain their own
-   repositories and identities. The desktop console and physical agent board are
-   views and controls for the same system, not separate sources of truth.
+   Phantom, Cortex, Phantom Secrets, Locus, Lexicon, Plugin, Stack, and Core
+   Efficiency compose through their existing repositories and compatible
+   interfaces. The desktop console and physical agent board are views and
+   controls for the same system, not separate sources of truth.
 
 ## The engineer
 
@@ -87,11 +88,11 @@ external authority remain explicit decisions.
 Model roles are configurable starting hypotheses, not account identities or
 guarantees of capability:
 
-| Role | Initial model assignment | Evidence required from the role |
+| Role | Selection guidance | Evidence required from the role |
 | --- | --- | --- |
-| Design and challenge | Astra | Alternatives, a dependency graph, scoped interfaces, acceptance criteria and reasons to reject the plan. |
-| Integrate and implement | Terra | Composable changes and a freshly tested combined candidate, not only independently passing branches. |
-| Bounded implementation and test repair | Luna | Narrow changes, reproducible checks and a finite retry budget before escalation. |
+| Design and challenge | A capable planner selected by task fit, available allowance, quality and latency | Alternatives, a dependency graph, scoped interfaces, acceptance criteria and reasons to reject the plan. |
+| Integrate and implement | Tool-capable workers selected by task fit and measured outcomes | Composable changes and a freshly tested combined candidate, not only independently passing branches. |
+| Implementation and test repair | Eligible local, efficient or frontier models selected by task complexity | Useful changes, reproducible checks, and escalation when the evidence shows another approach is needed. |
 
 Route these roles through enrolled workers; preserve account exclusions, shared
 capacity and operator reserves before considering model preference. An account
@@ -179,6 +180,10 @@ allowance generating more disconnected changes.
 ## Wiring
 
 `docs/NORTH-STAR.md` and `docs/ECOSYSTEM-MAP.md` ground strategy and invention.
-Goals should be substantive (value ≥ 4), bound to a concrete repo and verifiable
-outcome, and decomposed into shippable milestones. The [Ashlrverse operator guide](ASHLR-UNIVERSE.md)
-describes its five engines, current executable scope, and path to the full system.
+Prioritize useful outcomes in concrete repositories and decompose work into
+shippable milestones. Documentation, release work, tests and maintenance are
+valuable when they improve the product or unblock delivery; judge their effect,
+not their category. The [Phantom user guide](VERSE.md) describes the workbench;
+the [Universe experiment guide](ASHLR-UNIVERSE.md) describes the separate
+experiment runtime and its current executable scope. Reuse task playbooks and
+recorded strategic lessons for shared engineering guidance across providers.

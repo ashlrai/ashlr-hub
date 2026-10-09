@@ -14,6 +14,8 @@
  */
 import { useAppearance } from '../../../data/appearance-hooks.js';
 import { OnboardingPanel } from '../onboarding/OnboardingPanel.js';
+import { Tag } from '../../../components/primitives/index.js';
+import { APP_NAME, APP_VERSION, installedDesktopVersion } from './app-version.js';
 import { AboutPanel } from './AboutPanel.js';
 import { AppearancePanel } from './AppearancePanel.js';
 import { ChatSettingsPanel } from './ChatSettingsPanel.js';
@@ -24,11 +26,13 @@ import styles from './SettingsSection.module.css';
 
 export function SettingsSection() {
   const { appearance, set, reset } = useAppearance();
+  const desktopVersion = installedDesktopVersion();
 
   return (
     <div className={styles.section}>
       <header className={styles.strip} data-app-region="drag">
         <h2 className={styles.stripTitle}>Settings</h2>
+        <Tag size="sm" title={desktopVersion ? 'Installed desktop version' : 'Interface build version'}>{APP_NAME} {desktopVersion ?? APP_VERSION}</Tag>
       </header>
       <div className={styles.scroll}>
         <div className={styles.column}>

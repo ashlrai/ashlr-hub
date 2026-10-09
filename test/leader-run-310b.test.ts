@@ -3,7 +3,7 @@
  *
  *   - a run writes a memo from deterministic evidence; with no grant it is a
  *     dry run (actions shown, none applied);
- *   - unchanged evidence ⇒ skipped; at most 3 model runs per local day;
+ *   - unchanged evidence ⇒ skipped; explicit daily limits are respected;
  *   - no seat ⇒ a `no-seat` memo (not counted as a run); unparseable output ⇒
  *     `parse-failed` with no actions (one retry on free seats only);
  *   - daily 06:30 cadence + merge / revert / seat-reset / insight triggers;
@@ -204,9 +204,10 @@ describe('runLeader', () => {
     expect(r1.memo!.actions[0]).toMatchObject({ class: 'A', status: 'applied' });
   });
 
-  it('skips when the evidence has not changed, and caps model runs at 3 per day', async () => {
+  it('skips unchanged evidence and respects an explicit 3-run daily preference', async () => {
     let now = T0;
     const { deps, calls } = world({ now: () => now, replies: [reply(), reply(), reply(), reply()] });
+    deps.cfg.foundry = { leaderPreferences: { maxFullRunsPerDay: 3 } };
     expect((await runLeader(deps, 'schedule')).outcome).toBe('ok');
     now += 60_000;
     expect((await runLeader(deps, 'merges')).outcome).toBe('skipped-unchanged');
@@ -418,6 +419,7 @@ describe('operator daily Leader preferences use current observations and live po
     ensurePrivateDirectory(dirname(leaderStatePath()));
     writePrivateFileAtomic(leaderStatePath(), '{broken');
     const { deps, calls } = world({ now: () => now, replies: [reply(), reply()] });
+    deps.cfg.foundry = { leaderPreferences: { maxFullRunsPerDay: 3 } };
     expect((await runLeader(deps, 'manual', { force: true })).reason).toMatch(/required run counts/);
     expect(calls).toHaveLength(0);
     deps.cfg.foundry = { leaderPreferences: { maxFullRunsPerDay: null, maxTotalRunsPerDay: null } };
@@ -426,7 +428,7 @@ describe('operator daily Leader preferences use current observations and live po
     expect(recovered.dailyCountsComplete).toBe(false);
     expect(recovered.dailyCountsUnknownThroughDay).toBe('2026-09-24');
     expect(buildLeaderState(now).dailyRunCounts).toMatchObject({ total: null, full: null, sourceState: 'unavailable' });
-    deps.cfg.foundry = {};
+    deps.cfg.foundry = { leaderPreferences: { maxFullRunsPerDay: 3 } };
     expect((await runLeader(deps, 'manual', { force: true })).reason).toMatch(/required run counts/);
     now += 86_400_000;
     expect((await runLeader(deps, 'manual', { force: true })).outcome).toBe('ok');
@@ -436,10 +438,12 @@ describe('operator daily Leader preferences use current observations and live po
     ensurePrivateDirectory(dirname(leaderStatePath()));
     writePrivateFileAtomic(leaderStatePath(), JSON.stringify({ v: 1, runDays: { '2026-09-24': 'bad' }, checkinDays: {} }));
     const { deps, calls } = world({ now: () => T0 });
+    deps.cfg.foundry = { leaderPreferences: { maxFullRunsPerDay: 3 } };
     expect((await runLeader(deps, 'manual', { force: true })).reason).toMatch(/required run counts/);
     expect(calls).toHaveLength(0);
     expect(buildLeaderState(T0).dailyRunCounts).toMatchObject({ total: null, full: null, sourceState: 'unavailable' });
-    expect(buildLeaderState(T0).health.status).toBe('degraded');
+    // Without a persisted finite limit, missing count history remains unknown.
+    expect(buildLeaderState(T0).health.status).toBe('unknown');
   });
 });
 

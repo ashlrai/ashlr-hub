@@ -1,8 +1,10 @@
 /**
- * model-catalog.ts — M128: authoritative model roster for the autonomous fleet.
+ * model-catalog.ts — source-owned model defaults and routing estimates.
  *
- * Defines every model the fleet can route to, its engine, capability profile,
- * cost ($/M tokens, 0 for local), and the minimum effort level it is suited for.
+ * Defines static fallback choices and exact historical lookup, with engine, capability profile,
+ * API cost estimates ($/M tokens, 0 for local), and configured effort preferences.
+ * Native account discovery supplies live variants, availability and context;
+ * this catalog alone never authorizes provider contact or spending.
  *
  * PURE — no I/O, no side effects. All routing logic in run/router.ts uses this
  * catalog; fleet/router.ts references it for model selection.
@@ -30,7 +32,7 @@ export type ModelCapability =
 // from `ollama show`, so the capability is real. It is still absent from this
 // union on purpose: `pickModel({capability})` answers "which model in the WHOLE
 // catalog is best at X", and the cloud entries below carry no vision tag either
-// even though Claude and GPT-5.5 are multimodal. Adding 'vision' and tagging
+// even though the connected frontier providers are multimodal. Adding 'vision' and tagging
 // only the one entry we can verify would make
 // `pickModel({ capability: 'vision' })` answer "the local model is the only
 // multimodal model in the fleet" — false, and worse than silence. Tagging the
@@ -86,7 +88,7 @@ export interface ModelEntry {
    * Broad tier used to align model selection with engine tier.
    *  'small'   -- <=7B or dedicated fast/cheap cloud tier (haiku, gpt-mini)
    *  'mid'     -- 8-40B or cloud mid-tier (sonnet, gpt-4o)
-   *  'large'   -- 70B+ or cloud frontier (opus, gpt-5.5, deepseek-r1:32b w/ long CoT)
+   *  'large'   -- 70B+ or cloud frontier (opus, Sol, deepseek-r1:32b w/ long CoT)
    */
   tier: 'small' | 'mid' | 'large';
   /** USD per million input tokens (0 for local/free). */
@@ -122,13 +124,41 @@ export interface ModelEntry {
    * win the cheapest-first sort would silently route work onto a paid seat.
    */
   seatRouted?: true;
+  /** Exact historical lookup remains valid; not offered for automatic new work. */
+  historical?: true;
 }
 
 // ---------------------------------------------------------------------------
 // The catalog
 // ---------------------------------------------------------------------------
 
+/** Current native defaults, verified against installed catalogs on 2026-10-09. */
+export const DEFAULT_CLAUDE_MODEL_ID = 'claude-opus-5-5';
+export const DEFAULT_CODEX_MODEL_ID = 'gpt-6.1-sol';
+export const DEFAULT_FABLE_MODEL_ID = 'claude-fable-5-1';
+
 export const KNOWN_MODELS: readonly ModelEntry[] = [
+  // Concrete current IDs stay distinct from the old aliases used by signed grants.
+  // Public API sticker prices are estimates, never native allowance/billing proof:
+  // platform.claude.com/docs/en/models/overview; developers.openai.com/api/docs/models/gpt-6.1-sol.
+  {
+    id: `claude:${DEFAULT_CLAUDE_MODEL_ID}`, engine: 'claude', tier: 'large',
+    costPerMTokIn: 4, costPerMTokOut: 20,
+    capabilities: ['general', 'coder', 'reasoning', 'long-context'],
+    minEffort: 3, apiModelId: DEFAULT_CLAUDE_MODEL_ID, qualityRank: 4,
+  },
+  {
+    id: `claude:${DEFAULT_FABLE_MODEL_ID}`, engine: 'claude', tier: 'large',
+    costPerMTokIn: 10, costPerMTokOut: 50,
+    capabilities: ['general', 'coder', 'reasoning', 'long-context'],
+    minEffort: 5, apiModelId: DEFAULT_FABLE_MODEL_ID, qualityRank: 5,
+  },
+  {
+    id: `codex:${DEFAULT_CODEX_MODEL_ID}`, engine: 'codex', tier: 'large',
+    costPerMTokIn: 2, costPerMTokOut: 10,
+    capabilities: ['general', 'coder', 'reasoning', 'long-context'],
+    minEffort: 2, apiModelId: DEFAULT_CODEX_MODEL_ID,
+  },
   // -- Claude (subscription / token-billed via API) -------------------------
   {
     id: 'claude:opus',
@@ -192,6 +222,7 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
   // above Opus, so it must never become an accidental workhorse.
   {
     id: 'claude:fable-5',
+    historical: true,
     engine: 'claude',
     tier: 'large',
     costPerMTokIn: 10.0,
@@ -205,6 +236,7 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
   // -- Codex / OpenAI -------------------------------------------------------
   {
     id: 'codex:gpt-5.5',
+    historical: true,
     engine: 'codex',
     tier: 'large',
     costPerMTokIn: 10.0,
@@ -420,10 +452,10 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
 // ---------------------------------------------------------------------------
 
 /**
- * All entries for a specific engine.
+ * Current automatic entries for a specific engine. KNOWN_MODELS also preserves historical lookups.
  */
 export function catalogFor(engine: EngineId | string): ModelEntry[] {
-  return KNOWN_MODELS.filter((m) => m.engine === (engine as EngineId));
+  return KNOWN_MODELS.filter((m) => !m.historical && m.engine === (engine as EngineId));
 }
 
 /**
@@ -456,13 +488,13 @@ export function pickModel(opts: {
   /**
    * M320: catalog ids to exclude. DEFAULT: the Claude 5 ids — callers must
    * opt in via claude5ExcludeIds(cfg) to route the new generation, so every
-   * pre-M320 call site stays byte-identical without changes.
+   * older Claude rollout flags stay respected. Current concrete defaults evolve independently.
    */
   excludeIds?: ReadonlySet<string>;
 }): ModelEntry | null {
   const excluded = opts.excludeIds ?? CLAUDE5_CATALOG_IDS;
   let pool = KNOWN_MODELS.filter((m) => {
-    if (excluded.has(m.id)) return false;
+    if (m.historical || excluded.has(m.id)) return false;
     if (opts.engine && m.engine !== (opts.engine as EngineId)) return false;
     // V3.10: a seat-routed entry is reachable only by naming its engine.
     if (m.seatRouted && !opts.engine) return false;
@@ -522,15 +554,16 @@ export const CLAUDE_OPUS_API_ID = 'claude-opus-4-8';
 export const CLAUDE5_CATALOG_IDS: ReadonlySet<string> = new Set([
   'claude:sonnet-5',
   'claude:fable-5',
+  `claude:${DEFAULT_FABLE_MODEL_ID}`,
 ]);
 
 const EMPTY_EXCLUDES: ReadonlySet<string> = new Set();
-const FABLE_ONLY_EXCLUDES: ReadonlySet<string> = new Set(['claude:fable-5']);
+const FABLE_ONLY_EXCLUDES: ReadonlySet<string> = new Set(['claude:fable-5', `claude:${DEFAULT_FABLE_MODEL_ID}`]);
 
 /** Minimal structural view of cfg — keeps this module dependency-light/PURE. */
 type Claude5Cfg = { foundry?: { claude5?: { enabled?: boolean; fable?: boolean } } };
 
-/** M320 master switch. Absent ⇒ enabled. false ⇒ pre-M320 byte-identical. */
+/** M320 master switch. Absent ⇒ enabled. false excludes the optional Sonnet/Fable rollout choices. */
 export function claude5Enabled(cfg?: Claude5Cfg): boolean {
   return cfg?.foundry?.claude5?.enabled !== false;
 }
@@ -542,8 +575,8 @@ export function fableEnabled(cfg?: Claude5Cfg): boolean {
 
 /**
  * The excludeIds set a Claude5-aware caller passes to pickModel:
- * claude5 off ⇒ both new ids excluded (pre-M320 byte-identical);
- * fable off ⇒ only fable-5 excluded; otherwise nothing excluded.
+ * claude5 off ⇒ optional Sonnet/Fable entries excluded;
+ * fable off ⇒ current and historical Fable entries excluded; otherwise nothing excluded.
  */
 export function claude5ExcludeIds(cfg?: Claude5Cfg): ReadonlySet<string> {
   if (!claude5Enabled(cfg)) return CLAUDE5_CATALOG_IDS;
@@ -554,11 +587,11 @@ export function claude5ExcludeIds(cfg?: Claude5Cfg): ReadonlySet<string> {
 /**
  * M320: single source of truth for the strategist default model
  * (comms/director.ts, vision/strategist.ts, comms/elon-dialogue.ts — this
- * ends the triple-maintained constant). Fable 5 when claude5.fable is on,
- * else Opus 4.8. cfg.foundry.strategistModel always overrides at call sites.
+ * ends the triple-maintained constant). Current native Fable when claude5.fable is on,
+ * else current native Opus. Historical aliases are never reinterpreted. cfg.foundry.strategistModel always overrides at call sites.
  */
 export function defaultStrategistModel(cfg?: Claude5Cfg): string {
-  return fableEnabled(cfg) ? CLAUDE5_FABLE_API_ID : CLAUDE_OPUS_API_ID;
+  return fableEnabled(cfg) ? DEFAULT_FABLE_MODEL_ID : DEFAULT_CLAUDE_MODEL_ID;
 }
 
 /**

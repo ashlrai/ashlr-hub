@@ -3,7 +3,7 @@
  *
  * Units under test:
  *   1. inventWorkItems — returns bold net-new WorkItems tagged source:'invent'
- *   2. Maintenance filter — prompt forbids maintenance; parser rejects maintenance items
+ *   2. Useful maintenance is admitted and classified without category bans
  *   3. Dedup — skips recently-invented items (hash by repo+normalized-title)
  *   4. Never-throws — returns [] on frontier client failure
  *   5. Secret scrubbing — secrets redacted from inputs and outputs
@@ -46,12 +46,6 @@ const mockCfg: AshlrConfig = {
   foundry: { allowedBackends: ['builtin'] },
 } as unknown as AshlrConfig;
 
-const mockCfgWithGenerative: AshlrConfig = {
-  provider: 'anthropic',
-  models: { ollama: 'http://127.0.0.1:9' },
-  foundry: { allowedBackends: ['builtin'], generative: true },
-} as unknown as AshlrConfig;
-
 function makeBoldItems(n = 3): object[] {
   return Array.from({ length: n }, (_, i) => ({
     title: `Invent feature ${i + 1}: real-time diff preview with syntax highlighting`,
@@ -77,7 +71,6 @@ import {
   scrubSecrets,
   isMaintenanceItem,
   extractJsonArray,
-  SYSTEM_PROMPT,
 } from '../src/core/generative/invent.js';
 
 // ---------------------------------------------------------------------------
@@ -133,18 +126,19 @@ describe('inventWorkItems — bold net-new items', () => {
 // 2. Maintenance filter + prompt discipline
 // ---------------------------------------------------------------------------
 
-describe('SYSTEM_PROMPT — maintenance forbidden', () => {
-  it('contains explicit prohibition of maintenance/deps/lint/docs', () => {
-    expect(SYSTEM_PROMPT).toMatch(/STRICTLY FORBIDDEN/i);
-    expect(SYSTEM_PROMPT).toMatch(/dependency bump/i);
-    expect(SYSTEM_PROMPT).toMatch(/lint/i);
-    expect(SYSTEM_PROMPT).toMatch(/doc comment/i);
-    expect(SYSTEM_PROMPT).toMatch(/README/i);
-    expect(SYSTEM_PROMPT).toMatch(/CREATION ONLY/i);
+describe('invent guidance — useful outcomes', () => {
+  it('allows enabling work throughout the actual system and user prompts', async () => {
+    const complete = vi.fn(makeComplete(makeBoldItems(1)));
+    await inventWorkItems({ repo: '/fake/repo', repoState: 'tool', direction: 'Improve onboarding and release speed' },
+      { cfg: mockCfg }, { _testComplete: complete, skipDedup: true });
+    const [system, user] = complete.mock.calls[0];
+    expect(system).toContain('Documentation, tests, CI, releases, dependency updates and maintenance are valuable');
+    expect(user).toContain('including enabling maintenance');
+    expect(`${system}\n${user}`).not.toMatch(/STRICTLY FORBIDDEN|CREATION ONLY|NET-NEW capabilities only|No deps\/lint\/docs/i);
   });
 });
 
-describe('isMaintenanceItem — filters maintenance-flavored outputs', () => {
+describe('isMaintenanceItem — observational classification', () => {
   it('flags dep bump items', () => {
     expect(isMaintenanceItem('Upgrade dependency vitest to v2', '')).toBe(true);
     expect(isMaintenanceItem('Bump dependencies to latest', '')).toBe(true);
@@ -169,20 +163,30 @@ describe('isMaintenanceItem — filters maintenance-flavored outputs', () => {
   });
 });
 
-describe('inventWorkItems — maintenance items filtered from output', () => {
-  it('drops maintenance-flavored items the model emits despite prompt', async () => {
-    const mixed = [
-      { title: 'Upgrade dependency vitest to v2', rationale: 'newer version', boldness: '', sketch: '' },
-      { title: 'Real-time streaming diff viewer', rationale: 'Closes the review gap with live AST coloring', boldness: 'First of its kind', sketch: 'Add TUI diff panel' },
-      { title: 'Fix lint errors in src/core', rationale: 'cleanup', boldness: '', sketch: '' },
-    ];
-    const items = await inventWorkItems(
-      { repo: '/fake/repo', repoState: 'tool', direction: 'direction' },
-      { cfg: mockCfg },
-      { _testComplete: makeComplete(mixed), skipDedup: true },
-    );
-    expect(items).toHaveLength(1);
-    expect(items[0].title).toContain('streaming diff');
+describe('inventWorkItems — useful maintenance admission', () => {
+  it('admits concrete docs, CI and dependency improvements through the real parser and ranking contract', async () => {
+    const ideas = [
+      { title: 'Update README onboarding examples', rationale: 'Remove the obsolete install command that prevents new users from starting.', sketch: 'Replace the command in README.md; exercise it in a clean consumer install.' },
+      { title: 'CI tweak to reuse unchanged build inputs', rationale: 'Shorten the release path while retaining required artifact checks.', sketch: 'Update .github/workflows/ci.yml; compare base/head timings and verify changed inputs still rebuild.' },
+      { title: 'Upgrade dependency with a startup fix', rationale: 'Resolve a reproducible startup failure in the supported runtime.', sketch: 'Pin the fixed package version and run the existing startup regression.' },
+    ].map(idea => ({ ...idea, boldness: 'Enable faster reliable delivery.', impact: 8, confidence: 0.8, effort: 3 }));
+    const items = await inventWorkItems({ repo: '/fake/repo', repoState: 'tool', direction: 'Improve onboarding and delivery' },
+      { cfg: mockCfg }, { _testComplete: makeComplete(ideas), skipDedup: true });
+    expect(items.map(item => item.title)).toEqual(ideas.map(idea => idea.title));
+    for (const [index, item] of items.entries()) {
+      expect(item.detail).toContain(ideas[index].sketch);
+      expect(item.tags).toContain('maintenance');
+      expect(item.tags).not.toContain('net-new');
+      expect(item.value).toBe(4);
+      expect(item.score).toBeGreaterThan(0);
+    }
+  });
+  it('still rejects empty titles and invalid response shapes instead of manufacturing work', async () => {
+    for (const response of ['not JSON', '{}', '[null, {"title":""}, {"title":42}]']) {
+      const items = await inventWorkItems({ repo: '/fake/repo', repoState: 'tool', direction: 'direction' },
+        { cfg: mockCfg }, { _testComplete: async () => response, skipDedup: true });
+      expect(items).toEqual([]);
+    }
   });
 });
 

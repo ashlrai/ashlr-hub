@@ -692,9 +692,9 @@ describe('operator goal preference controls', () => {
 
 
 describe('operator Leader preference controls', () => {
-  it('projects legacy3/8/4 and disabled-checkin3 total, with explicit null distinguished', () => {
-    expect(readVerseCaps(baseConfig()).leaderPreferences).toMatchObject({ maxFullRunsPerDay: 3, maxTotalRunsPerDay: 8, maxGrokLanes: 4, sourceState: 'ready' });
-    expect(readVerseCaps(baseConfig({ foundry: { leader: { checkinHours: 0 } } })).leaderPreferences).toMatchObject({ maxTotalRunsPerDay: 3 });
+  it('projects adaptive implicit preferences and keeps explicit null distinguished', () => {
+    expect(readVerseCaps(baseConfig()).leaderPreferences).toMatchObject({ maxFullRunsPerDay: null, maxTotalRunsPerDay: null, maxGrokLanes: null, sourceState: 'ready' });
+    expect(readVerseCaps(baseConfig({ foundry: { leader: { checkinHours: 0 } } })).leaderPreferences).toMatchObject({ maxTotalRunsPerDay: null });
     const cfg = baseConfig({ foundry: { leaderPreferences: { maxGrokLanes: null } } });
     expect(readVerseCaps(cfg).leaderPreferences).toMatchObject({ maxGrokLanes: null, defaulted: ['maxFullRunsPerDay', 'maxTotalRunsPerDay'] });
   });

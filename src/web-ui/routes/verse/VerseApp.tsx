@@ -417,7 +417,7 @@ export function VerseApp() {
   useEffect(() => {
     if (!ui.announceChatMoved) return;
     const chat = commandChord('surface.chat');
-    toast.show(`Chat moved to ${chat ? formatChord(chat, platform) : '⌘5'} — Command, Fleet, Growth and Mind come first now.`);
+    toast.show(`Chat moved to ${chat ? formatChord(chat, platform) : '⌘5'}.`);
     acknowledgeChatMoved();
   }, [ui.announceChatMoved, toast, platform]);
 
@@ -481,7 +481,7 @@ export function VerseApp() {
         <span className={styles.railDragStrip} data-app-region="drag" aria-hidden="true" />
         <Tooltip label={PRODUCT_NAME} placement="right" disabled={expanded}>
           <span className={styles.mark}>
-            <VerseMark />
+            <VerseMark size={36} />
             <span className="visually-hidden">{PRODUCT_NAME}</span>
           </span>
         </Tooltip>

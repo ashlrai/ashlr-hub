@@ -47,7 +47,7 @@ vi.mock('../src/core/fleet/subscription-usage.js', async (importOriginal) => {
 
 import { subscriptionAllows } from '../src/core/fleet/subscription-usage.js';
 import { routeTask, routeTaskCascade, type RoutingContext } from '../src/core/run/router.js';
-import { writeCapacitySnapshot } from '../src/core/routing/budget-store.js';
+import { updateBudgetPolicy, writeCapacitySnapshot } from '../src/core/routing/budget-store.js';
 import type { SeatCapacity } from '../src/core/routing/headroom.js';
 import type { AshlrConfig, EngineId, WorkItem } from '../src/core/types.js';
 
@@ -130,7 +130,8 @@ describe('interactive routing (default) keeps the pre-3.10 rule', () => {
     expect(d.engine).toBe('claude');
   });
 
-  it('codex is not switched off interactively (the "Codex OFF" default is an autonomy rule)', () => {
+  it('an explicit Codex autonomy disable does not block interactive work', () => {
+    updateBudgetPolicy({ seatId: 'codex-personal', policy: { enabled: false } });
     mockRateLimitsReturn = codexReading(20);
     const d = routeTask(hardItem('feature'), cfg(), ctx(['codex', 'builtin']));
     expect(d.engine).toBe('codex');
@@ -171,10 +172,12 @@ describe('autonomous routing fails closed and applies the budget', () => {
     expect(d.engine).not.toBe('claude');
   });
 
-  it('default budget: codex is off for autonomy even with a fresh, low reading', () => {
+  it('the balanced default permits Codex autonomy with a fresh eligible reading', () => {
     mockRateLimitsReturn = codexReading(5);
     const d = routeTask(hardItem('feature'), cfg(), ctx(['codex', 'builtin'], true));
-    expect(d.engine).not.toBe('codex');
+    expect(d.engine).toBe('codex');
+    updateBudgetPolicy({ seatId: 'codex-personal', policy: { enabled: false } });
+    expect(routeTask(hardItem('feature'), cfg(), ctx(['codex', 'builtin'], true)).engine).not.toBe('codex');
   });
 
   it('routeTaskCascade keeps the autonomous flag through the cheap-first and escalation contexts', () => {

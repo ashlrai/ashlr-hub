@@ -52,7 +52,7 @@ import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'no
 
 import { CUSTODY_DATA_DIR_RELATIVE, CUSTODY_HELPER_PATH } from '../authority/custody-client.js';
 import { devinCliCredentialsPath } from '../devin/cli-probe.js';
-import { devinCliBindingCurrent, type DevinCliExecutionBinding } from '../devin/cli-admission.js';
+import { devinCliBindingCurrent, devinCliIdentityCurrent, type DevinCliExecutionBinding } from '../devin/cli-admission.js';
 
 export interface AutonomousEnvInput {
   /** Engine id as the registry knows it (e.g. `claude`, `grok-cli`, `local-coder`). */
@@ -495,7 +495,7 @@ export function buildAutonomousEnvOverlay(input: AutonomousEnvInput): Autonomous
     if (binding && !devinCliBindingCurrent(binding, binding.model)) throw new AutonomousEnvError('the selected Devin native identity changed during its private copy');
     if (binding) {
       const copiedEpoch = privateCopyEpoch(target);
-      devinCopyCheck = () => devinCliBindingCurrent(binding,binding.model) && privateCopyEpoch(target) === copiedEpoch;
+      devinCopyCheck = () => devinCliIdentityCurrent(binding,binding.model) && privateCopyEpoch(target) === copiedEpoch;
     }
     deniedReadPaths.push(dirname(real));
     // No DEVIN_* variable reaches the run: buildContainedEnv is an allowlist,

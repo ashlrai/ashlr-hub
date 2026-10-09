@@ -342,7 +342,7 @@ describe('M274 frontier judge reachability', () => {
     const client = resolveFrontierJudgeClient(cfg);
 
     expect(client).not.toBeNull();
-    expect(client!.model).toBe('gpt-5.5');
+    expect(client!.model).toBe('gpt-6.1-sol');
   });
 
   it('[R12] routes a Claude producer to an installed Codex reviewer', () => {
@@ -354,7 +354,7 @@ describe('M274 frontier judge reachability', () => {
       requireIndependent: true,
     });
 
-    expect(client?.model).toBe('gpt-5.5');
+    expect(client?.model).toBe('gpt-6.1-sol');
   });
 
   it('[R13] routes an OpenAI producer to an installed Claude reviewer', () => {
@@ -446,7 +446,7 @@ describe('M274 frontier judge reachability', () => {
       requireIndependent: true,
     });
 
-    expect(client?.model).toBe('gpt-5.5');
+    expect(client?.model).toBe('gpt-6.1-sol');
   });
 
   it('[R18] explicit frontier-only allowlist cannot fall through to Ollama', () => {

@@ -159,6 +159,8 @@
 /src/core/fleet/maintainer-pr-runner.ts @masonwyatt23
 /src/core/fleet/maintainer-cargo-dependencies.ts @masonwyatt23
 /src/cli/maintainer-verify.ts @masonwyatt23
+/src/core/website/** @masonwyatt23
+/src/cli/website.ts @masonwyatt23
 /src/core/release-public-facts.ts @masonwyatt23
 /src/core/release-articles.ts @masonwyatt23
 /src/cli/release-articles.ts @masonwyatt23
@@ -729,6 +731,7 @@
 /test/merge-gates-310b.test.ts @masonwyatt23
 /test/mirror-sibling-deps-314.test.ts @masonwyatt23
 /test/mirrors-310b.test.ts @masonwyatt23
+/test/native-locus-metadata-scope.test.ts @masonwyatt23
 /test/orchestrator-bash-standing-310b.test.ts @masonwyatt23
 /test/outcome-core.test.ts @masonwyatt23
 /test/outcome-daemon-loop.test.ts @masonwyatt23
@@ -788,6 +791,7 @@
 /test/resource-spark-enrollment-files.test.ts @masonwyatt23
 /test/resource-spark-enrollment.test.ts @masonwyatt23
 /test/resource-worker-kill.test.ts @masonwyatt23
+/test/role-completion.test.ts @masonwyatt23
 /test/routing-budget-api.test.ts @masonwyatt23
 /test/routing-budget-store.test.ts @masonwyatt23
 /test/routing-capacity-history.test.ts @masonwyatt23
@@ -866,3 +870,5 @@
 /test/w1.post-merge-halt.test.ts @masonwyatt23
 /test/w1.run-window-loop.test.ts @masonwyatt23
 /test/web-console-sse-backpressure.test.ts @masonwyatt23
+/test/website-host-release.test.ts @masonwyatt23
+/test/website-public-build-env.test.ts @masonwyatt23

@@ -19,15 +19,16 @@
  *  - Claude is excluded while its 5-hour window is above the grant's session
  *    ceiling (70% by decision) and whenever the weekly reserve is reached —
  *    A9's `assessSeat`, applied over the CLAMPED policy.
- *  - Codex runs only after the Leader enabled its lanes (class B, after the
- *    reset) AND the grant lists it; a spent Codex window parks work until its
- *    machine `resetsAt`.
+ *  - Native lanes follow their grant and account policy without requiring a
+ *    provider-specific enable action. An explicit Codex Off directive holds
+ *    its lane; a spent window parks work until its machine `resetsAt`.
  *  - An item that fits no seat's context is held as `split` — it is NEVER
  *    sent to a local model instead. An item that would fit a seat that is only
  *    budget-excluded is held as `park` until the earliest known reopening.
  *  - Presence caps: while Mason is present (a live Verse turn or a Claude Code
- *    transcript under 15 minutes old) the local lane runs at most 2 agents and
- *    the Claude producer slice is closed. Unknown presence counts as present.
+ *    transcript under 15 minutes old) the local lane runs at most 2 agents.
+ *    Unknown presence counts as present for that shared local runtime. Native
+ *    subscription workers use their measured account reserves and windows.
  *  - A lane outside the grant's current rollout stage has zero slots.
  *  - A seat is a PRODUCER only when the grant gives it the `producer` role;
  *    claude-a is judge / Leader only by default.
@@ -35,6 +36,7 @@
  * Honesty: `null` = unknown. Every exclusion carries a specific sentence, and
  * a hold always says why and (when a date is known) until when.
  */
+import { supportsRoleExecution } from '../run/role-invocation.js';
 import { isOutcomeManagerWorkItem } from '../goals/outcome-manager-types.js';
 import { resolveDaemonCountPreferences, countForInventory } from '../daemon/count-preferences.js';
 import { leaderPreferencesReady, resolveLeaderPreferences, type ResolvedLeaderPreferences } from '../vision/leader-preferences.js';
@@ -80,8 +82,8 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * Default slots per lane (SPEC-310B §3 table). Codex is 2 once the Leader has
- * enabled it (it is 0 until then — see `planLanes`).
+ * Default slots per lane (SPEC-310B §3 table), narrowed by actual readiness,
+ * grant scope and explicit lane controls in `planLanes`.
  */
 export const LANE_DEFAULT_SLOTS: Readonly<Record<FleetEngine, number>> = Object.freeze({
   local: 4,
@@ -329,12 +331,9 @@ export function planLanes(input: LanePlanInput): Record<FleetEngine, LanePlan> {
       }
     }
     if (lane === 'codex') {
-      if (input.directives?.codexEnabled !== true) {
+      if (input.directives?.codexEnabled === false) {
         slots = 0;
-        // Enabling Codex is a class-B Leader action: it waits out a veto
-        // window, which is what the operator can act on — say that, not the
-        // action class.
-        capReason = 'Codex stays off until the Leader turns it on after the usage reset (you can veto it).';
+        capReason = 'The Leader has switched Codex lanes off.';
       }
     }
     if (lane === 'local') {
@@ -358,8 +357,6 @@ export function planLanes(input: LanePlanInput): Record<FleetEngine, LanePlan> {
     if (lane === 'claude-cli') {
       if (!grantHasProducerFor(input.policy, 'claude-cli')) {
         narrow(0, 'The grant gives claude-a no producer role — it judges and runs the Leader only.');
-      } else if (presentOrUnknown) {
-        narrow(0, 'You are active (or presence is unknown), so the Claude producer slice is held for your own session.');
       }
     } else if (lane === DEVIN_CLI_LANE) {
       if (!grantHasProducerFor(input.policy, lane)) narrow(0, 'The grant gives Devin no producer seat.');
@@ -603,13 +600,15 @@ export function executionForSeat(item: WorkItem, legacy: LegacyRoute, seat: Seat
   if (lane === null) return null;
   const installed = ctx.laneEngines[lane];
   if (installed === null) return null;
-  const backend = fleetLaneOf(legacy.backend, ctx.cfg) === lane ? legacy.backend : installed;
+  const keepLegacy = fleetLaneOf(legacy.backend, ctx.cfg) === lane &&
+    (!isOutcomeManagerWorkItem(item) || supportsRoleExecution(legacy.backend, ctx.cfg ?? {} as AshlrConfig));
+  const backend = keepLegacy ? legacy.backend : installed;
   const candidateModel = (backend === legacy.backend ? legacy.model ?? undefined : configuredModel(ctx.cfg, backend))
     ?? (lane === 'grok-cli' && routingRequestFor(item).difficulty === 'low' ? grokFastModel() : undefined);
   // Cache the manager's concrete model before exact-route admission. Filling
   // a default later in the daemon would change the route it was admitted for.
   const model = isOutcomeManagerWorkItem(item)
-    ? candidateModel?.trim() || configuredModel(ctx.cfg, backend)?.trim() || resolveEngineSpec(backend, ctx.cfg)?.defaultModel
+    ? candidateModel?.trim() || configuredModel(ctx.cfg, backend)?.trim() || resolveEngineSpec(backend, ctx.cfg)?.defaultModel || resolveEngineSpec(backend, ctx.cfg)?.api?.defaultModel
     : candidateModel;
   return { backend, reason: 'Exact candidate execution for observed task fit.', tier: backend === legacy.backend ? legacyTier(legacy, ctx) : ctx.tierOf(backend) ?? 'local',
     ...(model ? { model } : {}) };
@@ -689,8 +688,8 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
       const execution = executionForSeat(item, legacy, seat, ctx);
       if (!execution) continue;
       const candidateEngine = execution.backend;
-      if (isOutcomeManagerWorkItem(item) && execution.tier !== 'frontier') {
-        add({ kind: 'lane', text: 'Planning and reviewing an outcome needs a frontier manager; this execution is not frontier.' });
+      if (isOutcomeManagerWorkItem(item) && !supportsRoleExecution(candidateEngine, ctx.cfg ?? {} as AshlrConfig)) {
+        add({ kind: 'lane', text: 'This execution has no qualified tool-capable Manager adapter.' });
         extra.push({ seatId, reasons, nextEligibleAt: null, details });
         continue;
       }
@@ -715,8 +714,12 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
 
   // 3.15: the Devin CLI lane takes what no seat-router seat could — see
   // devinCliOverflow. It never displaces a seat the router chose.
-  if (chosenSeat === null && !isOutcomeManagerWorkItem(item)) {
-    const devin = devinCliOverflow(request, repo, kind, ctx);
+  if (chosenSeat === null) {
+    let devin = devinCliOverflow(request, repo, kind, ctx);
+    if ('engine' in devin && isOutcomeManagerWorkItem(item) &&
+        (fleetLaneOf(devin.engine, ctx.cfg) !== DEVIN_CLI_LANE || !supportsRoleExecution(devin.engine, ctx.cfg ?? {} as AshlrConfig))) {
+      devin = { exclusion: { seatId: DEVIN_SEAT_ID, reasons: ['This execution has no qualified tool-capable Manager adapter.'], nextEligibleAt: null } };
+    }
     if ('engine' in devin) {
       const exclusionsSoFar = [...decision.exclusions, ...extra].sort((a, b) => (a.seatId < b.seatId ? -1 : a.seatId > b.seatId ? 1 : 0));
       const why = `Routed autonomous ${request.difficulty}-difficulty ${request.task} work to the Devin CLI (${devin.model}, free): `

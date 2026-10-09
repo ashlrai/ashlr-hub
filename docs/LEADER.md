@@ -100,12 +100,11 @@ conversation. Directives steer its judgement; they never widen the grant. See
   emails are scrubbed from your text and from the Leader's.
 - **Channels:** Phantom, Telegram, CLI and System, shown as a badge on every
   message.
-- **Replies** go through the Leader's own seat routing and budget, with no
-  tools: Grok first, then local models (see [Reliability](#reliability)).
-  Replies never use Claude, whatever `foundry.leader.claudeFallback` says; that
-  opt-in applies to memo runs only. A reply sees the last 30 messages. When it cannot think (no seat, a failure,
-  or the 60-calls-a-day cap) it says so ("I can't think right now: …") instead
-  of staying silent.
+- **Replies** use the same provider-neutral account/model routing as planning.
+  Prepared Claude Code, Codex, Grok, included native Devin models and local
+  resources can participate when their current capacity and signed Leader role
+  permit it. A reply sees the last 30 messages. Missing capacity or a failed
+  invocation produces a clear unavailable response.
 - **Limits:** your message up to 4,000 characters; replies time out after 120
   seconds.
 - A reply goes to Telegram only when you wrote from Telegram. Memos, questions
@@ -367,27 +366,34 @@ Exit codes: 0 ok, 1 error or refused, 2 bad usage.
 
 ## Reliability
 
-**Seats.** A memo run tries, in order: the router's pick (Grok; Claude only
-for the weekly deep run), other Grok seats, then local models (fast ones such as
-gpt-oss 20B before large dense ones such as a 27B), and Claude last only when
-you opt in with `foundry.leader.claudeFallback: true`. That opt-in never
-applies to conversation replies or check-ins. Never Codex. With no
-standing grant it runs on local models only. Local calls stream, so a slow
-local model is not cut off by a fetch timeout.
+**Seats.** A run follows the router's ranked eligible accounts. Every fitting,
+currently available model option shares its account's allowance. There is no
+provider fallback order or Claude-only deep-run rule. Native Claude Code,
+Codex and Grok use their exact prepared account profile; native Devin requires
+fresh host-observed included pricing and principal evidence. Cloud ACU sessions
+remain their own lane. Codex needs a current subscription-only billing boundary;
+native account metadata must match the selected allowance before contact, and
+reconnecting its profile invalidates that binding.
+unknown funding never authorizes purchased credits or overages. Without a
+standing grant only local planning is available. Local calls stream so a slow
+model can keep producing without waiting for a complete response body.
 
-**Retries.** A failed full run retries at 15 minutes, 45 minutes and 2 hours.
-Three full runs a day by default. Advanced Leader preferences accept a positive
-safe integer or **No preference limit** for full runs, all runs and Grok lanes.
-Absent settings retain the existing defaults. The separate interval, quiet hours,
-single-flight and retry schedule still apply. See the
+**Retries and preferences.** A failed full run retries at 15 minutes, 45 minutes
+and 2 hours. Full-run, total-run and Grok-lane preferences default to **No
+preference limit**. Explicit positive ceilings remain respected. The interval,
+quiet hours, single-flight and retry schedule still apply. See the
 [goal and Leader preference table](AGENT-HARNESS-EVOLUTION.md#operator-goal-and-leader-preferences).
 
 **Check-ins.** Every `foundry.leader.checkinHours` (default 2; 0 turns them
 off) during `foundry.leader.workingHours` (default 08–22), the Leader looks
-again, but runs only when the evidence changed materially. A new directive,
-answer or approval counts. Check-ins are advisory, never retried, and capped
-with full runs at 8 model runs a day. In reserve budget mode they use local
-models only.
+again only when evidence changed materially. A directive, answer or approval
+counts. Check-ins are advisory and are never retried. Reserve mode uses local
+models for check-ins.
+
+**Invocation traces.** Native completions record role, account, exact model,
+reported token totals when available and elapsed wall time. Reported output
+tokens divided by total wall time measures invocation throughput; it does not
+claim the model's generation speed. A missing token reading stays unknown.
 
 **One run at a time.** A cross-process lock and a stale-decision re-check stop
 the daemon and the comms poller from running the same slot twice.
@@ -397,3 +403,14 @@ the daemon and the comms poller from running the same slot twice.
 is pending, or the last memo is over 36 hours old), `down` (no seat, or the
 retries are spent) or `unknown` (never run), with the seats tried and when the
 next run is due. Phantom does not show the health state yet.
+
+
+Model availability comes from each connected account's native catalog. Current
+native defaults are Opus 5.5, Fable 5.1 and GPT-6.1 Sol; routing can select the
+other eligible variants on that same account. A published API model does not
+prove native CLI access. Hidden models are excluded from new automatic choices;
+older exact model tags remain readable and do not authorize newer versions.
+[OpenAI model details](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+and [Claude model details](https://platform.claude.com/docs/en/models/overview)
+provide public API price estimates. Those prices do not replace subscription
+allowance, native context allocation or verified funding observations.

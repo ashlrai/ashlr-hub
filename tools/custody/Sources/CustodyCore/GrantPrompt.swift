@@ -50,6 +50,7 @@ public enum GrantPromptRenderer {
         repos += "; +\(repoPhrases.count - repoLimit) more (see terminal)"
       }
       var parts: [String] = []
+      if let website = g.websitePublication { parts.append("Automatic publication of Phantom website / phm.dev. Profile \(website.profile), digest \(website.profileDigest.prefix(12)).") }
       parts.append("approve Phantom standing grant #\(g.grantSeq) for \(days) days, until \(until).")
       parts.append("\(g.repos.count) repos, \(merging) may merge: \(repos).")
       parts.append("Rollout: \(ladder).")
@@ -92,6 +93,7 @@ public enum GrantPromptRenderer {
     }
     lines.append("  engines     \(g.engines.joined(separator: ", "))")
     lines.append("  leader      classes=\(g.leaderClasses.joined(separator: ",")) vetoMinutes=\(g.vetoMinutes)")
+    if let website = g.websitePublication { lines.append("  website     automatic publication of Phantom website / phm.dev profile=\(website.profile) profileDigest=\(website.profileDigest)") }
     lines.append("  conductor   goals=\(g.conductorGoals)")
     lines.append("  rollout (auto-advance, never past the last stage):")
     for (i, st) in g.stages.enumerated() {

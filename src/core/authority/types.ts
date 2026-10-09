@@ -219,6 +219,13 @@ export interface StandingGrantRollout {
   autoAdvance: true;
 }
 
+/** One-time commissioning of the fixed host-owned public website publisher. */
+export interface StandingWebsitePublication {
+  profile: 'phantom-public-web';
+  profileDigest: string;
+  mode: 'automatic';
+}
+
 export interface StandingGrantV1 {
   v: 1;
   /** 32 lowercase hex. */
@@ -242,6 +249,7 @@ export interface StandingGrantV1 {
   /** Lets the goal / simple conductors run live (liveConductorActivationAuthorized). */
   conductorGoals: boolean;
   rollout: StandingGrantRollout;
+  websitePublication?: StandingWebsitePublication;
 }
 
 /** What ashlr-custody `sign-grant` returns and what is stored on disk (grants are signed public data, not secrets). */
@@ -346,7 +354,9 @@ export const STANDING_GRANT_KEYS = Object.freeze({
     leader: true,
     conductorGoals: true,
     rollout: true,
+    websitePublication: true,
   }),
+  websitePublication: keyList<StandingWebsitePublication>({ profile: true, profileDigest: true, mode: true }),
   repo: keyList<StandingGrantRepo>({
     nameWithOwner: true,
     stage: true,
@@ -388,6 +398,7 @@ export const STANDING_GRANT_KEYS = Object.freeze({
 
 /** The only optional keys in a signed grant. */
 export const STANDING_GRANT_OPTIONAL_KEYS = Object.freeze({
+  grant: Object.freeze(['websitePublication'] as const),
   merge: Object.freeze(['volumePolicy'] as const),
   seat: Object.freeze(['maxSessionWindowPercent'] as const),
 });
@@ -482,6 +493,7 @@ export interface EffectivePolicy {
   conductorGoals: boolean;
   /** When this value was computed (currentStandingPolicy caches ≤ 10 s). */
   computedAt: string;
+  websitePublication?: StandingWebsitePublication;
 }
 
 // ---------------------------------------------------------------------------
@@ -802,6 +814,7 @@ export interface AuthorityStatusV1 {
    * Additive (3.10 phase 2) — absent from day-0 fixtures.
    */
   effectiveReason?: string | null;
+  websitePublication?: { mode: 'auto' | 'paused' | 'off'; phase: string; reason: string | null; revision: string | null };
 }
 
 /**
@@ -868,6 +881,7 @@ export interface AuthorityGrantDraft {
  * mutation-token gates, which agents cannot reach.
  */
 export type AuthorityActionRequest =
+  | { action: 'website-mode'; to: 'auto' | 'paused' | 'off' }
   | { action: 'switch'; to: AutonomySwitch }
   | { action: 'stop' }
   | { action: 'clear-stop' }

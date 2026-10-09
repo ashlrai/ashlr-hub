@@ -27,9 +27,13 @@ serving slots, workspace isolation, quotas, reserves and current signed authorit
 Devin fleet launches use a separate granted ACU-budget path.
 
 **Manager** coordinates delegation and review for an explicit chat or outcome.
-**Leader** refines fleet priorities, reads results and briefs you. The current
-Manager supports Claude, Codex, Grok and local adapters. The Leader uses Grok
-and local models with restricted Claude fallback; Codex is not a Leader seat.
+**Leader** refines fleet priorities, reads results and briefs you. The
+successor source shares account-bound invocation across prepared Claude Code,
+Codex, Grok, included native Devin models and local resources. Model choice
+uses current capabilities and measurements rather than provider-specific roles.
+These additions require the successor release; publication of 3.27.0 alone does
+not activate them. Current capacity, account identity and signed roles decide
+which resources can run.
 Configured Telegram carries the same Leader conversation, short briefs, questions
 and approval controls. A reply or directive does not widen your grant.
 

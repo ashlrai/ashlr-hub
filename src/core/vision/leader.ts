@@ -17,21 +17,19 @@
  *   actions go through leader-apply.ts's pure policy check (class A / B / C
  *   against the standing grant).
  *
- *   SEAT: leader-seat.ts — grok first, then local; Claude only for the weekly
- *   deep run inside Mason's reserve; no seat ⇒ `no-seat`, never a cloud
- *   fallback. 3.14: a run walks a CHAIN of router-approved seats (grok → fast
- *   local → large local → opt-in Claude) with per-attempt timeouts, and the
- *   memo records every attempt (leader-seat.ts planLeaderSeats,
- *   leader-run-chain.ts).
+ *   SEAT: leader-seat.ts selects account-bound provider-neutral models from
+ *   current routing capacity and signed scope. A run walks router-ranked
+ *   alternatives with per-attempt timeouts and records every attempt. Unknown
+ *   billing or account evidence never becomes a credential fallback.
  *
  *   CADENCE: daily at 06:30 local, plus runs triggered by 10 fleet merges, any
  *   revert, a seat window resetting, or a high-severity reasoning insight —
- *   skipped when the evidence digest is unchanged, and at most 3 full model
- *   runs per local day. 3.14 (leader-cadence.ts): a failed full run retries
+ *   skipped when the evidence digest is unchanged. Daily volume limits are
+ *   optional operator preferences. 3.14 (leader-cadence.ts): a failed full run retries
  *   (bounded, backed off), and a cheap advisory check-in may run every
  *   `foundry.leader.checkinHours` (default 2) in working hours when the
- *   evidence changed materially — by default at most 8 model runs a day in total.
- *   Operator preferences can replace or explicitly remove those daily ceilings.
+ *   evidence changed materially. Finite user limits require complete daily run
+ *   observations; an uncapped policy preserves unknown metrics without inventing a count.
  *
  *   ACCOUNTABILITY: each move's expectedDelta is graded against the measured
  *   metric once 7 days have passed and its own deadline has come; the grades

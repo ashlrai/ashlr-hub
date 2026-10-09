@@ -2,10 +2,9 @@
  * V3.10 Track B (U5): the fleet dispatch router — SPEC-310B §3 "Routing" /
  * "Lanes" / §7 U5 key tests:
  *   - Claude is excluded while its 5-hour window is above 70%;
- *   - Codex waits for its machine `resetsAt`, and stays off until the Leader
- *     enables its lanes;
+ *   - Codex waits for its machine `resetsAt`, with explicit Off respected;
  *   - an item that fits no seat is split — NEVER sent to a local model;
- *   - presence caps (local 2, Claude producer slice closed; unknown = present);
+ *   - presence protects the shared local runtime without closing native lanes;
  *   - lanes outside the grant, seats without the producer role, demoted routes.
  * Pure: no I/O, fixed clock.
  */
@@ -233,24 +232,53 @@ describe('Codex waits for its reset', () => {
     expect(route.backend).not.toBe('llama-server');
   });
 
-  it('stays off (zero Codex slots) until the Leader enables Codex lanes', () => {
+  it.each([null, true])('opens grant-authorized Codex lanes with directive %s', (codexEnabled) => {
     const planned = planLanes({
       policy: policy(),
-      directives: null,
+      directives: { v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: null, codexEnabled },
       presence: ABSENT,
       localServingSlots: 4,
       engineUnavailable: {},
     });
-    expect(planned.codex.slots).toBe(0);
-    expect(planned.codex.capReason).toBe('Codex stays off until the Leader turns it on after the usage reset (you can veto it).');
-    const enabled = planLanes({
-      policy: policy(),
-      directives: { v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: null, codexEnabled: true },
+    expect(planned.codex).toEqual({ lane: 'codex', slots: 2, capReason: null });
+  });
+
+  it('opens eligible Codex without a Leader directive, but preserves explicit Off', () => {
+    const input = {
+      policy: policy(), directives: null,
       presence: ABSENT,
       localServingSlots: 4,
       engineUnavailable: {},
-    });
-    expect(enabled.codex.slots).toBe(2);
+    };
+    const open = planLanes(input);
+    expect(open.codex.slots).toBe(2);
+    const capacity = [codex(20, IN_3H)];
+    const work = item({ tags: ['difficulty:high', 'context:150000'] });
+    expect(routeWorkItem(work, LEGACY_LOCAL, ctx(capacity, { lanes: open })).backend).toBe('codex');
+    const off = planLanes({ ...input, directives: { v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: null, codexEnabled: false } });
+    expect(off.codex).toEqual({ lane: 'codex', slots: 0, capReason: 'The Leader has switched Codex lanes off.' });
+    expect(routeWorkItem(work, LEGACY_LOCAL, ctx(capacity, { lanes: off })).hold?.kind).toBe('park');
+  });
+
+  it.each(['off', 'stale', 'unknown', 'exhausted'] as const)('still denies Codex with %s account evidence despite an open lane', (state) => {
+    const reading = codex(state === 'exhausted' ? 100 : 20, IN_3H);
+    if (state === 'stale') reading.observedAt = new Date(NOW - 60 * 60_000).toISOString();
+    if (state === 'unknown') { reading.observedAt = null; reading.windows = []; }
+    const budget = defaultBudgetPolicy();
+    if (state === 'off') budget.seats[reading.seatId] = { seatId: reading.seatId, enabled: false, reservePercent: 0 };
+    const planned = planLanes({ policy: policy(), directives: null, presence: ABSENT, localServingSlots: 4, engineUnavailable: {} });
+    const route = routeWorkItem(item({ tags: ['difficulty:high', 'context:150000'] }), LEGACY_LOCAL, ctx([reading], { budget, lanes: planned }));
+    expect(planned.codex.slots).toBe(2);
+    expect(route.hold?.kind).toBe('park');
+    expect(route.backend).toBe('builtin');
+  });
+
+  it('keeps Codex grant roles and unavailable-engine checks authoritative', () => {
+    const input = { policy: policy(), directives: null, presence: ABSENT, localServingSlots: 4, engineUnavailable: {} };
+    const p = policy();
+    p.spend.seats['codex-personal'] = seat('codex-personal', ['judge']);
+    expect(planLanes({ ...input, policy: p }).codex.slots).toBe(0);
+    expect(planLanes({ ...input, engineUnavailable: { codex: 'Account-bound native adapter unavailable.' } }).codex).toMatchObject({ slots: 0, capReason: 'Account-bound native adapter unavailable.' });
   });
 
   it('routes to Codex once its window has headroom and its lane is open', () => {
@@ -348,12 +376,12 @@ describe('presence caps', () => {
     expect(planLanes({ ...input, engineUnavailable: { local: 'Runtime unavailable' } }).local).toMatchObject({ slots: 0, capReason: 'Runtime unavailable' });
   });
 
-  it('holds the local lane to 2 and closes the Claude producer slice while Mason is present', () => {
+  it('protects the local runtime while keeping the Claude producer lane available when present', () => {
     const present: OperatorPresence = { present: true, reason: 'A Verse chat turn is running.', evidenceAt: NOW_ISO };
     const planned = planLanes({ policy: policy(), directives: null, presence: present, localServingSlots: 4, engineUnavailable: {} });
     expect(planned.local.slots).toBe(2);
     expect(planned.local.capReason).toMatch(/You are active/);
-    expect(planned['claude-cli'].slots).toBe(0);
+    expect(planned['claude-cli'].slots).toBe(1);
   });
 
   it('treats unknown presence as present', () => {
@@ -361,6 +389,18 @@ describe('presence caps', () => {
     const planned = planLanes({ policy: policy(), directives: null, presence: unknown, localServingSlots: 4, engineUnavailable: {} });
     expect(planned.local.slots).toBe(2);
     expect(planned.local.capReason).toMatch(/Presence is unknown/);
+    expect(planned['claude-cli'].slots).toBe(1);
+  });
+
+  it.each([true, null])('routes eligible Claude work with presence %s using actual account limits', (present) => {
+    const planned = planLanes({ policy: policy(), directives: null, presence: { present, reason: 'Interactive state', evidenceAt: null }, localServingSlots: 4, engineUnavailable: {} });
+    const work = item({ tags: ['difficulty:high', 'context:150000'] });
+    expect(routeWorkItem(work, LEGACY_LOCAL, ctx([claude(20, 20)], { lanes: planned })).backend).toBe('claude');
+    for (const reading of [claude(75, 20), claude(20, 70)]) {
+      const held = routeWorkItem(work, LEGACY_LOCAL, ctx([reading], { lanes: planned }));
+      expect(held.hold?.kind).toBe('park');
+      expect(held.backend).toBe('builtin');
+    }
   });
 
   it('runs the full local width when absent, bounded by the runtime\'s serving slots', () => {
@@ -371,7 +411,7 @@ describe('presence caps', () => {
     expect(three.local.slots).toBe(3);
   });
 
-  it('retains the legacy default4 preference when no live preference is supplied', () => {
+  it('uses the admitted Grok directive without an invented default maximum', () => {
     const planned = planLanes({
       policy: policy(),
       directives: { v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: 9, codexEnabled: null },
@@ -379,7 +419,12 @@ describe('presence caps', () => {
       localServingSlots: 4,
       engineUnavailable: {},
     });
-    expect(planned['grok-cli'].slots).toBe(4);
+    expect(planned['grok-cli'].slots).toBe(9);
+    const bounded = planLanes({
+      policy: policy(), directives: { v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: 9, codexEnabled: null },
+      presence: ABSENT, localServingSlots: 4, engineUnavailable: {}, admittedBatchCapacity: 6,
+    });
+    expect(bounded['grok-cli'].slots).toBe(6);
   });
 
   it('closes every lane outside the grant\'s current stage', () => {
@@ -634,21 +679,47 @@ describe('shared outcome manager routing', () => {
     expect(route.model).toBe(resolveEngineSpec(route.backend)?.defaultModel);
     expect(route.model).toEqual(expect.any(String));
   });
-  it('uses an eligible frontier account instead of a non-frontier first candidate', () => {
+  it('keeps an eligible cheaper native Manager instead of requiring frontier tier', () => {
     const route = routeWorkItem(manager(), LEGACY_LOCAL, ctx([grok(), claude(10, 10), local()], {
       tierOf: engine => String(engine) === 'grok-cli' ? 'frontier' : 'mid',
     }));
     expect(route.hold).toBeNull();
-    expect(route.backend).toBe('grok-cli');
-    expect(route.tier).toBe('frontier');
-    expect(route.seatDecision?.seatId).toBe('grok');
-    expect(route.seatDecision?.exclusions.find(row => row.seatId === 'claude')?.reasons.join(' ')).toContain('frontier manager');
+    expect(route.backend).toBe('claude'); expect(route.tier).toBe('mid');
+    expect(route.seatDecision?.seatId).toBe('claude');
+    expect(route.seatDecision?.exclusions.some(row => row.reasons.some(reason => reason.includes('frontier manager')))).toBe(false);
   });
-  it('holds manager planning when only non-frontier execution is available', () => {
+  it('admits qualified non-frontier execution using the same grant and fit checks', () => {
     const route = routeWorkItem(manager(), LEGACY_LOCAL, ctx([grok(), local()], { tierOf: () => 'mid' }));
-    expect(route.hold?.kind).toBe('park');
-    expect(route.seatDecision?.seatId).toBeNull();
-    expect(route.seatDecision?.exclusions.some(row => row.reasons.some(reason => reason.includes('frontier manager')))).toBe(true);
+    expect(route.hold).toBeNull(); expect(route.backend).toBe('grok-cli'); expect(route.tier).toBe('mid');
+    expect(route.model).toEqual(expect.any(String));
+  });
+  it('admits the selected tool-capable local Manager with its actual configured model and tier', () => {
+    const cfg = { foundry: { models: { 'llama-server': 'selected-local-model' } } } as unknown as AshlrConfig;
+    const route = routeWorkItem({ ...manager(), tags: [...manager().tags, 'context:20000'] }, LEGACY_LOCAL, ctx([local()], { cfg, tierOf: () => 'local' }));
+    expect(route.hold).toBeNull(); expect(route.backend).toBe('llama-server');
+    expect(route.model).toBe('selected-local-model'); expect(route.tier).toBe('local');
+    expect(route.seatDecision?.seatId).toBe(FLEET_LOCAL_SEAT_ID);
+  });
+  it('keeps local Manager admission behind producer grants and measured context fit', () => {
+    const base = policy();
+    const noProducer = { ...base, spend: { ...base.spend, seats: { ...base.spend.seats, local: seat('local', ['judge']) } } };
+    expect(routeWorkItem(manager(), LEGACY_LOCAL, ctx([local()], { policy: noProducer })).hold).not.toBeNull();
+    expect(routeWorkItem({ ...manager(), tags: [...manager().tags, 'context:150000'] }, LEGACY_LOCAL, ctx([local()])).hold?.kind).toBe('split');
+  });
+  it('uses an admitted Devin CLI overflow Manager and keeps its actual middle tier', () => {
+    const base = policy();
+    const p = { ...base, engines: [...base.engines, 'devin' as const], spend: { ...base.spend,
+      seats: { ...base.spend.seats, devin: seat('devin', ['producer']) } } };
+    const context = ctx([], { policy: p, tierOf: () => 'mid',
+      lanes: { ...lanes(), 'devin-cli': { lane: 'devin-cli', slots: 1, capReason: null } },
+      laneEngines: { ...ctx([]).laneEngines, 'devin-cli': 'devin-cli' as EngineId } });
+    const route = routeWorkItem(manager(), LEGACY_LOCAL, context);
+    expect(route.hold).toBeNull(); expect(route.backend).toBe('devin-cli'); expect(route.tier).toBe('mid');
+    expect(route.seatDecision?.seatId).toBe('devin'); expect(route.model).toEqual(expect.any(String));
+    const wrong = routeWorkItem(manager(), LEGACY_LOCAL, { ...context,
+      laneEngines: { ...context.laneEngines, 'devin-cli': 'codex' as EngineId } });
+    expect(wrong.hold).not.toBeNull(); expect(wrong.seatDecision?.exclusions).toContainEqual(expect.objectContaining({ seatId: 'devin',
+      reasons: ['This execution has no qualified tool-capable Manager adapter.'] }));
   });
   it('preserves normal worker routing to cheaper models', () => {
     const route = routeWorkItem(item({ tags: ['difficulty:high'] }), LEGACY_LOCAL, ctx([grok(), local()], { tierOf: () => 'mid' }));

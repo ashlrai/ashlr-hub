@@ -21,7 +21,7 @@ import { createMultimodelApi, foldRoiByEngine, listPriceOf, localBadges, type Mu
 import { createMultimodelStore, type MultimodelStore } from '../src/core/verse/multimodel/store.js';
 import { isLoopbackUrl, lastThroughput, recordThroughput, resetThroughputForTest, warmLocalModel } from '../src/core/verse/multimodel/local-warm.js';
 import { localSpeedBinding, type LocalSpeedBinding } from '../src/core/verse/local-throughput.js';
-import { KNOWN_MODELS } from '../src/core/run/model-catalog.js';
+import { DEFAULT_CLAUDE_MODEL_ID, DEFAULT_CODEX_MODEL_ID, KNOWN_MODELS } from '../src/core/run/model-catalog.js';
 import type { ChatMeter, LocalWarmResult, MultimodelContext } from '../src/core/verse/multimodel/types.js';
 
 const TOKEN = 'mm-test-token';
@@ -234,8 +234,15 @@ describe('helpers', () => {
   it('list prices come from the fleet catalog (one table), with family fallbacks', () => {
     const sonnet = KNOWN_MODELS.find((m) => m.id === 'claude:sonnet')!;
     expect(listPriceOf('claude', 'claude-sonnet-4-7')).toEqual({ inPerM: sonnet.costPerMTokIn, outPerM: sonnet.costPerMTokOut });
-    expect(listPriceOf('claude', 'claude-opus-5-5')).toEqual({ inPerM: 5, outPerM: 25 });
-    expect(listPriceOf('codex', 'gpt-6')).toEqual({ inPerM: 10, outPerM: 30 });
+    for (const [engine, model] of [['claude', DEFAULT_CLAUDE_MODEL_ID], ['codex', DEFAULT_CODEX_MODEL_ID]] as const) {
+      const current = KNOWN_MODELS.find(entry => entry.id === `${engine}:${model}`)!;
+      expect(current).toBeDefined();
+      expect(listPriceOf(engine, model)).toEqual({ inPerM: current.costPerMTokIn, outPerM: current.costPerMTokOut });
+    }
+    const legacyOpus = KNOWN_MODELS.find(entry => entry.id === 'claude:opus')!;
+    expect(listPriceOf('claude', 'claude-opus-unknown')).toEqual({ inPerM: legacyOpus.costPerMTokIn, outPerM: legacyOpus.costPerMTokOut });
+    const legacyCodex = KNOWN_MODELS.find(entry => entry.id === 'codex:gpt-5.5')!;
+    expect(listPriceOf('codex', 'gpt-6')).toEqual({ inPerM: legacyCodex.costPerMTokIn, outPerM: legacyCodex.costPerMTokOut });
     expect(listPriceOf('grok', 'grok-4')).toBeNull();
     expect(listPriceOf('local', 'qwen')).toBeNull();
   });

@@ -10,11 +10,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { APP_NAME, APP_VERSION, installedDesktopVersion } from './app-version.js';
 import { SettingsSection } from './SettingsSection.js';
 import { LIGHT_SURFACE, DARK_SURFACE, accentReadability } from './AppearancePanel.js';
 import { ToastProvider } from '../../../components/primitives/Toast.js';
 import { evictAll } from '../../../data/cache.js';
-import { resetAppearance, getAppearance } from '../../../data/appearance-store.js';
+import { resetAppearance, getAppearance, APPEARANCE_STORAGE_KEY } from '../../../data/appearance-store.js';
 import { ACCENT_PRESETS } from '../../../data/appearance-presets.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { darkScope, lightScope, resolveToken } from '../../../design/token-probe.test-support.js';
@@ -140,6 +141,26 @@ describe('SettingsSection', () => {
     expect(root().style.getPropertyValue('--accent-s')).toBe(`${teal.s}%`);
   });
 
+  it('customizes the ghost with saved accent presets by keyboard, without changing theme or motion', async () => {
+    const user = userEvent.setup();
+    renderSettings();
+    expect(screen.getByRole('img', { name: 'Phantom ghost preview' })).toBeInTheDocument();
+    const group = screen.getByRole('radiogroup', { name: 'Accent' });
+    within(group).getByRole('radio', { name: 'Indigo' }).focus();
+    await user.keyboard('{ArrowRight}');
+    expect(within(group).getByRole('radio', { name: 'Blue' })).toHaveFocus();
+    expect(within(group).getByRole('radio', { name: 'Blue' })).toBeChecked();
+    const blue = ACCENT_PRESETS.find((p) => p.id === 'blue')!;
+    expect(root().style.getPropertyValue('--accent-h')).toBe(String(blue.h));
+    expect(JSON.parse(localStorage.getItem(APPEARANCE_STORAGE_KEY)!).accentH).toBe(blue.h);
+    expect(getAppearance().theme).toBe('system');
+    expect(getAppearance().motion).toBe('system');
+    await user.keyboard('{End}');
+    expect(within(group).getByRole('radio', { name: 'Violet' })).toHaveFocus();
+    await user.click(screen.getByRole('button', { name: 'Reset to defaults' }));
+    expect(within(group).getByRole('radio', { name: 'Indigo' })).toBeChecked();
+  });
+
   it('switches the display font and the radius scale', async () => {
     const user = userEvent.setup();
     renderSettings();
@@ -210,9 +231,34 @@ describe('SettingsSection', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
-  it('shows the hub version in About', () => {
+  it('keeps the interface build visible without claiming desktop installation or publication', () => {
     renderSettings();
-    expect(screen.getByText(/^v\d+\.\d+\.\d+/)).toBeInTheDocument();
+    expect(screen.getByTitle('Interface build version')).toHaveTextContent(`${APP_NAME} ${APP_VERSION}`);
+    expect(screen.getByText('Interface build')).toBeInTheDocument();
+    expect(screen.queryByText('Installed desktop')).toBeNull();
+  });
+
+  it('distinguishes an installed desktop from a different interface build', () => {
+    const original = Object.getOwnPropertyDescriptor(window, '__ASHLR_DESKTOP__');
+    Object.defineProperty(window, '__ASHLR_DESKTOP__', { configurable: true, value: { shell: 'tauri', version: '1.2.3' } });
+    try {
+      renderSettings();
+      expect(screen.getByTitle('Installed desktop version')).toHaveTextContent(`${APP_NAME} 1.2.3`);
+      expect(screen.getByText('Installed desktop')).toBeInTheDocument();
+      expect(screen.getByText('v1.2.3')).toBeInTheDocument();
+      expect(screen.getByText(`v${APP_VERSION}`)).toBeInTheDocument();
+      expect(screen.getByText('Interface build')).toBeInTheDocument();
+    } finally {
+      if (original) Object.defineProperty(window, '__ASHLR_DESKTOP__', original);
+      else Reflect.deleteProperty(window, '__ASHLR_DESKTOP__');
+    }
+  });
+
+  it('does not mistake native protocol versions or malformed metadata for installed versions', () => {
+    for (const bridge of [null, { version: 1 }, { shell: 'tauri', version: 1 }, { shell: 'tauri', version: 'latest' }, { shell: 'other', version: '3.27.0' }]) {
+      expect(installedDesktopVersion({ __ASHLR_DESKTOP__: bridge })).toBeNull();
+    }
+    expect(installedDesktopVersion({ __ASHLR_DESKTOP__: { shell: 'tauri', version: '3.28.0-rc.1' } })).toBe('3.28.0-rc.1');
   });
 });
 

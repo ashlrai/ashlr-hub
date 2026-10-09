@@ -40,6 +40,8 @@ export function formatLeaderDisplayText(text: string, formatInstant?: (iso: stri
   return withReadableFooter.split(DISPLAY_LITERAL).map((part, index) => {
     if (index % 2 === 1) return part;
     return part
+      // Current product prose only; compatibility commands and literal history stay exact.
+      .replace(/\b(?:Ashlr[ -]?[Vv]erse|ashlr[Vv]erse)\b/g, 'Phantom')
       .replace(DISPLAY_ID_LABEL, '$1')
       .replace(DISPLAY_UUID_LABEL, '$1')
       .replace(DISPLAY_COMMIT, (_match, label: string, sha: string) => `${label} ${sha.slice(0, 7)}`)

@@ -138,8 +138,8 @@ export function _resetNorthStarDocCache(): void {
 
 /**
  * Return a concise, token-bounded distillation of docs/NORTH-STAR.md for
- * prompt injection. Extracts the 3 pillars + grand measurement + substantive
- * value directive. Always ≤ maxChars (default ~1200 chars / ~300 tokens).
+ * prompt injection. Extracts the 3 pillars, progress measurements and
+ * useful-work guidance. Always ≤ maxChars (default ~1200 chars / ~300 tokens).
  * Returns '' when the doc is absent. Never throws.
  *
  * Format:
@@ -147,7 +147,7 @@ export function _resetNorthStarDocCache(): void {
  *   Vision: <one-liner>
  *   Pillars: 1. Recursive self-improvement … 2. Ecosystem product factory … 3. Composition flywheel
  *   Measure grand not vanity: products shipped+adopted, capabilities invented, compounding velocity.
- *   Goals must be: substantive (value≥4), bound to a concrete enrolled repo, decomposable into shippable milestones.
+ *   Prefer useful outcomes in concrete repos and shippable milestones; judge work by its effect, not its category.
  */
 export function northStarDocSummary(maxChars = 1200): string {
   try {
@@ -187,7 +187,7 @@ export function northStarDocSummary(maxChars = 1200): string {
     parts.push('');
     parts.push('Measure GRAND not vanity: verified engineering yield (useful accepted changes per measured token and hour), products shipped+adopted, net-new capabilities. Preserve raw evidence; unknown usage is not zero.');
     parts.push('');
-    parts.push('Every goal/idea MUST be: substantive (value≥4 — real capability or product, NOT docs/version-bumps/lint), bound to a concrete enrolled repo, decomposable into shippable milestones.');
+    parts.push('Prefer useful outcomes in concrete repos and shippable milestones. Docs, maintenance and release work can be valuable; judge outcomes, not task categories.');
     if (bets.length > 0) {
       parts.push('');
       parts.push('Ambitious bets (examples of the right altitude):');

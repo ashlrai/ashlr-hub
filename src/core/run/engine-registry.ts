@@ -32,7 +32,7 @@ import type {
   EngineSpec,
   EngineTier,
 } from '../types.js';
-import { DEFAULT_LOCAL_MODEL_TAG, GROK_CLI_DEFAULT_MODEL } from './model-catalog.js';
+import { DEFAULT_CLAUDE_MODEL_ID, DEFAULT_CODEX_MODEL_ID, DEFAULT_LOCAL_MODEL_TAG, GROK_CLI_DEFAULT_MODEL } from './model-catalog.js';
 import { resolveNativeSeatLaunch, type NativeSeatLaunchResult } from '../resources/native-profile.js';
 import {
   DEVIN_CLI_ENGINE_ID,
@@ -98,9 +98,9 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
     autonomousArgv: ['--dangerously-skip-permissions', '--add-dir', '$CWD'],
     capabilities: ['agent', 'edit', 'architecture'],
     // M260: canonical concrete model for merge-authority resolution.
-    // Must match an entry in cfg.foundry.mergeAuthority (e.g. {engine:'claude',model:'claude-opus-4-8'}).
+    // Must match an entry in cfg.foundry.mergeAuthority (e.g. {engine:'claude',model:'claude-opus-5-5'}).
     // Update here when the authorised Claude model changes.
-    defaultModel: 'claude-opus-4-8',
+    defaultModel: DEFAULT_CLAUDE_MODEL_ID,
   },
 
   // codex exec [--model M] --cd CWD --json <goal> [--dangerously-bypass-approvals-and-sandbox when autonomous]
@@ -125,9 +125,9 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
     autonomousArgv: ['--dangerously-bypass-approvals-and-sandbox'],
     capabilities: ['agent', 'edit', 'refactor'],
     // M260: canonical concrete model for merge-authority resolution.
-    // Must match an entry in cfg.foundry.mergeAuthority (e.g. {engine:'codex',model:'gpt-5.5'}).
+    // Must match an entry in cfg.foundry.mergeAuthority (e.g. {engine:'codex',model:'gpt-6.1-sol'}).
     // Update here when the authorised Codex model changes.
-    defaultModel: 'gpt-5.5',
+    defaultModel: DEFAULT_CODEX_MODEL_ID,
   },
 
   // aw auto <goal> --cwd CWD [--model M]

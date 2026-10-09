@@ -591,6 +591,8 @@ describe('M262 — buildFleetPulseMessage', () => {
     expect(msg).toContain('3 merged');
     expect(msg).toContain('Ledger estimate (24h):');
     expect(msg).toContain('Ship M262');
+    const withDate = { ...snap, director: { ...snap.director, topGoalObjective: 'Ashlrverse release 2026-10-09T06:15:00Z' } };
+    expect(buildFleetPulseMessage(withDate, 'Asia/Tokyo')).toContain('Phantom release Oct 9, 3:15 PM');
   });
 
   it('renders real-shaped measurements concisely without changing the underlying observations', () => {

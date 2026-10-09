@@ -1,22 +1,7 @@
-/**
- * Leader seat plan — the PURE half of the 3.14 fallback chain.
- *
- * WHY. On 2026-09-26 the 06:30 memo failed with "The local call failed: fetch
- * failed": the router picked the only seat it ranks first among local models
- * (the 27B dense `qwen3.8:27b-ctx64k`, first by discovery order because it is
- * the preferred `local-coder` tag), which decoded at 17 → 2.7 tok/s while a
- * second copy of the same weights sat in the llama-server runtime; Node's
- * fetch gave up after 300 s without response headers (the request was not
- * streamed), and there was no second option. The memo simply failed.
- *
- * Now a run walks an ordered list of router-approved seats. This module
- * decides the ORDER among local models (fast before slow), the per-attempt
- * TIMEOUT (sized to the model's speed class and the run mode), and the output
- * and context budgets — all from config and the model tag, no I/O.
- *
- * What it can never do: add a seat the router or the Leader's seat rules did
- * not approve. It only orders and bounds what leader-seat.ts admitted.
- */
+/** Per-attempt Leader context/output budgets and timeout estimates. The
+ * current shared router determines account order; legacy local ordering
+ * helpers remain exported for existing callers. These estimates never create
+ * account quota or override current authority and funding admission. */
 import type { AshlrConfig } from '../types.js';
 import type { LeaderRunMode } from './leader-types.js';
 
@@ -120,7 +105,7 @@ export function leaderContextTokens(promptChars: number, mode: LeaderRunMode): n
   return Math.min(32_768, Math.max(8_192, Math.ceil(need / 4_096) * 4_096));
 }
 
-export function leaderCallBudget(engine: 'grok' | 'claude' | 'local', model: string, mode: LeaderRunMode, promptChars: number): LeaderCallBudget {
+export function leaderCallBudget(engine: 'grok' | 'claude' | 'codex' | 'devin' | 'local', model: string, mode: LeaderRunMode, promptChars: number): LeaderCallBudget {
   if (engine !== 'local') {
     return { timeoutMs: LEADER_ATTEMPT_TIMEOUTS_MS[mode].cli, maxOutputTokens: LEADER_OUTPUT_TOKENS[mode], contextTokens: null };
   }

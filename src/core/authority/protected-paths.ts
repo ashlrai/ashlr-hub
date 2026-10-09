@@ -120,6 +120,8 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/fleet/maintainer-pr-runner.ts',
   'src/core/fleet/maintainer-cargo-dependencies.ts',
   'src/cli/maintainer-verify.ts',
+  'src/core/website/**',
+  'src/cli/website.ts',
   // Release claim eligibility and the opt-in signed company content task lane.
   'src/core/release-public-facts.ts',
   'src/core/release-articles.ts',

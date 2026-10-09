@@ -25,7 +25,7 @@
  * palette can never be a shortcut around any of them. When the bar would
  * have been disabled, the palette says why instead of doing nothing.
  */
-import { useState, type ReactNode } from 'react';
+import { lazy, Suspense, useState, type ReactNode } from 'react';
 import type { AuthorityGrantDraft, AuthorityStatusV1, AutonomySwitch } from '../../../../core/authority/types.js';
 import type { BudgetMode } from '../../../../core/routing/types.js';
 import { Button } from '../../../components/primitives/Button.js';
@@ -43,6 +43,8 @@ import { GrantSheet, type GrantIntent } from './GrantSheet.js';
 import { postAuthority, type OptionalRead } from './surface-data.js';
 import type { ConfirmSpec, SurfaceActions } from './actions.js';
 import styles from './command.module.css';
+
+const WebsitePublicationControl = lazy(() => import('./WebsitePublicationControl.js'));
 
 const MODE_WORD: Record<BudgetMode, string> = { 'all-in': 'All-in', balanced: 'Balanced', reserve: 'Reserve' };
 
@@ -222,6 +224,9 @@ export function AutonomyBar({ read, loading, budgetMode, actions, compact, now, 
             <BudgetPill mode={budgetMode} onOpen={() => setBudgetOpen(true)} />
             <GrantChip chip={chip} onOpen={(intent) => flow.open(intent, chip.detail)} />
           </>
+        ) : null}
+        {!compact && status?.websitePublication && status.policy?.websitePublication ? (
+          <Suspense fallback={null}><WebsitePublicationControl status={status.websitePublication} actions={actions} disabled={disabled} /></Suspense>
         ) : null}
         <span className={styles.barSpacer} />
         {stopButton}

@@ -298,16 +298,16 @@ describe('codex catalog', () => {
     expect(readCodexCatalog(path.join(tmp, 'codex-a', 'native-state'))).toBeNull();
     const options = codexModelOptions(null);
     expect(options.map((m) => m.id)).toEqual([
-      'gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5',
+      'gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
     ]);
     expect(options.map((m) => m.id)).not.toContain('gpt-reserve');
+    expect(options.map((m) => m.id)).not.toContain('gpt-5.5');
     for (const m of options) {
       expect(m.windowSource).toBe('documented');
       expect(m.contextWindow).toBe(258_400);
       expect(m.autoCompactAt).toBe(244_800);
     }
     expect(options[0]!.expansive).toEqual({ contextWindow: 828_400, autoCompactAt: 784_800, providerWindow: 872_000 });
-    expect(options.find((m) => m.id === 'gpt-5.5')!.expansive).toBeUndefined();
     // A catalog whose every row is hidden is no better than none.
     expect(codexModelOptions([{ slug: 'x', displayName: null, visibility: 'hide', contextWindow: 1, maxContextWindow: null, effectiveContextWindowPercent: null, autoCompactTokenLimit: null, priority: null }])[0]!.windowSource)
       .toBe('documented');

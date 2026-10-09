@@ -261,15 +261,13 @@ describe('M162 — model plumbing', () => {
     expect(briefing.proposedGoals.length).toBeGreaterThan(0);
   });
 
-  it('CLAUDE_DEFAULT_STRATEGIST_MODEL is claude-opus-4-8 (not sonnet)', async () => {
-    // Read the strategist source to verify the constant.
-    const src = fs.readFileSync(
-      path.join(process.cwd(), 'src/core/vision/strategist.ts'),
-      'utf8',
-    );
-    expect(src).toContain("'claude-opus-4-8'");
-    expect(src).not.toContain("CLAUDE_DEFAULT_STRATEGIST_MODEL = 'claude-sonnet");
+  it('uses the source-owned current strategist defaults while respecting explicit configuration', async () => {
+    const { defaultStrategistModel } = await import('../src/core/run/model-catalog.js');
+    expect(defaultStrategistModel(mockCfgBase)).toBe('claude-fable-5-1');
+    expect(defaultStrategistModel({ foundry: { claude5: { fable: false } } })).toBe('claude-opus-5-5');
+    expect(mockCfgWithStrategistModel.foundry?.strategistModel).toBe('claude-opus-4-8');
   });
+
 });
 
 // ---------------------------------------------------------------------------

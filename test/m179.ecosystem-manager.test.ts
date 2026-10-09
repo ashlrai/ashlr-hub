@@ -19,6 +19,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { DEFAULT_CLAUDE_MODEL_ID, KNOWN_MODELS, defaultStrategistModel } from '../src/core/run/model-catalog.js';
 import type { AshlrConfig } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -183,7 +184,7 @@ const mockCfgWithOpus: AshlrConfig = {
   models: { ollama: 'http://127.0.0.1:9' },
   foundry: {
     allowedBackends: ['builtin'],
-    strategistModel: 'claude-opus-4-8',
+    strategistModel: DEFAULT_CLAUDE_MODEL_ID,
   },
 } as unknown as AshlrConfig;
 
@@ -971,12 +972,14 @@ describe('M179 — runStrategist ecosystem full integrity', () => {
     expect(briefing.gapToVision.toLowerCase()).toMatch(/tool|ecosystem|pulse|phantom|vault|real.time|binshield/);
   });
 
-  it('uses cfg.foundry.strategistModel (Opus) — strategic-model constant present', () => {
+  it('uses the configured strategist model or the shared current catalog default', () => {
     const src = fs.readFileSync(
       path.join(process.cwd(), 'src/core/vision/strategist.ts'),
       'utf8',
     );
-    expect(src).toContain("'claude-opus-4-8'");
+    expect(src).toContain("from '../run/model-catalog.js'");
+    expect(src).toContain('configuredModel ?? defaultStrategistModel(cfg)');
+    expect(KNOWN_MODELS.some(model => model.apiModelId === defaultStrategistModel(mockCfgBase))).toBe(true);
   });
 
   it('degrades gracefully when LLM unavailable — never throws', async () => {

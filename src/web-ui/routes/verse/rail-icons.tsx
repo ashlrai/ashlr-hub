@@ -14,11 +14,12 @@
 import type { ComponentType, ReactNode } from 'react';
 import { IconChat, IconInbox, type IconProps } from '../../components/primitives/icon-base.js';
 import type { VerseSectionId } from './verse-ui-store.js';
+import './rail-icons.module.css';
 
 export const ChatIcon = IconChat;
 
 /** The Verse chrome geometry (verse-icons.tsx draws its local glyphs with it too). */
-export function Icon({ size = 16, children, ...rest }: IconProps & { children: ReactNode }) {
+export function Icon({ size = 16, children, ...rest }: IconProps & { children: ReactNode; viewBox?: string }) {
   return (
     <svg
       viewBox="0 0 16 16"
@@ -40,13 +41,15 @@ export function Icon({ size = 16, children, ...rest }: IconProps & { children: R
 
 /** Phantom ghost geometry from the first-party MIT asset; see docs/PHANTOM-BRAND.md. */
 export function VerseMark(props: IconProps) {
-  const { size = 20, ...rest } = props;
   return (
-    <svg viewBox="0 0 32 32" width={size} height={size} aria-hidden="true" focusable="false" {...rest}>
-      <path fill="currentColor" d="M16 2C10.5 2 6 6.5 6 12v10.5c0 .8.7 1.5 1.5 1.5H10c0-2 1.3-3.5 2.5-3.5S15 22 15 24h2c0-2 1.3-3.5 2.5-3.5S22 22 22 24h2.5c.8 0 1.5-.7 1.5-1.5V12c0-5.5-4.5-10-10-10z" />
-      <circle cx="12.5" cy="13.5" r="2.2" fill="var(--bg-canvas, #fafafa)" />
-      <circle cx="19.5" cy="13.5" r="2.2" fill="var(--bg-canvas, #fafafa)" />
-    </svg>
+    <Icon {...props} size={props.size ?? 20} viewBox="4 0 24 27" data-phantom-mark="">
+      <path d="M16 2C10.5 2 6 6.5 6 12v10.5c0 .8.7 1.5 1.5 1.5H10c0-2 1.3-3.5 2.5-3.5S15 22 15 24h2c0-2 1.3-3.5 2.5-3.5S22 22 22 24h2.5c.8 0 1.5-.7 1.5-1.5V12c0-5.5-4.5-10-10-10z" />
+      <path d="M8 12a8 8 0 0 1 8-8" />
+      <ellipse cx={12.5} cy={13.5} rx={2.2} ry={2.6} />
+      <ellipse cx={19.5} cy={13.5} rx={2.2} ry={2.6} />
+      <ellipse cx={13} cy={13.8} rx={0.9} ry={1.3} />
+      <ellipse cx={20} cy={13.8} rx={0.9} ry={1.3} />
+    </Icon>
   );
 }
 

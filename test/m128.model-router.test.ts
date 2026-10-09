@@ -222,16 +222,16 @@ describe('M128 routeTask — difficulty routing', () => {
     const cfg = withFoundry({ allowedBackends: ['claude', 'codex', 'local-coder' as any, 'builtin'] });
     const result = routeTask(item, cfg, ALL_ENGINES_CTX as any);
     expect(result.engine).toBe('claude');
-    expect(result.model).toBe('opus');
+    expect(result.model).toBe('claude-opus-5-5');
     expect(result.reason).toMatch(/hard|opus|reasoning/i);
   });
 
-  it('hard coding item (effort=5, source=todo) → codex:gpt-5.5', () => {
+  it('hard coding item (effort=5, source=todo) → current Codex model', () => {
     const item = makeItem({ source: 'todo', effort: 5, score: 8 });
     const cfg = withFoundry({ allowedBackends: ['claude', 'codex', 'local-coder' as any, 'builtin'] });
     const result = routeTask(item, cfg, ALL_ENGINES_CTX as any);
     expect(result.engine).toBe('codex');
-    expect(result.model).toBe('gpt-5.5');
+    expect(result.model).toBe('gpt-6.1-sol');
     expect(result.reason).toMatch(/codex|gpt-5\.5|coder/i);
   });
 
@@ -260,7 +260,7 @@ describe('M128 routeTask — difficulty routing', () => {
     const cfg = withFoundry({ allowedBackends: ['claude', 'codex', 'local-coder' as any, 'builtin'] });
     const result = routeTask(item, cfg, ALL_ENGINES_CTX as any);
     expect(result.engine).toBe('claude');
-    expect(result.model).toBe('opus');
+    expect(result.model).toBe('claude-opus-5-5');
   });
 
   it('escalation source always routes to frontier', () => {
@@ -499,8 +499,8 @@ describe('M128 routeBackend — model threading', () => {
     const result = routeBackend(item, cfg);
     expect(result.tier).toBe('frontier');
     expect(result.model).not.toBeNull();
-    // Should be opus or gpt-5.5
-    const isStrong = result.model === 'opus' || result.model === 'gpt-5.5';
+    // The selected concrete current frontier model is preserved.
+    const isStrong = result.model === 'claude-opus-5-5' || result.model === 'gpt-6.1-sol';
     expect(isStrong).toBe(true);
   });
 

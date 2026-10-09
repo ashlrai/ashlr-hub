@@ -11,6 +11,7 @@ import { autonomousConfinementProfile, buildAutonomousSbplProfile, escapeSbplPat
 import { observeClaudeNativeBinding, readClaudeNativeBinding, sameClaudeNativeBinding, type ClaudeNativeBinding } from './claude-native-admission.js';
 import { claudeBrokerCommand, claudeBrokerNativeEnvironment, startClaudeNativeBroker, type ClaudeBrokerObservation } from './claude-native-broker.js';
 import { claudeBrokerToolExecutor } from './claude-broker-executor.js';
+import { assertHostNativeAccountContext } from '../integrations/locus-job-env.js';
 
 const NATIVE_AUTH_HELPERS = ['/usr/bin/security','/bin/sh'] as const;
 const cleanupUnknown = (r: SpawnEngineResult): boolean => r.terminationReason === 'error-exit' &&
@@ -58,10 +59,14 @@ export interface ClaudeNativeAdapterOptions {
   retainCleanupFailure(): void;
   /** Harness tuning is source-selected; only the native effort flag is carried. */
   effort?: string;
+  /** Selected allowance principal, when the role is routed across accounts. */
+  expectedAccountHint?: string;
 }
 export async function runClaudeNativeAdapter(options: ClaudeNativeAdapterOptions): Promise<ClaudeNativeAdapterResult> {
   let providerContacted = false;
   const held = (reason: string): ClaudeNativeAdapterResult => ({ providerContacted,ok:false, output:'', error:reason, terminationReason:'error-exit',captureDenied:true });
+  try { assertHostNativeAccountContext(); }
+  catch (error) { return held(error instanceof Error ? error.message : 'Locus native-account context unavailable'); }
   if (options.signal === undefined) return held('Native Claude producer cancellation ownership unavailable');
   if (options.signal.aborted) return { ...held('run cancelled'), terminationReason:'cancelled' };
   if (!enginePermitted('claude', options.cfg).permitted || !options.admission()) return held('Selected Claude account authority unavailable');
@@ -104,7 +109,7 @@ export async function runClaudeNativeAdapter(options: ClaudeNativeAdapterOptions
     authHelperEpoch = trustedNativeAuthHelperEpoch();
     proof = await observeClaudeNativeBinding(options.cfg,options.seatId,options.runId,options.model,scratch,signal,options.admission);
     observation = proof?.observation ?? null;
-    if (!proof || !current()) return held('Selected Claude native identity, allowance or credit protection unconfirmed');
+    if (!proof || !current() || options.expectedAccountHint !== undefined && proof.observation.accountDigest !== options.expectedAccountHint) return held('Selected Claude native identity, allowance or credit protection unconfirmed');
     owned = prepareAutonomousSpawn({ engine:'local', worktree:scratch, bin:proof.binding.launch.command[0],
       baseEnv:claudeBrokerNativeEnvironment(), extraReadOnly:[dirname(proof.binding.launch.command[1]),proof.binding.launch.executable],
       profile:{...autonomousConfinementProfile('local'),loopbackPorts:[]} });

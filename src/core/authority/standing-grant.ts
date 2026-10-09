@@ -177,13 +177,11 @@ function parseSeat(value: unknown, seatId: string): StandingGrantSeat {
   if (Object.prototype.hasOwnProperty.call(seat, 'maxSessionWindowPercent')) {
     parsed.maxSessionWindowPercent = intIn(seat['maxSessionWindowPercent'], 1, 100, `${where}.maxSessionWindowPercent`);
   }
-  // 3.15: Devin is a PRODUCER only. A third-party hosted agent whose
-  // underlying models are undisclosed can never judge work (it may share a
-  // family with the producer it judges) and never runs the Leader. The Swift
-  // helper refuses the same (StandingGrant.swift parseSeat), so no signed
-  // grant can ever carry it.
-  if (engineOfSeatId(seatId) === 'devin' && (parsed.roles.length !== 1 || parsed.roles[0] !== 'producer')) {
-    fail(`${where}.roles: a Devin seat may only be a producer`);
+  // Leader is a planning role, independent of provider. Judging still needs
+  // a disclosed independent model family; do not infer it from a Devin label.
+  // Old producer-only grants keep their exact canonical bytes and role scope.
+  if (engineOfSeatId(seatId) === 'devin' && parsed.roles.includes('judge')) {
+    fail(`${where}.roles: a Devin judge requires independent model-family evidence`);
   }
   return parsed;
 }
@@ -252,7 +250,7 @@ function parseStage(
 
 function parsePayload(value: unknown): StandingGrantV1 {
   const grant = record(value, 'payload');
-  exactKeys(grant, STANDING_GRANT_KEYS.grant, [], 'payload');
+  exactKeys(grant, STANDING_GRANT_KEYS.grant, STANDING_GRANT_OPTIONAL_KEYS.grant, 'payload');
   if (grant['v'] !== 1) fail('payload.v must be 1');
   const issuedAt = isoInstant(grant['issuedAt'], 'issuedAt');
   const expiresAt = isoInstant(grant['expiresAt'], 'expiresAt');
@@ -303,6 +301,17 @@ function parsePayload(value: unknown): StandingGrantV1 {
   };
   if (typeof grant['conductorGoals'] !== 'boolean') fail('conductorGoals must be true or false');
 
+  let websitePublication: StandingGrantV1['websitePublication'];
+  if (Object.prototype.hasOwnProperty.call(grant, 'websitePublication')) {
+    const web = record(grant['websitePublication'], 'websitePublication');
+    exactKeys(web, STANDING_GRANT_KEYS.websitePublication, [], 'websitePublication');
+    websitePublication = {
+      profile: oneOf(web['profile'], ['phantom-public-web'] as const, 'websitePublication.profile'),
+      profileDigest: matching(web['profileDigest'], STANDING_GRANT_PATTERNS.sha256Hex, 'websitePublication.profileDigest'),
+      mode: oneOf(web['mode'], ['automatic'] as const, 'websitePublication.mode'),
+    };
+  }
+
   const rollout = record(grant['rollout'], 'rollout');
   exactKeys(rollout, STANDING_GRANT_KEYS.rollout, [], 'rollout');
   if (rollout['autoAdvance'] !== true) fail('rollout.autoAdvance must be true');
@@ -330,6 +339,7 @@ function parsePayload(value: unknown): StandingGrantV1 {
     leader: parsedLeader,
     conductorGoals: grant['conductorGoals'],
     rollout: { stages, autoAdvance: true },
+    ...(websitePublication ? { websitePublication } : {}),
   };
 }
 
@@ -689,19 +699,20 @@ function repoName(nameWithOwner: string): string {
 function defaultSeat(engine: BudgetEngine): StandingGrantSeat {
   switch (engine) {
     case 'claude':
-      return { enabled: true, reserveFloorPercent: 40, maxSessionWindowPercent: 70, roles: ['judge', 'leader'] };
+      return { enabled: true, reserveFloorPercent: 40, maxSessionWindowPercent: 70, roles: ['producer', 'judge', 'leader'] };
     case 'codex':
-      return { enabled: true, reserveFloorPercent: 40, maxSessionWindowPercent: 70, roles: ['producer', 'judge'] };
+      return { enabled: true, reserveFloorPercent: 40, maxSessionWindowPercent: 70, roles: ['producer', 'judge', 'leader'] };
     case 'grok':
       return { enabled: true, reserveFloorPercent: 0, roles: ['producer', 'judge', 'leader'] };
     case 'local':
       return { enabled: true, reserveFloorPercent: 0, roles: ['producer', 'leader'] };
     case 'devin':
-      // Producer ONLY — never judge, never Leader (parseSeat refuses more).
+      // Producer and Leader share the same observed native allowance. Judging
+      // remains separate until independent model-family evidence is supported.
       // No window to keep a percentage of: the operator's Devin reserve is
       // kept in ACUs by the Devin budget (DevinBudgetV1.reserveAcu), which
       // the fleet launcher checks before every launch.
-      return { enabled: true, reserveFloorPercent: 0, roles: ['producer'] };
+      return { enabled: true, reserveFloorPercent: 0, roles: ['producer', 'leader'] };
     default:
       return { enabled: false, reserveFloorPercent: 100, roles: ['producer'] };
   }
@@ -920,6 +931,7 @@ export function describeGrantScope(grant: StandingGrantV1): string[] {
     `Grant #${grant.grantSeq} (${grant.grantId.slice(0, 8)}), key ${grant.keyId}, valid ${grant.issuedAt} → ${grant.expiresAt}`,
     `Engines: ${grant.engines.join(', ')} · budget up to ${grant.spend.maxMode} · metered spend $${grant.spend.meteredUsdPerDay}/day`,
     `Merge caps: ${volumeLimitLabel(grant.merge.maxFiles)} files / ${volumeLimitLabel(grant.merge.maxLines)} lines · ashlr-hub: ${grant.merge.selfRepo}`,
+    ...(grant.websitePublication ? [`Website: automatic publication of Phantom website / phm.dev · ${grant.websitePublication.profile} · profile ${grant.websitePublication.profileDigest}`] : []),
     `Leader permission ceiling: ${grant.leader.classes.length > 0 ? grant.leader.classes.join('+') : 'none'} · veto window ${grant.leader.vetoMinutes} min · conductors ${grant.conductorGoals ? 'live' : 'dry-run'}`,
     `Leader at starting stage ${grant.rollout.stages[0]!.id}: ${grant.rollout.stages[0]!.leaderClasses.length ? grant.rollout.stages[0]!.leaderClasses.join('+') : 'advisory only'}`,
     `Volume policy: ${grant.merge.volumePolicy === 'operator-signed' ? 'operator-signed limits apply to all producer models and enforcement modes; risk and verification remain binding' : 'legacy local 4 files / 150 lines and local-enforcement 4 merges/day remain'}`,

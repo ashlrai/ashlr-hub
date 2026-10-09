@@ -157,9 +157,9 @@ export function fleetEngineOfSeat(seatId: string): GrantEngine | null {
 /**
  * 3.15: may autonomy LAUNCH Devin sessions under this policy? Only when the
  * current stage (∩ grant) names the `devin` engine AND the grant's `devin`
- * seat is enabled with the producer role. Devin is producer-only: a judge or
- * leader role on it is refused at verification (standing-grant.ts), and this
- * never reads those roles. Pure.
+ * seat is enabled with the producer role. This cloud-launch check is separate
+ * from explicitly signed native Leader roles and does not authorize judging.
+ * It never converts a Leader role into producer authority. Pure.
  */
 export function standingAuthorizesDevin(policy: Pick<EffectivePolicy, 'engines' | 'spend'> | null): { ok: boolean; reason: string } {
   if (!policy) return { ok: false, reason: 'No standing grant is in force.' };
@@ -293,6 +293,7 @@ export function computeEffectivePolicy(input: EffectivePolicyInput): EffectivePo
     engines,
     leader: { classes, vetoMinutes: grant.leader.vetoMinutes },
     conductorGoals: grant.conductorGoals,
+    ...(input.switch === 'autonomous' && grant.websitePublication ? { websitePublication: { ...grant.websitePublication } } : {}),
     computedAt: new Date(input.nowMs).toISOString(),
   };
 }
@@ -450,6 +451,8 @@ export interface StandingEvaluation {
 export interface EvaluateOptions {
   /** `fresh`: re-hash the surface and the verified ledger prefix, reload config. */
   mode: 'cached' | 'fresh';
+  /** Reuse hashes only for files whose complete inode/time tuple is unchanged; ledger/config remain fresh. */
+  surfaceHashes?: 'always' | 'unchanged';
   surface: SurfaceTarget;
   nowMs?: number;
   /** Supplied config (the daemon's per-tick config); otherwise loaded read-only. */
@@ -476,7 +479,7 @@ export function evaluateStandingAuthority(opts: EvaluateOptions): StandingEvalua
   const kill = killSwitchOn();
   const ledgerMode: LedgerReadMode = opts.mode === 'fresh' ? 'prefix' : 'cached';
   const snapshot = ledgerSnapshot(ledgerMode);
-  const surface = verifyAuthoritySurface(opts.surface, { fresh: opts.mode === 'fresh', nowMs });
+  const surface = verifyAuthoritySurface(opts.surface, { fresh: opts.mode === 'fresh' && opts.surfaceHashes !== 'unchanged', nowMs });
   const confinement = confinementAvailable();
   const base = {
     checkedAt,

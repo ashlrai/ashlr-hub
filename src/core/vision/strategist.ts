@@ -2,7 +2,7 @@
  * M121/M162/M179: Strategist — the ECOSYSTEM MANAGER of the autonomous fleet.
  *
  * M162 upgrades:
- *  - Runs on cfg.foundry.strategistModel (default: 'claude-opus-4-8') — the
+ *  - Runs on cfg.foundry.strategistModel (default: defaultStrategistModel) — the
  *    most capable model available. Founder-grade strategy needs best reasoning.
  *  - North-star = receipt-qualified retained product/user value, reusable IP,
  *    information gain, and value per expiring token/time window. Engineering
@@ -45,7 +45,7 @@ import { createHash } from 'node:crypto';
 import { basename, isAbsolute, join } from 'node:path';
 import { existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { AshlrConfig, Goal } from '../types.js';
-import { defaultStrategistModel } from '../run/model-catalog.js';
+import { defaultStrategistModel, DEFAULT_FABLE_MODEL_ID, DEFAULT_CLAUDE_MODEL_ID } from '../run/model-catalog.js';
 import { resolveLocalLeaderModel } from './leader-seat.js';
 import { loadSpec, applyEvolution } from './spec.js';
 import type { EndStateSpec, ToolRoadmapEntry } from './spec.js';
@@ -550,7 +550,7 @@ questionsForMason: only ask when a strategic fork GENUINELY requires Mason's jud
  * cfg.foundry.strategistModel.
  */
 // M320: strategist default resolves via defaultStrategistModel() in
-// run/model-catalog.ts (Fable 5 when claude5.fable is on, else Opus 4.8).
+// run/model-catalog.ts (current Fable when enabled, current Opus otherwise).
 
 /**
  * Build a `complete(system, user)` function using the Claude Code CLI.
@@ -604,7 +604,7 @@ function buildClaudeCliCompleteStrategist(
  * Resolve the best available client for strategic briefings.
  *
  * M162/M320: model priority — cfg.foundry.strategistModel → defaultStrategistModel(cfg)
- * (Fable 5 when claude5.fable is on, else 'claude-opus-4-8'). Founder-grade
+ * (current Fable when enabled, current Opus otherwise). Founder-grade
  * strategy always uses the elite model.
  *
  * Engine priority (controlled by cfg.foundry.managerJudgeEngine):
@@ -634,13 +634,13 @@ function resolveStrategistClient(
     // eliteModel starts with 'claude'; the explicit --model flag is always set.
     const primary = buildClaudeCliCompleteStrategist(cfg, eliteModel);
     // M337 (review fix): the claude5.fable contract promises an automatic
-    // Opus 4.8 fallback for the STRATEGIST too — without it, accounts
+    // current Opus fallback for the STRATEGIST too — without it, accounts
     // lacking Fable access silently produced empty briefings. Mirror the
     // judge wrapper: retry once on Opus when a Fable call yields nothing.
-    if (eliteModel !== 'claude-fable-5') {
+    if (eliteModel !== 'claude-fable-5' && eliteModel !== DEFAULT_FABLE_MODEL_ID) {
       return { complete: primary, judgeEngine: eliteModel };
     }
-    const fallback = buildClaudeCliCompleteStrategist(cfg, 'claude-opus-4-8');
+    const fallback = buildClaudeCliCompleteStrategist(cfg, DEFAULT_CLAUDE_MODEL_ID);
     return {
       complete: async (system: string, user: string): Promise<string> =>
         (await primary(system, user)) || fallback(system, user),

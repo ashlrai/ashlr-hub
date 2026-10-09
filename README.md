@@ -18,16 +18,16 @@
 
 ## Install
 
-Phantom 3.26.1 is published as `@ashlr/phantom` from `ashlrai/phantom`.
+Phantom 3.27.0 is published as `@ashlr/phantom` from `ashlrai/phantom`.
 Install the version-pinned canonical release:
 
 ```sh
-npm install -g @ashlr/phantom@3.26.1   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
+npm install -g @ashlr/phantom@3.27.0   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
 phm verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 On an Apple silicon Mac, download the
-[v3.26.1 desktop DMG](https://github.com/ashlrai/phantom/releases/download/v3.26.1/Phantom_3.26.1_aarch64.dmg).
+[v3.27.0 desktop DMG](https://github.com/ashlrai/phantom/releases/download/v3.27.0/Phantom_3.27.0_aarch64.dmg).
 The app inside the DMG is locally signed; the DMG is unsigned. Neither is Apple
 notarized; macOS may require **Open Anyway** on first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
@@ -74,7 +74,7 @@ console is the Phantom kernel: the CLI, the Universe experiment runtime and
 account-aware resource pools.
 
 Phantom was formerly Ashlr Verse. The current source repository is `ashlrai/phantom`;
-the published 3.26.1 package is `@ashlr/phantom`. `phm` and compatible `ashlr`
+the published 3.27.0 package is `@ashlr/phantom`. `phm` and compatible `ashlr`
 share the same entrypoint. Published 3.25.3 remains `@ashlr/hub`; its existing
 SDK imports, including `@ashlr/hub/universe`, retain their original identity.
 The canonical package provides the same five SDK surfaces under `@ashlr/phantom`.
@@ -132,9 +132,19 @@ can inform the choice; it cannot make a blocked resource eligible.
 
 **Manager** coordinates delegation and review for an explicit chat or outcome.
 **Leader** sets fleet priorities, refines work and asks for your decisions.
-These are different roles: the Manager supports the current Claude, Codex,
-Grok and local adapters; the Leader uses Grok or local models, with restricted
-Claude fallback, rather than Codex.
+Roles select an eligible account and fitting model rather than a preferred
+company. Leader planning and conversation support prepared Claude Code, Codex,
+Grok, local models and the included native Devin CLI models. Native roles use
+an account-bound dispatcher; Manager stages use qualified worker adapters.
+Cloud Devin sessions remain a separately accounted ACU lane. Balanced mode
+enables included Codex allowance by default; stored per-account Off settings
+remain respected. Each account's
+model variants share its allowance, so adding a model never creates quota.
+
+Routing retains current account, context, subscription-only billing and signed
+scope evidence. Unknown funding remains unavailable. Native completion traces
+record the selected account/model, wall time and reported tokens when present;
+whole-run throughput is distinct from generation tokens per second.
 
 ```mermaid
 flowchart LR
@@ -265,7 +275,7 @@ separate Node.js install to run.
 
 ### Install
 
-Use the [v3.26.1 release](https://github.com/ashlrai/phantom/releases/tag/v3.26.1)
+Use the [v3.27.0 release](https://github.com/ashlrai/phantom/releases/tag/v3.27.0)
 for the versioned arm64 DMG. The app inside is locally signed; the DMG is unsigned.
 Neither is Apple Developer ID notarized, so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
@@ -353,18 +363,18 @@ check identity and quota, are in
 The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
-Published 3.26.1 provides `phm` as the primary CLI command. Both `phm` and
+Published 3.27.0 provides `phm` as the primary CLI command. Both `phm` and
 `ashlr` use the same workbench entrypoint; existing `ashlr` scripts keep working.
 When building from source, `./install.sh` installs both aliases and refuses
 unrelated files or links. The separate Phantom Secrets command remains `phantom`.
 
 ```sh
-npm install -g @ashlr/phantom@3.26.1
+npm install -g @ashlr/phantom@3.27.0
 phm --version
 phm verse                 # start the server and open http://127.0.0.1:7777/verse/
 ```
 
-The canonical 3.26.1 package exposes `@ashlr/phantom`, `@ashlr/phantom/core`,
+The canonical 3.27.0 package exposes `@ashlr/phantom`, `@ashlr/phantom/core`,
 `@ashlr/phantom/types`, `@ashlr/phantom/plugin` and `@ashlr/phantom/universe`.
 The published 3.25.3 compatibility package preserves the public SDK entrypoints `@ashlr/hub`,
 `@ashlr/hub/core`, `@ashlr/hub/types`, `@ashlr/hub/plugin` and `@ashlr/hub/universe`.
@@ -543,7 +553,7 @@ switch, backends, sandboxing, the command reference, the safety model, the
 CLI archives are built by hosted CI; the macOS app is finalized and publication is performed locally.
 The source also runs GitHub CI and dependency audit checks. The local build procedure is in [Releasing without CI](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md).
 npm publication is confirmed separately for the selected package and version.
-The 3.26.0 canonical release was verified through `@ashlr/phantom` public-byte readback;
+The 3.27.0 canonical release was verified through `@ashlr/phantom` public-byte readback;
 a legacy `@ashlr/hub` response does not prove canonical publication.
 GitHub release assets require their own public download and checksum verification;
 repository or changelog state alone is not publication evidence.

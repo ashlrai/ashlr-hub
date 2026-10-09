@@ -110,6 +110,7 @@ describe('GrantContract.swift mirrors authority/types.ts', () => {
   it('exact key sets per object level', () => {
     const k = STANDING_GRANT_KEYS;
     const pairs: [string, readonly string[]][] = [
+      ['keysWebsitePublication', k.websitePublication], ['optionalKeysGrant', STANDING_GRANT_OPTIONAL_KEYS.grant],
       ['keysEnvelope', k.envelope], ['keysGrant', k.grant], ['keysRepo', k.repo], ['keysMerge', k.merge],
       ['keysSpend', k.spend], ['keysSeat', k.seat], ['keysLeader', k.leader], ['keysRollout', k.rollout],
       ['keysStage', k.stage], ['keysStageRepo', k.stageRepo], ['keysCriteria', k.criteria],

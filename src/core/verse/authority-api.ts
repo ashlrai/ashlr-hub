@@ -35,6 +35,7 @@
  * R1 (SPEC-310C): `needsYouItems()` and `autonomyBadge()` answer from a cache
  * refreshed OFF the caller's stack, so C1's activity route never waits on I/O.
  */
+import { setWebsiteMode, websiteStatus } from '../website/host-release.js';
 import { lstatSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
@@ -228,6 +229,7 @@ function statusFrom(ev: StandingEvaluation, custody: AuthorityCustodyView): Auth
     policy: ev.policy,
     ledger: { state: ev.ledger.chain, head: ev.ledger.head, reason: ev.ledger.reason },
     custody,
+    websitePublication: websiteStatus(ev.policy),
     effectiveReason: ev.effectiveSwitch === ev.switch && ev.grantState === 'active' ? null : ev.inactiveReason ?? ev.grantReason,
     // Additive (3.14): the signed ladder, where we stand on it, its last move.
     ladder: autonomyLadder(ev),
@@ -814,6 +816,7 @@ function ledgerPositionIndex(grant: StandingGrantV1): number {
 
 const ACTION_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   switch: ['action', 'to'],
+  'website-mode': ['action', 'to'],
   stop: ['action'],
   'clear-stop': ['action'],
   revoke: ['action', 'reason'],
@@ -839,6 +842,12 @@ export async function applyAuthorityAction(body: Record<string, unknown>): Promi
     if (!allowed.includes(key)) return { ok: false, status: 400, code: 'VERSE_INVALID', error: `unknown key for ${action}: ${key}` };
   }
   switch (action) {
+    case 'website-mode': {
+      const to = body['to'];
+      if (to !== 'auto' && to !== 'paused' && to !== 'off') return { ok: false, status: 400, code: 'VERSE_INVALID', error: 'Website mode must be Auto, Paused or Off' };
+      try { const result = setWebsiteMode(to); return { ok: true, status: 200, result: { websitePublication: result } }; }
+      catch { return { ok: false, status: 409, code: 'website-held', error: 'Website publication is not commissioned under a current valid grant' }; }
+    }
     case 'switch': {
       const to = body['to'];
       if (typeof to !== 'string' || !(AUTONOMY_SWITCHES as readonly string[]).includes(to)) {

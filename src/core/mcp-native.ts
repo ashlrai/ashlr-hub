@@ -166,6 +166,16 @@ interface NativeToolImpl extends NativeToolDef {
 
 const TOOLS: NativeToolImpl[] = [
   {
+    name: 'ashlr_website_publish', description: 'Request publication of the exact normally merged Phantom website revision. The host verifies signed scope, source, build and production aliases independently. Does not change settings or obtain credentials.',
+    inputSchema: { type: 'object', properties: { profile: { type: 'string', enum: ['phantom-public-web'] }, expectedMerge: { type: 'string', pattern: '^[a-f0-9]{40}$' } }, required: ['profile','expectedMerge'], additionalProperties: false },
+    safety: 'append', handler: async (args) => (await import('./website/host-release.js')).requestWebsitePublication(args),
+  },
+  {
+    name: 'ashlr_website_status', description: 'Read website publication mode, operation phase and hold reason.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false }, safety: 'read',
+    handler: async () => (await import('./website/host-release.js')).websiteStatus(),
+  },
+  {
     name: 'ashlr_orient',
     description:
       'Session-start orientation: genome memory hits, repo health, top backlog items, ' +

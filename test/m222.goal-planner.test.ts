@@ -180,8 +180,35 @@ describe('M222 — expandGoalToMilestones: basic expansion', () => {
     const goal = makeActiveGoalNoMilestones('goal-auth', 'Harden the authentication layer');
     const cfg = makeCfg();
     const result = await expandGoalToMilestones(goal, cfg, tmpDir);
-    expect(result.milestones.length).toBeGreaterThanOrEqual(3);
-    expect(result.milestones.length).toBeLessThanOrEqual(6);
+    expect(result.milestones).toHaveLength(4);
+  });
+
+  it.each([1, 2, 7])('preserves a useful %i-step plan and its dependency details without padding or truncation', async (count) => {
+    const goal = makeActiveGoalNoMilestones(`goal-task-sized-${count}`, 'Fix onboarding, integrate the feature and publish a verified release');
+    _savedGoals.set(goal.id, structuredClone(goal));
+    const planned = Array.from({ length: count }, (_, i) => ({
+      title: i === 0 ? 'Document the working installation' : i === count - 1 ? 'Publish the verified release' : `Integrate component ${i}`,
+      detail: i === 0 ? 'Update README.md with the supported command and verify it in a clean install.'
+        : `After milestone ${i}, integrate the required behavior and run its acceptance checks before delivery.`,
+    }));
+    _completeImpl = vi.fn(async () => planned.map((m, i) => `${i + 1}. ${m.title} — ${m.detail}`).join('\n'));
+    const result = await expandGoalToMilestones(goal, makeCfg(), tmpDir);
+    expect(result.milestones.map(({ title, detail }) => ({ title, detail }))).toEqual(planned);
+    expect(_savedGoals.get(goal.id)?.milestones).toEqual(result.milestones);
+    expect(result.milestones.map(m => m.order)).toEqual(planned.map((_, i) => i));
+    const [system, user] = _completeImpl.mock.calls[0] as string[];
+    expect(system).toContain('order prerequisites first');
+    expect(system).toContain('documentation, tests, CI, releases and maintenance');
+    expect(`${system}\n${user}`).not.toMatch(/3-6|1-4 hours|value≥4|NO documentation-only|must be independently shippable/);
+  });
+
+  it('preserves hyphenated titles and distinguishes explicit ASCII separators', async () => {
+    const goal = makeActiveGoalNoMilestones('goal-hyphenated', 'Repair CLI-to-desktop updates');
+    _savedGoals.set(goal.id, structuredClone(goal));
+    _completeImpl = vi.fn(async () => '1. Fix account-bound update handoff — Verify src/update/handoff.ts against the current account.\n2. Document CLI-to-desktop setup - Verify the documented install command.');
+    const result = await expandGoalToMilestones(goal, makeCfg(), tmpDir);
+    expect(result.milestones.map(m => m.title)).toEqual(['Fix account-bound update handoff', 'Document CLI-to-desktop setup']);
+    expect(result.milestones[1].detail).toBe('Verify the documented install command.');
   });
 
   it('expanded milestones all have status "pending"', async () => {

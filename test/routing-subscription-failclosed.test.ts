@@ -141,10 +141,18 @@ describe('Claude: the fail-open is closed', () => {
   });
 });
 
-describe('Codex: every account must be eligible; off by default', () => {
-  it('default budget keeps Codex off even with a fresh low reading in the snapshot', () => {
+describe('Codex: every account must be eligible under its saved policy', () => {
+  it('balanced defaults allow Codex with a fresh reading inside its reserve and session ceiling', () => {
     writeCapacitySnapshot([codexSeat('codex-personal', 5)], new Date(NOW));
     mockRateLimitsReturn = null;
+    const r = subscriptionAllows('codex', { nowMs: NOW });
+    expect(r.allowed).toBe(true);
+    expect(r.reason).toContain('within the balanced budget');
+  });
+
+  it('an explicit saved account Off preference still blocks fresh Codex allowance', () => {
+    updateBudgetPolicy({ seatId: 'codex-personal', policy: { enabled: false } });
+    writeCapacitySnapshot([codexSeat('codex-personal', 5)], new Date(NOW));
     const r = subscriptionAllows('codex', { nowMs: NOW });
     expect(r.allowed).toBe(false);
     expect(r.reason).toContain('switched off');

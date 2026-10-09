@@ -108,6 +108,15 @@ describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'funct
 });
 
 describe.runIf(process.platform === 'darwin' && typeof process.execve === 'function')('real inert native CLI and separately jailed tools',()=>{
+  it('holds a role when current native identity differs from the selected allowance',async()=>{
+    const f=fixture();readyWatch();
+    const result=await runClaudeNativeAdapter({...f,runId:'native-fixture',seatId:'claude-a',model:'claude-sonnet-4-5',
+      expectedAccountHint:'d'.repeat(64),prompt:JSON.stringify({text:'must not run'}),signal:new AbortController().signal,
+      admission:()=>true,timeoutMs:4000,recordEvidence:()=>{},retainCleanupFailure:()=>{throw Error('unexpected retention');}});
+    expect(result).toMatchObject({ok:false,providerContacted:false,captureDenied:true});
+    expect(existsSync(join(f.profile.nativeStatePath,'contact.json'))).toBe(false);
+    expect(existsSync(join(f.worktree,'written.txt'))).toBe(false);
+  });
   it('passes bounded stdin/accepted flags and actual MCP read/write; preserves streamed text and token usage',async()=>{
     const f=fixture();readyWatch();const evidence:AutonomousSpawnFinish[]=[];
     for(const key of ['ANTHROPIC_API_KEY','NODE_OPTIONS','HTTPS_PROXY'])vi.stubEnv(key,'fixture-ambient-must-not-pass');

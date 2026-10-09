@@ -23,6 +23,27 @@ final class StandingGrantTests: XCTestCase {
     XCTAssertEqual(g.leaderClasses, ["A", "B"])
   }
 
+  func testOptionalWebsiteScopeIsClosedAndAbsentBytesStayCompatible() throws {
+    let legacy = try StandingGrantValidator.validate(fx.payload, context: fixtureContext)
+    XCTAssertNil(legacy.websitePublication)
+    XCTAssertEqual(legacy.canonical, fx.canonical)
+    let scope = JSONValue.object([
+      JSONMember(key: "profile", value: .string("phantom-public-web")),
+      JSONMember(key: "profileDigest", value: .string(String(repeating: "a", count: 64))),
+      JSONMember(key: "mode", value: .string("automatic"))])
+    let payload = fx.payload.replacing([.key("websitePublication")], with: scope)
+    let grant = try StandingGrantValidator.validate(payload, context: fixtureContext)
+    XCTAssertEqual(grant.websitePublication?.profile, "phantom-public-web")
+    let prompt = GrantPromptRenderer.render(grant)
+    XCTAssertTrue(prompt.reason.contains("Automatic publication of Phantom website / phm.dev"))
+    XCTAssertTrue(prompt.fullScope.contains(String(repeating: "a", count: 64)))
+    for bad in ["preview", "off"] {
+      assertRefused(payload.replacing([.key("websitePublication"), .key("mode")], with: .string(bad)), path: "websitePublication.mode")
+    }
+    assertRefused(payload.replacing([.key("websitePublication"), .key("profile")], with: .string("other")), path: "websitePublication.profile")
+    assertRefused(payload.replacing([.key("websitePublication"), .key("profileDigest")], with: .string("bad")), path: "websitePublication.profileDigest")
+  }
+
   func testFixtureValidatesFromRawBytesAndFromEscapedInput() throws {
     let raw = try StandingGrantValidator.validate(json: Data(fx.canonical.utf8), context: fixtureContext)
     XCTAssertEqual(raw.canonical, fx.canonical)
@@ -210,11 +231,20 @@ final class StandingGrantTests: XCTestCase {
     XCTAssertTrue(g.canonical.contains(#""engines":["local","grok-cli","claude-cli","codex","devin"]"#))
   }
 
-  func testRefusesADevinSeatThatJudgesOrLeads() {
+  func testRefusesADevinSeatThatJudgesWithoutIndependentModelEvidence() {
     let base = fx.payload.replacing([.key("engines")], with: enginesWithDevin)
-    for roles in [["producer", "judge"], ["judge"], ["leader"], ["producer", "leader"], []] {
+    for roles in [["producer", "judge"], ["judge"], ["leader", "judge"]] {
       assertRefused(base.replacing([.key("spend"), .key("seats"), .key("devin")], with: devinSeat(roles)), path: "spend.seats.devin.roles")
       assertRefused(base.replacing([.key("spend"), .key("seats"), .key("Devin-b")], with: devinSeat(roles)), path: "spend.seats.Devin-b.roles")
+    }
+  }
+
+  func testAcceptsDevinLeaderOnlyWhenExplicitlySigned() throws {
+    let base = fx.payload.replacing([.key("engines")], with: enginesWithDevin)
+    for roles in [["leader"], ["producer", "leader"]] {
+      let p = base.replacing([.key("spend"), .key("seats"), .key("devin")], with: devinSeat(roles))
+      let grant = try StandingGrantValidator.validate(p, context: fixtureContext)
+      XCTAssertTrue(grant.canonical.contains("\"leader\""))
     }
   }
 

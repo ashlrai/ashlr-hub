@@ -48,7 +48,15 @@ export function defaultMaintainerVerificationDeps(signal?: AbortSignal): Maintai
   const host = defaultHostMergeDeps();
   // This explicit publication path must observe revocations and superseding
   // grants from other processes, rather than inheriting the 10s display cache.
-  host.policy = () => evaluateStandingAuthority({ mode: 'fresh', surface: 'running', nowMs: host.nowMs() }).policy;
+  let surfaceQualified = false;
+  host.policy = () => {
+    // Re-read ledger prefix, signed grant, config and every lowering signal on each probe.
+    // After one actual full hash, surface.ts reuses a file hash only while its inode/size/mtime/ctime match.
+    const evaluated = evaluateStandingAuthority({ mode: 'fresh', surface: 'running', nowMs: host.nowMs(),
+      ...(surfaceQualified ? { surfaceHashes: 'unchanged' as const } : {}) });
+    surfaceQualified = evaluated.surface?.ok === true;
+    return evaluated.policy;
+  };
   let activeFence: OutwardMutationFence | null = null;
   return {
     ...host,

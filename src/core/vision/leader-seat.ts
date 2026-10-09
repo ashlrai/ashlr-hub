@@ -1,49 +1,8 @@
-/**
- * Leader seat — which model the Leader thinks with (V3.10 Track B unit U8).
- *
- * WHY THIS FILE EXISTS. The Strategist the Leader extends picked its model
- * from `managerJudgeModel` (strategist.ts, pre-3.10), which on this machine is
- * `gpt-5.5` — so its "local fallback" asked Ollama for a model Ollama does not
- * have, failed, and returned an unwritten fallback briefing every night since
- * June. The next step then called `getActiveClient({ allowCloud: true })`,
- * which could have spent money on any cloud key it found. The Leader instead
- * routes like every other autonomous task:
- *
- *   routeSeat({ task: 'leader', difficulty: 'high', autonomous: true })
- *     over the A9 budget policy CLAMPED TO THE GRANT, restricted to
- *       - grok (the SuperGrok CLI seat) and local models — always;
- *       - claude ONLY for the weekly deep run, and only when it fits inside
- *         Mason's reserve (the router excludes it at 5-hour > 70% or when the
- *         weekly reserve would be touched);
- *       - never codex.
- *   With no standing grant, paid seats are not candidates at all: the Leader
- *   runs on free local models or not at all.
- *   No eligible seat ⇒ `no-seat` (fails closed). There is no cloud fallback.
- *
- * Unknown usage is not headroom (A9): a paid seat with no fresh reading in the
- * capacity snapshot the Verse server publishes is ineligible.
- *
- * TRANSPORTS (inference only — the Leader never gets tools). The paid ones
- * are the SAME text-only invocations the fleet's judges use (B-U7,
- * run/engine-registry.ts), so there is one audited "no tools" recipe per CLI,
- * not two that can drift apart:
- *   local  — Ollama `/api/chat` on the loopback endpoint the seat was
- *            discovered on, JSON-constrained, behind the local-only gate.
- *   grok   — buildGrokCliHeadlessCommand: the grok-a launcher with
- *            GROK_CLI_HEADLESS_ARGV (no tools, no web, no subagents, no
- *            memory) in a fresh empty 0700 directory; the answer is read with
- *            extractGrokStreamText. The resolved grok-cli seat must BE the seat
- *            the router picked, or the call is refused.
- *   claude — the seat's launcher with `-p --safe-mode --system-prompt …`,
- *            passed through restrictClaudeCommand (CLAUDE_RESTRICTED_ARGS),
- *            prompt on stdin. Its credential comes from the judges' hook
- *            (fleet/manager.ts judgeCredentialEnv): in standing mode that is
- *            the custody-minted claude-a token, attached only because the
- *            command is restricted. With no hook available, Claude is not a
- *            Leader candidate at all (fails closed — never Mason's own login).
- * Every paid transport passes `enginePermitted` first, so local-only mode
- * refuses it outright.
- */
+/** Leader roles use task fit and observed account capacity, not provider bans.
+ * The router ranks source-discovered model variants on their real account IDs;
+ * each account retains one shared allowance. Native completion contacts enter
+ * the same account-bound, Stop-aware execution lifecycle as native workers.
+ * Missing authority, billing or model evidence remains a specific hold. */
 import { spawn } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -55,30 +14,28 @@ import { buildGrokCliHeadlessCommand, extractGrokStreamText, restrictClaudeComma
 import { assertPermitted, endpointPermitted, enginePermitted } from '../policy/local-only.js';
 import type { BudgetPolicy, RoutingRequest, SeatDecision } from '../routing/types.js';
 import type { SeatCapacity } from '../routing/headroom.js';
-import { engineTier } from '../routing/tiers.js';
+import { seatTier, tierRank } from '../routing/tiers.js';
+import { tierPreference } from '../routing/router.js';
+import type { NativeRoleEngine, RoleCompletionMetrics } from '../run/role-completion.js';
+import { subscriptionOnlyCurrent } from '../routing/subscription-only.js';
+import { peekDevinCliExecutionBinding, refreshDevinCliExecutionBinding } from '../devin/cli-admission.js';
 import type { EffectivePolicy } from '../authority/types.js';
 import type { VerseSeat } from '../verse/types.js';
 import type { LeaderRunMode, LeaderSeatAttempt } from './leader-types.js';
-import { claudeFallbackEnabled, leaderCallBudget, orderLocalModels, type LeaderCallBudget } from './leader-seat-plan.js';
+import { leaderCallBudget, type LeaderCallBudget } from './leader-seat-plan.js';
 
 export type LeaderComplete = (system: string, user: string) => Promise<string>;
-export type LeaderSeatEngine = 'claude' | 'grok' | 'local';
+export type LeaderSeatEngine = 'claude' | 'codex' | 'grok' | 'devin' | 'local';
 
 export interface LeaderSeatChoice {
   seatId: string;
   engine: LeaderSeatEngine;
   model: string;
-  /** The weekly Claude deep run. */
+  /** Whether this request asks for a deep planning run; independent of provider. */
   deep: boolean;
 }
 
-/**
- * What a seat is for. `memo` (the default) — a memo run or check-in, under the
- * rules above, including the opt-in Claude fallback. `reply` — a conversation
- * reply (leader-thread.ts): NEVER Claude, whatever `foundry.leader.claudeFallback`
- * says. That opt-in covers memo runs only; conversation is not the weekly deep
- * run and must not spend Mason's reserve (PR #522's stated default).
- */
+/** Both memo and conversation work use the same account/model admission. */
 export type LeaderSeatPurpose = 'memo' | 'reply';
 
 export type LeaderSeatResolution =
@@ -113,6 +70,8 @@ export interface LeaderTransports {
   local(baseUrl: string, model: string, opts?: LeaderCallOptions): LeaderComplete;
   grok(launcher: readonly string[], model: string, opts?: LeaderCallOptions): LeaderComplete;
   claude(launcher: readonly string[], model: string, credential: LeaderClaudeCredential, opts?: LeaderCallOptions): LeaderComplete;
+  /** Host-issued account-bound dispatcher; absent older builds retain only their qualified legacy transports. */
+  native?(seatId: string, engine: NativeRoleEngine, model: string, admitted: () => boolean, opts: LeaderCallOptions): LeaderComplete;
 }
 
 export interface LeaderSeatDeps {
@@ -156,7 +115,7 @@ export function estimateTokens(text: string): number {
 }
 
 function runnableModel(seat: VerseSeat): string | null {
-  const first = seat.models.find((m) => !(m as { unavailableReason?: unknown }).unavailableReason) ?? seat.models[0];
+  const first = seat.models.find((m) => !(m as { unavailableReason?: unknown }).unavailableReason);
   return first?.id ?? null;
 }
 
@@ -204,28 +163,17 @@ async function routeLeader(
     return { ok: false, reason: 'Seat discovery failed.', decision: null, ruledOut: [] };
   }
   const standing = deps.standingPolicy();
-  // Claude: the weekly deep run (3.10), or — opt-in, 3.14 — the last fallback
-  // of a full run. A check-in is cheap by definition: grok or local only.
-  // A conversation reply never uses Claude — not even with the opt-in fallback.
-  const reply = opts.purpose === 'reply';
-  const claudeRun = !reply && opts.mode === 'full' && !opts.localOnly && (opts.deep || claudeFallbackEnabled(deps.cfg));
   const engines = new Set<string>(opts.localOnly ? ['local'] : ['grok', 'local']);
-  if (claudeRun && deps.claudeCredential) engines.add('claude');
-
+  if (!opts.localOnly && deps.transports.native) for (const engine of ['claude','codex','devin']) engines.add(engine);
+  // Older source-qualified text-only Claude hooks remain usable. Native
+  // production uses the official account-bound adapter, never a global login.
+  if (!opts.localOnly && deps.claudeCredential) engines.add('claude');
   const ruledOut: LeaderSeatAttempt[] = [];
   const eligible = candidates.filter((c) => {
     if (!engines.has(c.seat.engine)) {
-      ruledOut.push(skippedSeat(c, opts.localOnly && c.seat.engine !== 'codex'
-        ? 'Budget mode is reserve: this run uses free local models only.'
-        : c.seat.engine !== 'claude'
-        ? `The Leader never uses ${c.seat.engine}.`
-        : reply
-          ? 'Conversation replies never use Claude.'
-        : opts.mode === 'checkin'
-          ? 'A check-in never uses Claude.'
-          : !claudeRun
-            ? 'Claude is only for the weekly deep run.'
-            : 'The restricted-Claude credential hook is unavailable.'));
+      ruledOut.push(skippedSeat(c, opts.localOnly
+        ? 'This run uses local models only.'
+        : 'The account-bound role adapter is unavailable.'));
       return false;
     }
     if (c.seat.engine === 'local') return true;
@@ -242,10 +190,8 @@ async function routeLeader(
   if (eligible.length === 0) {
     return {
       ok: false,
-      reason: reply && candidates.some((c) => c.seat.engine === 'claude')
-        ? 'Conversation replies never use Claude, and no grok or local seat is available.'
-        : standing
-        ? 'No seat is available to the Leader: no local model is running and the grant lists no paid seat for the leader role.'
+      reason: standing
+        ? 'No granted account/model with an implemented role adapter is available.'
         : 'No local model is running, and without a standing grant the Leader may not use a paid seat.',
       decision: null,
       ruledOut,
@@ -264,32 +210,38 @@ async function routeLeader(
     eligible.splice(0, eligible.length, ...localOnly);
     policy = deps.budgetPolicy();
   }
-  // The Claude FALLBACK (not the weekly deep run) is off in reserve mode.
-  if (!opts.deep && policy.mode === 'reserve') {
-    for (let i = eligible.length - 1; i >= 0; i -= 1) {
-      const c = eligible[i]!;
-      if (c.seat.engine !== 'claude') continue;
-      ruledOut.push(skippedSeat(c, 'Budget mode is reserve: no Claude fallback.'));
-      eligible.splice(i, 1);
-    }
-    if (eligible.length === 0) return { ok: false, reason: 'Budget mode is reserve and no other seat is available.', decision: null, ruledOut };
-  }
-
   const snapshot = deps.capacitySnapshot();
   const byId = new Map((snapshot?.seats ?? []).map((s) => [s.seatId, s]));
-  // 3.15: the Leader keeps its own documented chain (grok → local → Claude
-  // only for the deep run), so it ranks by ENGINE tier. The elite local Qwen
-  // (routing/tiers.ts) must not outrank the deep run's Claude or Grok here.
-  const capacity = eligible
-    .map((c) => (c.seat.engine === 'local' ? deps.capacityFromSeat(c.seat) : byId.get(c.seat.id) ?? unknownCapacity(c.seat)))
-    .map((c) => ({ ...c, tier: engineTier(c.engine) }));
   const request: RoutingRequest = {
-    task: 'leader',
-    difficulty: 'high',
-    autonomous: true,
-    // Prompt plus room for the memo itself — a seat whose window cannot hold both is not used.
+    task: 'leader', difficulty: 'high', autonomous: true,
     contextTokens: Math.ceil(opts.promptChars / 4) + 4_096,
   };
+  // Inspect every source-discovered option without creating virtual quota
+  // seats. Pick one fitting option per real account, then rank accounts.
+  const preference=tierPreference(policy.mode,request);
+  const rank=(c:SeatCapacity):number => preference.by === 'tier'
+    ? preference.order.indexOf(c.tier ?? seatTier(c.engine))
+    : preference.order.indexOf(c.free || c.costBasis === 'free' ? 'free' : c.tier ?? seatTier(c.engine));
+  const selected:LeaderSeatCandidate[]=[];
+  const capacity:SeatCapacity[]=[];
+  for(const candidate of eligible){
+    const base=candidate.seat.engine === 'local' ? deps.capacityFromSeat(candidate.seat) : byId.get(candidate.seat.id) ?? unknownCapacity(candidate.seat);
+    if(deps.transports.native && candidate.seat.engine === 'codex' && !subscriptionOnlyCurrent(base,nowMs)){
+      ruledOut.push(skippedSeat(candidate,'A current subscription-only billing boundary is unconfirmed.'));continue;
+    }
+    const models=candidate.seat.models.filter(model=>!model.unavailableReason);
+    const variants=models.map(model => ({
+      candidate:{...candidate,seat:{...candidate.seat,models:[model],contextWindow:model.contextWindow}},
+      capacity:{...base,contextWindow:model.contextWindow,tier:seatTier(candidate.seat.engine,model.id),
+        ...(candidate.seat.engine === 'devin' && candidate.seat.id === 'devin-cli' && peekDevinCliExecutionBinding(model.id)
+          ? {free:true,costBasis:'free' as const,contextWindow:peekDevinCliExecutionBinding(model.id)!.contextTokens} : {})},
+    })).filter(variant => deps.route(request,[variant.capacity],policy,nowMs).seatId !== null)
+      .sort((a,b)=>rank(a.capacity)-rank(b.capacity) || tierRank(a.capacity.tier)-tierRank(b.capacity.tier));
+    const variant=variants[0];
+    if(variant){selected.push(variant.candidate);capacity.push(variant.capacity);}
+    else {capacity.push({...base,contextWindow:models[0]?.contextWindow ?? 0});selected.push({...candidate,seat:{...candidate.seat,models:models.slice(0,1)}});}
+  }
+  eligible.splice(0,eligible.length,...selected);
   const decision = deps.route(request, capacity, policy, nowMs);
   try { deps.recordDecision(request, decision); } catch { /* shadow log is best-effort */ }
   if (!decision.seatId) return { ok: false, reason: decision.why, decision, ruledOut };
@@ -299,7 +251,7 @@ async function routeLeader(
 type BuiltSeat = { ok: true; choice: LeaderSeatChoice; complete: LeaderComplete; budget: LeaderCallBudget } | { ok: false; reason: string };
 
 /** Build one seat's completion function (the per-engine gates run here). */
-function buildSeat(deps: LeaderSeatDeps, chosen: LeaderSeatCandidate, opts: { mode: LeaderRunMode; promptChars: number }): BuiltSeat {
+function buildSeat(deps: LeaderSeatDeps, chosen: LeaderSeatCandidate, opts: { mode: LeaderRunMode; promptChars: number; deep: boolean }): BuiltSeat {
   const model = runnableModel(chosen.seat);
   if (!model) return { ok: false, reason: `Seat ${chosen.seat.id} has no runnable model.` };
   const engine = chosen.seat.engine as LeaderSeatEngine;
@@ -311,13 +263,30 @@ function buildSeat(deps: LeaderSeatDeps, chosen: LeaderSeatCandidate, opts: { mo
   } else {
     const verdict = enginePermitted(engine, deps.cfg);
     if (!verdict.permitted) return { ok: false, reason: `Local-only mode refuses ${engine}.` };
-    if (!chosen.launcher || chosen.launcher.length === 0) return { ok: false, reason: `Seat ${chosen.seat.id} has no launcher.` };
-    complete = engine === 'grok'
-      ? deps.transports.grok(chosen.launcher, model, budget)
+    if (!deps.transports.native && (!chosen.launcher || chosen.launcher.length === 0)) return { ok: false, reason: `Seat ${chosen.seat.id} has no launcher.` };
+    const admitted=():boolean => {
+      const policy=deps.standingPolicy();
+      const seat=policy?.spend.seats[chosen.seat.id];
+      if(!seat?.enabled || !seat.roles.includes('leader'))return false;
+      const snapshot=deps.capacitySnapshot();
+      const capacity=snapshot?.seats.find(row=>row.seatId === chosen.seat.id) ?? (engine === 'devin' ? unknownCapacity(chosen.seat) : null);
+      if(!capacity)return false;
+      if(engine === 'codex' && !subscriptionOnlyCurrent(capacity,deps.now()))return false;
+      if(engine === 'devin' && !peekDevinCliExecutionBinding(model))return false;
+      let budgetPolicy=deps.budgetPolicy();
+      if(policy)budgetPolicy=deps.clampBudget(budgetPolicy,policy);
+      return deps.route({task:'leader',difficulty:'high',autonomous:true,contextTokens:Math.ceil(opts.promptChars/4)+4096},
+        [{...capacity,contextWindow:chosen.seat.contextWindow,tier:seatTier(engine,model),
+          ...(engine === 'devin' && peekDevinCliExecutionBinding(model) ? {free:true,costBasis:'free' as const} : {})}],budgetPolicy,deps.now()).seatId === chosen.seat.id;
+    };
+    complete = deps.transports.native
+      ? deps.transports.native(chosen.seat.id,engine,model,admitted,budget)
+      : engine === 'grok'
+      ? deps.transports.grok(chosen.launcher!, model, budget)
       // claudeCredential is non-null here: without it 'claude' never entered `engines`.
-      : deps.transports.claude(chosen.launcher, model, deps.claudeCredential!, budget);
+      : deps.transports.claude(chosen.launcher!, model, deps.claudeCredential!, budget);
   }
-  return { ok: true, choice: { seatId: chosen.seat.id, engine, model, deep: engine === 'claude' }, complete, budget };
+  return { ok: true, choice: { seatId: chosen.seat.id, engine, model, deep: opts.deep }, complete, budget };
 }
 
 /**
@@ -335,9 +304,7 @@ export async function resolveLeaderSeat(
   const { eligible, decision } = routed.routing;
   const chosen = eligible.find((c) => c.seat.id === decision.seatId);
   if (!chosen) return { ok: false, reason: `Seat ${decision.seatId} has no runnable model.`, decision };
-  // Belt and braces: routeLeader already removed Claude for a reply.
-  if (opts.purpose === 'reply' && chosen.seat.engine === 'claude') return { ok: false, reason: 'Conversation replies never use Claude.', decision };
-  const built = buildSeat(deps, chosen, { mode, promptChars: opts.promptChars });
+  const built = buildSeat(deps, chosen, { mode, promptChars: opts.promptChars, deep: opts.deep });
   if (!built.ok) return { ok: false, reason: built.reason, decision };
   return { ok: true, choice: built.choice, complete: built.complete, decision };
 }
@@ -367,21 +334,8 @@ function exclusionAttempts(decision: SeatDecision | null, byId: ReadonlyMap<stri
   });
 }
 
-/**
- * 3.14 — the fallback CHAIN. Every step is a seat the router approved over the
- * seats the Leader's rules admitted (the same gates as `resolveLeaderSeat`),
- * ordered:
- *   1. the router's pick when it is a paid seat (grok; Claude on the deep run);
- *   2. other approved grok seats, in the router's order;
- *   3. approved local models — operator-named first, then FAST before LARGE
- *      (leader-seat-plan.ts: a 27B dense model is the slow last resort);
- *   4. Claude last, when it was admitted as a fallback (opt-in; never on a
- *      check-in, never in reserve mode unless it is the weekly deep run).
- * Codex is never in it; with no grant it holds local models only; there is no
- * cloud fallback outside it. Seats the router excluded or the rules removed
- * come back as `skipped`, with their reasons, for the memo and the health
- * surface.
- */
+/** Walk the shared router's ranked real accounts. No provider-specific
+ * reorder is applied after routing; each step retains its exact chosen model. */
 export async function planLeaderSeats(
   deps: LeaderSeatDeps,
   opts: { deep: boolean; promptChars: number; mode: LeaderRunMode; localOnly?: boolean },
@@ -394,21 +348,12 @@ export async function planLeaderSeats(
   const byId = new Map(eligible.map((c) => [c.seat.id, c]));
   const approved = decision.candidates.map((id) => byId.get(id)).filter((c): c is LeaderSeatCandidate => c !== undefined);
   const pick = decision.seatId ? byId.get(decision.seatId) : undefined;
-  // The router ranks Claude first for high-difficulty work; outside the weekly
-  // deep run Claude is only ever the LAST fallback.
-  const first = pick && pick.seat.engine !== 'local' && (pick.seat.engine !== 'claude' || opts.deep) ? [pick] : [];
-  const rest = approved.filter((c) => !first.includes(c));
-  const ordered = [
-    ...first,
-    ...rest.filter((c) => c.seat.engine === 'grok'),
-    ...orderLocalModels(rest.filter((c) => c.seat.engine === 'local'), (c) => runnableModel(c.seat) ?? '', deps.cfg),
-    ...rest.filter((c) => c.seat.engine === 'claude'),
-  ];
+  const ordered=pick ? [pick,...approved.filter(c=>c !== pick)] : approved;
 
   const skippedList: LeaderSeatAttempt[] = [...ruledOut, ...exclusionAttempts(decision, byId)];
   const steps: LeaderSeatPlanStep[] = [];
   for (const c of ordered) {
-    const built = buildSeat(deps, c, { mode: opts.mode, promptChars: opts.promptChars });
+    const built = buildSeat(deps, c, { mode: opts.mode, promptChars: opts.promptChars, deep: opts.deep });
     if (built.ok) steps.push({ choice: built.choice, complete: built.complete, budget: built.budget });
     else skippedList.push(skippedSeat(c, built.reason));
   }
@@ -646,6 +591,23 @@ const GROK_CLI_ENGINE = 'grok-cli';
 
 export function defaultLeaderTransports(cfg: AshlrConfig): LeaderTransports {
   return {
+    native: (seatId,engine,model,admitted,opts) => async(system,user) => {
+      const {nativeRoleCompletion}=await import('../run/role-completion.js');
+      const {readCapacitySnapshot}=await import('../routing/budget-store.js');
+      const accountHint=readCapacitySnapshot()?.seats.find(row=>row.seatId === seatId)?.accountHint ?? undefined;
+      const sameAccount=()=>admitted() && (engine === 'devin' || accountHint !== undefined &&
+        readCapacitySnapshot()?.seats.find(row=>row.seatId === seatId)?.accountHint === accountHint);
+      return nativeRoleCompletion({cfg,role:'leader',seatId,engine,model,accountHint,admitted:sameAccount,timeoutMs:opts.timeoutMs ?? LEADER_CLI_TIMEOUT_MS},
+        (metrics:RoleCompletionMetrics)=>{
+          void import('../fleet/agent-action-ledger.js').then(({recordAgentAction})=>recordAgentAction({schemaVersion:1,ts:new Date().toISOString(),
+            actor:'agent',kind:'reflection',outcome:metrics.outcome === 'completed' ? 'ok' : metrics.outcome,action:'role:completion',
+            summary:`${metrics.role} completion ${metrics.outcome}.`,runId:metrics.runId,model:metrics.model,
+            backend:metrics.engine === 'grok' ? 'grok-cli' : metrics.engine === 'devin' ? 'devin-cli' : metrics.engine,
+            durationMs:metrics.elapsedMs,tags:[`role:${metrics.role}`,`seat:${metrics.seatId}`],
+            counts:{providerContacted:metrics.providerContacted ? 1 : 0,
+              ...(metrics.tokensIn !== null ? {tokensIn:metrics.tokensIn} : {}),...(metrics.tokensOut !== null ? {tokensOut:metrics.tokensOut} : {})}})).catch(()=>{});
+        })(system,user);
+    },
     local: (baseUrl, model, opts) => ollamaLeaderTransport(baseUrl, model, cfg, opts?.timeoutMs ?? 15 * 60_000, {
       maxOutputTokens: opts?.maxOutputTokens,
       contextTokens: opts?.contextTokens ?? null,
@@ -705,13 +667,12 @@ export async function loadJudgeCredentialHook(cfg: AshlrConfig): Promise<LeaderC
 
 /** Production deps (heavy modules imported lazily so strategist.ts can import this file cheaply). */
 export async function loadDefaultLeaderSeatDeps(cfg: AshlrConfig): Promise<LeaderSeatDeps> {
-  const [seats, budgetStore, router, headroom, effective, claudeCredential] = await Promise.all([
+  const [seats, budgetStore, router, headroom, effective] = await Promise.all([
     import('../verse/seats.js'),
     import('../routing/budget-store.js'),
     import('../routing/router.js'),
     import('../routing/headroom.js'),
     import('../authority/effective-config.js'),
-    loadJudgeCredentialHook(cfg),
   ]);
   return {
     cfg,
@@ -721,6 +682,13 @@ export async function loadDefaultLeaderSeatDeps(cfg: AshlrConfig): Promise<Leade
         // The Leader needs identity and launchers, not the Claude token scan.
         claudeUsage: () => ({ tokens5h: 0, tokens7d: 0, messages5h: 0, messages7d: 0, readAt: Date.now(), filesScanned: 0 }),
       });
+      const standing=effective.currentStandingPolicy();
+      const devinSeat=discovery.seats.find(seat=>seat.id === 'devin-cli' && seat.engine === 'devin');
+      if(devinSeat && cfg.devin?.enabled === true && cfg.devin?.fleet === true && standing?.engines.includes('devin') && standing.spend.seats[devinSeat.id]?.roles.includes('leader')){
+        for(const model of devinSeat.models.filter(model=>!model.unavailableReason)){
+          await refreshDevinCliExecutionBinding(model.id,{admitted:()=>effective.currentStandingPolicy()?.spend.seats[devinSeat.id]?.roles.includes('leader') === true});
+        }
+      }
       return discovery.seats.map((seat) => {
         const launch = discovery.launches.get(seat.id);
         return {
@@ -738,6 +706,6 @@ export async function loadDefaultLeaderSeatDeps(cfg: AshlrConfig): Promise<Leade
     capacityFromSeat: (seat) => headroom.capacityFromSeat(seat),
     recordDecision: (req, decision) => budgetStore.recordShadowDecision({ source: 'leader', request: req, decision, actual: null }),
     transports: defaultLeaderTransports(cfg),
-    claudeCredential,
+    claudeCredential: null,
   };
 }

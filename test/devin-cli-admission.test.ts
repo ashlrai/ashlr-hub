@@ -8,7 +8,7 @@ import { buildEngineCommand, spawnEngine } from '../src/core/run/engines.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import { autonomousDevinIdentityCurrent, buildAutonomousEnvOverlay, applyAutonomousEnvOverlay } from '../src/core/sandbox/autonomous-env.js';
 
-import { devinCliBindingCurrent, parseDevinCliPrincipal, peekDevinCliExecutionBinding, refreshDevinCliExecutionBinding, resetDevinCliAdmissionForTest, type DevinCliAdmissionOptions } from '../src/core/devin/cli-admission.js';
+import { devinCliIdentityCurrent, devinCliBindingCurrent, parseDevinCliPrincipal, peekDevinCliExecutionBinding, refreshDevinCliExecutionBinding, resetDevinCliAdmissionForTest, type DevinCliAdmissionOptions } from '../src/core/devin/cli-admission.js';
 
 const NOW = Date.parse('2026-10-05T17:00:00Z');
 const STATUS = 'Logged in\n  Email: fixture@example.invalid\n  User ID: native-user-1\n  Team ID: native-team-1\n  API server: https://server.codeium.com\n  Devin API: https://api.devin.ai\n';
@@ -30,6 +30,15 @@ describe.runIf(process.platform !== 'win32')('native Devin execution admission',
   function options(run: DevinCliAdmissionOptions['runMetadata'] = vi.fn(async (_bin: string, args: readonly string[]) => args[0] === 'auth' ? STATUS : catalog()), now = () => NOW) {
     return { cliPath:bin, credentialsPath:credentials, now, runMetadata:run };
   }
+
+  it('separates historical identity continuity from expiring contact authority', async () => {
+    const binding=await refreshDevinCliExecutionBinding('swe-2-high',options());
+    expect(devinCliIdentityCurrent(binding,'swe-2-high')).toBe(true);
+    expect(devinCliBindingCurrent(binding,'swe-2-high',NOW+60_000)).toBe(false);
+    expect(devinCliIdentityCurrent(JSON.parse(JSON.stringify(binding)),'swe-2-high')).toBe(false);
+    writeFileSync(credentials,'replacement-fixture-not-a-login',{mode:0o600});
+    expect(devinCliIdentityCurrent(binding,'swe-2-high')).toBe(false);
+  });
 
   it('seals the exact binary and supported native principal/context without storing identifiers or credentials', async () => {
     const run = vi.fn(async (_bin: string, args: readonly string[]) => args[0] === 'auth' ? STATUS : catalog());

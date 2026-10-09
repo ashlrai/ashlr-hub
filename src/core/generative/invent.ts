@@ -1,10 +1,9 @@
 /**
  * M181: Generative Engine — "rip mode"
  *
- * CREATION, not maintenance. This module invents bold, net-new features for a
- * tool given its current state and a high-level direction. Every output is a
- * concrete, buildable WorkItem tagged source:'invent'. This is the difference
- * between a fleet that patches rot and one that ships things worth shipping.
+ * Proposes ambitious, useful improvements from a tool's current state and
+ * high-level direction. Every output is a concrete, buildable WorkItem tagged
+ * source:'invent'; maintenance classification is observational, not admission.
  *
  * Never throws. Secret-scrubbed. Deduped via ~/.ashlr/generative/invented.json.
  */
@@ -105,8 +104,7 @@ function recordInvented(ledger: InventedLedger, repo: string, title: string): vo
 
 // ---------------------------------------------------------------------------
 // Frontier client resolution
-// Delegates to resolveFrontierJudgeClient from manager.ts — the PROVEN path
-// that returns a working Opus client (model=claude-opus-4-8, hasComplete=true).
+// Uses the shared strategist resolver; the selected adapter supplies its actual model.
 // ---------------------------------------------------------------------------
 
 type CompleteFn = (system: string, user: string) => Promise<string>;
@@ -128,16 +126,16 @@ function buildInventComplete(cfg: AshlrConfig): CompleteFn | null {
 function buildSystemPrompt(): string {
   const northStarSection = northStarDocSummary();
   const nsBlock = northStarSection
-    ? `\n\nGRAND VISION GROUNDING (orient every idea here — not incremental plumbing):\n${northStarSection}`
+    ? `\n\nGRAND VISION GROUNDING (orient ideas toward useful outcomes):\n${northStarSection}`
     : '';
   return `You are a world-class product engineer and founder. Your job is to invent BOLD, SPECIFIC, HIGH-LEVERAGE improvements for developer tools.${nsBlock}
 
-RULES — you MUST follow these absolutely:
-1. CREATION ONLY. Every item must be a net-new capability, UX leap, or bold feature.
-2. STRICTLY FORBIDDEN: dependency bumps, lint fixes, doc comments, README updates, TODO restoration, test coverage for existing code, version bumps, formatting, CI tweaks. If you generate any of these, you have failed.
+GUIDANCE:
+1. Seek ambitious capabilities, UX improvements and changes that compound the usefulness of the system.
+2. Documentation, tests, CI, releases, dependency updates and maintenance are valuable when they improve outcomes or unblock delivery; explain the concrete benefit.
 3. Be SPECIFIC and CONCRETE. "Add real-time diff previews in the TUI" is good. "Improve UX" is not.
 4. Be AMBITIOUS. Think 10x, not 10%. What would make this tool genuinely incredible vs the competition?
-5. Every invented item MUST be substantive, bound to a concrete enrolled repo, and decomposable into shippable milestones — aligned to one of the three pillars: recursive self-improvement, ecosystem product factory, or composition flywheel.
+5. Propose substantive, concrete repo-bound work and practical milestones — aligned to one of the three pillars: recursive self-improvement, ecosystem product factory, or composition flywheel.
 6. Output ONLY valid JSON — no markdown fences, no prose outside the JSON.
 
 SCORING — for each item, self-score honestly:
@@ -178,7 +176,7 @@ ${repoState}
 
 Direction / north star:
 ${direction}${ecosystemSection}
-Generate exactly ${n} BOLD, SPECIFIC, BUILDABLE improvements. Remember: NET-NEW capabilities only. No maintenance. No deps/lint/docs.`;
+Generate ${n} ambitious, specific, buildable improvements. Choose useful work based on the objective and evidence, including enabling maintenance when it has a concrete benefit.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +201,7 @@ const DEFAULT_IMPACT = 4;
 const DEFAULT_CONFIDENCE = 0.7;
 const DEFAULT_EFFORT = 3;
 
-// Phrases that indicate a maintenance item slipped through the prompt filter.
+// Observational labels only; matching a category must not reject useful work.
 const MAINTENANCE_PATTERNS: RegExp[] = [
   /\bdep(endency|endencies)?\s*(bump|upgrad|updat)/i,
   /\bupgrad.*\bdep(endenc)/i,
@@ -321,7 +319,7 @@ export interface InventOptions {
 }
 
 /**
- * Invent bold, net-new WorkItems for a repo.
+ * Propose ambitious, useful WorkItems for a repo.
  *
  * Never throws. Returns [] on any failure.
  * Secret-scrubbed. Deduplicates via ~/.ashlr/generative/invented.json.
@@ -382,11 +380,6 @@ export async function inventWorkItems(
 
       if (!title) continue;
 
-      if (isMaintenanceItem(title, rationale)) {
-        console.error(`[invent] filtered maintenance item: "${title}"`);
-        continue;
-      }
-
       const hash = entryHash(repo, title);
       if (!opts.skipDedup && isRecentlyInvented(ledger, hash)) {
         deduped.push(title);
@@ -428,7 +421,7 @@ export async function inventWorkItems(
         tags: [
           'generative',
           'bold',
-          'net-new',
+          isMaintenanceItem(title, rationale) ? 'maintenance' : 'net-new',
           `impact:${impact}`,
           `confidence:${confidence.toFixed(2)}`,
           `ambition-effort:${ambitionEffort}`,
@@ -453,7 +446,7 @@ export async function inventWorkItems(
     const dropped = rawItems.length - items.length - deduped.length;
     console.error(
       `[invent] accepted ${items.length} item(s)` +
-      (dropped > 0 ? `, dropped ${dropped} maintenance item(s)` : '') +
+      (dropped > 0 ? `, dropped ${dropped} invalid item(s)` : '') +
       (deduped.length > 0 ? `, deduped ${deduped.length}` : ''),
     );
 

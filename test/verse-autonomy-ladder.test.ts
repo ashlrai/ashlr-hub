@@ -18,10 +18,10 @@ vi.mock('../src/core/authority/trust-roots.js', () => ({
   BURNED_KEY_IDS: Object.freeze(['mason-workstation']),
 }));
 
-vi.mock('../src/core/authority/surface.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../src/core/authority/surface.js')>();
+vi.mock('../src/core/authority/surface.js', () => {
+  // Do not import the real surface here: its confinement import cycles through
+  // effective-config and standing-grant before this host mock is installed.
   return {
-    ...original,
     currentHostBinding: () => 'a'.repeat(64),
     confinementAvailable: () => ({ ok: true }),
     runningPackageRoot: () => '/test/release',

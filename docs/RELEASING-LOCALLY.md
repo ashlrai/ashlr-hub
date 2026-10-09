@@ -1,6 +1,6 @@
 # Releasing locally
 
-The published canonical 3.26.0 release uses `ashlrai/phantom`,
+The published canonical 3.27.0 release uses `ashlrai/phantom`,
 `@ashlr/phantom` and `phm`. The earlier published 3.25.3 compatibility
 artifacts retain their original legacy identity. Canonical release
 admission requires complete exact-source hosted CI, independent Audit and
@@ -32,6 +32,63 @@ not add npm provenance to the published package. Record both boundaries when
 reporting a release.
 
 ## Reuse a qualified CI build
+
+### Keep candidate versions consistent
+
+Run `npm run version:sync -- X.Y.Z` to update the workbench package, lockfile,
+desktop package, native version and desktop URL together. `npm run check:version`
+checks these fields without changing files and runs before every build.
+Dependency versions and release history remain unchanged. Website and article
+metadata instead use the latest freshly verified public release; preparing a
+candidate does not advertise it as published.
+
+### Canonical npm trusted publishing
+
+The source workflow [`publish-canonical-npm.yml`](../.github/workflows/publish-canonical-npm.yml)
+provides unattended `@ashlr/phantom` publication after npm owner commissioning.
+Its presence does not prove that the provider has been configured or that a
+release has published. The frozen historical `release.yml` remains separate.
+
+In npm package settings, configure a GitHub Actions trusted publisher for
+organization `ashlrai`, repository `phantom`, workflow filename
+`publish-canonical-npm.yml`, and environment `phantom-npm`. Enable both direct
+`npm publish` and `npm dist-tag`; these are independent permissions. Complete
+owner authentication yourself, then make the first qualified publication within
+two days. No saved fingerprint or long-lived npm token is involved. The hosted
+workflow uses integrity-pinned npm 11.21.0; the local desktop toolchain stays
+unchanged. See [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
+
+Dispatch the workflow on protected `master` with the exact candidate revision,
+CI run and attempt, current-master attestor run and attempt, immutable attested
+artifact ID, dependency Audit run and attempt, and package version. Admission
+freshly verifies complete qualification, numeric repository identity, branch
+protection, original bytes and trusted signatures. Candidate code is not
+executed during admission.
+
+The workflow must already be in that qualified candidate: its attestor's master
+tree must match the candidate tree. It cannot retroactively publish an earlier
+release after merging a different source tree.
+
+The publisher rehashes the transferred original tarball, publishes once under a
+run-specific `qualified` tag, and verifies public registry bytes, SRI, provenance
+and an isolated installed CLI before moving `latest`. An uncertain publish is
+reconciled from public state rather than replayed. Public readback checks immediately,
+then backs off for up to 15 minutes when npm is still processing an accepted publish;
+a ready registry proceeds immediately. A mismatched previous
+publication or unknown registry state holds promotion. npm provenance identifies
+the publisher workflow; the original CI qualification retains the producer
+lineage. Read back `latest` and the successful workflow before reporting release
+completion.
+
+The CLI consumer runs on a separate ephemeral runner without OIDC or publisher
+credentials. Recovery verifies the actual original publisher invocation against
+fresh GitHub metadata rather than pretending a rerun generated new provenance.
+The version comparison rejects an observed downgrade; workflow concurrency
+serializes this lane, but npm does not provide atomic compare-and-swap against a
+separate manual publisher. Avoid concurrent manual `latest` changes.
+
+Native macOS signing, desktop feed publication, installation and fleet authority
+remain separate steps below.
 
 Run `npm run check:release` before expensive qualification. After every required
 exact-source CI and audit check passes, follow the

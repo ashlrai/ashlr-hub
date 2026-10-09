@@ -64,6 +64,14 @@ describe('durable tool-capable outcome manager', () => {
     expect(f.manager.interject(f.command(), { ...reference, messageId: 'message-2', eventSeq: 2 }, f.admission).ok).toBe(false);
     expect(f.manager.interject(f.command(), { ...reference, messageId: 'message-2', eventSeq: 4 }, { ...f.admission, messageExists: () => false }).ok).toBe(false);
   });
+  it('refuses an invented quality tier without recording a launch, while preserving finite local and mid routes', () => {
+    const f = fixture(); expect(f.configure().ok).toBe(true);
+    const next = f.manager.project().next!;
+    expect(f.manager.claimRun(f.command(), next, f.repo, { ...f.route, tier: 'super' as never }, 'invented-tier', f.admission).ok).toBe(false);
+    expect(f.store.read().state!.manager!.stages).toEqual([]);
+    expect(f.manager.claimRun(f.command(), next, f.repo, { ...f.route, tier: 'mid' }, 'actual-mid', f.admission).ok).toBe(true);
+    expect(new OutcomeStore(f.store.directory).read().state!.manager!.stages[0]!.route.tier).toBe('mid');
+  });
   it('records a real parent atomically, prevents duplicate claims and never replays a launch', () => {
     const f = fixture(); expect(f.configure().ok).toBe(true); const next = f.manager.project().next!; const command = f.command();
     const claimed = f.manager.claimRun(command, next, f.repo, f.route, 'run-manager', f.admission);

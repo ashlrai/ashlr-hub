@@ -351,7 +351,12 @@ export function agentDocsText(): string {
   lines.push('Elite fleet-state read tools (M169): ashlr_north_star (north-star metric,');
   lines.push('7d window), ashlr_self_heal (self-heal queue summary), ashlr_racing');
   lines.push('(model-racing distillation stats), ashlr_comms (comms channel status).');
-  lines.push('There is NO approve/apply tool by design.');
+  lines.push('Website tools: ashlr_website_status reads publication mode, phase and holds;');
+  lines.push('ashlr_website_publish requests the exact normally merged website revision with');
+  lines.push('profile=phantom-public-web and expectedMerge=<40-hex SHA>. The commissioned host');
+  lines.push('checks signed scope, source, build and live aliases before publishing. A request');
+  lines.push('is not a deployment receipt; inspect status and production evidence. These tools');
+  lines.push('do not create credentials or commission publishing. Inbox approval stays human-only.');
   lines.push('');
   return lines.join('\n');
 }
@@ -557,6 +562,8 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'goal "<objective>" --direct',  desc: 'One owner-invoked proposal-only run with bounded --json output; no unattended authority or verification proof.', topic: 'autonomy' },
   { cmd: 'loop',                         desc: 'Dormant non-dry conductor loop: compiled conductor trust roots are empty; use loop --dry-run.', topic: 'autonomy' },
   { cmd: 'conductor-permit request|mint|inspect|stage', desc: 'Dormant signed one-shot goal-conductor permit operator; fail-closed while source trust roots are empty.', topic: 'autonomy' },
+  { cmd: 'website status|auto|pause|off', desc: 'Inspect or pause automatic phm.dev publication; Auto resumes within its existing signed website scope.', topic: 'autonomy' },
+  { cmd: 'website prepare --image <digest>', desc: 'Qualify the fixed website publisher and a real offline Linux x64 production build before one-time commissioning.', topic: 'autonomy' },
   { cmd: 'authority status [--json]',     desc: 'Standing authority: grant state, autonomy switch, Stop, rollout stage, ledger chain and custody (read-only).', topic: 'autonomy' },
   { cmd: 'authority switch <off|propose|autonomous>', desc: 'Lower autonomy instantly; raise it only up to what the signed grant allows (past it needs Touch ID).', topic: 'autonomy' },
   { cmd: 'authority stop|clear-stop',     desc: 'Engage Stop (~/.ashlr/KILL: halts running agents, cancels armed merges) or clear it; stopping never asks, clearing is ledgered first.', topic: 'autonomy' },

@@ -1,0 +1,12 @@
+/* Static presentation stays in CSS, shared by the rail and Appearance preview.
+   The two paths are the body/highlight; the last two ellipses are the pupils. */
+[data-phantom-mark] { fill: currentColor; stroke: none; }
+[data-phantom-mark] > path:nth-of-type(2) {
+  fill: none;
+  stroke: #fff;
+  stroke-opacity: .28;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+[data-phantom-mark] > ellipse { fill: #f7faff; }
+[data-phantom-mark] > ellipse:nth-of-type(n + 3) { fill: #172442; }

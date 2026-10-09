@@ -2,7 +2,7 @@
 export const LEADER_PREFERENCE_KEYS = ['maxFullRunsPerDay', 'maxTotalRunsPerDay', 'maxGrokLanes'] as const;
 export type LeaderPreferenceKey = typeof LEADER_PREFERENCE_KEYS[number];
 export type LeaderPreferenceConfig = Partial<Record<LeaderPreferenceKey, number | null>>;
-export const LEADER_PREFERENCE_DEFAULTS = Object.freeze({ maxFullRunsPerDay: 3, maxTotalRunsPerDay: 8, maxGrokLanes: 4 });
+export const LEADER_PREFERENCE_DEFAULTS = Object.freeze({ maxFullRunsPerDay: null, maxTotalRunsPerDay: null, maxGrokLanes: null });
 
 export interface ResolvedLeaderPreferences extends Record<LeaderPreferenceKey, number | null> {
   defaulted: LeaderPreferenceKey[];
@@ -44,7 +44,7 @@ export function parseLeaderPreferences(raw: unknown, allowEmpty = false): Leader
   }
 }
 
-function defaults(checkinsEnabled: boolean): Record<LeaderPreferenceKey, number> {
+function defaults(checkinsEnabled: boolean): Record<LeaderPreferenceKey, number | null> {
   return { ...LEADER_PREFERENCE_DEFAULTS,
     maxTotalRunsPerDay: checkinsEnabled ? LEADER_PREFERENCE_DEFAULTS.maxTotalRunsPerDay : LEADER_PREFERENCE_DEFAULTS.maxFullRunsPerDay };
 }

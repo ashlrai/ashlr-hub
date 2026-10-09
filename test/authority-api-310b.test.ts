@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({
   roots: [] as unknown[],
   surface: 'b'.repeat(64) as string | null,
+  host: 'a'.repeat(64),
   signMode: 'sign' as 'sign' | 'swap' | 'cancel',
   signCalls: 0,
 }));
@@ -22,11 +23,11 @@ vi.mock('../src/core/authority/trust-roots.js', () => ({
   BURNED_KEY_IDS: Object.freeze(['mason-workstation']),
 }));
 
-vi.mock('../src/core/authority/surface.js', async (importOriginal) => {
-  const original = await importOriginal<typeof import('../src/core/authority/surface.js')>();
+vi.mock('../src/core/authority/surface.js', () => {
+  // Do not import the real surface here: its confinement import cycles through
+  // effective-config and standing-grant before this host mock is installed.
   return {
-    ...original,
-    currentHostBinding: () => 'a'.repeat(64),
+    currentHostBinding: () => state.host,
     confinementAvailable: () => ({ ok: true }),
     runningPackageRoot: () => '/test/release',
     verifyAuthoritySurface: (target: 'running' | 'installed') => (state.surface
@@ -101,6 +102,7 @@ beforeEach(() => {
   restore = withTempHome('bu1-api-').restore;
   state.roots.length = 0;
   state.surface = 'b'.repeat(64);
+  state.host = 'a'.repeat(64);
   state.signMode = 'sign';
   state.signCalls = 0;
   ctx = { cfg: {} as AshlrConfig, token: TOKEN, allowDispatch: true };
@@ -247,7 +249,7 @@ describe('actions', () => {
 
     expect((await call('POST', '/api/verse/authority', { action: 're-approve', draftDigest: digest }))?.status).toBe(400);
     const granted = await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: digest });
-    expect(granted?.status).toBe(200);
+    expect(granted?.status, JSON.stringify(granted?.body)).toBe(200);
     expect(granted?.body).toMatchObject({ grant: { state: 'active', grantSeq: 1 }, maxSwitchWithoutGrant: 'autonomous' });
     // A draft is single-use.
     expect((await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: digest }))?.body).toMatchObject({ code: 'draft-expired' });
@@ -361,6 +363,18 @@ describe('actions', () => {
     expect(swapped?.body).toMatchObject({ code: 'custody-mismatch' });
     state.signMode = 'cancel';
     expect((await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: digest }))?.body).toMatchObject({ code: 'not-signed' });
+    expect((await call('GET', '/api/verse/authority'))?.body).toMatchObject({ grant: { state: 'none' } });
+  });
+
+  it('the real installer rejects a correctly signed draft when the current host changes', async () => {
+    state.roots.push(TEST_ROOT);
+    const draft = await call('GET', '/api/verse/authority/draft');
+    expect(draft?.status).toBe(200);
+    state.host = 'c'.repeat(64);
+    const granted = await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: draft!.body['digest'] });
+    expect(state.signCalls).toBe(1);
+    expect(granted?.status, JSON.stringify(granted?.body)).toBe(409);
+    expect(granted?.body).toMatchObject({ code: 'host-mismatch' });
     expect((await call('GET', '/api/verse/authority'))?.body).toMatchObject({ grant: { state: 'none' } });
   });
 });

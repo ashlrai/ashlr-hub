@@ -326,3 +326,83 @@ line, which is exactly the mismatch the runbook observed.
 3. A resident conductor service. Goals are still advanced by `ashlr loop`
    (foreground). Under a grant with `conductorGoals: true`, that loop now runs
    live.
+
+
+## Automatic public website publication
+
+The workbench's public version, npm install command, Mac download link and
+SoftwareApplication metadata share one generated presentation record. Refresh it
+from the host with `phm release-articles metadata --json`; this read-only command
+brackets the existing GitHub, CI, audit, npm and asset verifier with fresh latest
+release observations. A candidate package bump or saved success receipt cannot
+produce a public release record. Commit its successful output as
+`apps/web/src/lib/workbench-release.json` in the website's normal PR workflow.
+The Secrets release record stays independent. This record describes a published
+release; it grants no installation, signing or deployment authority.
+
+The host-owned website publisher can keep `phm.dev` current after a normal,
+verified merge in `ashlrai/phantom-secrets`. It has a separate, optional signed
+website scope. An agent can request publication with `ashlr_website_publish`;
+the request contains only the fixed profile and exact merged revision.
+Requests cannot choose credentials, commands, domains or deployment targets.
+
+An operator commissions it once after qualifying the exact private Vercel
+63.1.0 toolchain and an offline Linux x64 builder image:
+
+```sh
+phm website prepare --image sha256:<qualified-image-digest>
+phm website commission --yes
+phm website status
+```
+
+Preparation reads existing native Vercel sign-in and actual project identities,
+settings and every production domain. It performs a real isolated build before
+saving commissioning metadata. No credentials are created, environment secrets
+pulled or provider resources changed by preparation. Missing tools, dependencies,
+identity or build qualification hold publication; there is no Mac-output fallback.
+Preparation preserves only the existing production Supabase public URL and
+matching public anon key, plus configured public PostHog settings. It reads
+metadata first and retrieves only those fixed public variables individually;
+server credentials stay in Vercel. Partial, ambiguous or privileged client
+configuration blocks commissioning. If the separately commissioned Secrets
+Cloud service has no configuration yet, preparation preserves that absence
+without creating credentials or claiming that hosted sign-in is available.
+The real source build still must pass. Changes to configured public settings
+require renewed build qualification.
+Commissioning uses the existing custody signing prompt and preserves global Stop.
+This is not a general website-deployment permission or npm/desktop publication scope.
+
+With a valid commissioned grant and resident fleet running, the host notices
+new qualified merges. It builds without credentials or network access, inventories
+every output file, stages production output without moving domains, validates
+`/` and `/secrets`, and promotes that exact deployment. Fresh account, project,
+source, protection, output and complete-alias observations precede provider contact.
+Afterward, every commissioned alias and both public routes must verify before
+the operation is called published.
+
+Use **Website** beside the desktop autonomy controls, or these commands:
+
+```sh
+phm website auto
+phm website pause
+phm website off
+```
+
+Auto/Pause/Off reuse the same valid grant; they do not ask for a signature on
+each deployment. Global Stop, revocation and expired/changed authority continue
+to apply. Local builds share the existing verification admission and Stop/drain
+leases. A sent request with an uncertain provider result is reconciled by reads;
+it is never blindly uploaded or promoted again. Status distinguishes held,
+uncertain and promoted-but-unverified work from a verified public release.
+
+This implementation does not provision its publisher image or sign-in silently.
+Shipping the command alone does not establish commissioning or a live deployment.
+
+
+Maintainer Cargo verification keeps registry/vendor configuration immutable while
+Cargo cache metadata uses a separate writable directory in the verifier jail.
+Top-level Cargo commands receive the pinned config explicitly. Build scripts that
+recursively invoke Cargo do not inherit command-line `--config`; offline/network
+confinement remains in force, so those nested invocations may fail rather than
+use ambient account configuration. No mutable copy of registry config is supplied.
+Required command deadlines and source/check qualification remain unchanged.

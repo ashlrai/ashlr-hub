@@ -76,7 +76,7 @@
  * and the rail is unchanged. Under [data-app-shell="desktop"] the rail's
  * first 48px then contains no button — it is the drag handle below. */
 .rail {
-  padding-top: calc(var(--space-3) + var(--app-titlebar-height, 0px));
+  padding-top: calc(var(--space-1) + var(--app-titlebar-height, 0px));
 }
 
 /* Expanded, the rail is a list of rows rather than a column of centred
@@ -105,9 +105,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  margin-bottom: var(--space-2);
+  width: var(--space-10);
+  height: var(--space-10);
+  margin-bottom: var(--space-1);
   color: var(--accent-500);
 }
 

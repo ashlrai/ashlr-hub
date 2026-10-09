@@ -29,7 +29,7 @@ export function outcomeManagerWorkItems(states: readonly OutcomeState[], ts: str
     return [{ id: next.workItemId, repo: state.scope.targetRepos[0]!, source: 'goal' as const,
       title: `${next.intent === 'plan' ? 'Plan' : next.intent === 'review' ? 'Review' : 'Replan'} the desired outcome`,
       detail: 'Tool-capable manager stage. Plan/review evidence is separate from verified work completion.',
-      value: 5, effort: 5, score: 25, tags: ['outcome-manager', 'manager', 'frontier'], ts }];
+      value: 5, effort: 5, score: 25, tags: ['outcome-manager', 'manager'], ts }];
   });
 }
 export function readOutcomeManagerWorkItemContext(item: Pick<WorkItem, 'id' | 'repo' | 'tags'>): OutcomeManagerContext | null {
@@ -89,7 +89,7 @@ export function readOutcomeManagerSessionProjection(sessionId: string, roots: re
 }
 const digestText = (text: string): string => createHash('sha256').update(text).digest('hex');
 function runMatches(stage: OutcomeManagerStage, run: RunState): boolean {
-  return stage.providerRunIds.includes(run.id) && run.engine === stage.route.engine && run.engineTier === 'frontier' &&
+  return stage.providerRunIds.includes(run.id) && run.engine === stage.route.engine && run.engineTier === stage.route.tier &&
     run.engineModel === `${stage.route.engine}:${stage.route.model}` && run.trajectoryId === `run:${run.id}`;
 }
 /** Only an actually captured proposal or actual no-diff observation admits a manager result. */

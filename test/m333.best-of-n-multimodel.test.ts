@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DEFAULT_CLAUDE_MODEL_ID } from '../src/core/run/model-catalog.js';
 import { deriveCandidateAttemptIdentity } from '../src/core/fleet/attempt-identity.js';
 import {
   hashDiff,
@@ -842,7 +843,7 @@ describe('M333 — candidate specs', () => {
     expect(result.candidates.map((c) => c.model)).toEqual([
       'claude-sonnet-5',
       'qwen3-coder-next',
-      'claude-opus-4-8',
+      DEFAULT_CLAUDE_MODEL_ID,
     ]);
     expect(result.winner).toBeDefined();
   });

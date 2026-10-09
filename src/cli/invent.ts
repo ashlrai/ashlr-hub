@@ -1,7 +1,7 @@
 /**
  * M181: `ashlr invent [repo] [--n N] [--direction <text>] [--emit]`
  *
- * Runs the generative engine for a repo — invents bold, net-new features using
+ * Runs the generative engine for a repo — proposes ambitious, useful improvements using
  * a frontier model and prints them. With --emit, files them into the backlog.
  *
  * This is "rip mode": the fleet stops scanning for rot and starts inventing
@@ -136,7 +136,7 @@ function renderItems(items: WorkItem[], repo: string): void {
 function usage(): void {
   console.log(`usage: ashlr invent [<repo>] [--n <N>] [--direction <text>] [--emit] [--json]
 
-  Invent bold, net-new improvements for a repo using a frontier model.
+  Propose ambitious, useful improvements for a repo using the strategist.
 
   <repo>              Repo path (default: cwd)
   --n <N>             Number of items to invent (default: 6)

@@ -49,7 +49,9 @@ export function verifyNpmReleaseProvenance({
   revision,
   runId,
   runAttempt,
+  eventName = 'push',
 }) {
+  if (!['push', 'workflow_dispatch'].includes(eventName)) throw new Error('unsupported publisher event');
   requireString(packageName, 'package name');
   requireString(version, 'package version');
   requireString(repository, 'repository');
@@ -91,7 +93,7 @@ export function verifyNpmReleaseProvenance({
         definition?.buildType ===
           'https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1' &&
         workflow?.repository === repository && workflow?.path === workflowPath &&
-        workflow?.ref === ref && github?.event_name === 'push' &&
+        workflow?.ref === ref && github?.event_name === eventName &&
         Array.isArray(dependencies) && dependencies.length === 1 &&
         dependencies[0]?.uri === expectedDependency &&
         dependencies[0]?.digest?.gitCommit === revision &&
@@ -161,8 +163,8 @@ export function readBoundedJson(path, fs = nodeFs) {
 const invoked = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : '';
 if (import.meta.url === invoked) {
   const [auditPath, packageName, version, integrity, repository, workflowPath, ref, revision,
-    runId, runAttempt] = process.argv.slice(2);
-  if (process.argv.length !== 12) throw new Error('unexpected provenance verifier arguments');
+    runId, runAttempt, eventName = 'push'] = process.argv.slice(2);
+  if (![12, 13].includes(process.argv.length)) throw new Error('unexpected provenance verifier arguments');
   verifyNpmReleaseProvenance({
     audit: readBoundedJson(auditPath),
     packageName,
@@ -174,6 +176,7 @@ if (import.meta.url === invoked) {
     revision,
     runId,
     runAttempt,
+    eventName,
   });
   process.stdout.write('npm release provenance: verified\n');
 }
