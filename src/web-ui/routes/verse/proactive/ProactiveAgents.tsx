@@ -24,7 +24,9 @@ function SetupHelp({ provider }: { provider: ProactiveProvider }) {
     : provider === 'grok-bot' ? 'An existing routine needs an account-bound connection and independent result evidence. Phantom has not commissioned that connection yet.'
       : provider === 'meta-muse' ? 'A supported personal-Muse connection has not been verified. Meta Model API funding does not connect your personal Muse.'
         : 'Record your existing agent identity. A supported account connection and result path are needed before Phantom can send work.';
-  return <div className={styles.setup}><p>{guidance}</p>{link ? <a href={link.href} target="_blank" rel="noopener noreferrer">{link.label} ↗</a> : null}</div>;
+  return <div className={styles.setup}><p>{guidance}</p>{link ? <a href={link.href} target="_blank" rel="noopener noreferrer">{link.label} ↗</a> : null}
+    {provider === 'grok-bot' ? <p>Grok Bot has its own weekly allowance on your Cursor account, separate from Grok Build. Its balance, reset and on-demand billing must be verified separately. <a href="https://cursor.com/help/grok-bot/plans" target="_blank" rel="noopener noreferrer">Bot usage and billing ↗</a></p> : null}
+  </div>;
 }
 type Draft = Required<Pick<ProactiveProfileInput, 'identity' | 'displayName' | 'avatar' | 'responsibility' | 'computer' | 'services' | 'enabled'>> & { fundingKind: 'unknown' | 'subscription' | 'promotional-api'; poolId: string };
 type Editor = { saved: ProactiveProfile | null; draft: Draft; conflict: boolean };
@@ -100,7 +102,7 @@ export function ProactiveAgents() {
       if (!saved) return createProactiveProfile(input);
       const { identity: _identity, ...editable } = input;
       return editProactiveProfile(saved.id, { ...editable, expectedVersion: saved.version });
-    }, () => { setEditor(null); setNotice(saved ? 'Agent profile saved.' : 'Agent profile added. Connection capabilities remain unverified.'); });
+    }, () => { setEditor(null); setNotice('Profile saved. You can organize it here; sending work and reading results are not available yet.'); });
   }
 
   return <section className={styles.section} aria-label="Proactive agents">
@@ -112,7 +114,7 @@ export function ProactiveAgents() {
     <p className={styles.note}>Save your agents and planning preferences. The planner does not consume these profiles yet; connections, execution and funding are verified separately.</p>
     {notice ? <p role="status">{notice}</p> : null}
     {error && !editor && !deleting ? <p role="alert" className={styles.error}>{error}</p> : null}
-    {read.status === 'error' ? <p role="alert" className={styles.error}>Agent profiles are unavailable. {readFailureReason(read.error)} Refresh to reconnect.</p>
+    {read.status === 'error' ? <p role="alert" className={styles.error}>Agent profiles are unavailable. {readFailureReason(read.error)} Refresh to retry.</p>
       : !read.data ? <p role="status" aria-busy="true">Reading agent profiles…</p>
         : profiles.length === 0 ? <div className={styles.empty}><Avatar avatar={{ color: '#5a59ef', variant: 'classic' }} />
           <div><h3>Bring your persistent agents together</h3><p>Add Dot, Grok Bot, Muse or another agent. Keep its identity, responsibilities and connection evidence in one place.</p>
@@ -126,7 +128,7 @@ export function ProactiveAgents() {
         <dl><div><dt>Connection</dt><dd>Configured profile; transport unverified</dd></div>
           <div><dt>Account</dt><dd>{profile.identity.accountId}</dd></div><div><dt>Agent identity</dt><dd>{profile.identity.agentId}</dd></div>
           <div><dt>Computer</dt><dd>{profile.computer.label || 'Unknown'} · control unverified ({profile.computer.kind === 'hosted' ? 'hosted' : profile.computer.kind === 'connected-local' ? 'connected local computer' : 'not verified'})</dd></div>
-          <div><dt>Connected apps</dt><dd>{profile.services.length ? profile.services.map(service => service.label).join(', ') : 'None recorded'}; access unverified</dd></div>
+          <div><dt>Recorded apps</dt><dd>{profile.services.length ? profile.services.map(service => service.label).join(', ') : 'None recorded'}; access unverified</dd></div>
           <div><dt>Funding reference</dt><dd>{profile.fundingReference ? `${profile.fundingReference.kind === 'subscription' ? 'Subscription' : profile.fundingReference.kind === 'promotional-api' ? 'Promotional API pool' : 'Unknown'} · ${profile.fundingReference.accountId}${profile.fundingReference.poolId ? ` · ${profile.fundingReference.poolId}` : ''}` : 'None recorded'}. Spending eligibility unknown.</dd></div>
           {Object.entries(OPERATION_LABEL).map(([operation, label]) => { const readiness = profile.operations[operation as keyof typeof OPERATION_LABEL]; return <div key={operation}><dt>{label}</dt><dd>{readiness.state === 'unverified' ? 'Unverified' : 'Unsupported'}{readiness.note ? ` — ${readiness.note}` : ''}</dd></div>; })}
           <div><dt>Latest run</dt><dd>No qualified run evidence</dd></div>
@@ -149,11 +151,11 @@ export function ProactiveAgents() {
           <SetupHelp provider={editor.draft.identity.provider} />
           <p className={styles.note}>Use the provider’s existing account and agent IDs. These identities stay fixed after saving.</p>
           <label>Responsibility<textarea rows={3} maxLength={4000} value={editor.draft.responsibility} placeholder="What should this agent help with?" onChange={event => patch({ responsibility: event.target.value })} /></label>
-          <div className={styles.toggle}><div><strong>Consider for planning</strong><p>Saved preference; no planner consumes this profile yet.</p></div>
-            <Switch checked={editor.draft.enabled} aria-label="Consider for planning" onChange={enabled => patch({ enabled })} /></div>
+          <div className={styles.toggle}><div><strong>Save planning preference</strong><p>Saved preference; no planner consumes this profile yet.</p></div>
+            <Switch checked={editor.draft.enabled} aria-label="Save planning preference" onChange={enabled => patch({ enabled })} /></div>
           <details><summary>Computer, apps and funding</summary><div className={styles.advanced}>
             <label>Computer type<Select value={editor.draft.computer.kind} onChange={event => patch({ computer: { ...editor.draft.computer, kind: event.target.value as Draft['computer']['kind'] } })}>
-              <option value="unknown">Unknown</option><option value="hosted">Provider hosted</option><option value="connected-local">Connected local computer</option></Select></label>
+              <option value="unknown">Unknown</option><option value="hosted">Provider hosted</option><option value="connected-local">Local computer (recorded)</option></Select></label>
             <label>Computer label<Input maxLength={120} value={editor.draft.computer.label} onChange={event => patch({ computer: { ...editor.draft.computer, label: event.target.value } })} /></label>
             <label>Provider computer ID<Input maxLength={256} value={editor.draft.computer.providerComputerId ?? ''} onChange={event => patch({ computer: { ...editor.draft.computer, providerComputerId: event.target.value || null } })} /></label>
             <fieldset><legend>Apps</legend>{editor.draft.services.map((service, index) => <div className={styles.service} key={index}>

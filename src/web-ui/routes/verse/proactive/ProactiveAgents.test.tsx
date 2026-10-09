@@ -76,7 +76,7 @@ describe('proactive agent profiles', () => {
     fireEvent.change(within(dialog).getByLabelText('Account identity'), { target: { value: '  account-two  ' } });
     fireEvent.change(within(dialog).getByLabelText('Agent identity'), { target: { value: ' dot-two ' } });
     fireEvent.change(within(dialog).getByLabelText('Responsibility'), { target: { value: 'Improve Phantom' } });
-    fireEvent.click(within(dialog).getByRole('switch', { name: 'Consider for planning' }));
+    fireEvent.click(within(dialog).getByRole('switch', { name: 'Save planning preference' }));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save profile' }));
     await screen.findByRole('heading', { name: 'My Dot' });
     const post = calls.find(call => call.method === 'POST')!;
