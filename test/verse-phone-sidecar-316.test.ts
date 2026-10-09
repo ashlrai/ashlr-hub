@@ -56,7 +56,7 @@ describe('Phantom console CLI help', () => {
     try {
       expect(await cmdVerse(['--help'])).toBe(0);
       const output = log.mock.calls.map(args => args.join(' ')).join('\n');
-      expect(output).toContain('Open the Phantom console:');
+      expect(output).toContain('Open the Phantom console with your connected coding resources.');
       expect(output).toContain('phm verse');
       expect(output).toContain('ashlr remains compatible');
       expect(output).toContain('phm serve --allow-dispatch --open');
