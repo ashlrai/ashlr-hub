@@ -1724,6 +1724,14 @@ outputs. Inspection does not install; applying is an explicit maintenance
 operation and can remain held or roll back. This is distinct from an ordinary
 DMG download and does not rebuild, repack, sign, grant or resume work.
 
+For maintainer diagnostics, add `--timings` to the same installer invocation.
+It emits JSON stage and operation spans to stderr; the final result stays
+unchanged. Records contain fixed labels, span IDs, outcomes and monotonic
+durations, without paths, command arguments or provider content. Repeated
+checks have distinct spans. Nested durations overlap, so do not sum them as
+wall time. An unavailable clock produces an unknown duration. Timings are
+diagnostics, not installation or release evidence, and do not skip any checks.
+
 With Phantom running, right-click its Dock icon → **Options → Keep in Dock**.
 
 ### Build it
