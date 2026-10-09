@@ -121,8 +121,6 @@ jobs:
       NODE_AUTH_TOKEN: ''
       NPM_TOKEN: ''
       NPM_CONFIG_IGNORE_SCRIPTS: 'true'
-      NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/phantom-npmrc
-      NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/phantom-global-npmrc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -136,6 +134,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/phantom-npmrc"
+          export NPM_CONFIG_GLOBALCONFIG="$RUNNER_TEMP/phantom-global-npmrc"
+          printf 'NPM_CONFIG_USERCONFIG=%s\nNPM_CONFIG_GLOBALCONFIG=%s\n' "$NPM_CONFIG_USERCONFIG" "$NPM_CONFIG_GLOBALCONFIG" >> "$GITHUB_ENV"
           : > "$NPM_CONFIG_USERCONFIG"
           : > "$NPM_CONFIG_GLOBALCONFIG"
           curl --fail --silent --show-error --max-time 30 'https://registry.npmjs.org/npm/-/npm-11.21.0.tgz' > "$RUNNER_TEMP/npm-cli.tgz"
@@ -240,8 +241,6 @@ jobs:
       NODE_AUTH_TOKEN: ''
       NPM_TOKEN: ''
       NPM_CONFIG_IGNORE_SCRIPTS: 'true'
-      NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/phantom-npmrc
-      NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/phantom-global-npmrc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -255,6 +254,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/phantom-npmrc"
+          export NPM_CONFIG_GLOBALCONFIG="$RUNNER_TEMP/phantom-global-npmrc"
+          printf 'NPM_CONFIG_USERCONFIG=%s\nNPM_CONFIG_GLOBALCONFIG=%s\n' "$NPM_CONFIG_USERCONFIG" "$NPM_CONFIG_GLOBALCONFIG" >> "$GITHUB_ENV"
           : > "$NPM_CONFIG_USERCONFIG"
           : > "$NPM_CONFIG_GLOBALCONFIG"
           curl --fail --silent --show-error --max-time 30 'https://registry.npmjs.org/npm/-/npm-11.21.0.tgz' > "$RUNNER_TEMP/npm-cli.tgz"
