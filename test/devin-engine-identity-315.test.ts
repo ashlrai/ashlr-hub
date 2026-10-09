@@ -7,8 +7,8 @@
  *  - routing: the seat → engine → lane mapping, the seat router and the
  *    capacity snapshot never treat a Devin seat as anything but Devin;
  *  - the grant: `devin` is a grant engine (not a dispatch lane), a Devin seat
- *    is producer-only (verifier), drafting names Devin only on opt-in, and a
- *    re-approval follows the opt-in (adds / strips);
+ *    may produce or lead; judging requires independent-family evidence. Drafting
+ *    names Devin only on opt-in; re-approval follows the opt-in (adds / strips);
  *  - effective policy + standingAuthorizesDevin;
  *  - the custody helper's `status.grantEngines` report (an older helper does
  *    not report it → Devin is never drafted for it);
@@ -112,7 +112,7 @@ describe('dispatch lanes: a Devin producer seat opens NO other lane', () => {
   });
 });
 
-describe('the grant: Devin is an opt-in, producer-only grant engine', () => {
+describe('the grant: Devin is an opt-in producer and Leader engine', () => {
   const draftInput = {
     nowMs: NOW,
     grantId: 'd'.repeat(32),
@@ -137,26 +137,31 @@ describe('the grant: Devin is an opt-in, producer-only grant engine', () => {
     expect(grantNamesDevin(payload)).toBe(false);
   });
 
-  it('with the opt-in: the engine in the grant and every rung, one producer-only seat', () => {
+  it('with the opt-in: the engine in the grant and every rung, one producer and Leader seat', () => {
     const payload = buildDefaultGrantPayload({ ...draftInput, devin: true });
     expect(parseStandingGrantPayload(payload).ok).toBe(true);
     expect(payload.engines).toEqual(['local', 'grok-cli', 'claude-cli', 'codex', 'devin']);
     expect(payload.rollout.stages.every((s) => s.engines.at(-1) === 'devin')).toBe(true);
-    expect(payload.spend.seats['devin']).toEqual({ enabled: true, reserveFloorPercent: 0, roles: ['producer'] });
-    // Claude keeps its own seat and roles: nothing Devin-shaped widened it.
-    expect(payload.spend.seats['claude']!.roles).toEqual(['judge', 'leader']);
+    expect(payload.spend.seats['devin']).toEqual({ enabled: true, reserveFloorPercent: 0, roles: ['producer', 'leader'] });
+    // Claude independently receives its current roles; adding Devin does not alias its seat.
+    expect(payload.spend.seats['claude']!.roles).toEqual(['producer', 'judge', 'leader']);
     const lines = describeGrantScope(payload);
-    expect(lines.some((l) => l.includes('seat devin: on, Devin sessions (producer only, never a judge)'))).toBe(true);
+    expect(lines.some((l) => l.includes('seat devin: on, Devin sessions (producer/leader only, never a judge)'))).toBe(true);
   });
 
-  it('the verifier refuses a Devin seat that judges or leads, and an unknown engine', () => {
+  it('the verifier admits Devin planning roles but refuses unqualified judging and an unknown engine', () => {
     const base = buildDefaultGrantPayload({ ...draftInput, devin: true });
-    for (const roles of [['producer', 'judge'], ['judge'], ['leader'], ['producer', 'leader']] as const) {
+    for (const roles of [['producer', 'judge'], ['judge'], ['leader', 'judge']] as const) {
       const bad = structuredClone(base);
       bad.spend.seats['devin'] = { enabled: true, reserveFloorPercent: 0, roles: [...roles] };
       const parsed = parseStandingGrantPayload(bad);
       expect(parsed.ok).toBe(false);
-      if (!parsed.ok) expect(parsed.reason).toMatch(/Devin seat may only be a producer/);
+      if (!parsed.ok) expect(parsed.reason).toMatch(/Devin judge requires independent model-family evidence/);
+    }
+    for (const roles of [['producer'], ['leader'], ['producer', 'leader']] as const) {
+      const planning = structuredClone(base);
+      planning.spend.seats['devin'] = { enabled: true, reserveFloorPercent: 0, roles: [...roles] };
+      expect(parseStandingGrantPayload(planning).ok).toBe(true);
     }
     const renamed = structuredClone(base);
     renamed.spend.seats['devin-b'] = { enabled: true, reserveFloorPercent: 0, roles: ['judge'] };
@@ -177,7 +182,7 @@ describe('the grant: Devin is an opt-in, producer-only grant engine', () => {
     const without = buildDefaultGrantPayload(draftInput);
     const added = buildReapprovalGrantPayload(without, 0, { ...next, devin: true });
     expect(added.engines).toContain('devin');
-    expect(added.spend.seats['devin']).toEqual({ enabled: true, reserveFloorPercent: 0, roles: ['producer'] });
+    expect(added.spend.seats['devin']).toEqual({ enabled: true, reserveFloorPercent: 0, roles: ['producer', 'leader'] });
     expect(parseStandingGrantPayload(added).ok).toBe(true);
   });
 });

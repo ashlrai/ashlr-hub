@@ -371,7 +371,7 @@ describe('presence caps', () => {
     expect(three.local.slots).toBe(3);
   });
 
-  it('retains the legacy default4 preference when no live preference is supplied', () => {
+  it('uses the admitted Grok directive without an invented default maximum', () => {
     const planned = planLanes({
       policy: policy(),
       directives: { v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: 9, codexEnabled: null },
@@ -379,7 +379,12 @@ describe('presence caps', () => {
       localServingSlots: 4,
       engineUnavailable: {},
     });
-    expect(planned['grok-cli'].slots).toBe(4);
+    expect(planned['grok-cli'].slots).toBe(9);
+    const bounded = planLanes({
+      policy: policy(), directives: { v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: 9, codexEnabled: null },
+      presence: ABSENT, localServingSlots: 4, engineUnavailable: {}, admittedBatchCapacity: 6,
+    });
+    expect(bounded['grok-cli'].slots).toBe(6);
   });
 
   it('closes every lane outside the grant\'s current stage', () => {
