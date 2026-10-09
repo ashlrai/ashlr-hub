@@ -844,6 +844,7 @@
     "src/core/verse/github-repo.ts",
     "src/core/verse/health-api.ts",
     "src/core/verse/health-types.ts",
+    "src/core/verse/host-cpu.ts",
     "src/core/verse/local-models.ts",
     "src/core/verse/local-throughput.ts",
     "src/core/verse/manager-conversation.ts",
