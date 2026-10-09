@@ -560,7 +560,7 @@ function printUsage(): void {
   console.log(bold('  phm verse') + dim(' [--port N] [--no-open] [--json]'));
   console.log(dim('  Phantom CLI (ashlr remains compatible)'));
   console.log('');
-  console.log('  Open the Phantom console: project + seat (Claude / Codex / Grok / local Ollama)');
+  console.log('  Open the Phantom console with your connected coding resources.');
   console.log('  multi-turn agent sessions served by the local dashboard server at /verse/.');
   console.log('');
   console.log('  ' + bold('Options:'));

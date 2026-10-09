@@ -229,7 +229,7 @@ async function cmdModelsList(
       console.log(`  ${yellow('Tip:')} Ollama is not installed. Visit https://ollama.com to install.`);
     } else {
       console.log(`  ${yellow('Tip:')} Start Ollama with ${bold('ashlr models start')}, then pull a model:`);
-      console.log(`         ${cyan('ashlr models pull llama3.2')}`);
+      console.log(`         ${cyan('phm models pull MODEL_TAG')}`);
     }
     console.log('');
     return 0;
@@ -542,8 +542,8 @@ function printModelsHelp(): void {
   console.log('');
   console.log(`    ${cyan('ashlr models')}                      ${dim('# list all local models')}`);
   console.log(`    ${cyan('ashlr models --json')}               ${dim('# machine-readable list')}`);
-  console.log(`    ${cyan('ashlr models pull llama3.2')}        ${dim('# pull a model (confirms)')}`);
-  console.log(`    ${cyan('ashlr models pull llama3.2 --yes')}  ${dim('# pull without prompt (CI)')}`);
+  console.log(`    ${cyan('phm models pull MODEL_TAG')}        ${dim('# pull a model (confirms)')}`);
+  console.log(`    ${cyan('phm models pull MODEL_TAG --yes')}  ${dim('# pull without prompt (CI)')}`);
   console.log(`    ${cyan('ashlr models start')}                ${dim('# start local Ollama')}`);
   console.log('');
   console.log('  ' + bold('Exit codes:'));

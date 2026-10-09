@@ -9,7 +9,7 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.29.5] — Unreleased
+## [3.29.5] — 2026-10-09
 
 ### Added
 
@@ -104,7 +104,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   guide with package/native metadata. Preserve verified publication records and
   reject missing or duplicate markers before writing any file.
 
-Publication and installation of this candidate remain pending qualification.
+This entry describes the qualified source changes for that release; provider
+activation and resident work require their own current evidence.
 
 ## [3.29.2] — 2026-10-09
 
