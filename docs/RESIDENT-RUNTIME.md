@@ -330,6 +330,16 @@ line, which is exactly the mismatch the runbook observed.
 
 ## Automatic public website publication
 
+The workbench's public version, npm install command, Mac download link and
+SoftwareApplication metadata share one generated presentation record. Refresh it
+from the host with `phm release-articles metadata --json`; this read-only command
+brackets the existing GitHub, CI, audit, npm and asset verifier with fresh latest
+release observations. A candidate package bump or saved success receipt cannot
+produce a public release record. Commit its successful output as
+`apps/web/src/lib/workbench-release.json` in the website's normal PR workflow.
+The Secrets release record stays independent. This record describes a published
+release; it grants no installation, signing or deployment authority.
+
 The host-owned website publisher can keep `phm.dev` current after a normal,
 verified merge in `ashlrai/phantom-secrets`. It has a separate, optional signed
 website scope. An agent can request publication with `ashlr_website_publish`;

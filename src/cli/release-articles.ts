@@ -1,12 +1,14 @@
 import { configureReleaseArticles, defaultReleaseArticlesDeps, importProposedRelease, readReleaseArticles, syncReleaseArticles, type ReleaseArticlesDeps } from '../core/release-articles.js';
 import { readPrivateFileCapped } from '../core/verse/preferences.js';
+import { verifyLatestWorkbenchRelease } from '../core/release-public-facts.js';
 
-export const RELEASE_ARTICLES_USAGE = 'ashlr release-articles status | enable [ashlrai/ashlr-hub|ashlrai/phantom] | disable | import <proposed.json> | sync [version] [--json]';
+export const RELEASE_ARTICLES_USAGE = 'phm release-articles status | metadata | enable [ashlrai/ashlr-hub|ashlrai/phantom] | disable | import <proposed.json> | sync [version] [--json]';
 export async function runReleaseArticlesCli(args: string[], deps: ReleaseArticlesDeps, print: (text: string) => void, signal?: AbortSignal): Promise<number> {
   const json = args.includes('--json'); const argv = args.filter((arg) => arg !== '--json');
   try {
     let result;
     if (argv.length === 1 && argv[0] === 'status') result = readReleaseArticles();
+    else if (argv.length === 1 && argv[0] === 'metadata') result = await verifyLatestWorkbenchRelease(deps.reader, deps.now(), signal);
     else if (argv.length <= 2 && argv[0] === 'enable') {
       const repository = argv[1];
       if (repository !== undefined && repository !== 'ashlrai/ashlr-hub' && repository !== 'ashlrai/phantom') throw new Error('Invalid release repository');

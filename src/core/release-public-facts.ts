@@ -18,6 +18,13 @@ export interface ReleasePublicReader {
   github(endpoint: string, signal?: AbortSignal): Promise<unknown>;
   npm(version: string, signal?: AbortSignal, packageName?: DesktopUpdateProfile['packageName']): Promise<unknown>;
 }
+/** Public presentation only; this record never authorizes installation or effects. */
+export interface PublicWorkbenchRelease {
+  v: 1; product: 'workbench'; repository: 'ashlrai/phantom'; packageName: '@ashlr/phantom';
+  version: string; sourceSha: string; publishedAt: string; observedAt: string;
+  releaseUrl: string; registryUrl: string; installCommand: string;
+  macDownloadUrl: string | null; factsDigest: string;
+}
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const SHA = /^[a-f0-9]{40}$/;
 const MAX_JSON = 4 * 1024 * 1024;
@@ -179,6 +186,31 @@ export async function discoverLatestRelease(repository: HubRepositoryLabel, read
   const release = object(await reader.github(`repos/${repository}/releases/latest`, signal));
   if (typeof release['tag_name'] !== 'string' || !release['tag_name'].startsWith('v')) throw new Error('Stable release version missing');
   return parseProposedRelease({ v: 1, repository, version: release['tag_name'].slice(1) });
+}
+
+export function publicWorkbenchRelease(facts: PublishedReleaseFacts): PublicWorkbenchRelease {
+  parseProposedRelease({ v: facts.v, repository: facts.repository, version: facts.version });
+  if (facts.repository !== 'ashlrai/phantom' || facts.packageName !== '@ashlr/phantom') throw new Error('Canonical workbench release facts required');
+  hash(facts.sourceSha); iso(facts.publishedAt); iso(facts.observedAt);
+  const { observedAt: _observedAt, ...stable } = facts;
+  const releaseUrl = `https://github.com/ashlrai/phantom/releases/tag/v${facts.version}`;
+  const macAsset = `Phantom_${facts.version}_aarch64.dmg`;
+  const mac = facts.assets.find((asset) => asset.name === macAsset && asset.bytes > 0 && /^sha256:[a-f0-9]{64}$/.test(asset.digest ?? ''));
+  return { v: 1, product: 'workbench', repository: 'ashlrai/phantom', packageName: '@ashlr/phantom', version: facts.version,
+    sourceSha: facts.sourceSha, publishedAt: facts.publishedAt, observedAt: facts.observedAt, releaseUrl,
+    registryUrl: `https://www.npmjs.com/package/@ashlr/phantom/v/${facts.version}`,
+    installCommand: `npm install -g @ashlr/phantom@${facts.version}`,
+    macDownloadUrl: mac ? `https://github.com/ashlrai/phantom/releases/download/v${facts.version}/${macAsset}` : null,
+    factsDigest: createHash('sha256').update(JSON.stringify(stable)).digest('hex') };
+}
+
+/** Bracket the existing full verifier so candidate bumps or a moving latest pointer cannot become public latest claims. */
+export async function verifyLatestWorkbenchRelease(reader: ReleasePublicReader, nowMs: number, signal?: AbortSignal): Promise<PublicWorkbenchRelease> {
+  const before = await discoverLatestRelease('ashlrai/phantom', reader, signal);
+  const facts = await verifyPublishedRelease(before, reader, nowMs, signal);
+  const after = await discoverLatestRelease('ashlrai/phantom', reader, signal);
+  if (before.version !== after.version || signal?.aborted) throw new Error('Latest workbench release changed during verification');
+  return publicWorkbenchRelease(facts);
 }
 
 /** A renamed repository does not identify an historical release's npm package. */
