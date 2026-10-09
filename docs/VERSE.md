@@ -95,13 +95,15 @@ The panel uses existing chat events without additional model calls.
 ### Additional model providers
 
 The fleet's declarative engine registry supports model providers independently
-of the native chat seats. Meta Muse is available as the opt-in `meta-muse` API
-engine using `https://api.meta.ai/v1`, model `muse-spark-1.3`, and the private
+of the native chat seats. Meta Model API offers Muse Spark through the opt-in
+`meta-muse` API engine using `https://api.meta.ai/v1`, model `muse-spark-1.3`, and the private
 `MODEL_API_KEY` credential. Add `meta-muse` deliberately to
 `foundry.allowedBackends`; model/endpoint overrides use the existing
 `foundry.engines` contract. The engine is metered and subject to local-only,
 spend and signed-authority policy. It does not create a native Muse Code seat,
-grant new authority or reuse a consumer subscription. See the
+grant new authority or reuse a consumer subscription. The personal Muse agent's
+memory, computer and connected apps are separate; this API engine does not
+connect that agent to Phantom. See the
 [Meta API contract](https://dev.meta.ai/docs/cookbook/quickstart-chat-completions).
 
 [OpenAI Dots](https://help.openai.com/en/articles/20001530-getting-started-with-your-dot)
@@ -1819,8 +1821,8 @@ the optional connection. Phantom does not invoke its own `ashlr mcp` server as a
 substitute. The plugin remains restricted from autonomous runs under the existing
 authority policy.
 
-For an explicitly enabled Meta API engine, supply `MODEL_API_KEY` through your
-credential manager, add `meta-muse` to `foundry.allowedBackends`, then use a
+For an explicitly enabled Meta Model API engine, supply `MODEL_API_KEY` through
+your credential manager, add `meta-muse` to `foundry.allowedBackends`, then use a
 bounded sandbox run:
 
 ```sh
