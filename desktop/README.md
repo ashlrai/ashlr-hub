@@ -4,12 +4,45 @@ A Tauri v2 desktop app that wraps **Phantom** (the operator console at
 `/verse/`, see `../docs/VERSE.md`) in a native macOS window. Opening it starts
 the console; resident autonomy requires its separate local setup and grant.
 
-The current published release is [3.29.3](https://github.com/ashlrai/phantom/releases/tag/v3.29.3).
-It provides the signed arm64 app archive
-[`Phantom_3.29.3_aarch64.app.tar.gz`](https://github.com/ashlrai/phantom/releases/download/v3.29.3/Phantom_3.29.3_aarch64.app.tar.gz)
-and paired [`latest.json`](https://github.com/ashlrai/phantom/releases/download/v3.29.3/latest.json).
-No 3.29.3 DMG was published. These are update artifacts; downloading or unpacking
-them alone does not perform the qualified installation described below.
+Find the current qualified release at [GitHub releases](https://github.com/ashlrai/phantom/releases/latest).
+Its macOS download is the signed arm64 `Phantom_<version>_aarch64.app.tar.gz`
+archive, paired with [`latest.json`](https://github.com/ashlrai/phantom/releases/latest/download/latest.json),
+rather than a DMG. These are update artifacts; downloading or unpacking them
+alone does not perform the qualified installation described below.
+
+### Consumer first install (source implementation)
+
+The source includes `phm desktop install` for an empty Apple silicon Mac
+installation. It is not included in the published release above, and acceptance
+on a clean Mac remains unverified. After this command is published and accepted,
+use the canonical CLI's matching release:
+
+```sh
+phm authority stop --json
+phm desktop install           # downloads and verifies a fresh private stage
+phm desktop install --apply   # fresh inspection, then explicit installation
+```
+
+Inspection preserves downloaded data under `~/.ashlr/updates/consumer-staging`;
+it does not install, stop work or create command links. Apply requires absent
+`Phantom.app`/`Ashlr.app`, managed current pointer and both managed command links.
+It verifies the original signed app and paired npm archive, keeps Stop engaged,
+and never builds, re-signs, creates a signing key or resumes the fleet.
+
+Installation acceptance and shell setup are separate results. The exact managed
+CLI must report the matching version. An unrelated global npm command, missing
+command or unknown login-shell target reports `shell-setup-required`; the
+installer does not rewrite global aliases, PATH or shell profiles. Native updates
+use the managed current CLI; Fleet's login-shell discovery can resolve another
+installation. A same-version authenticated feed means no update, while a newer
+feed still needs the existing update admission and grant.
+
+Existing app/current/link collisions use the update or recovery flow instead.
+Failed launch can roll back to absence; a live or uncertain replacement is
+preserved for normal Quit and recovery. `/Applications` permission, isolated
+system Python and macOS Gatekeeper acceptance remain fresh-Mac prerequisites.
+The app is locally signed, not Developer ID notarized; this command never bypasses
+Gatekeeper or changes system security settings.
 
 ### Historical DMG: 3.27.0
 
@@ -54,7 +87,7 @@ explicit version.
 
 The source candidate is 3.29.4; publication and installation are pending qualification and public byte verification.
 
-The published 3.29.3 release uses `ashlrai/phantom` and `@ashlr/phantom`.
+Canonical releases use `ashlrai/phantom` and `@ashlr/phantom`.
 Its fixed discovery endpoint is
 `https://github.com/ashlrai/phantom/releases/latest/download/latest.json`.
 The commissioned public key, `ai.ashlr.desktop` bundle identifier, signer,
@@ -66,7 +99,7 @@ startup, automatic adoption and resident authority remain separate gates.
 
 ## Install
 
-For current 3.29.3, use the [versioned release](https://github.com/ashlrai/phantom/releases/tag/v3.29.3)
+Use the [current qualified release](https://github.com/ashlrai/phantom/releases/latest)
 and the [signed idle update flow](#signed-idle-updates) in an eligible installed
 app. Maintainers can use `scripts/install-desktop-artifacts.mjs` with the exact
 qualified checkout, signed hosted bundle and private original finalizer output.
@@ -79,12 +112,13 @@ This is a maintainer path, not a drag-to-Applications installer.
 The historical [3.27.0 macOS arm64 DMG](https://github.com/ashlrai/phantom/releases/download/v3.27.0/Phantom_3.27.0_aarch64.dmg)
 remains available. The table's DMG row describes that historical release.
 For the current browser workbench on macOS, Linux and Windows, install
-`@ashlr/phantom@3.29.3` and run `phm verse`.
+the promoted package with `npm install -g @ashlr/phantom`, confirm its version
+with `phm --version`, and run `phm verse`. Match desktop artifacts to that version.
 Other desktop formats remain subject to the draft artifact policy below.
 
 | Platform | Availability |
 |----------|-----------------------|
-| macOS arm64 current | Signed v3.29.3 app archive and paired update manifest; qualified installation required |
+| macOS arm64 current | Signed arm64 app archive and paired update manifest; qualified installation required |
 | macOS arm64 | Published canonical v3.27.0 `.dmg` |
 | Windows | `.msi` / `.exe` draft only |
 | Linux | Not produced while quarantined |
