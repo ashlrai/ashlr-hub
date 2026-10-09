@@ -395,6 +395,80 @@ describe('onboard — genome step', () => {
 // ready flag
 // ---------------------------------------------------------------------------
 
+describe('onboard — Phantom Secrets observations', () => {
+  const metadata = (initialized: boolean, issue = 'config-missing') => JSON.stringify({
+    schema_version: 1,
+    initialized,
+    inspection: 'metadata-only',
+    managed_dotenv: { inspected: false },
+    vault: { inspected: false },
+    proxy: { lifecycle_lock: initialized ? 'missing' : 'not-inspected', listener_authenticated: false },
+    issues: initialized ? [] : [issue],
+  });
+
+  it.each([
+    ['configured', metadata(true), 0, 'ok', 'project configured'],
+    ['missing configuration', metadata(false), 0, 'detected', 'project not configured'],
+    ['legacy status', 'Phantom is initialized', 0, 'manual', 'metadata status unverified'],
+    ['unavailable status', '', 2, 'manual', 'metadata status unverified'],
+    ['invalid configuration', metadata(false, 'config-invalid'), 0, 'manual', 'metadata status unverified'],
+    ['unreadable configuration', metadata(false, 'config-unreadable'), 0, 'manual', 'metadata status unverified'],
+  ] as const)('distinguishes %s without vault or execution claims', async (_name, stdout, exit, status, detail) => {
+    mockFetch.mockRejectedValue(new Error('offline'));
+    const previous = mockSpawnSync.getMockImplementation()!;
+    mockSpawnSync.mockImplementation((...args: unknown[]) => {
+      if (args[0] !== 'phantom') return previous();
+      const command = (args[1] as string[])[0];
+      if (command === '--version') return { status: 0, stdout: 'phantom 0.7.9', stderr: '' };
+      if (command === 'status') return { status: exit, stdout, stderr: 'SECRET_OBSERVATION_SENTINEL' };
+      if (command === 'list') return { status: 0, stdout: '[]', stderr: '' };
+      if (command === '--help') return { status: 0, stdout: 'Commands:\n  status\n  list\n  mcp\n  exec\n\nOptions:\n', stderr: '' };
+      throw new Error('Unexpected Phantom command');
+    });
+    try {
+      const onboard = await importOnboard();
+      const result = await onboard(makeConfig(), { wire: false, yes: false });
+      const observed = result.steps.find((step) => step.name === 'phantom');
+      expect(observed?.status).toBe(status);
+      expect(observed?.detail).toContain(detail);
+      expect(observed?.detail).not.toContain('vault initialized');
+      expect(observed?.detail).not.toContain('SECRET_OBSERVATION_SENTINEL');
+      if (status === 'ok') expect(observed?.detail).toContain('vault readiness unverified');
+      if (status === 'manual') {
+        if (_name === 'invalid configuration' || _name === 'unreadable configuration') {
+          expect(observed?.detail).toContain('Inspect existing project configuration and file access.');
+          expect(observed?.detail).not.toContain('compatible CLI');
+        } else {
+          expect(observed?.detail).toContain('phantom-secrets/blob/main/docs/hub-status-contract.md');
+        }
+        expect(observed?.detail).not.toContain('phantom init');
+      }
+      for (const forbidden of ['reveal', 'env', 'unwrap', 'exec', 'start']) {
+        expect(allSpawnedArgs()).not.toContain(forbidden);
+      }
+      expect(result.ready).toBe(true); // Optional Secrets observations do not alter onboarding gates.
+    } finally {
+      mockSpawnSync.mockImplementation(previous);
+    }
+  });
+
+  it('points an absent Secrets CLI to its own installation instructions', async () => {
+    mockFetch.mockRejectedValue(new Error('offline'));
+    const previous = mockSpawnSync.getMockImplementation()!;
+    mockSpawnSync.mockImplementation(() => ({ status: 1, stdout: '', stderr: '' }));
+    try {
+      const onboard = await importOnboard();
+      const result = await onboard(makeConfig(), { wire: false, yes: false });
+      const observed = result.steps.find((step) => step.name === 'phantom');
+      expect(observed?.status).toBe('manual');
+      expect(observed?.detail).toContain('https://github.com/ashlrai/phantom-secrets#installation');
+      expect(observed?.detail).not.toContain('phantom.sh');
+    } finally {
+      mockSpawnSync.mockImplementation(previous);
+    }
+  });
+});
+
 describe('onboard — ready flag', () => {
   it('ready is a boolean', async () => {
     mockFetch.mockRejectedValue(new Error('offline'));

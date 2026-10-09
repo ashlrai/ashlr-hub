@@ -492,6 +492,7 @@ function rootPackageIsPortable(
     'dist',
     'docs/README.md',
     'docs/PHANTOM-BRAND.md',
+    'docs/COMPANIONS.md',
     'docs/QUICKSTART.md',
     'docs/AUTOMATIC-OUTCOMES.md',
     'docs/VERSE.md',

@@ -25,7 +25,7 @@
  *
  * CI session isolation (opt-in via LOCUS_CI_BINDING / LOCUS_BINDING):
  *   When configured, each task dispatch mints an ephemeral Locus pin and
- *   overlays LOCUS_* onto process.env so sandboxed engines inherit the sealed
+ *   captures LOCUS_* in a private job environment so sandboxed engines inherit the sealed
  *   session. LOCUS_ENFORCE=enforce without a binding refuses as result.errors
  *   (never throws). Default (unset binding + enforce off) is a no-op.
  *   Does not add a second pre-mutate gate — that lives on spawnEngine /
@@ -37,7 +37,6 @@ import type { SandboxedEngineResult } from './run/sandboxed-engine.js';
 import type { AuthoritativePendingProposalExpectation } from './inbox/pending-authority.js';
 import { isSafeExecutionIdentity } from './fleet/attempt-identity.js';
 import {
-  applyLocusSessionEnv,
   LocusMintError,
   LocusSessionConfigError,
   runWithLocusSessionIfConfigured,
@@ -376,8 +375,7 @@ export async function runSimpleConductor(
 
     // Dispatch via the proven sandboxed-engine primitive.
     // CI isolation: when LOCUS_CI_BINDING/LOCUS_BINDING is set, mint an
-    // ephemeral sealed session and overlay LOCUS_* onto process.env so the
-    // sandboxed engine inherits it. Restores prior values after the run.
+    // ephemeral sealed session in a private job context for the sandboxed engine.
     // Default (unset binding + LOCUS_ENFORCE off) is a no-op pass-through.
     // LocusSessionConfigError / LocusMintError → result.errors (never throw).
     try {
@@ -415,27 +413,10 @@ export async function runSimpleConductor(
         workItemGenerationId: generationId,
       };
 
-      const sandboxResult = await runWithLocusSessionIfConfigured(async (handle) => {
-        const restored: Array<[string, string | undefined]> = [];
-        if (handle) {
-          const overlay: NodeJS.ProcessEnv = {};
-          applyLocusSessionEnv(overlay, handle.env);
-          for (const [key, value] of Object.entries(overlay)) {
-            if (typeof value !== 'string') continue;
-            restored.push([key, process.env[key]]);
-            process.env[key] = value;
-          }
-        }
-        try {
-          return isApiModel
-            ? await runApiModelSandboxed(engineId, instruction, cfg, sandboxOpts)
-            : await runEngineSandboxed(engineId, instruction, cfg, sandboxOpts);
-        } finally {
-          for (const [key, prev] of restored) {
-            if (prev === undefined) delete process.env[key];
-            else process.env[key] = prev;
-          }
-        }
+      const sandboxResult = await runWithLocusSessionIfConfigured(async () => {
+        return isApiModel
+          ? await runApiModelSandboxed(engineId, instruction, cfg, sandboxOpts)
+          : await runEngineSandboxed(engineId, instruction, cfg, sandboxOpts);
       });
 
       const candidateId = resultCandidateId(sandboxResult);

@@ -6,7 +6,7 @@
 
 **Work with agents. Let agents work for you. One open-source workbench for your accounts, local models, chats and engineering fleet.**
 
-**[phm.dev](https://phm.dev)**
+**[Get Phantom](https://github.com/ashlrai/phantom/releases/tag/v3.26.1) · [First-run guide](docs/QUICKSTART.md#open-verse)**
 
 [Install](#install) · [See the workbench](#what-it-is) · [Benchmarks](#benchmarks-and-traces) · [Read the guide](https://github.com/ashlrai/phantom/blob/master/docs/VERSE.md) · [Explore the ecosystem](https://verse.ashlr.ai/ecosystem) · [Star Phantom on GitHub](https://github.com/ashlrai/phantom)
 
@@ -32,6 +32,10 @@ The app inside the DMG is locally signed; the DMG is unsigned. Neither is Apple
 notarized; macOS may require **Open Anyway** on first launch. The CLI includes the browser console on macOS, Linux and Windows.
 See [desktop installation](#the-desktop-app-macos) or the
 [first-run guide](docs/QUICKSTART.md#open-verse).
+
+As checked on 2026-10-09, [phm.dev](https://phm.dev) presents the separate
+[Phantom Secrets](https://github.com/ashlrai/phantom-secrets) credential tool.
+Use this repository and its versioned releases to install the Phantom workbench.
 
 ![Phantom 3.24.3 Work with me: read-only Demo chat with labeled sample accounts and provider-inactive conversation.](https://raw.githubusercontent.com/ashlrai/phantom/master/docs/images/verse-work-with-me-3.24.3-demo.jpg)
 

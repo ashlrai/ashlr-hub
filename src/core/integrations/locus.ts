@@ -70,9 +70,10 @@
  */
 
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { getLocusJobEnv, hasLocusJobEnv, runInLocusJobEnv, withLocusJobChildEnv } from "./locus-job-env.js";
 import { loadConfigReadOnly } from "../config.js";
 import type { AshlrConfig } from "../types.js";
 
@@ -82,6 +83,8 @@ import type { AshlrConfig } from "../types.js";
 
 const LOCUS_BIN = process.env.LOCUS_BIN ?? "locus";
 const TIMEOUT_MS = 12_000;
+const EXECUTOR_CAPABILITY_ENV = "LOCUS_EXECUTOR_CAPABILITY";
+const CONTROL_CAPABILITY_ENV = "LOCUS_CONTROL_CAPABILITY";
 
 /** Identity plane + secret plane — the Ashlr agent safety pair. */
 export const REQUIRED_SERVERS = ["locus", "phantom"] as const;
@@ -320,6 +323,35 @@ export interface LocusSessionHandle {
   mint: LocusCiMint;
 }
 
+/** Scope fields actually exposed by Locus's live ProviderView contract. */
+export interface LocusProviderScope {
+  provider: string;
+  account: string;
+  project_ref?: string | null;
+  team_id?: string | null;
+  account_id?: string | null;
+  read_only?: boolean | null;
+  orgs?: string[];
+  repos?: string[];
+}
+
+interface LocusWhoami {
+  session_id: string;
+  binding_alias: string;
+  binding_id: string;
+  tenant: string;
+  expires_at: string;
+  worker_home: string;
+  seal_ok: boolean;
+  seal: string;
+  authority: string;
+  authority_anchor_ok: boolean;
+  backing_type: string;
+  backing_path: string;
+  frozen?: boolean;
+  providers: LocusProviderScope[];
+}
+
 /** Claude / Cursor style MCP config root. */
 export interface McpConfigJson {
   mcpServers?: Record<string, McpServerEntry>;
@@ -533,6 +565,9 @@ export async function locusAvailableAsync(): Promise<boolean> {
 }
 
 function locusEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (hasLocusJobEnv()) {
+    return { ...withLocusJobChildEnv(extra), LOCUS_NOTIFY: "0", LOCUS_QUIET: "1" };
+  }
   return {
     ...process.env,
     LOCUS_HOME: process.env.LOCUS_HOME ?? join(homedir(), ".locus"),
@@ -582,6 +617,7 @@ const MINT_IDENTITY_ENV = new Set([
   "LOCUS_WORKER_HOME",
   "LOCUS_EXPIRES_AT",
   "LOCUS_PROVIDERS",
+  EXECUTOR_CAPABILITY_ENV,
 ]);
 
 function isAllowedMintEnvKey(key: string): boolean {
@@ -605,10 +641,12 @@ export function scrubbedChildEnv(
       clean[key] = value;
     }
   }
-  return { ...clean, ...explicit };
+  const merged = { ...clean, ...explicit };
+  delete merged[CONTROL_CAPABILITY_ENV];
+  return merged;
 }
 
-/** Validate the non-secret identity/scope environment emitted by `ci mint`. */
+/** Validate private identity/scope metadata and delegated executor authority. Never log it. */
 export function validateMintEnv(raw: unknown): Record<string, string> {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new LocusMintError("ci mint JSON has invalid env map");
@@ -617,14 +655,212 @@ export function validateMintEnv(raw: unknown): Record<string, string> {
   for (const [key, value] of Object.entries(raw)) {
     if (
       !isAllowedMintEnvKey(key) ||
-      typeof value !== "string" ||
+      typeof value !== "string" || value.length > 4096 || /[\0\r\n]/u.test(value) ||
       /(?:phm|env|test):/i.test(value)
     ) {
       throw new LocusMintError("ci mint JSON contains disallowed env metadata");
     }
     clean[key] = value;
   }
+  if (!/^[a-f0-9]{64}$/i.test(clean[EXECUTOR_CAPABILITY_ENV] ?? "")) {
+    throw new LocusMintError("ci mint JSON has invalid executor authority");
+  }
   return clean;
+}
+
+function boundedSessionText(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 4096 &&
+    !/[\0\r\n]/u.test(value) && !/(?:phm|env|test):/i.test(value);
+}
+
+/** The requested binding and all duplicated identity labels must agree. */
+export function validateMintBinding(requestedBinding: string, mint: LocusCiMint): LocusCiMint {
+  if (!mint || typeof mint !== "object" || Array.isArray(mint) ||
+      (mint.binding !== requestedBinding.trim() && mint.binding_id !== requestedBinding.trim()) ||
+      mint.secrets_resolved !== false || !boundedSessionText(mint.path)) {
+    throw new LocusMintError("ci mint returned an invalid or different binding");
+  }
+  const labels: Record<string, unknown> = {
+    LOCUS_SESSION_ID: mint.session_id, LOCUS_BINDING: mint.binding,
+    LOCUS_BINDING_ID: mint.binding_id, LOCUS_TENANT: mint.tenant,
+    LOCUS_SEAL: mint.seal, LOCUS_WORKER_HOME: mint.worker_home,
+    LOCUS_EXPIRES_AT: mint.expires_at,
+  };
+  for (const [key, value] of Object.entries(labels)) {
+    if (!boundedSessionText(value) || mint.env[key] !== value) {
+      throw new LocusMintError("ci mint identity labels do not match sealed response");
+    }
+  }
+  // Retain only the reviewed metadata contract, never arbitrary CLI output fields.
+  return { session_id: mint.session_id, binding: mint.binding, binding_id: mint.binding_id,
+    tenant: mint.tenant, expires_at: mint.expires_at, seal: mint.seal, path: mint.path,
+    worker_home: mint.worker_home, secrets_resolved: false, env: { ...mint.env } };
+}
+
+function parseLiveWhoami(raw: string): LocusWhoami {
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch {
+    throw new LocusMintError("session verification returned invalid metadata");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new LocusMintError("session verification returned invalid metadata");
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of ["session_id", "binding_alias", "binding_id", "tenant", "expires_at",
+    "worker_home", "seal", "authority", "backing_type", "backing_path"]) {
+    if (!boundedSessionText(record[key])) throw new LocusMintError("session verification returned invalid metadata");
+  }
+  if (!Array.isArray(record.providers) || record.providers.length > 100) {
+    throw new LocusMintError("session verification returned invalid providers");
+  }
+  for (const item of record.providers) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new LocusMintError("session verification returned invalid providers");
+    const provider = item as Record<string, unknown>;
+    if (!boundedSessionText(provider.provider) || !/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(provider.provider) ||
+        !boundedSessionText(provider.account)) throw new LocusMintError("session verification returned invalid providers");
+    for (const key of ["project_ref", "team_id", "account_id"]) {
+      if (provider[key] !== undefined && provider[key] !== null && !boundedSessionText(provider[key])) {
+        throw new LocusMintError("session verification returned invalid providers");
+      }
+    }
+    if (provider.read_only !== undefined && provider.read_only !== null && typeof provider.read_only !== "boolean") {
+      throw new LocusMintError("session verification returned invalid providers");
+    }
+    for (const key of ["orgs", "repos"]) {
+      const values = provider[key];
+      if (values !== undefined && (!Array.isArray(values) || values.length > 100 || !values.every(boundedSessionText))) {
+        throw new LocusMintError("session verification returned invalid providers");
+      }
+    }
+  }
+  return value as LocusWhoami;
+}
+
+/** Check metadata only: never follow worker/auth symlinks or read credential contents. */
+function validateSessionStorage(home: string, sessionId: string): void {
+  const worker = join(home, "workers", sessionId);
+  const required: Array<[string, boolean]> = [
+    [home, true], [join(home, "workers"), true], [worker, true],
+    [join(home, "sessions"), true], [join(home, "sessions", `ci-${sessionId.slice(4)}.json`), false],
+  ];
+  const optional: Array<[string, boolean]> = [
+    [join(worker, "gh"), true], [join(worker, "gh", "hosts.yml"), false],
+    [join(worker, "aws"), true], [join(worker, "aws", "config"), false],
+    [join(worker, "aws", "credentials"), false],
+  ];
+  for (const [path, directory] of [...required, ...optional]) {
+    let stat;
+    try { stat = lstatSync(path); } catch (error) {
+      if (optional.some(([candidate]) => candidate === path) &&
+          (error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw new LocusMintError("session storage metadata is unavailable");
+    }
+    if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile()) ||
+        (typeof process.getuid === "function" && stat.uid !== process.getuid()) ||
+        (stat.mode & 0o022) !== 0 || realpathSync(path) !== path) {
+      throw new LocusMintError("session storage containment or ownership is invalid");
+    }
+  }
+}
+
+/**
+ * Reconstruct frozen selectors from validated live whoami ProviderView fields.
+ * Locus's VERCEL_PROJECT_ID uses scope.projects[0], which ProviderView does not
+ * expose. Never invent it from project_ref or copy unverified mint/parent lists.
+ */
+export function reconstructLocusProviderScopeEnv(
+  providers: readonly LocusProviderScope[],
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const provider of providers) {
+    const prefix = `LOCUS_${provider.provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+    env[`${prefix}_ACCOUNT`] = provider.account;
+    env[`${prefix}_CREDENTIAL_RESOLVED`] = "0";
+    for (const key of ["project_ref", "team_id", "account_id"] as const) {
+      if (provider[key]) env[`${prefix}_${key.toUpperCase()}`] = provider[key];
+    }
+    if (typeof provider.read_only === "boolean") env[`${prefix}_READ_ONLY`] = String(provider.read_only);
+    if (provider.orgs?.length) env[`${prefix}_ORGS`] = provider.orgs.join(",");
+    if (provider.repos?.length) env[`${prefix}_REPOS`] = provider.repos.join(",");
+
+    const name = provider.provider.toLowerCase();
+    if (name === "supabase" && provider.project_ref) {
+      env.SUPABASE_PROJECT_REF = provider.project_ref;
+      env.SUPABASE_PROJECT_ID = provider.project_ref;
+    }
+    if (name === "vercel" && provider.team_id) {
+      env.VERCEL_ORG_ID = provider.team_id;
+      env.VERCEL_TEAM_ID = provider.team_id;
+    }
+    if (name === "aws" && provider.account_id) env.AWS_ACCOUNT_ID = provider.account_id;
+    if (name === "cloudflare" && provider.account_id) env.CLOUDFLARE_ACCOUNT_ID = provider.account_id;
+  }
+  return env;
+}
+
+/** Verify the CLI's current sealed backing and broker authority immediately before use. */
+export function validateExistingLocusSession(
+  source: NodeJS.ProcessEnv = process.env,
+  mint?: LocusCiMint,
+): LocusSessionHandle {
+  const sessionId = source.LOCUS_SESSION_ID ?? "";
+  const executor = source[EXECUTOR_CAPABILITY_ENV] ?? "";
+  if (!/^ses_[a-f0-9]+$/i.test(sessionId) || !/^[a-f0-9]{64}$/i.test(executor)) {
+    throw new LocusMintError("session identity or executor authority is invalid");
+  }
+  let home: string;
+  try { home = realpathSync(source.LOCUS_HOME ?? join(homedir(), ".locus")); } catch {
+    throw new LocusMintError("session identity storage is unavailable");
+  }
+  validateSessionStorage(home, sessionId);
+  const commandEnv = { ...scrubbedChildEnv(source), LOCUS_HOME: home,
+    LOCUS_SESSION_ID: sessionId, [EXECUTOR_CAPABILITY_ENV]: executor,
+    LOCUS_NOTIFY: "0", LOCUS_QUIET: "1" };
+  const result = spawnSync(LOCUS_BIN, ["whoami", "--json"], {
+    encoding: "utf8", timeout: TIMEOUT_MS, env: commandEnv, maxBuffer: 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) throw new LocusMintError("session failed live authority verification");
+  const whoami = parseLiveWhoami(result.stdout ?? "");
+  const expiry = Date.parse(whoami.expires_at);
+  if (whoami.session_id !== sessionId || whoami.seal_ok !== true ||
+      whoami.authority_anchor_ok !== true || whoami.authority !== "delegated" ||
+      whoami.backing_type !== "ci" || whoami.frozen !== false ||
+      !Number.isFinite(expiry) || expiry <= Date.now() ||
+      !isAbsolute(whoami.backing_path) || !isAbsolute(whoami.worker_home) ||
+      resolve(whoami.backing_path) !== join(home, "sessions", `ci-${sessionId.slice(4)}.json`) ||
+      resolve(whoami.worker_home) !== join(home, "workers", sessionId)) {
+    throw new LocusMintError("session authority, backing or expiry is invalid");
+  }
+  validateSessionStorage(home, sessionId);
+  const labels: Record<string, string> = {
+    LOCUS_SESSION_ID: sessionId, LOCUS_BINDING: whoami.binding_alias,
+    LOCUS_BINDING_ID: whoami.binding_id, LOCUS_TENANT: whoami.tenant,
+    LOCUS_SEAL: whoami.seal, LOCUS_WORKER_HOME: whoami.worker_home,
+    LOCUS_EXPIRES_AT: whoami.expires_at,
+    LOCUS_PROVIDERS: whoami.providers.map(p => p.provider).join(","),
+  };
+  for (const [key, expected] of Object.entries(labels)) {
+    if (source[key] !== undefined && source[key] !== expected) throw new LocusMintError("session labels do not match live authority");
+  }
+  if (mint && (mint.path !== whoami.backing_path || mint.binding !== whoami.binding_alias ||
+      mint.binding_id !== whoami.binding_id || mint.tenant !== whoami.tenant ||
+      mint.worker_home !== whoami.worker_home || mint.seal !== whoami.seal ||
+      mint.expires_at !== whoami.expires_at)) throw new LocusMintError("mint response does not match live authority");
+  const env: NodeJS.ProcessEnv = { ...scrubbedChildEnv(source), ...labels,
+    [EXECUTOR_CAPABILITY_ENV]: executor, LOCUS_HOME: home, LOCUS_NOTIFY: "0", LOCUS_QUIET: "1",
+    HOME: whoami.worker_home, USERPROFILE: whoami.worker_home,
+    GH_CONFIG_DIR: join(whoami.worker_home, "gh"),
+    AWS_CONFIG_FILE: join(whoami.worker_home, "aws", "config"),
+    AWS_SHARED_CREDENTIALS_FILE: join(whoami.worker_home, "aws", "credentials"),
+  };
+  Object.assign(env, reconstructLocusProviderScopeEnv(whoami.providers));
+  const verifiedMint: LocusCiMint = { session_id: sessionId, binding: whoami.binding_alias,
+    binding_id: whoami.binding_id, tenant: whoami.tenant, expires_at: whoami.expires_at,
+    seal: whoami.seal, path: whoami.backing_path, worker_home: whoami.worker_home,
+    secrets_resolved: false, env: Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string" && isAllowedMintEnvKey(entry[0]))),
+  };
+  return { sessionId, binding: whoami.binding_alias, tenant: whoami.tenant,
+    expiresAt: whoami.expires_at, env: Object.freeze(env), mint: verifiedMint };
 }
 
 /**
@@ -1517,7 +1753,17 @@ export async function runWithLocusSessionIfConfigured<T>(
   fn: (handle: LocusSessionHandle | null) => Promise<T> | T,
   opts?: RunWithLocusSessionOptions,
 ): Promise<T> {
-  const env = opts?.env ?? process.env;
+  const env = opts?.env ?? getLocusJobEnv();
+  if (env.LOCUS_SESSION_ID !== undefined || env[EXECUTOR_CAPABILITY_ENV] !== undefined) {
+    if (!env.LOCUS_SESSION_ID || !env[EXECUTOR_CAPABILITY_ENV]) {
+      throw new LocusMintError("inherited session identity and executor authority must both be present");
+    }
+    const handle = validateExistingLocusSession(env);
+    const captured = { ...handle.env };
+    return runInLocusJobEnv(handle.env, () => fn(handle), () => {
+      validateExistingLocusSession(captured, handle.mint);
+    });
+  }
   // Consult ~/.ashlr locus.enforce / locus.firm when env LOCUS_ENFORCE is unset.
   const decision = decideLocusSessionRun(env, readLocusConfigFromAshlr());
 
@@ -1533,6 +1779,14 @@ export async function runWithLocusSessionIfConfigured<T>(
     throw new LocusSessionConfigError(decision.reason);
   }
 
+  if (decision.kind === "already-session") {
+    const handle = validateExistingLocusSession(env);
+    const captured = { ...handle.env };
+    return runInLocusJobEnv(handle.env, () => fn(handle), () => {
+      validateExistingLocusSession(captured, handle.mint);
+    });
+  }
+
   if (decision.kind === "warn") {
     const msg = `[ashlr] locus session: ${decision.reason}`;
     if (opts?.onWarn) {
@@ -1546,7 +1800,7 @@ export async function runWithLocusSessionIfConfigured<T>(
     }
   }
 
-  // already-session | pass-through | warn
+  // pass-through | warn
   return await fn(null);
 }
 
@@ -1841,10 +2095,10 @@ export function locusCiMint(
   if (opts?.force) {
     args.push("--force");
   }
-  const env = locusEnv({
-    ...opts?.env,
-    ...(opts?.home ? { LOCUS_HOME: opts.home } : {}),
-  });
+  const baseline = scrubbedChildEnv(getLocusJobEnv(), opts?.env);
+  const env = { ...baseline,
+    LOCUS_HOME: opts?.home ?? opts?.env?.LOCUS_HOME ?? getLocusJobEnv().LOCUS_HOME ?? join(homedir(), ".locus"),
+    LOCUS_NOTIFY: "0", LOCUS_QUIET: "1" };
   const r = spawnSync(LOCUS_BIN, args, {
     encoding: "utf8",
     timeout: opts?.timeoutMs ?? TIMEOUT_MS,
@@ -1852,12 +2106,10 @@ export function locusCiMint(
     maxBuffer: 4 * 1024 * 1024,
   });
   if (r.error) {
-    throw new LocusMintError(`ci mint failed: ${r.error.message}`);
+    throw new LocusMintError("ci mint process unavailable");
   }
   if (r.status !== 0) {
-    throw new LocusMintError(
-      `ci mint exit ${r.status}: ${(r.stderr ?? r.stdout ?? "").trim() || "unknown"}`,
-    );
+    throw new LocusMintError("ci mint command failed");
   }
   const stdout = (r.stdout ?? "").trim();
   if (!stdout) {
@@ -1866,19 +2118,17 @@ export function locusCiMint(
   let mint: LocusCiMint;
   try {
     mint = JSON.parse(stdout) as LocusCiMint;
-  } catch (e) {
-    throw new LocusMintError(
-      `ci mint JSON parse failed: ${e instanceof Error ? e.message : String(e)}`,
-    );
+  } catch {
+    throw new LocusMintError("ci mint returned invalid metadata");
   }
-  if (!mint.session_id || !mint.env) {
+  if (!mint || typeof mint !== "object" || Array.isArray(mint) || !mint.session_id || !mint.env) {
     throw new LocusMintError("ci mint JSON missing session_id or env");
   }
   if (mint.secrets_resolved) {
     throw new LocusMintError("ci mint unexpectedly returned resolved secrets");
   }
   mint.env = validateMintEnv(mint.env);
-  return mint;
+  return validateMintBinding(binding, mint);
 }
 
 /**
@@ -1905,12 +2155,12 @@ export async function withLocusSession<T>(
   const mint = locusCiMint(binding, opts);
   const home =
     opts?.home ??
-    process.env.LOCUS_HOME ??
+    opts?.env?.LOCUS_HOME ?? getLocusJobEnv().LOCUS_HOME ??
     mint.env.LOCUS_HOME ??
     join(homedir(), ".locus");
 
   const env: NodeJS.ProcessEnv = {
-    ...scrubbedChildEnv(process.env, opts?.env),
+    ...scrubbedChildEnv(getLocusJobEnv(), opts?.env),
     ...mint.env,
     LOCUS_HOME: home,
     LOCUS_SESSION_ID: mint.session_id,
@@ -1918,16 +2168,11 @@ export async function withLocusSession<T>(
     LOCUS_QUIET: "1",
   };
 
-  const handle: LocusSessionHandle = {
-    sessionId: mint.session_id,
-    binding: mint.binding,
-    tenant: mint.tenant,
-    expiresAt: mint.expires_at,
-    env,
-    mint,
-  };
-
-  return await fn(handle);
+  const handle = validateExistingLocusSession(env, mint);
+  const captured = { ...handle.env };
+  return runInLocusJobEnv(handle.env, () => fn(handle), () => {
+    validateExistingLocusSession(captured, mint);
+  });
 }
 
 // ---------------------------------------------------------------------------

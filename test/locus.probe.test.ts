@@ -359,6 +359,7 @@ describe('validateMintEnv', () => {
       SUPABASE_PROJECT_REF: 'xyz',
       LOCUS_SUPABASE_PROJECT_REF: 'xyz',
       LOCUS_GITHUB_ORGS: 'ashlrai',
+      LOCUS_EXECUTOR_CAPABILITY: 'a'.repeat(64),
     });
     expect(env.LOCUS_SESSION_ID).toBe('abc');
     expect(env.SUPABASE_PROJECT_REF).toBe('xyz');
@@ -379,6 +380,12 @@ describe('validateMintEnv', () => {
     expect(() =>
       validateMintEnv({ LOCUS_SESSION_ID: 1 as never }),
     ).toThrow(/disallowed env metadata/);
+  });
+
+  it('requires delegated executor authority and never accepts operator authority', () => {
+    expect(() => validateMintEnv({ LOCUS_SESSION_ID: 'ses_a' })).toThrow(/executor authority/);
+    expect(() => validateMintEnv({ LOCUS_EXECUTOR_CAPABILITY: 'invalid' })).toThrow(/executor authority/);
+    expect(() => validateMintEnv({ LOCUS_EXECUTOR_CAPABILITY: 'a'.repeat(64), LOCUS_CONTROL_CAPABILITY: 'b'.repeat(64) })).toThrow(/disallowed/);
   });
 });
 
@@ -1069,9 +1076,9 @@ describe('runTask CI session isolation (LOCUS_CI_BINDING / LOCUS_ENFORCE)', () =
     }
   });
 
-  it('overlays mint handle env on process.env for the task body only', async () => {
+  it('refuses an unscoped in-process provider before any client call', async () => {
     const prev = snapshotLocusEnv();
-    const seen: { sessionId?: string } = {};
+    const seen: { sessionId?: string; calls: number } = { calls: 0 };
     try {
       delete process.env.LOCUS_SESSION_ID;
       vi.doMock('../src/core/integrations/locus.js', async (importOriginal) => {
@@ -1086,8 +1093,9 @@ describe('runTask CI session isolation (LOCUS_CI_BINDING / LOCUS_ENFORCE)', () =
               binding: string;
               env: NodeJS.ProcessEnv;
             } | null) => Promise<unknown>,
-          ) =>
-            fn({
+          ) => {
+            const { runInLocusJobEnv } = await import('../src/core/integrations/locus-job-env.js');
+            const handle = {
               sessionId: 'sess-mint-test',
               binding: 'ci-acme',
               env: {
@@ -1095,7 +1103,9 @@ describe('runTask CI session isolation (LOCUS_CI_BINDING / LOCUS_ENFORCE)', () =
                 LOCUS_BINDING: 'ci-acme',
                 LOCUS_HOME: '/tmp/locus-mint-test',
               },
-            }),
+            };
+            return runInLocusJobEnv(handle.env, () => fn(handle));
+          },
         };
       });
 
@@ -1114,7 +1124,8 @@ describe('runTask CI session isolation (LOCUS_CI_BINDING / LOCUS_ENFORCE)', () =
           id: 'mock',
           supportsTools: false,
           chat: async () => {
-            seen.sessionId = process.env.LOCUS_SESSION_ID;
+            seen.calls++;
+            seen.sessionId = (await import('../src/core/integrations/locus-job-env.js')).getLocusJobEnv().LOCUS_SESSION_ID;
             return {
               content: 'ok',
               usage: { tokensIn: 1, tokensOut: 1 },
@@ -1127,9 +1138,11 @@ describe('runTask CI session isolation (LOCUS_CI_BINDING / LOCUS_ENFORCE)', () =
           onStep: () => {},
         },
       );
-      expect(task.status).toBe('done');
-      expect(seen.sessionId).toBe('sess-mint-test');
-      // Restored after body — must not leak mint session into ambient env.
+      expect(task.status).toBe('failed');
+      expect(task.error).toContain('in-process provider clients have no qualified job credential contract');
+      expect(seen.calls).toBe(0);
+      expect(seen.sessionId).toBeUndefined();
+      // The private context must never leak into ambient env.
       expect(process.env.LOCUS_SESSION_ID).toBeUndefined();
     } finally {
       restoreLocusEnv(prev);
@@ -1331,7 +1344,7 @@ describe('runBestOfN CI session isolation (LOCUS_CI_BINDING / LOCUS_ENFORCE)', (
     }
   });
 
-  it('overlays mint handle env on process.env for the best-of-n body only', async () => {
+  it('captures mint handle env privately for the best-of-n body only', async () => {
     const prev = snapshotLocusEnv();
     const seen: { sessionId?: string } = {};
     try {
@@ -1348,8 +1361,9 @@ describe('runBestOfN CI session isolation (LOCUS_CI_BINDING / LOCUS_ENFORCE)', (
               binding: string;
               env: NodeJS.ProcessEnv;
             } | null) => Promise<unknown>,
-          ) =>
-            fn({
+          ) => {
+            const { runInLocusJobEnv } = await import('../src/core/integrations/locus-job-env.js');
+            const handle = {
               sessionId: 'sess-bon-mint',
               binding: 'ci-acme',
               env: {
@@ -1357,12 +1371,14 @@ describe('runBestOfN CI session isolation (LOCUS_CI_BINDING / LOCUS_ENFORCE)', (
                 LOCUS_BINDING: 'ci-acme',
                 LOCUS_HOME: '/tmp/locus-bon-mint-test',
               },
-            }),
+            };
+            return runInLocusJobEnv(handle.env, () => fn(handle));
+          },
         };
       });
 
       const sandboxMock = vi.fn(async () => {
-        seen.sessionId = process.env.LOCUS_SESSION_ID;
+        seen.sessionId = (await import('../src/core/integrations/locus-job-env.js')).getLocusJobEnv().LOCUS_SESSION_ID;
         return {
           proposalId: undefined,
           runId: 'run-mint',
@@ -1384,7 +1400,7 @@ describe('runBestOfN CI session isolation (LOCUS_CI_BINDING / LOCUS_ENFORCE)', (
       await runBestOfN(makeItem(), makeConfig());
       expect(sandboxMock).toHaveBeenCalled();
       expect(seen.sessionId).toBe('sess-bon-mint');
-      // Restored after body — must not leak mint session into ambient env.
+      // The private context must never leak into ambient env.
       expect(process.env.LOCUS_SESSION_ID).toBeUndefined();
     } finally {
       restoreLocusEnv(prev);

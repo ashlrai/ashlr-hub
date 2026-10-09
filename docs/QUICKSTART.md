@@ -13,6 +13,10 @@ The verified 3.25.3 compatibility release remains `@ashlr/hub`.
 Local routes remain `/verse/`, and the published macOS app is `Phantom.app`. See
 [the product naming guide](PHANTOM-BRAND.md).
 
+As checked on 2026-10-09, [phm.dev](https://phm.dev) presents the separate
+[Phantom Secrets](https://github.com/ashlrai/phantom-secrets) credential tool.
+Use the workbench release links below for this guide.
+
 <a id="open-verse"></a>
 
 ## Open Phantom
@@ -81,15 +85,20 @@ See [Automatic work](AUTOMATIC-OUTCOMES.md) for resource boundaries and recovery
 
 ### Make your first useful turn
 
-1. Choose **Work with me**, open **New chat** and choose a project folder. Saving a folder as a project
-   does not enroll it for unattended fleet work.
+1. Choose **Work with me**, open **New chat** and choose a scratch project or
+   public repository for your first task. Saving a folder as a project does not
+   enroll it for unattended fleet work.
 2. Use provider CLIs you are already signed in to, or start Ollama with
    a tool-capable local model. **Automatic** chooses an eligible resource;
    open **Advanced** if you want to pin an account or model. For separate Claude Code, Codex and Grok accounts,
    follow [seat commissioning](RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity).
    Each vendor signs in through its own CLI; Phantom does not take its password.
+   Providers may have their own costs; check the selected resource and budget
+   before starting the turn.
 3. Ask for a small, checkable change. Inspect reported tools, context and
    sources, then review the diff and verification results before accepting it.
+   When sharing setup feedback, include the task and checks, and keep private
+   code, credentials and unredacted logs out of the report.
    Usage can be reported, estimated or unknown; a producer's success message
    alone does not prove delivery. Use **⌘K** to find actions and **⌘J** for
    **Needs you**. The full interface is in the [Phantom guide](https://github.com/ashlrai/phantom/blob/master/docs/VERSE.md).

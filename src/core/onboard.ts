@@ -196,33 +196,45 @@ async function stepGenome(): Promise<OnboardStep> {
   }
 }
 
-/** Step 6: phantom status — report only, never touches secrets. */
+/** Step 6: Secrets metadata and names only, never retrieves secret values. */
 async function stepPhantom(): Promise<OnboardStep> {
   try {
     const status = getPhantomStatus();
+    if (status.error) {
+      return step(
+        'phantom',
+        'manual',
+        status.error === 'status-config-unavailable'
+          ? 'Phantom Secrets project metadata status unverified. Inspect existing project configuration and file access.'
+          : 'Phantom Secrets project metadata status unverified. Use a compatible CLI: https://github.com/ashlrai/phantom-secrets/blob/main/docs/hub-status-contract.md',
+      );
+    }
     if (!status.installed) {
       return step(
         'phantom',
         'manual',
-        'Phantom not installed. Install from https://phantom.sh to enable secrets management.',
+        'Phantom Secrets not installed. Install: https://github.com/ashlrai/phantom-secrets#installation',
       );
     }
     if (!status.initialized) {
       return step(
         'phantom',
         'detected',
-        `Phantom v${status.version ?? 'unknown'} installed but vault not initialized. Run: phantom init`,
+        `Phantom Secrets v${status.version ?? 'unknown'} installed but project not configured. Review project configuration with: phantom init`,
       );
     }
     const count = status.secretNames.length;
     return step(
       'phantom',
       'ok',
-      `Phantom v${status.version ?? 'unknown'} — vault initialized (${count} secret${count !== 1 ? 's' : ''})`,
+      `Phantom Secrets v${status.version ?? 'unknown'} — project configured (${count} secret name${count !== 1 ? 's' : ''}; vault readiness unverified)`,
     );
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return step('phantom', 'manual', `Phantom status unavailable: ${msg}`);
+  } catch {
+    return step(
+      'phantom',
+      'manual',
+      'Phantom Secrets project metadata status unverified. Use a compatible CLI: https://github.com/ashlrai/phantom-secrets/blob/main/docs/hub-status-contract.md',
+    );
   }
 }
 

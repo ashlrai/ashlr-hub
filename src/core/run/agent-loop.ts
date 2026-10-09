@@ -12,8 +12,8 @@ import { selectedOutcomeAdmissionCurrent, SelectedOutcomeAdmissionRefusal, withS
  * tool-call events per tool execution.
  *
  * CI session isolation (opt-in via LOCUS_CI_BINDING / LOCUS_BINDING):
- *   When configured, runTask mints an ephemeral Locus pin and overlays LOCUS_*
- *   onto process.env so tools / child engines inherit the sealed session.
+ *   When configured, runTask mints an ephemeral Locus pin and captures a private job environment
+ *   so tools / child engines inherit the sealed session without global mutation.
  *   LOCUS_ENFORCE=enforce without a binding refuses as task.status='failed'
  *   (never throws). Default (unset binding + enforce off) is a no-op.
  *   Does not add a second pre-mutate gate — that lives on spawnEngine /
@@ -31,6 +31,7 @@ import type {
   ChatResult,
   ToolExecutor,
 } from '../types.js';
+import { assertLocusJobDispatch, hasInheritedLocusSession, hasLocusJobEnv } from '../integrations/locus-job-env.js';
 import { fitTaskContext } from './context-window.js';
 import { addUsage, overBudget, newUsage } from './budget.js';
 import { nullSink } from './streaming.js';
@@ -44,7 +45,6 @@ import {
   releasePreparedToolEffect,
 } from '../util/effect-journal.js';
 import {
-  applyLocusSessionEnv,
   LocusMintError,
   LocusSessionConfigError,
   runWithLocusSessionIfConfigured,
@@ -147,30 +147,17 @@ export async function runTask(
   ctx: RunTaskContext,
 ): Promise<RunTask> {
   // CI isolation: when LOCUS_CI_BINDING/LOCUS_BINDING is set, mint an
-  // ephemeral sealed session and overlay LOCUS_* onto process.env so tools
-  // and child engines inherit it. Restores prior values after the task ends.
+  // ephemeral sealed session in a private job context so child engines inherit it.
   // Default (unset binding + LOCUS_ENFORCE off) is a no-op pass-through.
   // Never throws — session refuse/mint failures become task.status='failed'.
   try {
-    return await runWithLocusSessionIfConfigured(async (handle) => {
-      const restored: Array<[string, string | undefined]> = [];
-      if (handle) {
-        const overlay: NodeJS.ProcessEnv = {};
-        applyLocusSessionEnv(overlay, handle.env);
-        for (const [key, value] of Object.entries(overlay)) {
-          if (typeof value !== 'string') continue;
-          restored.push([key, process.env[key]]);
-          process.env[key] = value;
-        }
+    return await runWithLocusSessionIfConfigured(async () => {
+      if (hasLocusJobEnv() || hasInheritedLocusSession()) {
+        throw new LocusSessionConfigError(
+          'Locus sealed jobs require scoped child engines; in-process provider clients have no qualified job credential contract',
+        );
       }
-      try {
-        return await runTaskBody(task, client, ctx);
-      } finally {
-        for (const [key, prev] of restored) {
-          if (prev === undefined) delete process.env[key];
-          else process.env[key] = prev;
-        }
-      }
+      return await runTaskBody(task, client, ctx);
     });
   } catch (error) {
     if (
@@ -587,6 +574,7 @@ async function runTaskBody(
               break;
             }
             try {
+              assertLocusJobDispatch();
               const rawResult = await executor(tc.arguments, ctx.signal);
               toolResultContent =
                 typeof rawResult === 'string'

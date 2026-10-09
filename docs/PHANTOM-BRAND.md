@@ -21,7 +21,11 @@ normal enrollment and approval flow.
 The intended website separates the workbench at `phm.dev` and Secrets at
 `phm.dev/secrets`. The prepared website source still requires its separate
 verification and production promotion; this source cutover does not establish
-that either new page is live.
+that either new page is live. As checked on 2026-10-09,
+[phm.dev](https://phm.dev) still presents the separate
+[Phantom Secrets](https://github.com/ashlrai/phantom-secrets) credential tool.
+Use the versioned workbench release and [first-run guide](QUICKSTART.md#open-verse)
+for workbench installation.
 
 The native window, menus and About identify Phantom. Published 3.25.1 uses `Phantom.app` and `Phantom_3.25.1_aarch64.dmg`; the historical 3.25.0 release retains `Ashlr.app`. The guarded installer requires prior Stop/drain and a closed, identity-verified app, then coordinates the app/current CLI links with a full rollback archive. It refuses conflicting names or uncertain work. The bundle identifier, signing identity, custody keys, grants, data and launch-agent names are retained. This does not activate automatic updates. Published 3.25.2 supplies the verified signed app/CLI feed. The 3.25.2 updater client later reproduced a startup abort. Published 3.25.3 corrects that constructor and supplies the compatibility bridge; existing 3.25.1 installs need a qualified manual update. Feed publication does not establish installed startup or activate automatic updates or resident authority. No notarization is claimed.
 

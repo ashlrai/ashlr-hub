@@ -120,6 +120,12 @@ const loadMcpCmd = lazyCmd(
   'mcp command requires src/cli/mcp.ts (M3 module not yet built).',
 );
 
+const loadCompanionsCmd = lazyCmd(
+  () => import('./companions.js'),
+  (m) => m.cmdCompanions as Cmd,
+  'companions command requires src/cli/companions.ts.',
+);
+
 // Cache slots — undefined = not yet attempted; null = attempted & failed
 let _getToolsRegistry: GetToolsRegistryFn | null | undefined = undefined;
 let _discoverMcpServers: DiscoverMcpServersFn | null | undefined = undefined;
@@ -1856,6 +1862,12 @@ async function main(): Promise<void> {
       case 'doctor':
         process.exitCode = await cmdDoctor(rest);
         break;
+
+      case 'companions': {
+        const cmdCompanions = await loadCompanionsCmd();
+        process.exitCode = await cmdCompanions(rest);
+        break;
+      }
 
       case 'init':
         process.exitCode = await cmdInit(rest);
