@@ -50,6 +50,8 @@ import { sweepRepoSandboxes } from '../core/sandbox/worktree.js';
 export interface DemoDisposeResult {
   /** True only when policy removal completed while outward mutations were quiesced. */
   readonly unenrolled: boolean;
+  /** All requested removals completed; intentionally kept directories count as complete. */
+  readonly cleanupComplete: boolean;
   readonly reason: string;
 }
 
@@ -171,7 +173,7 @@ export function makeDemoContext(opts?: MakeDemoContextOptions): DemoContext {
   let disposeResult: DemoDisposeResult | null = null;
 
   const dispose = (): DemoDisposeResult => {
-    if (disposed) return disposeResult ?? { unenrolled: false, reason: 'cleanup outcome unavailable' };
+    if (disposed) return disposeResult ?? { unenrolled: false, cleanupComplete: false, reason: 'cleanup outcome unavailable' };
     disposed = true;
 
     // a. Unenroll the tmp repo + sweep its sandboxes (the rollback) — STILL
@@ -180,11 +182,13 @@ export function makeDemoContext(opts?: MakeDemoContextOptions): DemoContext {
       const result = unenroll(repoDir);
       disposeResult = {
         unenrolled: result === undefined || (result.ok && result.quiesced),
+        cleanupComplete: true,
         reason: result?.reason ?? 'legacy cleanup completed',
       };
     } catch (err) {
       disposeResult = {
         unenrolled: false,
+        cleanupComplete: true,
         reason: err instanceof Error ? err.message : String(err),
       };
     }
@@ -196,15 +200,24 @@ export function makeDemoContext(opts?: MakeDemoContextOptions): DemoContext {
 
     // b. rm -rf the tmp repo + tmp HOME (unless --no-cleanup keeps them).
     if (!keep) {
-      try {
-        rmSync(repoDir, { recursive: true, force: true });
-      } catch {
-        /* idempotent */
+      const failures: string[] = [];
+      for (const [label, path] of [['repo', repoDir], ['home', home]] as const) {
+        try {
+          rmSync(path, { recursive: true, force: true });
+          // A successful policy rollback does not prove filesystem cleanup.
+          if (existsSync(path)) failures.push(`${label}: still present`);
+        } catch (err) {
+          // Do not put arbitrary exception text (paths or file contents) in the trace.
+          const code = (err as NodeJS.ErrnoException | null)?.code;
+          const safeCode = typeof code === 'string' &&
+            ['EACCES', 'EPERM', 'EBUSY', 'ENOTEMPTY', 'EMFILE', 'ENFILE', 'EIO'].includes(code)
+            ? code : 'UNKNOWN';
+          failures.push(`${label}: ${safeCode}`);
+        }
       }
-      try {
-        if (existsSync(home)) rmSync(home, { recursive: true, force: true });
-      } catch {
-        /* idempotent */
+      if (failures.length > 0) {
+        disposeResult = { ...disposeResult, cleanupComplete: false,
+          reason: `temporary cleanup incomplete (${failures.join('; ')})` };
       }
     }
 

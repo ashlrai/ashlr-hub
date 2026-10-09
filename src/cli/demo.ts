@@ -83,8 +83,10 @@ interface DemoTranscript {
   repoDir: string;
   /** Whether the tmp dir was kept (--no-cleanup). */
   kept: boolean;
-  /** Present when best-effort policy teardown could not confirm unenrollment. */
+  /** Present when policy teardown or requested temporary-directory cleanup failed. */
   cleanupError?: string;
+  /** Present when the live proposal activation was refused. */
+  error?: 'activation-refused';
   /** Ordered step records. */
   steps: DemoStep[];
 }
@@ -220,6 +222,8 @@ export async function cmdDemo(
   let liveModel = false;
   let ok = false;
   let cleanupError: string | undefined;
+  const activationRefusal = Symbol('demo activation refused');
+  let activationRefused = false;
 
   try {
     // Narrate the first two (already-completed) steps + install the signal
@@ -280,17 +284,9 @@ export async function cmdDemo(
           'Daemon tick refused',
           'live demo execution requires a one-use proposal activation permit',
         );
-        if (asJson) {
-          console.log(JSON.stringify({
-            ok: false,
-            liveModel: true,
-            error: 'activation-refused',
-            steps,
-          }, null, 2));
-        } else {
-          console.error(red('demo: live daemon tick refused by the activation gate'));
-        }
-        return 1;
+        // Report only after finally completes, so refusal cannot hide failed cleanup.
+        activationRefused = true;
+        throw activationRefusal;
       }
       step(
         'tick',
@@ -360,6 +356,8 @@ export async function cmdDemo(
     );
 
     ok = true;
+  } catch (err) {
+    if (err !== activationRefusal) throw err;
   } finally {
     // ── Step 9: GUARANTEED auto-cleanup — runs on success, on error, AND on a
     //    forced mid-run throw. dispose() is idempotent + never throws.
@@ -368,7 +366,7 @@ export async function cmdDemo(
     if (!signalled) {
       try {
         const disposed = ctx.dispose();
-        if (!disposed.unenrolled) {
+        if (!disposed.unenrolled || !disposed.cleanupComplete) {
           cleanupError = disposed.reason;
           ok = false;
         }
@@ -386,12 +384,16 @@ export async function cmdDemo(
       liveModel,
       repoDir: ctx.repoDir,
       kept: noCleanup,
+      ...(activationRefused ? { error: 'activation-refused' as const } : {}),
       ...(cleanupError ? { cleanupError } : {}),
       steps,
     };
     console.log(JSON.stringify(transcript, null, 2));
   } else {
     console.log('');
+    if (activationRefused) {
+      console.error(red('demo: live daemon tick refused by the activation gate'));
+    }
     if (cleanupError) {
       console.error(`  ${red('cleanup incomplete:')} ${cleanupError}`);
     } else if (noCleanup) {
