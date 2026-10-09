@@ -41,8 +41,8 @@ the installed version with `phm --version`. Browse
 [GitHub releases](https://github.com/ashlrai/phantom/releases/latest) and select
 that same version before using desktop installer artifacts.
 For a reproducible install of the published release verified on 2026-10-09,
-use `npm install -g @ashlr/phantom@3.29.3`; its
-[versioned release](https://github.com/ashlrai/phantom/releases/tag/v3.29.3)
+use `npm install -g @ashlr/phantom@3.29.5`; its
+[versioned release](https://github.com/ashlrai/phantom/releases/tag/v3.29.5)
 provides the matching installer artifacts. Package installation, desktop
 installation and fleet activation are separate steps.
 
