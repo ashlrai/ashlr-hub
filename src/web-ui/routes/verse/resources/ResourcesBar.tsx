@@ -22,6 +22,7 @@ import { estimatedCreditValue, formatNativeCreditUnits, nativeCreditBalanceTitle
 import { useMemo, useState, type CSSProperties, type ReactNode } from 'react';
 import { formatMetric } from '../../../components/charts/format-metric.js';
 import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
+import { IconChevronDown, IconChevronUp } from '../../../components/primitives/icons.js';
 import { Tooltip } from '../../../components/primitives/Tooltip.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { usedPercentText } from '../percent-text.js';
@@ -481,7 +482,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
         aria-label="Compact resources" aria-pressed={resources.compact}
         title={resources.compact ? 'Expand resource details' : 'Compact resources; hover or focus for details'}
         onClick={() => setResourcesCompact(!resources.compact)}>
-        <span>Resources</span><span aria-hidden="true">{resources.compact ? '▾' : '▴'}</span>
+        <span>Resources</span>{resources.compact ? <IconChevronDown /> : <IconChevronUp />}
       </button> : null}
       <span className={styles.visuallyHidden} role="status">{announcement}</span>
       {ordered.map((entry, index) => (
