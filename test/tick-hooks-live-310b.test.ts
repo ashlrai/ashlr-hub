@@ -503,8 +503,9 @@ describe('lanes, presence and the router seam', () => {
     await hooks.beforeTick(hookCtx);
     const first = hooks.route(item(), CFG);
     const second = hooks.route(item(), CFG);
-    expect(first.backend).toBe('grok-cli');
-    expect(first.seatDecision?.seatId).toBe('grok');
+    expect(first.backend).toBe('llama-server');
+    expect(first.seatDecision?.seatId).toBe('local');
+    expect(first.hold).toBeNull();
     expect(second).toEqual(first);
     expect(legacy).toHaveBeenCalledTimes(1);
     expect(h.shadowed).toBe(1);
@@ -614,6 +615,9 @@ describe('seatAllows', () => {
   });
 
   it('admits the cached concrete default model for a manager without a model override', async () => {
+    // Isolate concrete native-model admission from independent seat ranking.
+    policy!.spend.seats.grok.roles = ['judge'];
+    policy!.spend.seats.local.roles = ['judge'];
     const hooks = createLiveTickHooks({ deps: { ...h.deps,
       legacyRoute: () => ({ backend: 'claude', tier: 'frontier', reason: 'native default' }),
     } });
@@ -693,9 +697,10 @@ describe('afterDispatch / afterLanding', () => {
     const hooks = createLiveTickHooks({ deps: h.deps });
     hooks.effectiveConfig(CFG);
     await hooks.beforeTick(hookCtx);
-    hooks.route(item(), CFG);
-    await hooks.afterDispatch(outcome());
-    expect(h.journal.at(-1)).toMatchObject({ type: 'dispatch', repo: REPO, title: 'Fix the parser', source: 'todo', seatId: 'grok', proposalId: 'p-1', seatDecision: { seatId: 'grok' } });
+    const route = hooks.route(item(), CFG);
+    expect(route).toMatchObject({ backend: 'llama-server', hold: null, seatDecision: { seatId: 'local' } });
+    await hooks.afterDispatch(outcome({ backend: route.backend, model: route.model ?? null, seatId: route.seatDecision!.seatId, lane: route.lane }));
+    expect(h.journal.at(-1)).toMatchObject({ type: 'dispatch', backend: route.backend, repo: REPO, title: 'Fix the parser', source: 'todo', seatId: 'local', proposalId: 'p-1', seatDecision: { seatId: 'local' } });
   });
 
   it('records a held item in the tick state (the parked Gantt)', async () => {
@@ -1392,7 +1397,9 @@ describe('fresh Grok preference and actual admitted dispatch capacity', () => {
 
 describe('reset-aware selected batch — real routing seam with injected advice', () => {
   function batchHarness(advice: NonNullable<LiveHooksDeps['resourceAdvice']>, extra: Partial<LiveHooksDeps> = {}) {
-    policy = {...policy!,spend:{...policy!.spend,meteredUsdPerDay:1}};
+    // Advice cases compare two subscription producers. Keep the local account
+    // as a judge so its independent free headroom cannot absorb that test.
+    policy = {...policy!,spend:{...policy!.spend,meteredUsdPerDay:1,seats:{...policy!.spend.seats,local:{...policy!.spend.seats.local,roles:['judge']}}}};
     const views = [grokSeat(), { ...claudeSeat(), tier: 'fast' as const }];
     const recordScheduling = vi.fn<NonNullable<LiveHooksDeps['recordScheduling']>>(async () => undefined);
     const hooks = createLiveTickHooks({ deps: { ...h.deps,
@@ -1473,12 +1480,13 @@ describe('reset-aware selected batch — real routing seam with injected advice'
       liveLeaderConfig:cfg=>changed && kind==='config' ? {...cfg,foundry:{...cfg.foundry,allowedBackends:['builtin']}} : cfg,
       killActive:()=>changed && kind==='stop',
     });
+    if(kind==='capacity') policy!.spend.seats.local.roles=['producer'];
     hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);await hooks.prepareDispatchPlan!([item()],CFG);
     expect(advice).not.toHaveBeenCalled();
     if(kind==='capacity'){
       // Paid provider rows became spent; an admitted local producer remains
       // useful and must not be globally parked by advisory freshness checks.
-      expect(hooks.route(item(),CFG)).toMatchObject({backend:'builtin',hold:null,seatDecision:{seatId:'local'}});
+      expect(hooks.route(item(),CFG)).toMatchObject({backend:'llama-server',hold:null,seatDecision:{seatId:'local'}});
       expect(hooks.seatAllows('claude',{maxPercent:90}).allowed).toBe(false);
       expect(hooks.seatAllows('grok-cli',{maxPercent:90}).allowed).toBe(false);
     }else expect(hooks.route(item(),CFG).hold).not.toBeNull();

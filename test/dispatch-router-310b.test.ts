@@ -314,8 +314,33 @@ describe('split items never go local', () => {
     const route = routeWorkItem(item({ effort: 1 }), LEGACY_LOCAL, ctx([grok(), local()]));
     expect(route.hold).toBeNull();
     expect(route.lane).toBe('local');
-    // The legacy engine is kept when it already dispatches through the chosen lane.
-    expect(route.backend).toBe('builtin');
+    // A planning-only legacy engine must not absorb the qualified local lane.
+    expect(route.backend).toBe('llama-server');
+  });
+
+  it.each(['llama-server', 'local-coder'] as const)('binds local runtime evidence to the capable %s producer, preserving a real local pin', (engine) => {
+    const context = ctx([local()], { laneEngines: { ...ctx([]).laneEngines, local: engine } });
+    expect(routeWorkItem(item(), LEGACY_LOCAL, context)).toMatchObject({ backend: engine, lane: 'local', hold: null });
+    const pinned: LegacyRoute = { backend: engine, tier: 'mid', model: 'exact-local-model', reason: 'local pin' };
+    expect(routeWorkItem(item(), pinned, context)).toMatchObject({ backend: engine, model: 'exact-local-model', lane: 'local', hold: null });
+  });
+
+  it('rejects a planning-only injected local producer, then uses an eligible coding account', () => {
+    const context = ctx([local(), grok()], { laneEngines: { ...ctx([]).laneEngines, local: 'builtin' } });
+    const route = routeWorkItem(item(), LEGACY_LOCAL, context);
+    expect(route).toMatchObject({ backend: 'grok-cli', lane: 'grok-cli', hold: null });
+    expect(route.seatDecision?.exclusions.find(e => e.seatId === FLEET_LOCAL_SEAT_ID)?.reasons.join(' ')).toMatch(/tool-capable local producer/);
+    const onlyLocal = routeWorkItem(item(), LEGACY_LOCAL, { ...context, capacity: [local()] });
+    expect(onlyLocal.hold?.kind).toBe('park');
+    expect(onlyLocal.lane).toBeNull();
+  });
+
+  it('has no coding lane when only builtin is allowed, including a configured builtin fleet runtime', () => {
+    const resolved = resolveLaneEngines({ allowedBackends: ['builtin'], installed: () => true, localFleetEngine: 'builtin' });
+    expect(resolved.engines.local).toBeNull();
+    const route = routeWorkItem(item(), LEGACY_LOCAL, ctx([local()], { laneEngines: resolved.engines }));
+    expect(route.hold?.kind).toBe('park');
+    expect(route.lane).toBeNull();
   });
 
   it('uses the lane engine when the legacy engine is in another lane', () => {
@@ -441,7 +466,8 @@ describe('presence caps', () => {
     const engines = resolveLaneEngines({ allowedBackends: ['builtin', 'claude'], installed: () => true, localFleetEngine: null });
     expect(engines.engines['grok-cli']).toBeNull();
     expect(engines.unavailable['grok-cli']).toMatch(/not in foundry.allowedBackends/);
-    expect(engines.engines.local).toBe('builtin');
+    expect(engines.engines.local).toBeNull();
+    expect(engines.unavailable.local).toMatch(/No free local engine/);
     const planned = planLanes({ policy: policy(), directives: null, presence: ABSENT, localServingSlots: 4, engineUnavailable: engines.unavailable });
     expect(planned['grok-cli'].slots).toBe(0);
   });
