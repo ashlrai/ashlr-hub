@@ -23,6 +23,7 @@ import { verseBootstrapQuery } from '../verse-queries.js';
 import { budgetQuery } from '../budget/budget-queries.js';
 import { ResourcesBar } from './ResourcesBar.js';
 import { ResourcesDrawer } from './ResourcesDrawer.js';
+import { verseLocalModelsQuery } from '../usage/usage-queries.js';
 import { resourceReadinessQuery } from './resources-queries.js';
 import { getResourcesUi, openResources, reloadResourcesUiForTest } from './resources-store.js';
 
@@ -436,6 +437,20 @@ describe('ResourcesDrawer — accounts', () => {
 });
 
 describe('ResourcesDrawer — local', () => {
+  it('does not pass its earlier timer clock to freshly completed local metadata', async () => {
+    let clock = NOW;
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const view = render(<ResourcesDrawer mode="docked" />);
+    await screen.findByRole('heading', { name: /^Local models/ });
+    clock += 2000;
+    await act(async () => { await runQuery(verseLocalModelsQuery.key, async () => ({ available: true as const,
+      raw: { ...LOCAL_MODELS, sampledAt: new Date(clock).toISOString(),
+        machine: { ...LOCAL_MODELS.machine, cpu: { usedPercent: 15, intervalMs: 30_000 } } } })); });
+    expect(await screen.findByText('Host CPU · 15% across all cores · 30 s interval · just measured')).toBeInTheDocument();
+    clock += 120_000;
+    view.rerender(<ResourcesDrawer mode="docked" />);
+    expect(await screen.findByText(/Host CPU · 15% across all cores · 30 s interval · 2 min ago/)).toBeInTheDocument();
+  });
   it('shows the runtime, the context each model runs at, and starts a supervised runtime', async () => {
     const user = userEvent.setup();
     render(<ResourcesDrawer mode="docked" now={NOW} />);

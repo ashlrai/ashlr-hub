@@ -44,7 +44,8 @@ const RUNTIME_LABEL: Readonly<Record<string, string>> = { ollama: 'Ollama', lmst
 export interface LocalResourcesProps {
   status: AccountStatus | null;
   onOpenUsage: () => void;
-  now: number;
+  /** Fixed observation clock for tests; normal query updates read the current clock. */
+  now?: number;
   /** The `local` row of GET /api/verse/budget/readiness, when this server has it. */
   readiness?: ResourceReadinessRow | null;
   onReadinessAction?: (fix: ReadinessFix, row: ResourceReadinessRow) => void;
@@ -52,7 +53,7 @@ export interface LocalResourcesProps {
   facts?: ResourceFactsView | null;
 }
 
-export function LocalResources({ status, onOpenUsage, now, readiness = null, onReadinessAction, facts = null }: LocalResourcesProps) {
+export function LocalResources({ status, onOpenUsage, now: fixedNow, readiness = null, onReadinessAction, facts = null }: LocalResourcesProps) {
   const models = useQuery(verseLocalModelsQuery);
   const runtimeRead = useQuery(servingRuntimeQuery);
   const speedQuery = multimodelContextQuery({ projectPath: null });
@@ -66,6 +67,9 @@ export function LocalResources({ status, onOpenUsage, now, readiness = null, onR
   const [note, setNote] = useState<{ tone: 'neutral' | 'danger'; text: string } | null>(null);
   const [busy, setBusy] = useState<'start' | 'stop' | null>(null);
 
+  // Query subscriptions can update between the parent drawer's clock ticks.
+  // Observe actual wall time here rather than treating a new sample as future.
+  const now = fixedNow ?? Date.now();
   const snapshot = models.data?.available ? projectLocalModels(models.data.raw) : null;
   const view = buildLocalModelsView(snapshot, now);
   const runtimes = models.data?.available ? localRuntimeLines(models.data.raw) : [];

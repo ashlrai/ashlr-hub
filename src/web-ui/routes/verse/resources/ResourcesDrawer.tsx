@@ -419,7 +419,7 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
                         facts={entry.facts}
                         status={localRow ? accountStatus(localRow, { healthRead, now }) : null}
                         onOpenUsage={() => go('usage')}
-                        now={now}
+                        now={fixedNow}
                         readiness={readinessById.get('local') ?? null}
                       />
                     );
