@@ -47,4 +47,14 @@ describe('credential-free website public configuration', () => {
     const analytics = fixture(); analytics.rows.push({ id: 'host', key: 'NEXT_PUBLIC_POSTHOG_HOST', type: 'encrypted', target: ['production'], value: 'https://unrelated.example' });
     await expect(readWebsitePublicBuildEnv(analytics.api)).rejects.toThrow('analytics host');
   });
+  it('supports the official scalar production target while rejecting a target changed during read', async () => {
+    const f = fixture(); const original = f.api.getMockImplementation()!;
+    f.api.mockImplementation(async (path) => {
+      const value = await original(path);
+      return path.includes('?decrypt=false') ? value : { ...value, target: 'production', id: undefined };
+    });
+    expect((await readWebsitePublicBuildEnv(f.api))['NEXT_PUBLIC_SUPABASE_ANON_KEY']).toBe(f.token);
+    f.api.mockImplementation(async (path) => path.endsWith('/anon') ? { ...(await original(path)), target: ['preview'] } : original(path));
+    await expect(readWebsitePublicBuildEnv(f.api)).rejects.toThrow('identity changed');
+  });
 });

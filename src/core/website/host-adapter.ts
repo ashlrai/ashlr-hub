@@ -81,13 +81,15 @@ function requireDirectoryEntries(path: string): string[] { return readdirSync(pa
 /** Only browser-public, source-needed settings enter the credential-free builder. */
 export async function readWebsitePublicBuildEnv(api: (endpoint: string) => Promise<Record<string, unknown>>): Promise<Record<string, string>> {
   const keys = ['NEXT_PUBLIC_SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_ANON_KEY', 'NEXT_PUBLIC_POSTHOG_KEY', 'NEXT_PUBLIC_POSTHOG_HOST'];
+  const production = (row: Record<string, unknown>): boolean => !row['gitBranch'] &&
+    (row['target'] === 'production' || (Array.isArray(row['target']) && row['target'].includes('production')));
   const metadata = await api(`/v10/projects/${WEBSITE_PROFILE.projectId}/env?decrypt=false`);
   if (!Array.isArray(metadata['envs'])) throw new Error('Website public client configuration metadata is unavailable');
   const values: Record<string, string> = { NEXT_PUBLIC_PHANTOM_SITE_URL: 'https://phm.dev' };
   for (const key of keys) {
     const selected = metadata['envs'].filter((entry) => {
       const row = object(entry);
-      return row['key'] === key && Array.isArray(row['target']) && row['target'].includes('production') && !row['gitBranch'];
+      return row['key'] === key && production(row);
     });
     if (selected.length > 1) throw new Error('Website public client configuration is ambiguous');
     if (selected.length === 0) continue;
@@ -95,7 +97,7 @@ export async function readWebsitePublicBuildEnv(api: (endpoint: string) => Promi
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(id) || row['type'] === 'sensitive' || row['type'] === 'secret') throw new Error('Website public client configuration is not readable public Config');
     // The single-variable endpoint cannot retrieve unrelated server credentials.
     const observed = await api(`/v1/projects/${WEBSITE_PROFILE.projectId}/env/${id}`);
-    if (observed['id'] !== id || observed['key'] !== key) throw new Error('Website public client configuration identity changed');
+    if ((observed['id'] !== undefined && observed['id'] !== id) || observed['key'] !== key || !production(observed) || observed['type'] === 'sensitive' || observed['type'] === 'secret') throw new Error('Website public client configuration identity changed');
     const value = string(observed['value']);
     if (value.length > 4096 || /[\r\n]/.test(value) || value.includes('\0')) throw new Error('Website public client configuration value is invalid');
     values[key] = value;
