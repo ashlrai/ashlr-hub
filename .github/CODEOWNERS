@@ -731,6 +731,7 @@
 /test/merge-gates-310b.test.ts @masonwyatt23
 /test/mirror-sibling-deps-314.test.ts @masonwyatt23
 /test/mirrors-310b.test.ts @masonwyatt23
+/test/native-locus-metadata-scope.test.ts @masonwyatt23
 /test/orchestrator-bash-standing-310b.test.ts @masonwyatt23
 /test/outcome-core.test.ts @masonwyatt23
 /test/outcome-daemon-loop.test.ts @masonwyatt23
