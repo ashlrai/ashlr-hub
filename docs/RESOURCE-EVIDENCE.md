@@ -78,6 +78,10 @@ activity retains the existing configured-capacity policy. CPU, RAM and warm
 decoder speed do not impose additional routing limits.
 
 - **Host CPU** is busy time across all cores over the displayed sampling interval.
+  It averages activity since the previous sample. The first reading after the
+  drawer was closed or the window hidden can span that entire gap; visible
+  polling normally samples every 30 seconds. RAM is sampled at the new reading,
+  rather than averaged over the CPU interval.
 - **Host RAM** is total and OS free memory. Free memory is not macOS memory
   pressure or a safe model-allocation limit; model residency is reported separately.
 - **Task speed** is recorded output tokens divided by end-to-end turn time,
@@ -95,6 +99,25 @@ Missing measurements remain unknown, and visible ages retain the original
 observation time. The router uses reported allowance, context, serving capacity
 and recorded fleet latency. Sidebar CPU, RAM and exact-model task-speed readings
 are currently descriptive; they do not yet drive model selection or concurrency.
+
+Context windows also carry provenance: a server-reported allocation, model
+catalog value and configured/default estimate are different evidence. Inspect
+the context tooltip and [context guide](VERSE-CONTEXT.md), rather than treating
+every displayed window as a current per-agent allocation. Total serving context
+and per-slot context are distinct.
+
+## Routing tiers and roles
+
+Elite, Fast and Free are configured routing tiers, not measured model quality,
+speed or prices. Current defaults group Grok and Devin SWE in Fast, local
+Qwen 3.8 27B in Elite and other local models in Free. These priors affect ranking
+alongside task fit, headroom, cost and recorded latency. They do not establish
+that one provider's model is always better, cheaper or faster.
+
+Leader, Manager and worker eligibility is checked separately through the
+available account-bound adapter, context, current funding evidence and authority.
+Supported Claude, Codex, Grok, Devin and tool-capable local resources can serve
+eligible roles; a saved connection or tier label alone does not qualify a run.
 
 ## Credit details
 

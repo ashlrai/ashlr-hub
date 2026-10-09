@@ -6,7 +6,7 @@
 
 **Work with agents. Let agents work for you. One open-source workbench for your accounts, local models, chats and engineering fleet.**
 
-**[Get Phantom](https://github.com/ashlrai/phantom/releases/tag/v3.28.0) · [First-run guide](docs/QUICKSTART.md#open-verse)**
+**[Get Phantom](https://github.com/ashlrai/phantom/releases/latest) · [First-run guide](docs/QUICKSTART.md#open-verse)**
 
 [Install](#install) · [See the workbench](#what-it-is) · [Benchmarks](#benchmarks-and-traces) · [Read the guide](https://github.com/ashlrai/phantom/blob/master/docs/VERSE.md) · [Explore the ecosystem](https://verse.ashlr.ai/ecosystem) · [Star Phantom on GitHub](https://github.com/ashlrai/phantom)
 
@@ -19,13 +19,18 @@
 ## Install
 
 Phantom 3.29.2 is published as `@ashlr/phantom` from `ashlrai/phantom`.
-Install the version-pinned canonical release.
+Install the canonical package's promoted release.
 The source candidate is 3.29.3; preparing it does not publish or install it.
 
 ```sh
-npm install -g @ashlr/phantom@3.29.2   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
+npm install -g @ashlr/phantom   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
+phm --version             # report the installed version
 phm verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
+
+For a reproducible install of the published release verified on 2026-10-09,
+use `npm install -g @ashlr/phantom@3.29.2`. General release discovery is at
+[GitHub releases](https://github.com/ashlrai/phantom/releases/latest).
 
 The [v3.29.2 release](https://github.com/ashlrai/phantom/releases/tag/v3.29.2)
 provides a signed macOS arm64 app archive and paired update manifest; it has no
@@ -78,7 +83,7 @@ console is the Phantom kernel: the CLI, the Universe experiment runtime and
 account-aware resource pools.
 
 Phantom was formerly Ashlr Verse. The current source repository is `ashlrai/phantom`;
-the published 3.28.0 package is `@ashlr/phantom`. `phm` and compatible `ashlr`
+the published 3.29.2 package is `@ashlr/phantom`. `phm` and compatible `ashlr`
 share the same entrypoint. Published 3.25.3 remains `@ashlr/hub`; its existing
 SDK imports, including `@ashlr/hub/universe`, retain their original identity.
 The canonical package provides the same five SDK surfaces under `@ashlr/phantom`.
@@ -283,8 +288,8 @@ separate Node.js install to run.
 
 ### Install
 
-Use the [v3.28.0 release](https://github.com/ashlrai/phantom/releases/tag/v3.28.0)
-for the original signed arm64 app archive and paired update manifest. No 3.28.0
+Use the [v3.29.2 release](https://github.com/ashlrai/phantom/releases/tag/v3.29.2)
+for the original signed arm64 app archive and paired update manifest. No 3.29.2
 DMG was published; use the [desktop installation guide](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install)
 for the qualified update or maintainer artifact path. The app is locally signed,
 not Apple Developer ID notarized, so macOS may require **Open Anyway** on first launch. To build from source on a
@@ -373,18 +378,18 @@ check identity and quota, are in
 The same console runs from the CLI on macOS, Linux and Windows. It needs Node.js
 22.15 or newer and Git.
 
-Published 3.28.0 provides `phm` as the primary CLI command. Both `phm` and
+The canonical package provides `phm` as the primary CLI command. Both `phm` and
 `ashlr` use the same workbench entrypoint; existing `ashlr` scripts keep working.
 When building from source, `./install.sh` installs both aliases and refuses
 unrelated files or links. The separate Phantom Secrets command remains `phantom`.
 
 ```sh
-npm install -g @ashlr/phantom@3.28.0
+npm install -g @ashlr/phantom
 phm --version
 phm verse                 # start the server and open http://127.0.0.1:7777/verse/
 ```
 
-The canonical 3.28.0 package exposes `@ashlr/phantom`, `@ashlr/phantom/core`,
+The canonical package exposes `@ashlr/phantom`, `@ashlr/phantom/core`,
 `@ashlr/phantom/types`, `@ashlr/phantom/plugin` and `@ashlr/phantom/universe`.
 The published 3.25.3 compatibility package preserves the public SDK entrypoints `@ashlr/hub`,
 `@ashlr/hub/core`, `@ashlr/hub/types`, `@ashlr/hub/plugin` and `@ashlr/hub/universe`.
@@ -410,8 +415,9 @@ ID).
    desktop app **Choose folder…** opens the native picker. Saving a folder as a
    project never enrolls it for unattended work.
 4. **Chat.** The composer takes attachments, `@` files and `/` commands, and
-   queues up to 3 turns while one runs. The context meter shows the model's real
-   window and compaction point; **Continue in a fresh chat** hands off with a
+   queues up to 3 turns while one runs. The context meter shows the selected
+   window and compaction point when known; its tooltip identifies reported,
+   catalog or default values. **Continue in a fresh chat** hands off with a
    note built without a model call. ⌘K reaches every chat, action and seat; ⌘J
    opens Needs you.
 5. **Optionally run the local fast lane.** `ashlr local-runtime start --slots 4`
@@ -455,18 +461,20 @@ source documentation cannot establish that it is active on a particular Mac.
 ## Resources, on every page
 
 Press **⌘.** (or click the tab on the right edge, or run "Open Resources" from ⌘K) to open the Resources drawer:
-every resource grouped by tier — **Elite** (Claude Code, every Codex account, Devin, Claude cloud credits),
-**Fast** (Grok) and **Free · local** (one card for Ollama, LM Studio and llama-server). Every card reads the same
-way: tier, cost basis, models, status, usage against its window or budget, the share kept for you, and two
-readiness lines, "Chat: ready / why" and "Fleet: ready · reserve kept / why", with the command that fixes it. It
-opens over your work or pins as a column beside it, and a dot on the edge tab tells you at a glance whether
-everything is usable.
+connected resources grouped by their configured routing tier. **Elite**, **Fast**
+and **Free · local** influence ranking; they are not measured quality or speed
+scores, and do not restrict Leader or Manager roles. A tier can depend on the
+selected model, including local Qwen. Cards show the available account, model,
+billing and readiness evidence; unknown readings stay unknown. Chat sign-in,
+quota collection and fleet authority are separate checks. The drawer opens over
+your work or pins beside it. See [resource evidence](docs/RESOURCE-EVIDENCE.md)
+for the meaning of each reading.
 
-Without opening anything, the **resource bar** in the rail foot keeps every resource in view. It shows one battery
-per account with how much of its window is left, plus your local models and your cloud credits. Each row carries
-the provider's own mark: Anthropic's Claude, OpenAI, xAI's Grok or Ollama. Hover a row for every window, its reset
-and the share kept for you, or click it to open the drawer. **Hide resource bar** is in the drawer's footer and in
-⌘K.
+The **resource bar** keeps account allowances, separate credit balances and local
+resources in view. Saved Grok Bot profiles have their own reorderable entries;
+their allowance, reset and dispatch remain unverified and never inherit Grok
+Build usage. Hover a row for its evidence, or click it to inspect the resource.
+Drag rows to reorder them. **Hide resource bar** is in the drawer's footer and ⌘K.
 
 <a id="working-on-verse-itself"></a>
 

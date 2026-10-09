@@ -24,24 +24,29 @@ Use the workbench release links below for this guide.
 
 ### CLI on macOS, Linux or Windows
 
-Install Node.js 22.15+ and Git, then install the published canonical release, Phantom 3.28.0:
+Install Node.js 22.15+ and Git, then install the canonical package's promoted release:
 
 ```sh
-npm install -g @ashlr/phantom@3.28.0
-phm --version   # should print 3.28.0
+npm install -g @ashlr/phantom
+phm --version   # report the installed version
 phm verse
 ```
 
 Phantom opens at `http://127.0.0.1:7777/verse/` and binds to loopback. The CLI
 prints a read token for the browser and asks for a separate mutation token
 before your first chat or other change. Keep both tokens private. Confirm
-`phm --version` reports `3.28.0`; the
-[versioned GitHub release](https://github.com/ashlrai/phantom/releases/tag/v3.28.0) is the
-source for versioned installers. Use the explicit package version above and inspect the selected release artifacts before installing.
+the installed version with `phm --version`. Browse
+[GitHub releases](https://github.com/ashlrai/phantom/releases/latest) and select
+that same version before using desktop installer artifacts.
+For a reproducible install of the published release verified on 2026-10-09,
+use `npm install -g @ashlr/phantom@3.29.2`; its
+[versioned release](https://github.com/ashlrai/phantom/releases/tag/v3.29.2)
+provides the matching installer artifacts. Package installation, desktop
+installation and fleet activation are separate steps.
 
 ### Desktop app on Apple silicon Mac
 
-The [3.28.0 release](https://github.com/ashlrai/phantom/releases/tag/v3.28.0)
+The [3.29.2 release](https://github.com/ashlrai/phantom/releases/tag/v3.29.2)
 provides a signed arm64 app archive and paired update manifest, not a DMG.
 Use the qualified signed-update flow in an eligible installed app, or the
 maintainer artifact path in the
@@ -66,6 +71,11 @@ There is no Linux or Windows desktop package in this release; use the CLI above.
 - Expand **Resources** for dated usage and Devin organization consumption.
   Consumed ACUs are distinct from the tracked budget and do not show remaining
   subscription or purchased credits.
+- Subscription allowances, API credits and local hardware are separate readings.
+  Saved Grok Bot profiles do not inherit Grok Build usage. Promotional API credits
+  remain held until their balance, expiry and funding boundary are verified;
+  purchased credits are excluded from automatic reset spending. Read
+  [resource evidence](RESOURCE-EVIDENCE.md) for context, slot and speed provenance.
 - Open **Growth** for source-qualified adoption readings. Retrievals, traffic
   and downloads use different windows and do not count active engineers.
 - In Fleet or Resources, inspect **Use allowance before resets**. Saving On

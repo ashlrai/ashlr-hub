@@ -73,7 +73,7 @@ import { collectionNotice } from './collection-notice.js';
 const ResetSpendingControl = lazy(() => import('../budget/ResetSpendingControl.js').then(module => ({ default: module.ResetSpendingControl })));
 
 export const RESOURCES_EMPTY_TEXT =
-  'No accounts connected yet. Sign in to Claude Code, Codex, Devin or Grok in a terminal — they show up here within a minute.';
+  'No accounts connected yet. Sign in to a supported CLI, then refresh Resources. Connection and current usage are checked separately.';
 
 /** One card in a tier section. */
 type DrawerEntry = TierEntry & (
