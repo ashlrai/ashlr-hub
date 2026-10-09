@@ -160,7 +160,7 @@ describe('NeedsYouCard names seats and engines as every other surface does', () 
 
   it('touches only the trailing engine eyebrow', () => {
     expect(cardKindLabel('Patch · Partial claude run')).toBe('Patch · Partial Claude run');
-    expect(cardKindLabel('Partial grok run')).toBe('Partial Grok run');
+    expect(cardKindLabel('Partial grok run')).toBe('Partial Grok Build run');
     expect(cardKindLabel('Partial ollama run')).toBe('Partial Ollama run');
     expect(cardKindLabel('Patch · Claude run')).toBe('Patch · Claude run');
     expect(cardKindLabel('Patch')).toBe('Patch');

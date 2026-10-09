@@ -818,7 +818,7 @@ describe('UsageSection — context efficiency per seat', () => {
     const table = await screen.findByRole('table', { name: /Context efficiency per seat/ });
     const rows = within(table).getAllByRole('row').slice(1);
     // The seat cell reads "<label> · <engine>"; rows are sorted by prompt tokens.
-    expect(rows.map((r) => within(r).getAllByRole('cell')[0]!.textContent)).toEqual(['Claude Max · Claude', 'Grok · Grok']);
+    expect(rows.map((r) => within(r).getAllByRole('cell')[0]!.textContent)).toEqual(['Claude Max · Claude', 'Grok · Grok Build']);
     const [claude, grok] = rows as [HTMLElement, HTMLElement];
     const cells = within(claude).getAllByRole('cell').map((c) => c.textContent);
     // Chats, turns, prompt tokens, cache hit (900k / 1.001M — not the 45%
