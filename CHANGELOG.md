@@ -9,7 +9,7 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.29.1] — Unreleased
+## [3.29.2] — Unreleased
 
 ### Added
 
@@ -29,6 +29,13 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   real lock refusal and unchanged production behavior.
 - Explain independent Bot/Build/API funding, descriptive host metrics and the
   missing live execution evidence that currently holds reserve shrinking.
+- Label native Grok allowance windows without treating shared consumer usage as
+  a separate Build quota; preserve provider labels and independent Bot/API pools.
+- Render one completed local answer when inline reasoning follows streamed text,
+  preserving distinct tool calls, turns and historical messages.
+- Distinguish explicitly reported token counters from missing provider details.
+  Preserve numeric totals; show unknown historical details rather than measured
+  zero or an unsupported exact throughput rate.
 
 Publication and installation of this candidate remain pending qualification.
 
