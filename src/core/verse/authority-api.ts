@@ -286,7 +286,12 @@ function capDetail(text: string | null): string | null {
 }
 
 /** PURE (given the evaluation): what the authority source puts in Needs-you. */
-export function authorityNeedsYouItems(status: AuthorityStatusV1, ev: StandingEvaluation, nowMs: number): NeedsYouItem[] {
+export function authorityNeedsYouItems(
+  status: AuthorityStatusV1,
+  ev: StandingEvaluation,
+  nowMs: number,
+  previousItems: readonly NeedsYouItem[] = [],
+): NeedsYouItem[] {
   const items: NeedsYouItem[] = [];
   const grant = status.grant;
   const renew = [{ kind: 'renew' as const, label: 'Re-approve', request: null, confirm: null, destructive: false }];
@@ -376,6 +381,17 @@ export function authorityNeedsYouItems(status: AuthorityStatusV1, ev: StandingEv
       actions: [],
     });
   }
+  // A status check is not a new paused/invalid alert. Keep the first observed
+  // arrival only while every other actionable fact matches the prior snapshot.
+  // Actual event timestamps (expiry, Stop and rollout) are never rewritten.
+  if (grant.state === 'paused' || grant.state === 'invalid') {
+    const previous = new Map(previousItems.map((item) => [item.id, item]));
+    return items.map((item) => {
+      const prior = previous.get(item.id);
+      return prior && JSON.stringify({ ...prior, since: null }) === JSON.stringify({ ...item, since: null })
+        ? { ...item, since: prior.since } : item;
+    });
+  }
   return items;
 }
 
@@ -398,7 +414,7 @@ export function authorityBadge(status: AuthorityStatusV1): VerseAutonomyBadge {
 
 function rememberStatus(status: AuthorityStatusV1, evaluation: StandingEvaluation): void {
   const nowMs = Date.parse(status.checkedAt) || Date.now();
-  statusCache = { at: Date.now(), status, items: authorityNeedsYouItems(status, evaluation, nowMs), badge: authorityBadge(status) };
+  statusCache = { at: Date.now(), status, items: authorityNeedsYouItems(status, evaluation, nowMs, statusCache?.items), badge: authorityBadge(status) };
   refreshFailed = false;
 }
 

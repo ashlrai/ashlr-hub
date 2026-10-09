@@ -6,6 +6,8 @@
  * helper is faked — no Touch ID prompt, no Keychain — and the trust root is a
  * test key injected by module mocking. HOME-isolated.
  */
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -79,6 +81,11 @@ import type { AuthorityStatusV1, StandingGrantV1 } from '../src/core/authority/t
 import type { VerseApiContext } from '../src/core/verse/verse-api.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import { TEST_ROOT, withTempHome } from './helpers/authority-310b.js';
+import { installedGrantPath } from '../src/core/authority/standing-grant.js';
+import { clearDecisionCache } from '../src/core/decide/cache.js';
+import { readLedger, resetLedgerCountersForTests } from '../src/core/decide/ledger.js';
+import { orderNeedsYouWithJev, resetNeedsYouOrderingForTests } from '../src/core/decide/needs-you.js';
+import { FAKE_TYPESAFE_ENDPOINT, FAKE_TYPESAFE_KEY, installFakeTypeSafe } from './helpers/fake-typesafe.js';
 
 const TOKEN = 'authority-test-token';
 let restore: () => void;
@@ -409,6 +416,138 @@ describe('Needs-you and the rail badge (R1)', () => {
     expect(items.map((i) => i.title)).toEqual(['Authority code changed — re-approve the grant']);
     expect(items.every(isNeedsYouItem)).toBe(true);
     expect(autonomyBadge()).toMatchObject({ paused: true, label: 'Paused — re-approve' });
+  });
+
+  it.each(['paused', 'invalid'] as const)('keeps an unchanged %s alert arrival and one advisory pass across fresh 15s status reads', async (grantState) => {
+    const envKeys = ['ASHLR_HOME', 'TYPESAFE_API_KEY', 'ASHLR_TYPESAFE_ENDPOINT', 'ASHLR_JEV_DISABLE', 'ASHLR_CLASSIFY_DISABLE'] as const;
+    const saved = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+    const start = Date.now();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(start);
+    process.env['ASHLR_HOME'] = join(process.env['HOME']!, '.ashlr');
+    process.env['TYPESAFE_API_KEY'] = FAKE_TYPESAFE_KEY;
+    process.env['ASHLR_TYPESAFE_ENDPOINT'] = FAKE_TYPESAFE_ENDPOINT;
+    delete process.env['ASHLR_JEV_DISABLE'];
+    delete process.env['ASHLR_CLASSIFY_DISABLE'];
+    clearDecisionCache();
+    resetLedgerCountersForTests();
+    resetNeedsYouOrderingForTests();
+    const fake = installFakeTypeSafe();
+    fake.answerAll({ confidence: 0.3 });
+    try {
+      if (grantState === 'paused') {
+        state.roots.push(TEST_ROOT);
+        const draft = await call('GET', '/api/verse/authority/draft');
+        await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: draft!.body['digest'] });
+        state.surface = 'c'.repeat(64);
+      } else {
+        const path = installedGrantPath();
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+        writeFileSync(path, '{', { mode: 0o600 });
+      }
+      invalidateStandingPolicyCache();
+      const first = await buildAuthorityStatus();
+      expect(first.status.grant.state).toBe(grantState);
+      const original = needsYouItems()[0]!;
+      const companion = { ...original, id: 'test:other-alert', title: 'Another unchanged alert' };
+      orderNeedsYouWithJev([original, companion], start);
+      await vi.waitFor(() => expect(fake.fetch).toHaveBeenCalledTimes(1));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      for (let poll = 1; poll <= 5; poll++) {
+        const at = start + poll * 15_000;
+        vi.setSystemTime(at);
+        invalidateStandingPolicyCache();
+        const current = await buildAuthorityStatus();
+        expect(current.status.checkedAt).toBe(new Date(at).toISOString());
+        expect(current.evaluation.checkedAt).toBe(current.status.checkedAt);
+        expect(current.status.grant).toEqual(first.status.grant);
+        expect(current.status.effectiveSwitch).toBe(first.status.effectiveSwitch);
+        expect(needsYouItems()[0]).toEqual(original);
+        orderNeedsYouWithJev([needsYouItems()[0]!, companion], at);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      expect(fake.fetch).toHaveBeenCalledTimes(1);
+      expect(readLedger()).toHaveLength(2);
+
+      // A real changed authority reason must replace the observation and reclassify now.
+      vi.setSystemTime(start + 90_000);
+      if (grantState === 'paused') state.surface = null;
+      else writeFileSync(installedGrantPath(), '{}', { mode: 0o600 });
+      invalidateStandingPolicyCache();
+      const changed = await buildAuthorityStatus();
+      expect(changed.status.grant.state).toBe(grantState);
+      expect(changed.status.grant.reason).not.toBe(first.status.grant.reason);
+      expect(needsYouItems()[0]?.since).toBe(changed.status.checkedAt);
+      orderNeedsYouWithJev([needsYouItems()[0]!, companion], start + 90_000);
+      await vi.waitFor(() => expect(fake.fetch).toHaveBeenCalledTimes(2));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(readLedger()).toHaveLength(4);
+
+      // Recovery removes continuity; recurrence is a new observation of current facts.
+      vi.setSystemTime(start + 105_000);
+      if (grantState === 'paused') state.surface = 'b'.repeat(64);
+      else rmSync(installedGrantPath());
+      invalidateStandingPolicyCache();
+      await buildAuthorityStatus();
+      expect(needsYouItems()).toEqual([]);
+      vi.setSystemTime(start + 120_000);
+      if (grantState === 'paused') state.surface = 'c'.repeat(64);
+      else writeFileSync(installedGrantPath(), '{', { mode: 0o600 });
+      invalidateStandingPolicyCache();
+      const recurrent = await buildAuthorityStatus();
+      expect(needsYouItems()[0]?.since).toBe(recurrent.status.checkedAt);
+      expect(needsYouItems()[0]?.since).not.toBe(original.since);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+      clearDecisionCache();
+      resetLedgerCountersForTests();
+      resetNeedsYouOrderingForTests();
+      for (const key of envKeys) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+    }
+  });
+
+  it('retains only complete identical paused facts and clears arrival continuity after recovery or reset', async () => {
+    state.roots.push(TEST_ROOT);
+    const draft = await call('GET', '/api/verse/authority/draft');
+    await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: draft!.body['digest'] });
+    state.surface = 'c'.repeat(64);
+    invalidateStandingPolicyCache();
+    const { status, evaluation } = await buildAuthorityStatus();
+    const original = needsYouItems()[0]!;
+    const later = Date.parse(status.checkedAt) + 15_000;
+    const freshStatus = { ...status, checkedAt: new Date(later).toISOString() };
+    const project = (prior: typeof original[]) => authorityNeedsYouItems(freshStatus, evaluation, later, prior);
+    expect(project([original])[0]?.since).toBe(original.since);
+    // Same ID is insufficient: changes to any actual actionable fact must be observed anew.
+    for (const prior of [
+      { ...original, detail: 'An earlier pause reason' },
+      { ...original, expiresAt: new Date(later + 3_600_000).toISOString() },
+      { ...original, subject: { ...original.subject, repo: 'test/previous-repo' } },
+      { ...original, target: { kind: 'section' as const, section: 'fleet' as const, anchor: 'autonomy' } },
+      { ...original, actions: [] },
+      { ...original, severity: 'warn' as const },
+    ]) {
+      expect(project([prior])[0]).toEqual({ ...original, since: freshStatus.checkedAt });
+    }
+    expect(project([])[0]?.since).toBe(freshStatus.checkedAt);
+    expect(authorityNeedsYouItems({ ...freshStatus, grant: { ...freshStatus.grant, grantId: 'new-grant' } }, evaluation, later, [original])[0]?.since)
+      .toBe(freshStatus.checkedAt);
+
+    state.surface = 'b'.repeat(64);
+    invalidateStandingPolicyCache();
+    await buildAuthorityStatus();
+    expect(needsYouItems()).toEqual([]);
+    state.surface = 'c'.repeat(64);
+    invalidateStandingPolicyCache();
+    const recurrent = await buildAuthorityStatus();
+    expect(needsYouItems()[0]?.since).toBe(recurrent.status.checkedAt);
+    resetAuthorityApiCachesForTest();
+    const reset = await buildAuthorityStatus();
+    expect(needsYouItems()[0]?.since).toBe(reset.status.checkedAt);
   });
 
   it('warns before a grant expires', async () => {
