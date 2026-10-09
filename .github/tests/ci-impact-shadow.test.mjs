@@ -51,6 +51,15 @@ function fixture(t) {
   return { root, parent, put, git, commit, base, makeLane };
 }
 
+function rewriteRawReport(lane, file, mutate) {
+  const path = join(lane.directory, 'reports', file); const raw = JSON.parse(fs.readFileSync(path));
+  mutate(raw); const data = JSON.stringify(raw); fs.writeFileSync(path, data);
+  const record = lane.lane.reports.find((row) => row.file === file);
+  record.sha256 = hash(data); record.bytes = Buffer.byteLength(data);
+  record.modules = normalizeReport(raw, lane.options.root);
+  fs.writeFileSync(join(lane.directory, 'lane.json'), JSON.stringify(lane.lane));
+}
+
 test('observes exact source and duplicate occurrence/skip/todo results without inheriting or rewriting reports', (t) => {
   const f = fixture(t); f.put('README.md', 'copy change\n'); f.commit(); const lane = f.makeLane();
   const paths = [join(lane.directory, 'lane.json'), join(lane.directory, 'reports', 'web.json')]; const original = paths.map((path) => hash(fs.readFileSync(path)));
@@ -62,6 +71,7 @@ test('observes exact source and duplicate occurrence/skip/todo results without i
   assert.ok(report.inputs.head.find((node) => node.path === 'test/example.test.ts').imports.some((edge) => edge.target === 'src/value.ts'));
   assert.equal(report.summary.eligibleModules, 0); assert.equal(report.summary.inheritedCases, 0); assert.equal(report.summary.baseCaseOccurrences, null);
   assert.equal(report.summary.headCaseOccurrences, 3); assert.equal(report.summary.headSkippedOccurrences, 1); assert.equal(report.summary.headTodoOccurrences, 1);
+  assert.equal(report.timing.moduleTimingCoverage, 'unknown'); assert.equal(report.timing.testSpanSumMs, null);
   const cases = report.head.reports[0].modules[0].cases; assert.equal(new Set(cases.map((row) => row.id)).size, 3);
   assert.deepEqual(cases.map((row) => row.state), ['passed', 'skipped', 'todo']);
   assert.deepEqual(paths.map((path) => hash(fs.readFileSync(path))), original);
@@ -80,6 +90,8 @@ test('source-only dry observation has unknown outcomes and membership, never zer
   const f = fixture(t);
   const report = collectShadow({ root: f.root, revision: f.base, baseRevision: f.base, role: 'mac-general-1', sourceOnly: true });
   assert.equal(report.head.outcome, 'unobserved'); assert.equal(report.head.reports, null); assert.equal(report.head.run, null);
+  assert.equal(report.timing.moduleTimingCoverage, 'unobserved'); assert.equal(report.timing.moduleOccurrences, null);
+  assert.equal(report.timing.laneElapsedMs, null); assert.equal(report.timing.testSpanSumMs, null);
   assert.equal(report.summary.observedModules, null); assert.equal(report.summary.sourceCandidateModules, 1);
   assert.equal(report.summary.headCaseOccurrences, null); assert.equal(report.summary.headPassedOccurrences, null);
   assert.equal(report.descriptors[0].roleMembership, 'unobserved-source-candidate'); assert.equal(report.summary.eligibleModules, 0);
@@ -147,6 +159,87 @@ test('keeps platform roles and filtered report occurrences distinct', (t) => {
   assert.equal(report.descriptors[0].role, 'mac-isolated');
   // These are report occurrences, never claimed as an authoritative unique union.
   assert.equal(report.summary.eligibleModules, 0);
+});
+
+test('ranks actual reporter spans without changing qualification or claiming unchanged inputs reusable', (t) => {
+  const f = fixture(t); f.put('README.md', 'copy change\n'); f.commit(); const lane = f.makeLane();
+  const start = Date.parse(lane.lane.startedAt) + 100;
+  rewriteRawReport(lane, 'web.json', (raw) => {
+    raw.testResults[0].startTime = start; raw.testResults[0].endTime = start + 1250.5;
+    raw.testResults[0].arbitraryMetadata = 'RAW_DIAGNOSTIC_MUST_NOT_ESCAPE';
+  });
+  const paths = [join(lane.directory, 'lane.json'), join(lane.directory, 'reports', 'web.json')];
+  const original = paths.map((path) => hash(fs.readFileSync(path)));
+  const report = collectShadow(lane.options);
+  assert.deepEqual(report.timing, { scope: 'reporter-test-spans', moduleTimingCoverage: 'complete', laneElapsedMs: 60_000,
+    moduleOccurrences: 1, measuredModuleOccurrences: 1, unknownModuleOccurrences: 0, testSpanSumMs: 1250.5,
+    measuredUnchangedModuleOccurrences: 1, observedUnchangedTestSpanSumMs: 1250.5, rankedModules: [
+      { report: 'web.json', module: 'test/example.test.ts', executedCases: 1, testSpanMs: 1250.5, unknownReason: null,
+        inputComparison: 'observed-inputs-unchanged' },
+    ] });
+  assert.equal(report.descriptors[0].decision, 'full-required'); assert.equal(report.descriptors[0].complete, false);
+  assert.equal(report.summary.eligibleModules, 0); assert.equal(report.summary.inheritedCases, 0);
+  assert.deepEqual(paths.map((path) => hash(fs.readFileSync(path))), original);
+  assert.equal(JSON.stringify(report).includes('RAW_DIAGNOSTIC_MUST_NOT_ESCAPE'), false);
+});
+
+for (const kind of ['missing', 'null', 'string', 'negative', 'reversed', 'before-lane', 'after-lane', 'no-executed-cases']) {
+  test(`keeps ${kind} reporter timing unknown without changing case evidence`, (t) => {
+    const f = fixture(t); const lane = f.makeLane(); const start = Date.parse(lane.lane.startedAt);
+    rewriteRawReport(lane, 'web.json', (raw) => {
+      const module = raw.testResults[0]; module.startTime = start + 1; module.endTime = start + 10;
+      if (kind === 'missing') delete module.endTime;
+      if (kind === 'null') module.endTime = null;
+      if (kind === 'string') module.startTime = String(start);
+      if (kind === 'negative') module.startTime = -1;
+      if (kind === 'reversed') module.endTime = start;
+      if (kind === 'before-lane') module.startTime = start - 1;
+      if (kind === 'after-lane') module.endTime = Date.parse(lane.lane.finishedAt) + 1;
+      if (kind === 'no-executed-cases') {
+        module.assertionResults[0].status = 'skipped'; raw.numPassedTests = 0; raw.numPendingTests = 2;
+      }
+    });
+    const report = collectShadow(lane.options);
+    assert.equal(report.timing.moduleTimingCoverage, 'unknown'); assert.equal(report.timing.measuredModuleOccurrences, 0);
+    assert.equal(report.timing.unknownModuleOccurrences, 1); assert.equal(report.timing.testSpanSumMs, null);
+    assert.equal(report.head.reports[0].timings[0].testSpanMs, null);
+    assert.ok(report.head.reports[0].timings[0].unknownReason);
+    assert.equal(report.summary.headCaseOccurrences, 3); assert.equal(report.summary.eligibleModules, 0);
+    assert.equal(report.descriptors[0].decision, 'full-required');
+  });
+}
+
+test('keeps changed and missing-base comparison separate from measured timing', (t) => {
+  const f = fixture(t); f.put('src/value.ts', 'export const value = 1;\n'); f.commit(); const lane = f.makeLane();
+  const start = Date.parse(lane.lane.startedAt);
+  rewriteRawReport(lane, 'web.json', (raw) => { raw.testResults[0].startTime = start; raw.testResults[0].endTime = start + 100; });
+  const changed = collectShadow(lane.options);
+  assert.equal(changed.timing.rankedModules[0].inputComparison, 'observed-inputs-changed');
+  assert.equal(changed.timing.measuredUnchangedModuleOccurrences, 0); assert.equal(changed.timing.observedUnchangedTestSpanSumMs, null);
+  const unavailable = collectShadow({ ...lane.options, baseRevision: null });
+  assert.equal(unavailable.timing.rankedModules[0].inputComparison, 'unknown'); assert.equal(unavailable.timing.testSpanSumMs, 100);
+  assert.equal(unavailable.summary.eligibleModules, 0);
+});
+
+test('bounds ranking and preserves filtered occurrences, partial coverage and overlapping spans', (t) => {
+  const f = fixture(t); f.put('test/other.test.ts', "import { value } from '../src/value.js'; export const input = value;\n"); f.commit();
+  const lane = f.makeLane('mac-isolated'); const start = Date.parse(lane.lane.startedAt);
+  for (const [index, record] of lane.lane.reports.entries()) {
+    rewriteRawReport(lane, record.file, (raw) => {
+      const first = raw.testResults[0]; first.startTime = start + 1; first.endTime = start + 50_001;
+      const other = { ...first, name: join(f.root, 'test/other.test.ts'), endTime: start + 100 + index };
+      if (index === 0) delete other.startTime;
+      raw.testResults.push(other); raw.numTotalTests *= 2; raw.numPassedTests *= 2; raw.numPendingTests *= 2; raw.numTodoTests *= 2;
+    });
+  }
+  const report = collectShadow(lane.options);
+  assert.equal(report.timing.moduleTimingCoverage, 'partial'); assert.equal(report.timing.moduleOccurrences, 28);
+  assert.equal(report.timing.measuredModuleOccurrences, 27); assert.equal(report.timing.unknownModuleOccurrences, 1);
+  assert.equal(report.timing.rankedModules.length, 20);
+  const repeated = report.timing.rankedModules.filter((row) => row.module === 'test/example.test.ts');
+  assert.equal(repeated.length, 14); assert.deepEqual(repeated.map((row) => row.report), reportNames('mac-isolated'));
+  assert.ok(report.timing.testSpanSumMs > report.timing.laneElapsedMs, 'overlapping sums must not be clamped or presented as lane wall time');
+  assert.equal(report.summary.headCaseOccurrences, 84); assert.equal(report.summary.eligibleModules, 0);
 });
 
 const repositoryMetadata = () => ({ full_name: hub.legacyName, id: hub.repositoryId, node_id: hub.repositoryNodeId,
