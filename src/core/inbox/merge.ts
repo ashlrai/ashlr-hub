@@ -2462,6 +2462,8 @@ export async function openStandingVerificationConfinement(
       if (base.writablePaths.some((path) => isInsideDir(cargo.cargoHome, path) || isInsideDir(cargo.vendor, path)) ||
           isInsideDir(cargo.cargoHome, worktree) || isInsideDir(cargo.vendor, worktree)) throw new VerificationConfinementError('Cargo attachment overlaps writable source/cache');
     }
+    const cargoRuntimeHome = cargo ? join(runTmpDir, 'cargo-runtime') : null;
+    if (cargoRuntimeHome) mkdirSync(cargoRuntimeHome, { mode: 0o700 });
     const toolchain = nodeToolchainPrefix(home, base.deniedReadPaths);
     const readOnly = [...base.readOnlyPaths];
     // The caller's grants that survived the checks below (real paths): the
@@ -2491,7 +2493,7 @@ export async function openStandingVerificationConfinement(
       set: Object.freeze({
         ...base.set,
         ...(toolchain ? { PATH: `${join(toolchain, 'bin')}${delimiter}${base.set['PATH'] ?? ''}` } : {}),
-        ...(cargo ? { CARGO_HOME: cargo.cargoHome, CARGO_NET_OFFLINE: 'true', RUSTC: join(cargo.toolchainBin, 'rustc'), RUSTDOC: join(cargo.toolchainBin, 'rustdoc') } : {}),
+        ...(cargo ? { CARGO_HOME: cargoRuntimeHome!, CARGO_NET_OFFLINE: 'true', RUSTC: join(cargo.toolchainBin, 'rustc'), RUSTDOC: join(cargo.toolchainBin, 'rustdoc') } : {}),
       }),
     };
     const launcher = confine.buildSandboxLauncher(confine.autonomousVerificationProfile(), {
@@ -2513,10 +2515,17 @@ export async function openStandingVerificationConfinement(
         // Inherited source/config/wrapper variables cannot replace this pinned
         // toolchain or immutable source config. Candidate PATH bins come last.
         for (const key of Object.keys(env)) if (/^(?:CARGO_|RUST|CC$|CXX$|CFLAGS$|CXXFLAGS$|AR$)/i.test(key)) delete env[key];
-        Object.assign(env, { CARGO_HOME: cargo.cargoHome, CARGO_NET_OFFLINE: 'true', RUSTC: join(cargo.toolchainBin, 'rustc'), RUSTDOC: join(cargo.toolchainBin, 'rustdoc') });
+        Object.assign(env, { CARGO_HOME: cargoRuntimeHome!, CARGO_NET_OFFLINE: 'true', RUSTC: join(cargo.toolchainBin, 'rustc'), RUSTDOC: join(cargo.toolchainBin, 'rustdoc') });
         env['PATH'] = [cargo.toolchainBin, env['PATH'] ?? ''].join(delimiter);
       }
-      return runVerifySubprocessAsync([launcher.bin, ...launcher.prefixArgs, ...argv], { ...subprocessOpts, env });
+      let command = argv;
+      if (cargo && (argv[0] === 'cargo' || argv[0] === join(cargo.toolchainBin, 'cargo'))) {
+        const options = argv.slice(1, argv.indexOf('--') === -1 ? argv.length : argv.indexOf('--'));
+        if (options.some((arg) => arg === '--config' || arg.startsWith('--config='))) throw new VerificationConfinementError('Cargo command cannot replace the immutable attachment config');
+        // Cargo cache metadata is writable in the jail; its registry recipe stays outside all writable paths.
+        command = [join(cargo.toolchainBin, 'cargo'), '--config', join(cargo.cargoHome, 'config.toml'), ...argv.slice(1)];
+      }
+      return runVerifySubprocessAsync([launcher.bin, ...launcher.prefixArgs, ...command], { ...subprocessOpts, env });
     };
     return { runSubprocess, close };
   } catch (error) {

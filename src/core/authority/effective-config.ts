@@ -450,6 +450,8 @@ export interface StandingEvaluation {
 export interface EvaluateOptions {
   /** `fresh`: re-hash the surface and the verified ledger prefix, reload config. */
   mode: 'cached' | 'fresh';
+  /** Reuse hashes only for files whose complete inode/time tuple is unchanged; ledger/config remain fresh. */
+  surfaceHashes?: 'always' | 'unchanged';
   surface: SurfaceTarget;
   nowMs?: number;
   /** Supplied config (the daemon's per-tick config); otherwise loaded read-only. */
@@ -476,7 +478,7 @@ export function evaluateStandingAuthority(opts: EvaluateOptions): StandingEvalua
   const kill = killSwitchOn();
   const ledgerMode: LedgerReadMode = opts.mode === 'fresh' ? 'prefix' : 'cached';
   const snapshot = ledgerSnapshot(ledgerMode);
-  const surface = verifyAuthoritySurface(opts.surface, { fresh: opts.mode === 'fresh', nowMs });
+  const surface = verifyAuthoritySurface(opts.surface, { fresh: opts.mode === 'fresh' && opts.surfaceHashes !== 'unchanged', nowMs });
   const confinement = confinementAvailable();
   const base = {
     checkedAt,

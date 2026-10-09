@@ -8,7 +8,7 @@
  * import form (including `export * as ns from` and literal dynamic imports)
  * and ignores imports that only appear in comments or strings.
  */
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync, statSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -211,6 +211,16 @@ describe('runtime verification (surface.ts)', () => {
     const manifest = await build();
     const verified = verifyAuthoritySurfaceAt(root, 'installed', { fresh: true });
     expect(verified).toMatchObject({ ok: true, digest: manifest.digest, fileCount: 5 });
+  });
+
+  it('reuses verified unchanged hashes but catches equal-size edits even when mtime is restored', async () => {
+    await build();
+    expect(verifyAuthoritySurfaceAt(root, 'installed', { fresh: true }).ok).toBe(true);
+    expect(verifyAuthoritySurfaceAt(root, 'installed', { fresh: false }).ok).toBe(true);
+    const file = join(root, 'dist/core/authority/b.js'); const before = statSync(file);
+    put('dist/core/authority/b.js', 'export const b = 2;\n');
+    utimesSync(file, before.atime, before.mtime);
+    expect(verifyAuthoritySurfaceAt(root, 'installed', { fresh: false })).toMatchObject({ ok: false, code: 'file-changed' });
   });
 
   it('catches a changed file, a changed package and an edited manifest', async () => {

@@ -55,7 +55,7 @@ beforeEach(() => {
   io.now = 1_800_000_000_000; io.killed = false; io.epoch = 'off'; io.owned = true;
   io.policy = { grantId: 'signed', grantSeq: 1, computedAt: new Date(io.now).toISOString(),
     expiresAt: new Date(io.now + 60_000).toISOString(), repos: [{ nameWithOwner: pins.repo }], switch: 'autonomous' } as EffectivePolicy;
-  io.evaluate.mockImplementation(() => ({ policy: io.policy }));
+  io.evaluate.mockImplementation(() => ({ policy: io.policy, surface: { ok: true } }));
   io.acquire.mockResolvedValue({ capability: 'in-memory-only' });
   io.token.mockResolvedValue({ token: 'in-memory-only', expiresAt: null });
   io.repoLease.mockImplementation(async (_key: string, fn: () => Promise<unknown>) => ({ ok: true, value: await fn() }));
@@ -98,7 +98,8 @@ describe('default maintainer host authority and execution lifetime', () => {
     expect(deps.policy()).toBeNull();
     expect(io.cachedPolicy).not.toHaveBeenCalled();
     expect(io.evaluate).toHaveBeenCalledTimes(2);
-    expect(io.evaluate).toHaveBeenLastCalledWith({ mode: 'fresh', surface: 'running', nowMs: io.now });
+    expect(io.evaluate).toHaveBeenNthCalledWith(1, { mode: 'fresh', surface: 'running', nowMs: io.now });
+    expect(io.evaluate).toHaveBeenLastCalledWith({ mode: 'fresh', surface: 'running', nowMs: io.now, surfaceHashes: 'unchanged' });
   });
 
   it('refuses a replacement signed grant that no longer enrolls the requested repository before registration', async () => {

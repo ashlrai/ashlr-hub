@@ -108,6 +108,13 @@ describe.runIf(process.platform === 'darwin' && existsSync(join(publicToolchain,
       const env = { PATH: '/usr/bin:/bin', LANG: 'en_US.UTF-8', CARGO_HOME: '/invalid', CARGO_NET_OFFLINE: 'false', RUSTC_WRAPPER: '/invalid' };
       const built = await confined!.runSubprocess(['cargo', 'build', '--locked', '--offline'], { cwd: worktree, env, timeoutMs: 60_000 });
       expect(built, built.stderr).toMatchObject({ exitCode: 0, timedOut: false, cancelled: false });
+      expect(built.stderr).not.toContain('failed to save last-use data');
+      const runtime = await confined!.runSubprocess([process.execPath, '-e',
+        'const fs=require("node:fs");const p=require("node:path");fs.writeFileSync(p.join(process.env.CARGO_HOME,"runtime-probe"),"ok");console.log(process.env.CARGO_HOME)'], { cwd: worktree, env, timeoutMs: 10_000 });
+      expect(runtime.exitCode).toBe(0); expect(runtime.stdout.trim()).not.toBe(attachment.cargoHome);
+      expect(runtime.stdout.trim()).toContain('verify-confine-');
+      expect(() => confined!.runSubprocess(['cargo', '--config', 'net.offline=false', 'build'], { cwd: worktree, env, timeoutMs: 10_000 })).toThrow('immutable attachment config');
+      expect(() => confined!.runSubprocess(['cargo', '--config=net.offline=false', 'build'], { cwd: worktree, env, timeoutMs: 10_000 })).toThrow('immutable attachment config');
       const binary = await confined!.runSubprocess([join(worktree, 'target/debug/demo')], { cwd: worktree, env, timeoutMs: 10_000 });
       expect(binary).toMatchObject({ exitCode: 0, stdout: '0\n' });
       const network = await confined!.runSubprocess([process.execPath, '-e',
