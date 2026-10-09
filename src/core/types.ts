@@ -2053,6 +2053,29 @@ export interface RunUsage {
   steps: number;
   /** Estimated USD cost (0 for local providers). */
   estCostUsd: number;
+  /** Exact settled API charges and retained maximum exposure; never subscription quota. */
+  apiBilling?: ApiBillingSummary;
+}
+
+export interface ApiBillingSummary {
+  provider: 'anthropic';
+  settledUsdMicros: string;
+  unknownExposureUsdMicros: string;
+  settledRequests: number;
+  unknownRequests: number;
+}
+
+export interface ApiMessageBilling {
+  provider: 'anthropic';
+  requestId: string;
+  model: string;
+  pricingDigest: string;
+  serviceTier: 'standard';
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  actualUsdMicros: string;
 }
 
 /** Lifecycle state of a single task in the run graph. */
@@ -2325,6 +2348,8 @@ export interface ChatResult {
    * governed token reservation.
    */
   usageKnown?: boolean;
+  /** Present only after exact provider accounting and durable API settlement. */
+  billing?: ApiMessageBilling;
 }
 
 /**
@@ -2353,6 +2378,8 @@ export interface ProviderClient {
   authority?: ProviderClientAuthority;
   /** Optional metadata-only discovery for the exact endpoint/model; unknown is undefined. */
   getContextWindowTokens?(signal?: AbortSignal): Promise<number | undefined>;
+  /** Metadata only: no provider reads or credential access. */
+  getApiBillingSummary?(): ApiBillingSummary;
   /** Send a chat exchange (optionally with tool specs) and get a result. */
   chat(
     messages: ChatMessage[],
@@ -2761,6 +2788,7 @@ export type EngineId =
   | 'ashlrcode'
   | 'aw'
   | 'claude'
+  | 'claude-api'
   | 'codex'
   | 'grok-cli'
   | 'devin-cli'
@@ -2904,7 +2932,7 @@ export interface EngineSpec {
     baseUrlEnv?: string;
     defaultBaseUrl?: string;
     defaultModel?: string;
-    protocol: 'openai';
+    protocol: 'openai' | 'anthropic-messages';
   };
   /** Free-form capability tags used by capability-aware routing. */
   capabilities?: string[];

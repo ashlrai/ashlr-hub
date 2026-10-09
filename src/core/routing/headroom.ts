@@ -39,6 +39,8 @@ import { costBasisOf, isWindowlessEngine, seatTier, type CostBasis, type Resourc
 import { reasonSentences } from './seat-reasons.js';
 import type { SeatBudgetPolicy, SeatHeadroom, SeatReason } from './types.js';
 import type { ResetProvenance } from './scheduling-types.js';
+import type { ClaudeApiGrantView } from '../resources/claude-api-grant-types.js';
+import { CLAUDE_API_SEAT_ID } from './policy.js';
 
 /** A reading older than this is too stale to spend against (the collector polls every 30 s when active). */
 export const HEADROOM_READING_MAX_AGE_MS = 15 * 60_000;
@@ -69,6 +71,8 @@ export interface CapacityWindow {
 
 /** What the budget layer needs to know about one seat. JSON-safe; persisted in the capacity snapshot. */
 export interface SeatCapacity {
+  /** Historical API credit display only; never an admission capability. */
+  claudeApiGrant?: ClaudeApiGrantView;
   seatId: string;
   /**
    * The seat's engine. A `devin` seat only ever reaches the router from an
@@ -313,6 +317,19 @@ export function assessSeat(capacity: SeatCapacity, policy: SeatBudgetPolicy, opt
   const maxAge = opts.readingMaxAgeMs ?? HEADROOM_READING_MAX_AGE_MS;
   // Reasons are built as data; `headroom.reasons` is derived from them.
   const details: SeatReason[] = [];
+
+  // Before local/free/windowless paths: even a forged capacity cannot borrow
+  // the subscription or local lane while the signed API vocabulary is absent.
+  if (capacity.engine === 'claude-api' || capacity.seatId.toLowerCase() === CLAUDE_API_SEAT_ID) {
+    details.push({ kind: 'grant', text: 'Claude API is not commissioned in the signed grant.' });
+    return {
+      headroom: { seatId: capacity.seatId, sessionUsedPercent: null, weeklyUsedPercent: null,
+        bindingWindow: null, autonomyHeadroomPercent: null, resetAt: null,
+        eligibleForAutonomy: false, reasons: reasonSentences(details) },
+      reopensAt: null, exhausted: false, unknownUsage: true,
+      spentReasons: [], details, spentDetails: [],
+    };
+  }
 
   // ── Local: free, windowless, bounded only by reachability ──────────────
   if (capacity.free) {

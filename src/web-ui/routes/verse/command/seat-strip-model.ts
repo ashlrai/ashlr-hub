@@ -200,6 +200,8 @@ function budgetOnlyItems(view: BudgetView, now: number): SeatStripItem[] {
   const rows = readBudgetRows(view);
   const out: SeatStripItem[] = [];
   for (const b of rows.values()) {
+    // Recorded API dollars belong in Credit balances, never this percentage strip.
+    if (b.engine === 'claude-api') continue;
     const h = b.headroom;
     const used = h?.bindingWindow === 'weekly' ? h.weeklyUsedPercent : h?.bindingWindow === 'session' ? h.sessionUsedPercent : null;
     const left = b.free || used === null || used === undefined ? null : Math.max(0, Math.min(100, 100 - used));

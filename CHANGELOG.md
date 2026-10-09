@@ -9,7 +9,23 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.26.1] — Unreleased
+## [3.27.0] — Unreleased
+
+### Added
+
+- Separate recorded Claude API promotions from subscriptions, cloud gifts and
+  purchased credits. Show exact-money tooltips, rounded dollar balances,
+  verified expiry dates and explicit automatic-use holds in Resources.
+- Add an internal first-party Messages adapter with durable organization-wide
+  reservations, verified request pricing and retained unknown-charge exposure.
+  The new API lane stays off until fresh billing, credential binding and
+  explicit signed API authority are commissioned; existing grants stay closed.
+- Keep verified but unbound grant history readable without manufacturing a
+  credential, provider cycle or spending capability.
+
+Publication, installation and provider activation remain separate checks.
+
+## [3.26.1] — 2026-10-08
 
 ### Changed
 
@@ -26,9 +42,6 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Add the guarded manual installation path for an original signed published
   release after protected master advances, with fresh release evidence and
   the existing Stop, drain, rollback and separate authority requirements.
-
-This is a source candidate. Publication, installation and resident activation
-remain separate checks; the verified published stable release is 3.26.0.
 
 ## [3.26.0] — 2026-10-08
 

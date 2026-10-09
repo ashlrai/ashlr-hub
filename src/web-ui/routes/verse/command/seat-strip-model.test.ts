@@ -48,6 +48,11 @@ function strip(seats: VerseSeat[], view: BudgetView | null, opts: { health?: Sea
 const LOCAL_UNREAD: VerseSeat = { ...LOCAL_SEAT_V2, health: { state: 'unknown', summary: null, windows: [], observedAt: null } };
 
 describe('seatStrip', () => {
+  it('does not invent subscription allowance for an API credit-only budget row', () => {
+    const view = budget([{ id: 'api-promotion', label: 'API promotion', engine: 'claude', eligible: false }]);
+    view.seatInfo[0] = { ...view.seatInfo[0]!, engine: 'claude-api' };
+    expect(strip([], view).items).toEqual([]);
+  });
   it('says what is left of the binding window, its reset, and the router\'s verdict — the rail\'s numbers', () => {
     const view = budget([{ id: 'grok', label: 'Grok', engine: 'grok', eligible: true, reserve: 40, reason: '69% of the weekly window is free for autonomy' }]);
     const { items, headline } = strip([GROK_SEAT], view);

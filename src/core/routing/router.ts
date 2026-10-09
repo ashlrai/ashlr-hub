@@ -35,7 +35,7 @@
 import { opportunityPriority } from './reset-pressure.js';
 import type { AccountSchedulingView } from './scheduling-types.js';
 import { assessSeat, HEADROOM_READING_MAX_AGE_MS, type SeatCapacity } from './headroom.js';
-import { effectiveSeatPolicy } from './policy.js';
+import { CLAUDE_API_SEAT_ID, effectiveSeatPolicy } from './policy.js';
 import { listSeatIds, reasonSentences } from './seat-reasons.js';
 import { COST_BASIS_RANK, costBasisOf, engineTier, RESOURCE_TIERS, type ResourceTier } from './tiers.js';
 import type {
@@ -460,8 +460,11 @@ export function routeSeat(
   opts: RouteOptions,
 ): SeatDecision {
   const readingMaxAgeMs = opts.readingMaxAgeMs ?? HEADROOM_READING_MAX_AGE_MS;
-  const verdicts = capacity.map((seat, index) => ({
-    ...(req.autonomous && seat.engine === 'devin'
+  const verdicts = capacity.map((seat, index): Verdict => ({
+    ...(seat.engine === 'claude-api' || seat.seatId.toLowerCase() === CLAUDE_API_SEAT_ID
+      ? { capacity: seat, eligible: false, headroom: null, nextEligibleAt: null,
+        details: [{ kind: 'grant' as const, text: 'Claude API is not commissioned in the signed grant.' }] }
+      : req.autonomous && seat.engine === 'devin'
       ? devinFleetVerdict(seat)
       : applyFit(
         req.autonomous

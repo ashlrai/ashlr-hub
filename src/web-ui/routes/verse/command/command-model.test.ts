@@ -66,6 +66,13 @@ describe('needs you ordering and silence', () => {
 
 describe('seat burn-downs', () => {
   const GROK = seriesKey('grok-a', 'weekly');
+  it('keeps API dollars out of subscription percentage charts', () => {
+    const view = budgetView('live', NOW);
+    view.seatInfo[0] = { ...view.seatInfo[0]!, engine: 'claude-api', label: 'API promotion' };
+    const burns = seatBurns(view, recordReading({}, view));
+    expect(burns.some(row => row.seatId === view.seatInfo[0]!.seatId)).toBe(false);
+    expect(burns.some(row => row.engine === 'codex')).toBe(true);
+  });
 
   it('records readings per seat window, drops a reset window, and builds paid seats first', () => {
     let history = recordReading({}, budgetView('live', NOW));

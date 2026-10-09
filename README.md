@@ -181,8 +181,11 @@ subscription can still have credits: the sidebar shows current native units,
 spending holds and an estimated dollar value for known personal plans.
 Purchased credit balances do not become reset spend-down targets. Cloud-credit
 estimates and tracked Devin ACUs do not establish an expiration. Expand
-**Credit balances** for account-bound historical gift and purchased captures,
-when available; a capture does not authorize gift spending.
+**Credit balances** for separate recorded API promotions, cloud gifts and
+purchased balances, when available. API promotions show their verified expiry
+date and conservative admission cutoff; their separate execution lane stays
+held until billing, credential binding and signed API authority are verified.
+A capture does not authorize spending. See [resource evidence](docs/RESOURCE-EVIDENCE.md#claude-api-promotional-grants).
 
 Expand **Execution feedback** in Fleet for recorded producer outcomes, proposal
 coverage and failure categories. A completed agent run is separate from verified
