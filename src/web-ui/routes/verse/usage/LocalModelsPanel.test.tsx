@@ -125,6 +125,20 @@ describe('LocalModelsPanel — the agentic gate', () => {
 });
 
 describe('LocalModelsPanel — placement', () => {
+  it('describes the catalog context without claiming it is the dispatched seat allocation', () => {
+    const rows = [
+      row({ name: 'qwen3.8:27b-ctx64k', nativeContext: 262_144, configuredContext: 65_536, contextTruncated: true }),
+      row({ name: 'qwen3.8:27b-q8_0', nativeContext: 262_144 }),
+    ];
+    const before = structuredClone(rows);
+    render(<LocalModelsPanel view={view({ rows })} />);
+    expect(screen.getByTitle('Reported context is 64k; native maximum is 256k. The serving allocation may differ.')).toHaveTextContent('64k of 256k');
+    expect(screen.getByText('256k')).toBeInTheDocument();
+    expect(screen.getByText('qwen3.8:27b-ctx64k')).toBeInTheDocument();
+    expect(screen.getByText('qwen3.8:27b-q8_0')).toBeInTheDocument();
+    expect(screen.queryByTitle(/Phantom runs this seat/)).not.toBeInTheDocument();
+    expect(rows).toEqual(before);
+  });
   it('draws no placement bar when the runtime reported no VRAM split', () => {
     render(<LocalModelsPanel view={view({ rows: [row({ name: 'x', resident: true, gpuPct: null })] })} />);
     expect(screen.queryByRole('img', { name: /on GPU/ })).not.toBeInTheDocument();

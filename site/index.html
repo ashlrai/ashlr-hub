@@ -37,7 +37,6 @@
       "description": "One coding-agent workbench for individual engineers and engineering teams. Use your accounts and local models, review changes, and add signed fleet work when ready.",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "macOS, Linux, Windows",
-      "softwareVersion": "3.26.0",
       "license": "https://github.com/ashlrai/phantom/blob/master/LICENSE",
       "isAccessibleForFree": true,
       "sameAs": "https://github.com/ashlrai/phantom",
@@ -1344,10 +1343,11 @@ ashlr wiki ask "where are standing grants verified?"</pre>
         <div class="steps">
           <div class="step"><span class="n"></span><div>
             <h3 id="install-verse">Install and open the console</h3>
-            <p>Inspect reported tools and context in each chat, and open source-line evidence from the local module map. Install Phantom 3.26.0 with the same CLI command on all three platforms. On an Apple silicon Mac, the release also provides the <a href="https://github.com/ashlrai/phantom/releases/tag/v3.26.0">Phantom 3.26.0 desktop DMG</a>. The app inside the DMG is locally signed; the DMG is unsigned. Neither is Apple Developer ID notarized, so macOS may require Open Anyway on first launch.</p>
+            <p>Inspect reported tools and context in each chat, and open source-line evidence from the local module map. Install Node.js 22.15+ and Git, then install Phantom's promoted CLI release on macOS, Linux or Windows with the commands below. Check your installed version with <code>phm --version</code>, then browse <a href="https://github.com/ashlrai/phantom/releases/latest">GitHub releases</a> and select that same version before using desktop artifacts.</p>
+            <p>On an Apple silicon Mac, use the qualified signed-update or maintainer artifact path in the <a href="https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install">desktop installation guide</a>. Downloading or unpacking an app archive alone does not perform installation. The app is locally signed, not Apple Developer ID notarized; macOS may require Open Anyway on first launch. Desktop installation and fleet activation are separate steps.</p>
             <p>New in 3.25: Choose Manager in a chat’s Auto seat menu, or Enable manager on a saved Fleet outcome, for planning, delegation and review under the fleet’s current authority. <a href="https://github.com/ashlrai/phantom/blob/master/docs/AUTOMATIC-OUTCOMES.md#one-conversation-with-the-manager">Read the Manager guide</a>.</p>
             <p>New in 3.24: Automatic awake during observed local desktop work, reported Devin consumption and source-qualified Growth measurements. Reset controls retain signed reserves and hold allowance taper when the execution account is unconfirmed. Automatic chat and editable fleet outcomes remain available.</p>
-            <pre id="install-command">npm i -g @ashlr/phantom@3.26.0
+            <pre id="install-command">npm i -g @ashlr/phantom
 phm verse</pre>
             <button class="copy-command" type="button" data-copy="install-command">Copy commands</button><span class="copy-status" role="status" aria-live="polite"></span>
           </div></div>

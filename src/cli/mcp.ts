@@ -11,14 +11,15 @@
  * interactively with the real target paths. In tests, always pass --config to a temp file.
  */
 
-import { readFileSync, writeFileSync, existsSync, copyFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, copyFileSync, lstatSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { resolve, join, dirname } from 'node:path';
+import { resolve, join, dirname, delimiter, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 
 import type { McpRegistry, McpServerSpec, McpServerHealth } from '../core/types.js';
 import { locusServerSpec } from '../core/integrations/locus.js';
+import { companionExecutableCandidates, companionExecutableKind } from '../core/companion-inventory.js';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers
@@ -591,17 +592,6 @@ export function buildEcosystemMcpEntry(srv: EcosystemMcpEntry): {
   };
 }
 
-/** Resolve a binary's full path from PATH; returns undefined if not found. */
-function resolveInPath(bin: string): string | undefined {
-  // Honour injected PATH (tests) or fall back to process.env.PATH.
-  const pathDirs = (process.env['PATH'] ?? '').split(':').filter(Boolean);
-  for (const dir of pathDirs) {
-    const candidate = join(dir, bin);
-    if (existsSync(candidate)) return candidate;
-  }
-  return undefined;
-}
-
 /** Shape of ~/.ashlr/settings.json for MCP purposes. */
 interface AshlrSettingsShape {
   mcpServers?: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>;
@@ -613,17 +603,36 @@ function ashlrSettingsPath(): string {
   return join(homedir(), '.ashlr', 'settings.json');
 }
 
-/** Load ~/.ashlr/settings.json; returns {} on absence/parse error. */
+function settingsObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+const SETTINGS_REFUSAL = 'Cannot read existing MCP settings safely; repair the file before registration. No settings were changed.';
+
+/** Missing settings permit first setup; unreadable or malformed existing bytes never do. */
 function loadAshlrSettings(settingsPath?: string): AshlrSettingsShape {
   const p = settingsPath ?? ashlrSettingsPath();
-  if (!existsSync(p)) return {};
-  const raw = readFileSync(p, 'utf8').trim();
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw) as AshlrSettingsShape;
-  } catch {
-    return {};
+  try { lstatSync(p); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw new Error(SETTINGS_REFUSAL);
   }
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(p, 'utf8'));
+    if (!settingsObject(parsed)) throw new Error(SETTINGS_REFUSAL);
+    const servers = parsed['mcpServers'];
+    if (servers !== undefined) {
+      if (!settingsObject(servers)) throw new Error(SETTINGS_REFUSAL);
+      for (const entry of Object.values(servers)) {
+        if (!settingsObject(entry)) throw new Error(SETTINGS_REFUSAL);
+        const env = entry['env'];
+        if (env !== undefined && (!settingsObject(env) || Object.values(env).some(value => typeof value !== 'string'))) {
+          throw new Error(SETTINGS_REFUSAL);
+        }
+      }
+    }
+    return parsed as AshlrSettingsShape;
+  } catch { throw new Error(SETTINGS_REFUSAL); }
 }
 
 /**
@@ -684,18 +693,22 @@ async function cmdMcpEcosystem(args: string[]): Promise<number> {
   // Detect which ecosystem servers are available in PATH.
   const detected: Array<EcosystemServer & { resolvedBin: string }> = [];
   const missing: EcosystemServer[] = [];
+  const refused: Array<{ server: EcosystemServer; reason: 'ambiguous' | 'unsupported-launcher' }> = [];
+  const directories = (process.env['PATH'] ?? '').split(delimiter).filter(isAbsolute);
 
   for (const srv of ECOSYSTEM_SERVERS) {
-    const resolved = resolveInPath(srv.probe);
-    if (resolved) {
-      detected.push({ ...srv, resolvedBin: resolved });
-    } else {
-      missing.push(srv);
-    }
+    const candidates = companionExecutableCandidates(srv.probe, directories);
+    if (candidates.length === 0) missing.push(srv);
+    else if (candidates.length > 1) refused.push({ server: srv, reason: 'ambiguous' });
+    else if (companionExecutableKind(candidates[0]!) !== 'native') {
+      refused.push({ server: srv, reason: 'unsupported-launcher' });
+    } else detected.push({ ...srv, resolvedBin: candidates[0]! });
   }
 
   // Load current settings to check registration state.
-  const currentSettings = loadAshlrSettings(settingsPath);
+  let currentSettings: AshlrSettingsShape;
+  try { currentSettings = loadAshlrSettings(settingsPath); }
+  catch { console.log(red('  ' + SETTINGS_REFUSAL)); return 1; }
   const currentServers = currentSettings.mcpServers ?? {};
 
   // Print detected servers.
@@ -708,7 +721,7 @@ async function cmdMcpEcosystem(args: string[]): Promise<number> {
     for (const srv of detected) {
       const isRegistered = Boolean(currentServers[srv.name]);
       const regStr = isRegistered ? green('registered') : yellow('not registered');
-      const cmdStr = dim([srv.command, ...srv.args].join(' '));
+      const cmdStr = dim([srv.resolvedBin, ...srv.args].join(' '));
       console.log(
         '    ' + cyan(pad(srv.label, nameW)) +
         '  ' + regStr +
@@ -724,6 +737,14 @@ async function cmdMcpEcosystem(args: string[]): Promise<number> {
     console.log(bold('  Not installed (skipped):'));
     for (const srv of missing) {
       console.log('    ' + dim(srv.label) + gray('  — ' + srv.probe + ' not found in PATH'));
+    }
+    console.log('');
+  }
+
+  if (refused.length > 0) {
+    console.log(bold('  Not selected (skipped):'));
+    for (const { server, reason } of refused) {
+      console.log('    ' + dim(server.label) + gray(` — ${reason}; choose one installed native executable through PATH.`));
     }
     console.log('');
   }
@@ -745,10 +766,17 @@ async function cmdMcpEcosystem(args: string[]): Promise<number> {
     return 0;
   }
 
-  const added = mergeEcosystemServers(
-    detected.map(s => ({ name: s.name, command: s.command, args: s.args })),
-    settingsPath,
-  );
+  let added: string[];
+  try {
+    added = mergeEcosystemServers(
+      detected.map(s => ({ name: s.name, command: s.resolvedBin, args: s.args })),
+      settingsPath,
+    );
+  } catch (error) {
+    console.log(red('  ' + (error instanceof Error && error.message === SETTINGS_REFUSAL
+      ? SETTINGS_REFUSAL : 'MCP registration failed; inspect the settings file before retrying.')));
+    return 1;
+  }
 
   if (added.length === 0) {
     console.log(green('  ✓ All available servers already registered — no changes.'));
