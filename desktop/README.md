@@ -52,7 +52,7 @@ For routine drift detection, `node scripts/sync-candidate-version.mjs --check`
 uses the root package version as the expected value; writing still requires an
 explicit version.
 
-The source candidate is 3.29.4; publication and installation are pending qualification and public byte verification.
+This source tree targets version 3.29.4; check canonical release availability and exact matching assets before installation.
 
 The published 3.29.3 release uses `ashlrai/phantom` and `@ashlr/phantom`.
 Its fixed discovery endpoint is

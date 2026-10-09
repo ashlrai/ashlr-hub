@@ -78,13 +78,10 @@ export function syncCandidateVersion(root, version, { check = false } = {}) {
   replacements.set('desktop/src-tauri/tauri.conf.json', updatedTauri);
   replacements.set('desktop/src-tauri/Cargo.toml', ownCargoVersion(sources.get('desktop/src-tauri/Cargo.toml'), version, false));
   replacements.set('desktop/src-tauri/Cargo.lock', ownCargoVersion(sources.get('desktop/src-tauri/Cargo.lock'), version, true));
-  // Only the explicit candidate line moves; published and historical versions stay intact.
-  replacements.set('desktop/README.md', replaceOne(sources.get('desktop/README.md'),
-    /^(The source candidate is )\d+\.\d+\.\d+(; publication and installation are pending qualification and public byte verification\.)$/gm,
-    (_line, before, after) => `${before}${version}${after}`, 'desktop candidate documentation'));
-  for (const file of ['README.md', 'docs/QUICKSTART.md']) {
+  // Source identity stays true before and after publication; historical releases stay intact.
+  for (const file of ['desktop/README.md', 'README.md', 'docs/QUICKSTART.md']) {
     replacements.set(file, replaceOne(sources.get(file),
-      /^(The source candidate is )\d+\.\d+\.\d+(; preparing it does not publish or install it\.)$/gm,
+      /^(This source tree targets version )\d+\.\d+\.\d+(; check canonical release availability and exact matching assets before installation\.)$/gm,
       (_line, before, after) => `${before}${version}${after}`, `${file} candidate documentation`));
   }
   const changed = files.filter((file) => sources.get(file) !== replacements.get(file));

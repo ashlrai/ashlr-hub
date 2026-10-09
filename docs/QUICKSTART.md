@@ -9,7 +9,7 @@ its work are distinct steps.
 
 The primary CLI is `phm`; `ashlr` remains compatible. Current source uses
 `@ashlr/phantom` in `ashlrai/phantom`; the canonical 3.29.3 release is published.
-The source candidate is 3.29.4; preparing it does not publish or install it.
+This source tree targets version 3.29.4; check canonical release availability and exact matching assets before installation.
 The verified 3.25.3 compatibility release remains `@ashlr/hub`.
 Local routes remain `/verse/`, and the published macOS app is `Phantom.app`. See
 [the product naming guide](PHANTOM-BRAND.md).
