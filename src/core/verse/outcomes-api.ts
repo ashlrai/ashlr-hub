@@ -6,7 +6,10 @@ import type { VerseEngineHandle } from './session-engine.js';
 import { isValidSessionId } from './session-store.js';
 import { reconcileOutcomeManagerSession, submitOutcomeManagerMessage, validManagerSubmit, type ManagerSessionDeps } from './manager-session.js';
 import { normalizeOutcomeOperation } from './outcomes-input.js';
-import { runOutcomeOperation } from './outcomes-io.js';
+import { runOutcomeOperation, runOutcomeTaskContext } from './outcomes-io.js';
+import type { OutcomeTaskContextRequest, OutcomeTaskContextResult } from './outcome-task-context.js';
+import { parseOutcomeTaskPublicId } from './outcome-task-context.js';
+import { taskContextTimestamp } from '../context/task-temporal-context.js';
 import { OUTCOMES_PATH, OUTCOME_ID_PATTERN, type OutcomeOperation } from './outcomes-api-types.js';
 
 const REFUSAL = {
@@ -18,7 +21,10 @@ const REFUSAL = {
   unenrolled: [409, 'Choose exact currently enrolled repositories.'],
 } as const;
 
-export interface OutcomesApiDeps extends ManagerSessionDeps { engine?: () => Promise<VerseEngineHandle> }
+export interface OutcomesApiDeps extends ManagerSessionDeps {
+  engine?: () => Promise<VerseEngineHandle>;
+  taskContext?: (input: OutcomeTaskContextRequest) => Promise<OutcomeTaskContextResult>;
+}
 
 export async function handleOutcomesApiWithDeps(
   ctx: VerseApiContext, req: IncomingMessage, res: ServerResponse, path: string, method: string, deps: OutcomesApiDeps = {},
@@ -32,10 +38,31 @@ export async function handleOutcomesApiWithDeps(
     if (!ctx.allowDispatch) { sendJson(res, 404, { error: 'not found' }); return true; }
     if (!passesMutationGate(req, res, ctx.token)) return true;
   }
+  const suffixParts = path.slice(OUTCOMES_PATH.length + 1).split('/');
+  if (method === 'GET' && suffixParts.length === 4 && suffixParts[1] === 'tasks' && suffixParts[3] === 'context') {
+    let input: OutcomeTaskContextRequest;
+    try {
+      const params = new URL(req.url ?? path, 'http://localhost').searchParams;
+      const taskId = parseOutcomeTaskPublicId(suffixParts[2]);
+      if ([...params.keys()].some(key => !['asOf', 'observedThrough', 'maxEvents'].includes(key) || params.getAll(key).length !== 1) ||
+          !OUTCOME_ID_PATTERN.test(suffixParts[0]!) || !taskId) throw new Error();
+      const asOf = params.get('asOf'), observedThrough = params.get('observedThrough'), maxEvents = params.get('maxEvents');
+      if (asOf !== null && !taskContextTimestamp(asOf) || observedThrough !== null && !taskContextTimestamp(observedThrough) ||
+          maxEvents !== null && (!/^[1-9]\d{0,5}$/.test(maxEvents) || Number(maxEvents) > 100_000)) throw new Error();
+      input = { outcomeId: suffixParts[0]!, taskId, ...(asOf === null ? {} : { asOf }),
+        ...(observedThrough === null ? {} : { observedThrough }), ...(maxEvents === null ? {} : { maxEvents: Number(maxEvents) }) };
+    } catch { sendJson(res, 400, { error: 'Invalid task context scope, time or retrieval size.' }); return true; }
+    try {
+      const result = await (deps.taskContext ?? runOutcomeTaskContext)(input);
+      if (result.ok) sendJson(res, 200, result.context);
+      else sendJson(res, result.reason === 'invalid' ? 400 : result.reason === 'not-found' ? 404 : result.reason === 'unenrolled' ? 409 : 503,
+        { error: 'Task context is unavailable in the current outcome and repository scope.', reason: result.reason });
+    } catch { sendJson(res, 503, { error: 'Task context could not be read. Refresh before retrying.' }); }
+    return true;
+  }
   try {
     if (new URL(req.url ?? path, 'http://localhost').search) throw new Error();
   } catch { sendJson(res, 400, { error: 'Outcomes do not accept query parameters.' }); return true; }
-  const suffixParts = path.slice(OUTCOMES_PATH.length + 1).split('/');
   if (method === 'GET' && suffixParts.length === 2 && suffixParts[0] === 'session' && isValidSessionId(suffixParts[1]!)) {
     try {
       const engine = await (deps.engine ?? getVerseEngine)();

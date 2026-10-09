@@ -148,6 +148,29 @@ all resources are activated or every call has the same credential boundary.
 
 ## Evidence and recovery
 
+### Task context in the successor source
+
+Each saved task has a stable `id`. The authenticated read endpoint
+`GET /api/verse/outcomes/:outcomeId/tasks/:taskId/context` retrieves its saved
+definition, exact-attempt action receipts and authorized private task records.
+It checks the current outcome and enrolled repositories, runs filesystem reads
+off the desktop server's event loop, and creates no records during retrieval.
+
+Evidence retains its provider, account, object, revision and original source
+references. `occurredAt` and `observedAt` answer different questions: when the
+event happened and when Phantom observed it. Unknown event times remain `null`.
+Optional `asOf` and `observedThrough` parameters require explicit timezone
+offsets. `maxEvents` controls retrieval size; truncation remains visible in
+`coverage.complete` and `coverage.stopReasons`.
+
+Current and historical evidence retain superseded, canceled and expired states.
+Conflicting revisions remain visible instead of choosing whichever arrived last.
+Private content stays out of action telemetry. This first endpoint includes
+local Phantom evidence only. It does not import Gmail, calendars or global firm
+memory, or establish a connection to a personal proactive agent. Those sources
+need a qualified account-specific adapter. Missing and partial sources remain
+unknown; a dispatch receipt does not prove completion.
+
 Outcome revisions and task bindings are durable, private records. A replayed
 command does not launch another producer. Parallel candidates register their
 actual run identities before contact, and only the selected proposal can
