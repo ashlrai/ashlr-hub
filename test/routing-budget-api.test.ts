@@ -33,6 +33,7 @@ import type { BudgetView } from '../src/core/routing/policy.js';
 import type { SeatDecision } from '../src/core/routing/types.js';
 import type { AshlrConfig } from '../src/core/types.js';
 import type { VerseApiContext } from '../src/core/verse/verse-api.js';
+import { sanitizePublicJson } from '../src/core/util/public-json.js';
 
 const TOKEN = 'test-mutation-token';
 let home: string;
@@ -319,8 +320,8 @@ describe('GET /api/verse/budget/preview', () => {
   it('routes a hypothetical task without logging it', async () => {
     const { status, body } = await get<SeatDecision>('/api/verse/budget/preview?task=code&difficulty=medium&autonomous=true');
     expect(status).toBe(200);
-    expect(body.seatId).toBe('grok');
-    expect(body.why).toContain('balanced mode prefers the fast tier');
+    expect(body.seatId).toBe('local:qwen3.8:27b-ctx64k');
+    expect(body.why).toContain('admitted headroom and funding category');
     expect(readShadowDecisions(10)).toEqual([]);
   });
 
@@ -342,12 +343,19 @@ describe('shadow decisions', () => {
   it('routeSeatShadow logs a decision the decisions route then serves', async () => {
     const decision = await routeSeatShadow({} as AshlrConfig, { task: 'code', difficulty: 'high', autonomous: true }, 'daemon',
       { engine: 'claude', seatId: null });
-    expect(decision!.seatId).toBe('claude');
+    expect(decision!.seatId).toBe('local:qwen3.8:27b-ctx64k');
     const { status, body } = await get<{ decisions: Array<{ source: string; decision: SeatDecision; actual: unknown }> }>(
       '/api/verse/budget/decisions?limit=5');
     expect(status).toBe(200);
     expect(body.decisions).toHaveLength(1);
     expect(body.decisions[0]).toMatchObject({ source: 'daemon', actual: { engine: 'claude', seatId: null } });
+    const stored = readShadowDecisions(5)[0]!.decision;
+    // The private writer scrubs prose too; structured routing identity survives
+    // both that boundary and the HTTP response sanitizer.
+    expect(stored).toEqual(sanitizePublicJson(decision));
+    expect(stored).toMatchObject({ seatId: decision!.seatId, candidates: decision!.candidates, mode: decision!.mode });
+    expect(body.decisions[0]!.decision).toEqual(sanitizePublicJson(stored));
+    expect(body.decisions[0]!.decision.seatId).toBe('local:qwen3.8:27b-ctx64k');
   });
 
   it('routeSeatShadow never throws when capacity cannot be read', async () => {

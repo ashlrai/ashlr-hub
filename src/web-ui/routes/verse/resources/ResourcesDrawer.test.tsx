@@ -880,14 +880,14 @@ describe('ResourcesDrawer — equal partners (3.15)', () => {
     expect(calls.every((c) => c.method === 'GET')).toBe(true);
   });
 
-  it('each tier section says what the tier means, and the sections come in tier order', async () => {
+  it('keeps legacy display groups in order without claiming measured quality or role restrictions', async () => {
     render(<ResourcesDrawer mode="docked" now={NOW} />);
     await screen.findByRole('heading', { name: /^Cash Margin Partners/ });
     const titles = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent);
     expect(titles).toEqual(['Use allowance before resets', 'Elite', 'Fast', 'Free · local', 'Decision layer']);
     expect(within(screen.getByRole('region', { name: 'Elite' })).getByText(/equal partners/)).toBeInTheDocument();
     expect(within(screen.getByRole('region', { name: 'Elite' })).getByText(/does not restrict Leader or Manager roles/)).toBeInTheDocument();
-    expect(within(screen.getByRole('region', { name: 'Fast' })).getByText(/configured preference, not a measured speed or price/)).toBeInTheDocument();
+    expect(within(screen.getByRole('region', { name: 'Fast' })).getByText(/legacy Fast display group.*does not establish measured speed or price/)).toBeInTheDocument();
     expect(within(screen.getByRole('region', { name: 'Free · local' })).getByText(/connected tools can use network services/)).toBeInTheDocument();
   });
 });
