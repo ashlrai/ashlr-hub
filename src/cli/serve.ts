@@ -131,7 +131,7 @@ export async function cmdServe(args: string[]): Promise<number> {
       return 0;
     }
     console.error(red('error: ') + parsed.error);
-    console.error(dim('Run `ashlr serve --help` for usage.'));
+    console.error(dim('Run `phm serve --help` for usage.'));
     return parsed.code;
   }
 
@@ -189,7 +189,7 @@ export async function cmdServe(args: string[]): Promise<number> {
     console.log(JSON.stringify(out));
   } else {
     console.log('');
-    console.log(bold('  ashlr serve') + gray(' — local web dashboard'));
+    console.log(bold('  phm serve') + gray(' — local web dashboard'));
     console.log('');
     console.log(`  ${green('✓')} Listening on ${cyan(handle.url)}`);
     console.log(`  ${green('✓')} Operator console ${cyan(`${handle.url}/next/`)}`);
@@ -266,7 +266,8 @@ export async function cmdServe(args: string[]): Promise<number> {
 
 function printUsage(): void {
   console.log('');
-  console.log(bold('  ashlr serve') + dim(' [--port N] [--open] [--allow-dispatch] [--json]'));
+  console.log(bold('  phm serve') + dim(' [--port N] [--open] [--allow-dispatch] [--json]'));
+  console.log(dim('  Phantom CLI (ashlr remains compatible)'));
   console.log('');
   console.log('  Start a localhost-only web dashboard and JSON API server.');
   console.log('');
@@ -295,12 +296,12 @@ function printUsage(): void {
   console.log(`    ${cyan('GET  /api/events')}          Server-Sent Events live feed`);
   console.log('');
   console.log('  ' + bold('Dispatch route (--allow-dispatch only):'));
-  console.log(`    ${cyan('POST /api/run')}             Launch ashlr run (requires X-Ashlr-Token header)`);
+  console.log(`    ${cyan('POST /api/run')}             Launch phm run (requires X-Ashlr-Token header)`);
   console.log('');
   console.log('  ' + bold('Examples:'));
-  console.log(`    ${cyan('ashlr serve')}                            # Start on port ${DEFAULT_PORT}, read-only`);
-  console.log(`    ${cyan('ashlr serve --port 8080 --open')}         # Custom port + open browser`);
-  console.log(`    ${cyan('ashlr serve --allow-dispatch')}           # Enable agent dispatch`);
-  console.log(`    ${cyan('ashlr serve --json')}                     # Machine-readable startup output`);
+  console.log(`    ${cyan('phm serve')}                            # Start on port ${DEFAULT_PORT}, read-only`);
+  console.log(`    ${cyan('phm serve --port 8080 --open')}         # Custom port + open browser`);
+  console.log(`    ${cyan('phm serve --allow-dispatch')}           # Enable agent dispatch`);
+  console.log(`    ${cyan('phm serve --json')}                     # Machine-readable startup output`);
   console.log('');
 }

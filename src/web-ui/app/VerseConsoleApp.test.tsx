@@ -60,7 +60,8 @@ describe('VerseConsoleApp', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(<VerseConsoleApp />);
     expect(await screen.findByRole('heading', { name: 'Connect to Phantom' })).toBeInTheDocument();
-    expect(screen.getAllByText(/ashlr verse/).length).toBeGreaterThan(0);
+    expect(screen.getByText('phm verse', { selector: 'pre' })).toBeInTheDocument();
+    expect(screen.getByText(/Phantom only ever talks to the Phantom server/)).toBeInTheDocument();
     // No read session, no injected tokens: nothing is fetched until a token is pasted.
     expect(fetchMock).not.toHaveBeenCalled();
     expect(MockEventSource.instances).toHaveLength(0);

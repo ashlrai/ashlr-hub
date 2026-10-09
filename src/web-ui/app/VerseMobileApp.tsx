@@ -130,7 +130,7 @@ function LocalVerseMobileApp() {
     <Boot>
       {phase === 'unauthenticated' ? (
         <Suspense fallback={CONNECTING}>
-          <SessionGate heading="Connect to your Mac" command="ashlr verse" subject={PRODUCT_NAME} mutationField />
+          <SessionGate heading="Connect to your Mac" command="phm verse" subject={PRODUCT_NAME} mutationField />
         </Suspense>
       ) : unreachable ? (
         <div role="alert">

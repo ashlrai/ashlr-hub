@@ -379,6 +379,66 @@ describe('activity reader', () => {
     expect(response.capacity).toEqual({ seatId: 'codex-b', engine: 'codex', label: 'Seat codex-b', usedPercent: 91, window: 'weekly', resetsAt: null });
   });
 
+  it('retains continuous account alert arrival times while report checks and capacity stay fresh', () => {
+    const h = harness();
+    h.health = { seats: [seat('codex-b', 'codex', 91)], reports: [
+      report('codex-b', 'signed-out', { engine: 'codex' }),
+      report('grok-a', 'binary-skew', { engine: 'grok' }),
+    ] };
+    const reader = createActivityReader(h.deps, 'eeeeeeee');
+    const first = reader.build(null).response;
+    for (let poll = 1; poll <= 3; poll++) {
+      h.clock.now = T0 + poll * 6_000;
+      h.health = { seats: [seat('codex-b', 'codex', 91 - poll)], reports: h.health.reports
+        .map((item) => ({ ...item, checkedAt: new Date(h.clock.now).toISOString() })).reverse() };
+      const current = reader.build(null).response;
+      expect(current.needsYou).toEqual(first.needsYou);
+      expect(current.capacity?.usedPercent).toBe(91 - poll);
+      expect(h.health.reports.every((item) => item.checkedAt === new Date(h.clock.now).toISOString())).toBe(true);
+    }
+  });
+
+  it('renews account alert arrival times for changed facts, recurrence, unknown health and a new reader', () => {
+    const h = harness();
+    const view = (over: Partial<SeatHealthReport> = {}, label = 'Seat codex-b'): HealthView => ({
+      seats: [{ ...seat('codex-b', 'codex', 50), label }],
+      reports: [report('codex-b', 'signed-out', { engine: 'codex', checkedAt: new Date(h.clock.now).toISOString(), ...over })],
+    });
+    h.health = view();
+    const reader = createActivityReader(h.deps, 'eeeeeeee');
+    let previous = reader.build(null).response.needsYou[0]!;
+    for (const [over, label] of [
+      [{ reasons: ['The login changed.'] }, 'Seat codex-b'],
+      [{ connection: 'expiring', credentialExpiresAt: new Date(T0 + 3_600_000).toISOString() }, 'Seat codex-b'],
+      [{ connection: 'expiring', credentialExpiresAt: new Date(T0 + 7_200_000).toISOString() }, 'Renamed seat'],
+      [{ engine: 'grok' }, 'Renamed seat'],
+    ] as Array<[Partial<SeatHealthReport>, string]>) {
+      h.clock.now += 6_000;
+      h.health = view(over, label);
+      const item = reader.build(null).response.needsYou[0]!;
+      expect(item.since).toBe(new Date(h.clock.now).toISOString());
+      expect(item.since).not.toBe(previous.since);
+      expect(isNeedsYouItem(item)).toBe(true);
+      expect(item.subject.engine).toBe(over.engine ?? 'codex');
+      previous = item;
+    }
+    h.clock.now += 6_000;
+    h.health = view({ connection: 'connected', reasons: [] });
+    expect(reader.build(null).response.needsYou).toEqual([]);
+    h.clock.now += 6_000;
+    h.health = view();
+    expect(reader.build(null).response.needsYou[0]?.since).toBe(new Date(h.clock.now).toISOString());
+    h.clock.now += 6_000;
+    h.health = null;
+    expect(reader.build(null).response.sources.accounts).toBe('unavailable');
+    h.clock.now += 6_000;
+    h.health = view();
+    expect(reader.build(null).response.needsYou[0]?.since).toBe(new Date(h.clock.now).toISOString());
+    h.clock.now += 6_000;
+    h.health = view();
+    expect(createActivityReader(h.deps, 'ffffffff').build(null).response.needsYou[0]?.since).toBe(new Date(h.clock.now).toISOString());
+  });
+
   it("files C3's held follow-up queues as chat items, and drops a malformed one as an error", () => {
     const h = harness();
     h.engine.sessions = [session('q', { turnCount: 3, updatedAt: new Date(T0 + 1).toISOString() })];

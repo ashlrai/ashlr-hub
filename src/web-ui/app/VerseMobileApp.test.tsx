@@ -114,6 +114,8 @@ describe('VerseMobileApp', () => {
     act(() => markCheckComplete(false));
     render(<VerseMobileApp />);
     expect(await screen.findByRole('heading', { name: 'Connect to your Mac' })).toBeInTheDocument();
+    expect(screen.getByText('phm verse', { selector: 'pre' })).toBeInTheDocument();
+    expect(screen.getByText(/Phantom only ever talks to the Phantom server/)).toBeInTheDocument();
     expect(fetch).not.toHaveBeenCalled();
     expect(window.location.pathname).toBe('/verse/m/');
   });

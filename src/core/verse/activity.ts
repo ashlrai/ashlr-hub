@@ -428,8 +428,17 @@ export function createActivityReader(deps: ActivityDeps, bootId: string = random
     if (healthMemo && nowMs - healthMemo.at < 5_000) return healthMemo;
     let view: HealthView | null = null;
     try { view = deps.health(); } catch { view = null; }
+    // checkedAt is the projection's read time, not a new alert. Keep the
+    // arrival time only while every actionable fact stays identical. The
+    // latest memo bounds this history; removal or unknown health clears it.
+    const previous = new Map(healthMemo?.items.map((item) => [item.id, item]));
+    const items = view ? accountItems(view, new Date(nowMs).toISOString()).map((item) => {
+      const prior = previous.get(item.id);
+      return prior && JSON.stringify({ ...prior, since: null }) === JSON.stringify({ ...item, since: null })
+        ? { ...item, since: prior.since } : item;
+    }) : [];
     healthMemo = view
-      ? { at: nowMs, items: accountItems(view, new Date(nowMs).toISOString()), capacity: scarcestSeat(view.seats), ok: true }
+      ? { at: nowMs, items, capacity: scarcestSeat(view.seats), ok: true }
       : { at: nowMs, items: [], capacity: null, ok: false };
     return healthMemo;
   }

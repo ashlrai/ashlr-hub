@@ -146,7 +146,7 @@ function printSnapshot(snapshot: import('../core/fabric/resource-monitor.js').Re
     console.log('');
   }
 
-  console.log(dim(`  Run ${cyan('ashlr resources --json')} for machine-readable snapshot.`));
+  console.log(dim(`  Run ${cyan('phm resources --json')} for machine-readable snapshot.`));
   console.log('');
 }
 
@@ -156,16 +156,17 @@ function printSnapshot(snapshot: import('../core/fabric/resource-monitor.js').Re
 
 function printResourcesHelp(): void {
   console.log('');
-  console.log(bold('  ashlr resources') + dim(' — per-backend resource control plane (read-only)'));
+  console.log(bold('  phm resources') + dim(' — per-backend resource control plane (read-only)'));
+  console.log(dim('  Phantom CLI (ashlr remains compatible)'));
   console.log('');
-  console.log('  Usage: ashlr resources [--json] [--watch]');
-  console.log('         ashlr resources pool status|run|observe|probe|console|benchmark --help');
-  console.log('         ashlr resources launcher --help');
-  console.log('         ashlr resources profile --help');
+  console.log('  Usage: phm resources [--json] [--watch]');
+  console.log('         phm resources pool status|run|observe|probe|console|benchmark --help');
+  console.log('         phm resources launcher --help');
+  console.log('         phm resources profile --help');
   console.log('');
-  console.log(`    ${cyan('ashlr resources')}          ${dim('table view of availability/used%/cap/resets')}`);
-  console.log(`    ${cyan('ashlr resources --json')}   ${dim('raw JSON (ResourceSnapshot)')}`);
-  console.log(`    ${cyan('ashlr resources --watch')}  ${dim('refresh every 30s (Ctrl-C to stop)')}`);
+  console.log(`    ${cyan('phm resources')}          ${dim('table view of availability/used%/cap/resets')}`);
+  console.log(`    ${cyan('phm resources --json')}   ${dim('raw JSON (ResourceSnapshot)')}`);
+  console.log(`    ${cyan('phm resources --watch')}  ${dim('refresh every 30s (Ctrl-C to stop)')}`);
   console.log('');
 }
 

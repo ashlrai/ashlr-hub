@@ -51,6 +51,6 @@ export function ResourcePoolConsoleApp() {
   }, [phase]);
   if (phase === 'checking') return <p className={styles.checking} role="status">Checking for an existing resource session…</p>;
   if (phase === 'unauthenticated') return <SessionGate heading={`Connect to ${PRODUCT_NAME} resources`}
-    command="ashlr resources pool console --root /absolute/resource-store --pool /absolute/pool.json --bindings /absolute/bindings.json --observations /absolute/observations.json" />;
+    command="phm resources pool console --root /absolute/resource-store --pool /absolute/pool.json --bindings /absolute/bindings.json --observations /absolute/observations.json" />;
   return <ScopedResourceWorkspace />;
 }

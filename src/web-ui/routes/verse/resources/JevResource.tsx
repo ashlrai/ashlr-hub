@@ -7,6 +7,7 @@
  * without the route (404) renders nothing. Setting up happens in a terminal
  * (the key lives in ~/.ashlr/secrets/typesafe.env): the page never takes one.
  */
+import { formatCompact } from '../../../components/charts/format.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { MonogramTile } from '../apps/MonogramTile.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
@@ -70,14 +71,14 @@ export function JevResource() {
             <ul className={styles.subtle} aria-label="Jev decisions today by kind">
               {top.map((k) => (
                 <li key={k.kind} data-jev-kind={k.kind}>
-                  {k.kind}: {k.decisions} · {k.jev} by Jev · conf {formatConfidence(k.avgConfidence)}
+                  {k.kind}: {formatCompact(k.decisions)} · {formatCompact(k.jev)} by Jev · conf {formatConfidence(k.avgConfidence)}
                 </li>
               ))}
             </ul>
           ) : null}
           <p className={styles.fine}>{status.dailyCallBudget === null
-            ? `${status.callsToday} API call attempts today · no call-count preference`
-            : `${status.callsToday} of ${status.dailyCallBudget} API call attempts today`}. <code>ashlr jev status</code> for the full table.</p>
+            ? `${formatCompact(status.callsToday)} API call attempts today · no call-count preference`
+            : `${formatCompact(status.callsToday)} of ${formatCompact(status.dailyCallBudget)} API call attempts today`}. <code>phm jev status</code> for the full table.</p>
         </>
       ) : null}
     </li>
