@@ -110,13 +110,59 @@ Existing file hashes describe before images; no backup or installation occurs.
 `installed:false`, `runtimeCapability:"not-inspected"`, `effects:[]` and required
 revalidation remain explicit. Exit 0 means a verified plan, exit 1 a blocked
 plan, and exit 2 bad usage. There is no download, archive extraction, source-build
-fallback or apply flag. A future installer must safely revalidate artifacts and
-before images at application time and preserve owner approval boundaries.
+fallback or apply flag. A plan does not authorize applying its observations.
+The separate explicit installer below accepts only a fresh destination slot.
 
 Locus 0.5.0 release archives lack published checksum sidecars. Do not invent a
 qualified manifest or execute its unpinned source fallback to fill that gap.
 Cross-platform artifacts, installation and clean-machine MCP acceptance remain
 separate qualification steps.
+
+## Install verified local files explicitly
+
+This installer is implemented in the unreleased source change. It does not
+download companions or run a package manager. Review an expanded local file set,
+its independent complete manifest digest, the target root and an existing Python
+runtime before authorizing this filesystem mutation:
+
+```sh
+phm companions install --artifacts /absolute/reviewed-artifacts \
+  --manifest manifest.json --sha256 VERIFIED_MANIFEST_SHA256 \
+  --root /absolute/private-companions \
+  --python /absolute/canonical/python3 --json
+```
+
+The destination root must already exist, belong to the invoking user, and have
+no group or other permissions. The runtime must be a canonical absolute regular
+executable with no group/other write permission. Additional hard links are
+accepted only for a root-owned system runtime. No runtime is selected from PATH
+or installed automatically. macOS and Linux
+require the corresponding exclusive native rename operation. Unsupported
+runtimes, platforms and filesystems are blocked without a fallback.
+
+The installer rechecks the pinned manifest and complete source bytes/modes,
+copies files into private staging using descriptor-relative operations, and
+publishes a complete fresh `<tool>-<version>-<platform>` directory exclusively.
+It never overlays, updates or removes an existing installation. Another process
+publishing the same slot wins or loses without overwriting the winner. Files
+remain data throughout installation: no version/help probe, configuration write,
+credential retrieval, trust grant, MCP handshake or service startup occurs.
+
+The returned anchor identifies the destination directory inode. This protects
+operations from pathname redirection; it is not a sandbox against a hostile
+process with the same user identity that can relocate or mutate owned files.
+`installed:true` establishes the copied file set only, and
+`runtimeCapability:"not-inspected"` remains explicit. Exit 0 means installed,
+exit 1 blocked, exit 2 bad usage and exit 3 uncertain completion. For uncertain
+completion, inspect the destination and preserved staging evidence before
+retrying; no automatic rollback removes a possibly published directory.
+
+A manifest may select a reviewed component such as a bundled MCP server rather
+than the complete companion CLI. Record that distinction in its independent
+qualification evidence. A synthetic test manifest or the manifest's own
+`qualified` declaration cannot establish public artifact provenance. A shipped
+qualified artifact catalog and platform-wide clean-install acceptance are still
+required for automatic out-of-box provisioning.
 
 ## Register Lexicon for one project and client
 
@@ -139,7 +185,38 @@ CLI uses `mcp`. The entry has explicit `LEXICON_CWD` and a project/client-scoped
 `LEXICON_PATH` under `.phantom/lexicon`. No vocabulary is opened, project trust
 granted or MCP server started by registration.
 
-Point the intended MCP client at that project config. This does not automatically
-add project-local servers to the workbench gateway or prove client identity,
-MCP initialize/tools discovery, vocabulary acceptance or provider availability.
-No identity is re-pinned and no resident grant is changed.
+Point the intended MCP client at that project config. Registration alone does
+not prove client identity, MCP initialize/tools discovery, vocabulary acceptance
+or provider availability. No identity is re-pinned and no resident grant is
+changed.
+
+## Consume the selected Lexicon config through Phantom
+
+Use the same explicit project, client and config for gateway discovery:
+
+```sh
+phm mcp list --project /absolute/project --client intended-client \
+  --config /absolute/project/.mcp.json --json
+phm mcp --project /absolute/project --client intended-client \
+  --config /absolute/project/.mcp.json
+```
+
+The first command validates metadata without starting Lexicon. The second starts
+the gateway and selected downstream stdio process when invoked by an MCP client.
+`phm mcp doctor` accepts the same binding flags and performs a real bounded
+initialize/tools-list probe. These commands read only that selected Lexicon
+registration, with no fallback to home configs. The exact installed executable,
+launch arguments and project/client vocabulary paths must match; extra server
+environment variables, including Lexicon's trust-bypass option, are refused.
+For the reviewed Lexicon 0.5.x contract, the selected project must have its own
+existing `.git` file or directory: Lexicon otherwise searches ancestor folders
+for vocabulary before checking trust. Vocabulary and client trust/hit-state
+paths must remain regular single-link files inside their selected scope;
+redirecting state symlinks are refused without reading those files.
+The downstream receives scoped HOME/XDG paths, an explicit project working
+directory and a narrow runtime PATH, without provider configuration bridging.
+
+This selects Lexicon's downstream binding. Native Phantom tools remain exposed
+by the gateway under their existing authority rules; the binding does not create
+an overall project authorization sandbox. A handshake or tools listing does not
+grant vocabulary trust or prove a correction/provider workflow.

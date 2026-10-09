@@ -21,6 +21,7 @@ import { mkdirSync } from 'node:fs';
 import type { McpRegistry, McpServerSpec, McpServerHealth } from '../core/types.js';
 import { locusServerSpec } from '../core/integrations/locus.js';
 import { lexiconServerSpec, pathWithinProject } from '../core/integrations/lexicon-mcp.js';
+import { discoverCompanionProjectMcp } from '../core/integrations/companion-project-mcp.js';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers
@@ -100,7 +101,26 @@ function fleetEngineMcpIsolationEnabled(): boolean {
   return process.env['ASHLR_MCP_HOST'] === FLEET_ENGINE_MCP_HOST;
 }
 
-function discoverRegistryForMcpHost(discoverMcpServers: () => McpRegistry): McpRegistry {
+function discoverRegistryForMcpHost(discoverMcpServers: () => McpRegistry, args: string[] = []): McpRegistry {
+  const values = new Map<string, string>();
+  let jsonSeen = false;
+  for (let index = 0; index < args.length; index++) {
+    const flag = args[index]!;
+    if (flag === '--json') {
+      if (jsonSeen) throw new Error('Duplicate --json option');
+      jsonSeen = true;
+      continue;
+    }
+    if (!['--project', '--client', '--config'].includes(flag) || values.has(flag)) throw new Error('Unknown or duplicate scoped MCP option');
+    const value = args[++index];
+    if (!value || value.startsWith('--')) throw new Error(`${flag} requires a value`);
+    values.set(flag, value);
+  }
+  if (values.size) {
+    if (values.size !== 3) throw new Error('Scoped MCP requires --project <absolute root> --client <id> --config <absolute project config>');
+    if (fleetEngineMcpIsolationEnabled()) throw new Error('Project-scoped MCP is unavailable inside the fleet gateway');
+    return discoverCompanionProjectMcp({ project: values.get('--project')!, client: values.get('--client')!, config: values.get('--config')! });
+  }
   // The sandboxed fleet's strict Claude MCP config launches only `ashlr mcp`.
   // That nested gateway must not re-scan the user's global/home MCP configs.
   if (fleetEngineMcpIsolationEnabled()) return { servers: [] };
@@ -111,12 +131,13 @@ function discoverRegistryForMcpHost(discoverMcpServers: () => McpRegistry): McpR
 // Subcommand: run (default)
 // ---------------------------------------------------------------------------
 
-async function cmdMcpRun(): Promise<number> {
+async function cmdMcpRun(args: string[] = []): Promise<number> {
   // Pure stdio — log only to stderr, never stdout
   try {
+    if (args.includes('--json')) throw new Error('--json is supported by list and doctor only');
     const { discoverMcpServers } = await importRegistry();
     const { startGateway } = await importGateway();
-    const registry = discoverRegistryForMcpHost(discoverMcpServers);
+    const registry = discoverRegistryForMcpHost(discoverMcpServers, args);
     process.stderr.write(`[ashlr mcp] starting gateway with ${registry.servers.length} discovered server(s)\n`);
     await startGateway(registry);
     return 0;
@@ -137,8 +158,9 @@ async function cmdMcpList(args: string[]): Promise<number> {
   const { discoverMcpServers } = await importRegistry();
   const { getToolsRegistry } = await importToolsRegistry();
 
-  const registry = discoverRegistryForMcpHost(discoverMcpServers);
-  const toolsReg = getToolsRegistry();
+  const registry = discoverRegistryForMcpHost(discoverMcpServers, args);
+  const scoped = args.includes('--project');
+  const toolsReg = scoped ? { tools: [], state: 'not-inspected' } : getToolsRegistry();
 
   // M31: native ashlr tools served by the gateway itself (no probe needed).
   const { nativeToolDefs } = await import('../core/mcp-native.js');
@@ -157,6 +179,7 @@ async function cmdMcpList(args: string[]): Promise<number> {
           servers: safe,
           tools: toolsReg,
           native: native.map(t => ({ name: t.name, safety: t.safety })),
+          ...(scoped ? { scope: { companion: 'lexicon', runtime: 'not-probed', vocabularyTrust: 'not-inspected', nativeGatewayToolsAvailable: true } } : {}),
         },
         null,
         2,
@@ -220,6 +243,10 @@ async function cmdMcpList(args: string[]): Promise<number> {
   }
 
   // Tools registry summary
+  if (scoped) {
+    console.log(dim('  Scoped Lexicon registration only; handshake and vocabulary trust unverified. Ecosystem inventory omitted.'));
+    return 0;
+  }
   const installed = toolsReg.tools.filter(t => t.installed);
   console.log(bold('  Ecosystem tools') + gray(`  — ${installed.length}/${toolsReg.tools.length} installed`));
   console.log('');
@@ -263,7 +290,7 @@ async function cmdMcpDoctor(args: string[]): Promise<number> {
   const { discoverMcpServers } = await importRegistry();
   const { probeServer } = await importGateway();
 
-  const registry = discoverRegistryForMcpHost(discoverMcpServers);
+  const registry = discoverRegistryForMcpHost(discoverMcpServers, args);
 
   if (!jsonMode) {
     console.log('');
@@ -329,9 +356,10 @@ async function cmdMcpDoctor(args: string[]): Promise<number> {
   }
 
   // Exit 1 if any REQUIRED server is down
-  const anyRequiredDown = healths.some(h => REQUIRED_SERVERS.has(h.name) && !h.ok);
+  const anyRequiredDown = healths.some(h => (REQUIRED_SERVERS.has(h.name) || args.includes('--project')) && !h.ok);
   if (anyRequiredDown && !jsonMode) {
-    console.log(red('  One or more required servers (ashlr, phantom-secrets, locus) are down.'));
+    console.log(red(args.includes('--project') ? '  The selected project/client Lexicon server is down.'
+      : '  One or more required servers (ashlr, phantom-secrets, locus) are down.'));
     console.log('');
   }
 
@@ -611,7 +639,7 @@ export function buildEcosystemMcpEntry(srv: EcosystemMcpEntry): {
 /** Resolve a binary's full path from PATH; returns undefined if not found. */
 function resolveInPath(bin: string): string | undefined {
   // Honour injected PATH (tests) or fall back to process.env.PATH.
-  const pathDirs = (process.env['PATH'] ?? '').split(delimiter).filter(Boolean);
+  const pathDirs = (process.env['PATH'] ?? '').split(delimiter).filter(isAbsolute);
   for (const dir of pathDirs) {
     const candidate = resolve(dir, bin);
     try {
@@ -909,6 +937,7 @@ function printHelp(): void {
     ['(default)',                       'Run the aggregation gateway on stdio. Point any agent here.'],
     ['list [--json]',                   'Print discovered servers + ecosystem tools summary.'],
     ['doctor [--json]',                 'Probe each server; exit 1 if required servers (ashlr/phantom/locus) are down.'],
+    ['[run|list|doctor] --project <root> --client <id> --config <file>', 'Consume only matching Lexicon registration; no HOME scan or vocabulary trust grant. Native gateway tools remain available.'],
     ['install <claude|ashlrcode>',      'Idempotently add the ashlr gateway to a target config (backs up first).'],
     ['install <target> --config <path>', 'Install to a specific config path (use in tests to avoid real configs).'],
     ['ecosystem',                        'Detect installed ecosystem MCP servers + show registration status.'],
@@ -967,16 +996,18 @@ export async function cmdMcp(args: string[]): Promise<number> {
   }
 
   // Default / explicit "run"
-  if (!sub || sub === 'run') {
-    return cmdMcpRun();
+  if (!sub || sub === 'run' || sub.startsWith('--')) {
+    return cmdMcpRun(sub === 'run' ? args.slice(1) : args);
   }
 
   if (sub === 'list') {
-    return cmdMcpList(args.slice(1));
+    try { return await cmdMcpList(args.slice(1)); }
+    catch (err) { console.error(red('error: ') + (err instanceof Error ? err.message : String(err))); return 2; }
   }
 
   if (sub === 'doctor') {
-    return cmdMcpDoctor(args.slice(1));
+    try { return await cmdMcpDoctor(args.slice(1)); }
+    catch (err) { console.error(red('error: ') + (err instanceof Error ? err.message : String(err))); return 2; }
   }
 
   if (sub === 'install') {
