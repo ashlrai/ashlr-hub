@@ -4,7 +4,7 @@ Phantom is the local execution and observation kernel for [Phantom](NORTH-STAR.m
 It ships a TypeScript/ESM CLI and SDK plus a React web console, with Node 22.15+
 as the package runtime floor. The backend primarily uses Node builtins and uses
 its declared runtime dependencies for transport, authentication, document parsing,
-archive handling and notifications. The [package manifest](../package.json) and
+archive handling and notifications. The [package manifest](https://github.com/ashlrai/phantom/blob/master/package.json) and
 lockfile are the canonical dependency inventory; this overview does not duplicate
 their changing counts or versions.
 
