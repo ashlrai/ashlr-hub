@@ -593,3 +593,9 @@
     z-index: 2;
   }
 }
+
+/* Coding and proactive views share one lazy surface stylesheet. Avoid a
+ * separate preload dependency for three layout rules in the desktop shell. */
+.surface { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg-surface); }
+.views { flex: none; padding: var(--space-3) var(--space-5); border-bottom: 1px solid var(--border-subtle); }
+.viewBody { flex: 1; min-height: 0; overflow: hidden; }
