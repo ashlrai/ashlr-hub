@@ -9,7 +9,30 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.29.0] — Unreleased
+## [3.29.1] — Unreleased
+
+### Added
+
+- Opt-in artifact installer timing diagnostics with fixed phase names and
+  durations. Default installation, signature checks and rollback stay unchanged;
+  diagnostics contain no credentials, arguments or private paths.
+
+### Fixed
+
+- Bind local Leader text requests to the selected llama-server model, context
+  and runtime identity; handle streamed output, cancellation and completion.
+- Age local resource readings against the current display clock when an
+  asynchronous reading arrives.
+- Show Grok Build's available adapter separately from account readiness.
+- Identify llama warm measurements as warm while retaining their end-to-end scope.
+- Remove deliberate retry pacing from two blocked-lock test fixtures, retaining
+  real lock refusal and unchanged production behavior.
+- Explain independent Bot/Build/API funding, descriptive host metrics and the
+  missing live execution evidence that currently holds reserve shrinking.
+
+Publication and installation of this candidate remain pending qualification.
+
+## [3.29.0] — 2026-10-09
 
 ### Added
 
@@ -37,9 +60,13 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Remove unsupported Phantom Secrets extraction commands; retain existing valid
   environment, private-file and native routes with accurate diagnostics. A
   value-blind vault-backed provider transport remains a separate proposal.
+- Discover the prepared local Claude harness from the native launch environment
+  without relying on a login shell.
 
-These entries describe unreleased successor source. The current published and
-installed release is 3.28.0; website and provider activation remain incomplete.
+Published `@ashlr/phantom@3.29.0` through the commissioned trusted publisher in
+[run 37925115978, attempt 1](https://github.com/ashlrai/phantom/actions/runs/37925115978/attempts/1).
+Signed GitHub desktop assets and local installation were verified separately.
+Website commissioning and resident provider activation remain incomplete.
 
 ## [3.28.0] — 2026-10-09
 
