@@ -61,13 +61,11 @@ describe('projectServingRuntime — capacity is never overstated', () => {
     // every turn fourfold — the same error class as quoting slots as concurrency.
     expect(projectServingRuntime(runtime()).contextTokens).toBe(16384);
 
-    // And when /props cannot be read, the `-c` TOTAL is not a substitute. It is
-    // only usable divided by a slot count we trust — otherwise a runtime whose
-    // /props is briefly unreadable would report 65536 per agent when each slot
-    // actually has 16384, in exactly the degraded state where nobody can check.
+    // A legacy/configured TOTAL cannot establish a live allocation, even when
+    // the responding server independently reports a valid slot count.
     expect(
       projectServingRuntime(runtime({ contextPerSlot: null })).contextTokens,
-    ).toBe(16384);
+    ).toBeNull();
 
     // No trusted slot count means no division, and no number.
     expect(
@@ -76,6 +74,10 @@ describe('projectServingRuntime — capacity is never overstated', () => {
         slots: { configured: 4, busy: 1, idle: 3, source: 'unknown' },
       })).contextTokens,
     ).toBeNull();
+  });
+
+  it.each([0,-1,1.5,Number.MAX_SAFE_INTEGER+1])('does not display an invalid observed per-slot allocation %j', contextPerSlot => {
+    expect(projectServingRuntime(runtime({contextPerSlot})).contextTokens).toBeNull();
   });
 
   it('DROPS a slot count the runtime lane does not vouch for', () => {

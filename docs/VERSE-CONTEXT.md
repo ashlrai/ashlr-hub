@@ -207,9 +207,12 @@ Local seats run the Claude Code binary against a local Anthropic-compatible endp
 whatever the **runner** serves — and one resolver (`local-models.ts`) decides it, in this order:
 
 1. **llama-server lane** (`ASHLR_VERSE_LOCAL_DISPATCH` / `cfg.verse.localDispatch = 'llama-server'`):
-   the per-slot `n_ctx` — `/props.default_generation_settings.n_ctx`, else `/slots[0].n_ctx`, else
-   `floor(-c / total_slots)`. The tag's Modelfile is irrelevant on this lane; today every tag gets
-   65,536 (a 262,144 context split across 4 slots).
+   the observed per-slot `n_ctx` — `/props.default_generation_settings.n_ctx`, else a complete,
+   consistent `/slots` context reading with unique integer server IDs. Missing IDs, conflicting
+   or partial reported allocation stays unknown.
+   Requested launch context does not prove the answering server's allocation. When the live reading
+   is unavailable, the tag's catalog/configured window remains labelled with its source and a caveat;
+   it is not an observed llama-server allocation. Strict local Leader admission still requires observed context.
 2. **Ollama, `num_ctx` pinned in `/api/show` parameters:** `min(num_ctx, native context_length)`.
    `qwen3.8:27b-ctx64k` pins 65,536 and always loads at 65,536.
 3. **Ollama, not pinned:** `min(server default, native)`. The **server default** — what an unpinned

@@ -940,21 +940,10 @@ async function llamaSlotWindow(
       const { resolveLlamaServerOrigin } = await import('../local-runtime/llama/config.js');
       origin = resolveLlamaServerOrigin(cfg);
     }
-    // The `-c` we launched it with, but only from a record that describes THIS
-    // server: a record for another port says nothing about the one answering.
-    let requestedContext: number | null = null;
-    try {
-      const { readOwnershipRecord } = await import('../local-runtime/llama/record.js');
-      const record = readOwnershipRecord();
-      const port = Number.parseInt(new URL(origin).port, 10);
-      if (record !== null && record.port === port && typeof record.requestedContext === 'number') {
-        requestedContext = record.requestedContext;
-      }
-    } catch {
-      requestedContext = null;
-    }
-    const reading = await probeLlamaSlotContext(fetchImpl, origin, { timeoutMs: OLLAMA_TIMEOUT_MS, requestedContext });
-    return reading.perSlot;
+    const reading = await probeLlamaSlotContext(fetchImpl, origin, { timeoutMs: OLLAMA_TIMEOUT_MS });
+    // Only observed allocation can become runtime/llama-slot. Legacy requested
+    // values remain estimates and cannot suppress the missing-reading caveat.
+    return reading.source === 'props' || reading.source === 'slots' ? reading.perSlot : null;
   } catch {
     return null;
   }

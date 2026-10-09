@@ -313,16 +313,10 @@ export function projectServingRuntime(snapshot: LlamaRuntimeSnapshot): ServingRu
     model: humaneModelName(snapshot),
     slotsTotal: total,
     slotsBusy: busy,
-    // PER-SLOT, or nothing. Falling back to the `-c` total would report 65536
-    // to an operator whose agents each have 16384 — a fourfold overstatement,
-    // and one that only appears when `/props` is unreadable, i.e. exactly when
-    // nobody can check it. A total is usable only when a TRUSTED slot count can
-    // divide it; otherwise this stays null and the panel says "unknown".
-    contextTokens:
-      snapshot.contextPerSlot ??
-      (total !== null && total > 0 && snapshot.contextTotal !== null && snapshot.contextTotal > 0
-        ? Math.floor(snapshot.contextTotal / total)
-        : null),
+    // A legacy total may describe a launch request. A live slot count does not
+    // turn that request into an observed allocation for the answering server.
+    contextTokens: typeof snapshot.contextPerSlot === 'number' && Number.isSafeInteger(snapshot.contextPerSlot) && snapshot.contextPerSlot > 0
+      ? snapshot.contextPerSlot : null,
     startedAt: snapshot.startedAt,
     parallel: {
       capable,
