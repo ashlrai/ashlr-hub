@@ -468,7 +468,7 @@ function sentIds(res: TelegramSendResult): number[] {
 }
 
 async function send(text: string, cfg: AshlrConfig, opts: TelegramSendOpts, record: Omit<TelegramThreadEntry, 'tg' | 'at'>): Promise<boolean> {
-  const res = await sendTelegramMessage(leaderDisplayText(scrubSecrets(text)), opts, cfg);
+  const res = await sendTelegramMessage(leaderDisplayText(scrubSecrets(text), Date.now(), cfg.comms?.timeZone), opts, cfg);
   if (res.ok) recordTelegramMessages(sentIds(res), record);
   return res.ok;
 }
@@ -739,7 +739,7 @@ export async function threadLineHooks(cfg: AshlrConfig): Promise<ThreadLineHooks
 
 async function replyTo(event: InboundEvent, text: string, cfg: AshlrConfig, extra: TelegramSendOpts = {}): Promise<TelegramSendResult> {
   const opts: TelegramSendOpts = { ...extra, ...(typeof event.messageId === 'number' ? { replyToMessageId: event.messageId } : {}) };
-  return sendTelegramMessage(leaderDisplayText(scrubSecrets(text)), opts, cfg);
+  return sendTelegramMessage(leaderDisplayText(scrubSecrets(text), Date.now(), cfg.comms?.timeZone), opts, cfg);
 }
 
 /** Remember a long reply so "more" can send the rest. */

@@ -362,7 +362,7 @@ async function cmdDigest(force: boolean): Promise<number> {
       requestId = postRequest({
         kind: 'fleet-digest',
         type: 'report',
-        text: `No fleet changes since the last digest.\n${await buildStatusText()}`,
+        text: `No fleet changes since the last digest.\n${await buildStatusText(Date.now(), cfg.comms?.timeZone)}`,
         options: [],
         meta: { source: 'digest', reason: 'forced' },
       });

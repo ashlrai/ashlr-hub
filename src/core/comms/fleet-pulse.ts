@@ -69,11 +69,11 @@ function resetsIn(resetsAt: string | null, nowMs: number): string {
  * Build the concise fleet Telegram message from a VisibilitySnapshot.
  * Returns Telegram-HTML text because sendTelegramMessage uses parse_mode=HTML.
  */
-export function buildFleetPulseMessage(snap: VisibilitySnapshot): string {
+export function buildFleetPulseMessage(snap: VisibilitySnapshot, timeZone?: string): string {
   const lines: string[] = ['<b>Phantom fleet</b>'];
   const at = Date.parse(snap.generatedAt);
   const focus = snap.director.topGoalObjective;
-  if (focus) lines.push(`Focus: ${html(leaderDisplayText(scrubSecrets(focus)).replace(/\s+/g, ' ').trim())}`);
+  if (focus) lines.push(`Focus: ${html(leaderDisplayText(scrubSecrets(focus), at, timeZone).replace(/\s+/g, ' ').trim())}`);
   if (snap.director.escalationCount > 0) {
     lines.push(`${telegramMetric(snap.director.escalationCount)} decision${snap.director.escalationCount === 1 ? '' : 's'} awaiting your input`);
   }
@@ -89,7 +89,7 @@ export function buildFleetPulseMessage(snap: VisibilitySnapshot): string {
       : resource.capWindow ? ' · reset time unknown' : '';
     const reason = resource.reason.trim();
     // Preserve a concise real blocker; full diagnostics and measurements stay in the snapshot/UI.
-    const blocker = reason ? ` · ${leaderDisplayText(scrubSecrets(reason)).replace(/\s+/g, ' ').slice(0, 120)}` : '';
+    const blocker = reason ? ` · ${leaderDisplayText(scrubSecrets(reason), at, timeZone).replace(/\s+/g, ' ').slice(0, 120)}` : '';
     lines.push(`${html(backendName(resource.backend))}: ${html(availabilityLabel(resource.availability))} · ${html(usage)}${html(reset)}${html(blocker)}`);
   }
   lines.push(`Ledger estimate (24h): ${html(telegramUsd(snap.costSavings.todaySpendUsd))}`);
@@ -115,7 +115,7 @@ export async function sendFleetPulse(
     if (!comms?.proactive) return;
     if (!telegramEnabled(cfg)) return;
 
-    const text = buildFleetPulseMessage(snap);
+    const text = buildFleetPulseMessage(snap, cfg.comms?.timeZone);
     await sendTelegramMessage(text, { html: true }, cfg);
   } catch {
     // Never throws — fire-and-forget

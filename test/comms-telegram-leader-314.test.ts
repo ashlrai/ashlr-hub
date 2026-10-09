@@ -397,6 +397,16 @@ describe('Leader thread over Telegram', () => {
     ]);
   });
 
+  it('uses the operator timezone for Leader dates without altering callback targets or human literals', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-10T12:00:00Z'));
+    const config = cfg(); config.comms!.timeZone = 'Asia/Tokyo';
+    const iso = '2026-10-09T06:15:00.123Z';
+    expect(await sendThreadMessage(leaderMsg({ id: 'clock-message', text: `Next ${iso}`, kind: 'answer' }), config)).toBe(true);
+    expect(texts().at(-1)).toBe('Leader:\nNext Oct 9, 3:15 PM');
+    expect(lookupTelegramMessage(nextMessageId - 1)?.threadId).toBe('clock-message');
+    expect(await sendThreadMessage({ ...leaderMsg({ id: 'human-clock', text: iso }), from: 'mason', channel: 'verse' }, config)).toBe(true);
+    expect(texts().at(-1)).toBe(`You (in Phantom):\n${iso}`);
+  });
   it('a failed thread send is marked not-delivered and retried next cycle', async () => {
     thread.outbound = [leaderMsg({ id: 'l-1', text: 'one' }), leaderMsg({ id: 'l-2', text: 'two' })];
     failSends = true;

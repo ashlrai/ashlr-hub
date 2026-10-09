@@ -210,7 +210,7 @@ export async function sendReportViaTelegram(req: CommsRequest, cfg: AshlrConfig)
     );
   }
   const text = isMemo
-    ? `${leaderDisplayText(scrubSecrets(req.text))}\n\nReply to this message to talk to the Leader about it.`
+    ? `${leaderDisplayText(scrubSecrets(req.text), Date.now(), cfg.comms?.timeZone)}\n\nReply to this message to talk to the Leader about it.`
     : scrubSecrets(req.text);
   const res = await sendTelegramMessage(text, opts, cfg);
   if (res.ok) {
@@ -225,9 +225,9 @@ export async function sendReportViaTelegram(req: CommsRequest, cfg: AshlrConfig)
 // ---------------------------------------------------------------------------
 
 /** How a Leader-thread message reads on the phone (plain text; escaped at the transport). */
-export function formatThreadMessage(msg: LeaderThreadMessage): string {
+export function formatThreadMessage(msg: LeaderThreadMessage, timeZone?: string): string {
   // 3.15: the Leader always speaks as itself (leader-persona.ts); Mason's own words are shown as written.
-  const body = scrubSecrets(msg.from === 'mason' ? (msg.text ?? '') : leaderDisplayText(guardPersonaText(msg.text ?? ''))).trim();
+  const body = scrubSecrets(msg.from === 'mason' ? (msg.text ?? '') : leaderDisplayText(guardPersonaText(msg.text ?? ''), Date.now(), timeZone)).trim();
   // Mason's own words from another surface (e.g. Phantom), mirrored so the
   // Leader's reply on Telegram has its context.
   if (msg.from === 'mason') return `You (in ${msg.channel === 'verse' ? 'Phantom' : String(msg.channel)}):\n${body}`;
@@ -304,7 +304,7 @@ export async function sendThreadMessage(
   }
   if (typedDraft) opts.keyboard = typedQuestionKeyboard(typedDraft);
 
-  let text = formatThreadMessage(msg);
+  let text = formatThreadMessage(msg, cfg.comms?.timeZone);
   if (shape.maxLines !== undefined) {
     const fit = fitTelegram(text, shape.maxLines);
     if (fit.truncated) {
@@ -629,19 +629,19 @@ async function handleTypedQuestionButton(event: InboundEvent, cfg: AshlrConfig):
   return true;
 }
 
-async function memoDetails(memoId: string): Promise<string> {
+async function memoDetails(memoId: string, timeZone?: string): Promise<string> {
   try {
     const { readLeaderMemo } = await import('../vision/leader-memo.js');
     const memo = readLeaderMemo(memoId);
     if (!memo) return 'That Leader memo is no longer on file.';
     const { leaderMemoText } = await import('./handlers.js');
-    return leaderDisplayText(scrubSecrets(leaderMemoText(memo)));
+    return leaderDisplayText(scrubSecrets(leaderMemoText(memo)), Date.now(), timeZone);
   } catch {
     return 'Could not read that Leader memo.';
   }
 }
 
-async function actionDetails(actionIds: string[]): Promise<string> {
+async function actionDetails(actionIds: string[], timeZone?: string): Promise<string> {
   try {
     const { findStoredAction } = await import('../vision/leader-apply.js');
     const lines: string[] = [];
@@ -654,7 +654,7 @@ async function actionDetails(actionIds: string[]): Promise<string> {
       const a = stored.action;
       lines.push(`Action ${index + 1} [class ${a.class}] ${a.status}: ${a.summary}`, `  why: ${a.why}`);
     }
-    return leaderDisplayText(scrubSecrets(lines.join('\n'))) || 'No details on file.';
+    return leaderDisplayText(scrubSecrets(lines.join('\n')), Date.now(), timeZone) || 'No details on file.';
   } catch {
     return 'Could not read those Leader actions.';
   }
@@ -703,7 +703,7 @@ export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig):
 
     if (verb === 'd') {
       await ack('Details');
-      const text = memoId ? await memoDetails(memoId) : actionIds.length ? await actionDetails(actionIds) : 'No details on file.';
+      const text = memoId ? await memoDetails(memoId, cfg.comms?.timeZone) : actionIds.length ? await actionDetails(actionIds, cfg.comms?.timeZone) : 'No details on file.';
       await replyTo(event, text, cfg);
       return true;
     }
@@ -730,7 +730,7 @@ export async function handleLeaderButton(event: InboundEvent, cfg: AshlrConfig):
           const res = await mod.approveLeaderAction(id, { channel: 'telegram', cfg });
           const r = resultMessage(res, 'approved');
           const leaderSays = res?.thread?.reply?.text;
-          lines.push(`${r.ok ? 'Approved' : 'Not approved'} action: ${leaderDisplayText(leaderSays && leaderSays.trim() ? leaderSays : r.message)}`);
+          lines.push(`${r.ok ? 'Approved' : 'Not approved'} action: ${leaderDisplayText(leaderSays && leaderSays.trim() ? leaderSays : r.message, Date.now(), cfg.comms?.timeZone)}`);
           if (res?.thread?.reply?.id) ackIds.push(res.thread.reply.id);
         } catch (err) {
           lines.push(`Not approved action: ${errorText(err)}`);
@@ -830,7 +830,7 @@ function clip(text: string, max: number): string {
 }
 
 /** /status — honest, local-only status (no model calls). */
-export async function buildStatusText(nowMs: number = Date.now()): Promise<string> {
+export async function buildStatusText(nowMs: number = Date.now(), timeZone?: string): Promise<string> {
   const lines: string[] = ['Status'];
   try {
     const { isPaused } = await import('./pause.js');
@@ -850,7 +850,7 @@ export async function buildStatusText(nowMs: number = Date.now()): Promise<strin
     const { buildLeaderState } = await import('../vision/leader.js');
     const s = buildLeaderState(nowMs);
     const last = s.lastRun ? `last run ${ago(s.lastRun.at, nowMs)} (${s.lastRun.outcome})` : 'no run yet';
-    const next = s.nextRunAt ? `, next ${leaderDisplayText(s.nextRunAt, nowMs)}` : '';
+    const next = s.nextRunAt ? `, next ${leaderDisplayText(s.nextRunAt, nowMs, timeZone)}` : '';
     lines.push(`Leader: ${last}${next}`);
     if (s.latest) lines.push(`Latest memo: ${ago(s.latest.at, nowMs)}`);
   } catch { /* skip */ }
@@ -866,7 +866,7 @@ async function sendLatestMemo(event: InboundEvent, cfg: AshlrConfig): Promise<vo
       await replyTo(event, 'No Leader memo yet. Message the Leader with /leader <text>, or just type.', cfg);
       return;
     }
-    const parts = [`Leader memo — ${leaderDisplayText(memo.at)}${memo.dryRun ? ' (dry run)' : ''}`];
+    const parts = [`Leader memo — ${leaderDisplayText(memo.at, Date.now(), cfg.comms?.timeZone)}${memo.dryRun ? ' (dry run)' : ''}`];
     if (memo.bottleneck) parts.push(`Bottleneck: ${clip(memo.bottleneck.statement, 300)}`);
     if (memo.move) parts.push(`Move: ${clip(memo.move.statement, 300)}`);
     if (memo.questionsForMason.length > 0) parts.push(`Question: ${clip(memo.questionsForMason[0]!, 300)}`);
@@ -875,7 +875,7 @@ async function sendLatestMemo(event: InboundEvent, cfg: AshlrConfig): Promise<vo
       { memoId: memo.id, ...(facts?.approvable.length ? { actionIds: facts.approvable } : {}) },
       { approve: (facts?.approvable.length ?? 0) > 0, veto: (facts?.live ?? 0) > 0 },
     );
-    const res = await sendTelegramMessage(leaderDisplayText(scrubSecrets(parts.join('\n'))), {
+    const res = await sendTelegramMessage(leaderDisplayText(scrubSecrets(parts.join('\n')), Date.now(), cfg.comms?.timeZone), {
       keyboard,
       ...(typeof event.messageId === 'number' ? { replyToMessageId: event.messageId } : {}),
     }, cfg);
@@ -915,7 +915,7 @@ export async function directivesHtml(): Promise<string> {
 }
 
 /** /settings — the Leader's own settings (lanes, router tuning) and standards. */
-async function settingsText(): Promise<string> {
+async function settingsText(timeZone?: string): Promise<string> {
   try {
     const { readLeaderDirectives, readStandards } = await import('../vision/leader-apply.js');
     const d = readLeaderDirectives();
@@ -927,7 +927,7 @@ async function settingsText(): Promise<string> {
       lines.push(`  codex lanes: ${d.codexEnabled === null ? 'default (off)' : d.codexEnabled ? 'on' : 'off'}`);
       const tuning = d.routerTuning ? Object.entries(d.routerTuning).map(([k, v]) => `${k}=${String(v)}`).join(', ') : '';
       lines.push(`  router tuning: ${tuning || 'none'}`);
-      lines.push(`  updated ${leaderDisplayText(d.updatedAt)}`);
+      lines.push(`  updated ${leaderDisplayText(d.updatedAt, Date.now(), timeZone)}`);
     }
     const standards = readStandards().filter((s) => !s.retiredAt);
     lines.push('', `Standards (${standards.length})`);
@@ -966,7 +966,7 @@ export async function handleSlashCommand(event: InboundEvent, text: string, cfg:
       await replyTo(event, await directivesHtml(), cfg, { html: true });
       return true;
     case 'settings':
-      await replyTo(event, await settingsText(), cfg);
+      await replyTo(event, await settingsText(cfg.comms?.timeZone), cfg);
       return true;
     case 'task': {
       // 3.15 automations: routed by an enabled Telegram automation covering

@@ -12,11 +12,33 @@
  */
 
 import { formatLeaderDisplayText } from '../vision/leader-display-text.js';
-import { describeResetAt } from '../verse/seat-readiness.js';
 
-/** Generated Leader prose before Telegram escaping; retains the existing local date wording. */
-export function leaderDisplayText(text: string, nowMs: number = Date.now()): string {
-  return formatLeaderDisplayText(text, (iso) => describeResetAt(iso, nowMs));
+/** Display-only instants on the operator's clock; never alter saved dates or IDs. */
+export function telegramInstant(iso: string, nowMs: number = Date.now(), timeZone = 'America/New_York'): string | null {
+  const parts = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})$/.exec(iso);
+  if (!parts) return null;
+  const yearValue = Number(parts[1]), month = Number(parts[2]), dayValue = Number(parts[3]);
+  const calendar = new Date(0); calendar.setUTCFullYear(yearValue, month - 1, dayValue);
+  if (calendar.getUTCFullYear() !== yearValue || calendar.getUTCMonth() !== month - 1 || calendar.getUTCDate() !== dayValue) return null;
+  const at = Date.parse(iso);
+  if (!Number.isFinite(at) || !Number.isFinite(nowMs)) return null;
+  let zone = timeZone;
+  try { new Intl.DateTimeFormat('en-US', { timeZone: zone }); }
+  catch { zone = 'America/New_York'; }
+  const date = new Date(at); const now = new Date(nowMs);
+  if (!Number.isFinite(now.getTime())) return null;
+  const day = new Intl.DateTimeFormat('en-US', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' });
+  const time = new Intl.DateTimeFormat('en-US', { timeZone: zone, hour: 'numeric', minute: '2-digit' }).format(date);
+  if (day.format(date) === day.format(now)) return `today ${time}`;
+  const year = new Intl.DateTimeFormat('en-US', { timeZone: zone, year: 'numeric' });
+  const label = new Intl.DateTimeFormat('en-US', { timeZone: zone, month: 'short', day: 'numeric',
+    ...(year.format(date) !== year.format(now) ? { year: 'numeric' } as const : {}) }).format(date);
+  return `${label}, ${time}`;
+}
+
+/** Generated Leader prose before Telegram escaping; literals and exact IDs stay intact. */
+export function leaderDisplayText(text: string, nowMs: number = Date.now(), timeZone = 'America/New_York'): string {
+  return formatLeaderDisplayText(text, (iso) => telegramInstant(iso, nowMs, timeZone));
 }
 
 // Display-only structured measurements; exact provider values remain in their records.
