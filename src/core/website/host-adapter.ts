@@ -128,12 +128,42 @@ export async function readWebsitePublicBuildEnv(api: (endpoint: string) => Promi
 /** Prebuilt uploads have no Git checkout from which Vercel can infer runtime
  * source identity. Bind only the operation's qualified merge, never a caller
  * string or a project-global environment value shared by later deployments. */
-export function websiteStageArgs(op: Pick<WebsiteOperation, 'revision' | 'source'>): string[] {
+function qualifiedWebsiteMerge(op: Pick<WebsiteOperation, 'revision' | 'source'>): string {
   const revision = sha(op.revision);
   const merge = sha(op.source?.merge);
   if (merge !== revision) throw new Error('Website qualified source does not match operation revision');
+  return merge;
+}
+export function websiteStageArgs(op: Pick<WebsiteOperation, 'revision' | 'source'>): string[] {
+  const merge = qualifiedWebsiteMerge(op);
   return ['deploy', '--prebuilt', '--prod', '--skip-domain', '--yes',
     '--env', `VERCEL_GIT_COMMIT_SHA=${merge}`, '--meta', `phantomSourceSha=${merge}`];
+}
+function websiteDeploymentUrl(value: unknown): string {
+  const url = string(value);
+  if (!/^https:\/\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.vercel\.app\/?$/.test(url)) throw new Error('Website deployment URL is invalid');
+  return new URL(url).origin;
+}
+/** CLI 63.1.0 always emits this JSON envelope under --non-interactive. Only
+ * deployment.url identifies the staged artifact; productionUrl is an alias. */
+export function parseWebsiteStageOutput(stdout: string): { id: string; url: string } {
+  if (Buffer.byteLength(stdout, 'utf8') > 64 * 1024) throw new Error('Website upload result is too large');
+  let result: Record<string, unknown>;
+  try { result = object(JSON.parse(stdout)); } catch { throw new Error('Website upload result is invalid JSON'); }
+  const deployed = object(result['deployment']);
+  if (result['status'] !== 'ok' || deployed['readyState'] !== 'READY' || deployed['target'] !== 'production' ||
+      typeof deployed['id'] !== 'string' || !/^dpl_[A-Za-z0-9]+$/.test(deployed['id'])) throw new Error('Website upload result is not exact READY production');
+  return { id: deployed['id'], url: websiteDeploymentUrl(deployed['url']) };
+}
+/** Provider readback, never CLI guidance, confirms the same staged artifact. */
+export function assertWebsiteDeployment(op: Pick<WebsiteOperation, 'revision' | 'source' | 'deploymentId' | 'deploymentUrl'>, teamId: string, observed: unknown): void {
+  const merge = qualifiedWebsiteMerge(op);
+  if (!op.deploymentId || !/^dpl_[A-Za-z0-9]+$/.test(op.deploymentId)) throw new Error('Website deployment ID is missing');
+  const result = object(observed);
+  if (result['id'] !== op.deploymentId || result['projectId'] !== WEBSITE_PROFILE.projectId || result['ownerId'] !== teamId ||
+      object(result['team'])['id'] !== teamId || result['target'] !== 'production' || result['readyState'] !== 'READY' ||
+      object(result['meta'])['phantomSourceSha'] !== merge) throw new Error('Website staged deployment is not exact READY production source');
+  if (websiteDeploymentUrl(`https://${string(result['url'])}`) !== websiteDeploymentUrl(op.deploymentUrl)) throw new Error('Website staged URL changed');
 }
 
 export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?: AbortSignal): WebsiteHostAdapter {
@@ -233,7 +263,7 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
   const deployment = async (op: WebsiteOperation): Promise<Record<string, unknown>> => {
     if (!op.deploymentId || !/^dpl_[A-Za-z0-9]+$/.test(op.deploymentId)) throw new Error('Website deployment ID is missing');
     const result = await api(`/v13/deployments/${op.deploymentId}`);
-    if (result['id'] !== op.deploymentId || result['projectId'] !== WEBSITE_PROFILE.projectId || result['ownerId'] !== commission.teamId || object(result['team'])['id'] !== commission.teamId || result['target'] !== 'production' || result['readyState'] !== 'READY') throw new Error('Website staged deployment is not exact READY production');
+    assertWebsiteDeployment(op, commission.teamId, result);
     return result;
   };
   return {
@@ -341,13 +371,12 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
         if (inventoryWebsiteOutput(output(op)).digest !== op.outputDigest) throw new Error('Website output changed before upload');
         if (fileDigest(join(dirname(output(op)), 'project.json')) !== createHash('sha256').update(projectMetadata).digest('hex')) throw new Error('Website upload project metadata changed');
         await authorize();
-        const url = await vc(args, join(operationRoot(op), 'upload'));
-        const parsed = new URL(url); if (parsed.protocol !== 'https:' || !parsed.hostname.endsWith('.vercel.app') || parsed.pathname !== '/') throw new Error('Website upload returned no exact deployment URL');
-        const observed = await api(`/v13/deployments/${encodeURIComponent(parsed.hostname)}`);
-        return { id: string(observed['id']), url: parsed.origin };
+        const staged = parseWebsiteStageOutput(await vc(args, join(operationRoot(op), 'upload')));
+        await deployment({ ...op, deploymentId: staged.id, deploymentUrl: staged.url });
+        return staged;
       } finally { releaseOutwardMutationFence(fence); }
     },
-    validateStage: async (op) => { const observed = await deployment(op); if (`https://${string(observed['url'])}` !== op.deploymentUrl) throw new Error('Website staged URL changed'); await routeContract(op.deploymentUrl!); },
+    validateStage: async (op) => { await deployment(op); await routeContract(op.deploymentUrl!); },
     promote: async (op, authorize) => {
       const fence = await acquireOutwardMutationFenceAsync(2_000, { signal }); if (!fence) throw new Error('Website promotion mutation fence unavailable');
       try { assertWebsiteAuthority(commission); await deployment(op); assertWebsiteAuthority(commission); await authorize(); await vc(['promote', op.deploymentId!, '--yes']); }
