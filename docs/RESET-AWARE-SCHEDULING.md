@@ -74,8 +74,8 @@ an observed fit gets earlier access to a qualified deadline. Within each fit
 class, priority rises continuously as the remaining time approaches the observed
 75th-percentile duration; there is no fixed urgency horizon. Likely-to-finish
 work stays ahead of uncertain work. Unknown history does not make a distant
-deadline urgent. Existing quality-tier placement and ordinary routing remain
-when evidence is incomplete. This is a preference during normal fleet ticks,
+deadline urgent. Ordinary admitted routing still uses headroom, independent
+funding and explicit preferences when scheduling evidence is incomplete. This is a preference during normal fleet ticks,
 not a promise to consume every remaining token. Once an eligible selected task
 has a compatible observed duration, an existing abortable fleet park can shorten
 to its next duration-derived boundary. No extra service or periodic provider

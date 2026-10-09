@@ -4,7 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { createServer } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
 import { canonical } from '../src/core/universe/artifacts.js';
 import { writePrivateFileAtomically } from '../src/core/util/private-file-write.js';
@@ -24,6 +24,8 @@ const missionDiagnostics = vi.hoisted(() => ({
   events: [] as Array<Record<string, unknown>>, sequence: 0,
   latestQueue: null as Record<string, unknown> | null,
   latestSuccessors: null as Record<string, unknown> | null,
+  requestTimings: new Map<string, { calls: number; threw: number; unknownDuration: number; durationMs: number }>(),
+  requestTimingIncomplete: false,
 }));
 vi.mock('../src/core/resources/engineering-mission-console.js', async () => {
   const actual = await vi.importActual<typeof import('../src/core/resources/engineering-mission-console.js')>(
@@ -35,6 +37,21 @@ vi.mock('../src/core/resources/engineering-mission-console.js', async () => {
   const project = (value: unknown): Record<string, unknown> | null => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
   const event = (value: Record<string, unknown>): void => {
     missionDiagnostics.events.push(value); if (missionDiagnostics.events.length > 64) missionDiagnostics.events.shift();
+    // Added measurements are isolated from the original delegated result/error.
+    try {
+      if (process.env.ASHLR_ACCEPTANCE_PHASE_TIMING !== '1' || (value.stage !== 'request-return' && value.stage !== 'request-error')) return;
+      const route = closed(value.route, ['supervision', 'successors', 'other']);
+      const elapsedMs = finite(value.elapsedMs); const prior = missionDiagnostics.requestTimings.get(route);
+      const stats = { calls: (prior?.calls ?? 0) + 1, threw: (prior?.threw ?? 0) + Number(value.stage === 'request-error'),
+        unknownDuration: (prior?.unknownDuration ?? 0) + Number(elapsedMs === null),
+        durationMs: (prior?.durationMs ?? 0) + (elapsedMs ?? 0) };
+      if (![stats.calls, stats.threw, stats.unknownDuration].every(count => Number.isSafeInteger(count) && count >= 0) ||
+        !Number.isFinite(stats.durationMs) || stats.durationMs < 0) { missionDiagnostics.requestTimingIncomplete = true; return; }
+      if (elapsedMs === null || route === 'unknown') missionDiagnostics.requestTimingIncomplete = true;
+      missionDiagnostics.requestTimings.set(route, stats);
+    } catch {
+      try { missionDiagnostics.requestTimingIncomplete = true; } catch { /* Keep the original operation's outcome. */ }
+    }
   };
   return { ...actual, async requestEngineeringMissionConsole(options: Parameters<typeof actual.requestEngineeringMissionConsole>[0]) {
     const started = performance.now(); const sequence = missionDiagnostics.sequence = Math.min(1000_000, missionDiagnostics.sequence + 1);
@@ -84,12 +101,98 @@ vi.mock('../src/core/resources/engineering-mission-console.js', async () => {
 });
 
 const cleanup: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
+// Opt-in elapsed diagnostics only. Buffer until fixture cleanup settles so
+// observation cannot manufacture output liveness during a stalled case.
+const acceptanceTiming = process.env.ASHLR_ACCEPTANCE_PHASE_TIMING === '1';
+type TimingPhase = 'fixture' | 'git.operation' | 'mission.first' | 'mission.second' | 'mission.replay' | 'cleanup.fixture';
+type TimingStats = { calls: number; threw: number; durationMs: number; minMs: number; maxMs: number };
+const acceptancePhases = new Map<TimingPhase, TimingStats>();
+let acceptanceCase = 0;
+let acceptanceIncomplete = false;
+function timingClock(): number | null {
+  if (!acceptanceTiming) return null;
+  try {
+    const value = performance.now();
+    if (Number.isFinite(value)) return value;
+    acceptanceIncomplete = true; return null;
+  }
+  catch { acceptanceIncomplete = true; return null; }
+}
+function observeTiming(phase: TimingPhase, started: number | null, threw: boolean): void {
+  if (started === null) return;
+  try {
+    const ended = timingClock(); const durationMs = ended === null ? null : ended - started;
+    if (durationMs === null || !Number.isFinite(durationMs) || durationMs < 0) { acceptanceIncomplete = true; return; }
+    const prior = acceptancePhases.get(phase);
+    const stats = { calls: (prior?.calls ?? 0) + 1, threw: (prior?.threw ?? 0) + Number(threw),
+      durationMs: (prior?.durationMs ?? 0) + durationMs, minMs: Math.min(prior?.minMs ?? durationMs, durationMs),
+      maxMs: Math.max(prior?.maxMs ?? durationMs, durationMs) };
+    if (![stats.calls, stats.threw].every(count => Number.isSafeInteger(count) && count >= 0) ||
+      ![stats.durationMs, stats.minMs, stats.maxMs].every(value => Number.isFinite(value) && value >= 0)) {
+      acceptanceIncomplete = true; return;
+    }
+    acceptancePhases.set(phase, stats);
+  } catch { acceptanceIncomplete = true; }
+}
+function timedSync<T>(phase: TimingPhase, work: () => T): T {
+  if (!acceptanceTiming) return work();
+  const started = timingClock(); let threw = true;
+  try { const value = work(); threw = false; return value; }
+  finally { observeTiming(phase, started, threw); }
+}
+function timedAsync<T>(phase: TimingPhase, work: () => Promise<T>): Promise<T> {
+  if (!acceptanceTiming) return work();
+  const started = timingClock();
+  return (async () => {
+    let threw = true;
+    try { const value = await work(); threw = false; return value; }
+    finally { observeTiming(phase, started, threw); }
+  })();
+}
+beforeEach(() => {
+  if (!acceptanceTiming) return;
+  acceptanceCase++; acceptancePhases.clear(); acceptanceIncomplete = false;
+});
+function emitAcceptanceTiming(): void {
+  if (!acceptanceTiming) return;
+  try {
+    console.log('ACCEPTANCE_TIMINGS ' + JSON.stringify({ schemaVersion: 1, module: 'mission', caseIndex: acceptanceCase,
+      scope: 'elapsed-inclusive', incomplete: acceptanceIncomplete || missionDiagnostics.requestTimingIncomplete,
+      phases: [...acceptancePhases].map(([phase, stats]) => ({ phase, ...stats })), requestTimings: [...missionDiagnostics.requestTimings].map(([route, stats]) => ({ route, calls: stats.calls, threw: stats.threw,
+        unknownDuration: stats.unknownDuration, reportedDurationMsSum: stats.calls > stats.unknownDuration ? stats.durationMs : null })),
+      transitions: missionTransitions }));
+  } catch { /* Diagnostics cannot replace an original result or cleanup error. */ }
+}
+type MissionInvocation = 'first' | 'second' | 'replay';
+let timingInvocation: MissionInvocation = 'first';
+let timingInvocationStarted: number | null = null;
+const missionTransitions: Array<{ invocation: MissionInvocation; scope: number; phase: string; elapsedFromInvocationStartMs: number }> = [];
+beforeEach(() => {
+  if (!acceptanceTiming) return;
+  missionTransitions.splice(0); missionDiagnostics.requestTimings.clear(); missionDiagnostics.requestTimingIncomplete = false; timingInvocationStarted = null;
+});
+function observeMissionTransition(value: { scope: number; phase: string }): void {
+  if (!acceptanceTiming) return;
+  try {
+    const at = timingClock();
+    if (at === null || timingInvocationStarted === null || at < timingInvocationStarted || !Number.isSafeInteger(value.scope) || value.scope < 0 ||
+      !['preparing', 'executing', 'draining', 'verifying', 'reconciling', 'proposing'].includes(value.phase) || missionTransitions.length >= 64) {
+      acceptanceIncomplete = true; return;
+    }
+    missionTransitions.push({ invocation: timingInvocation, scope: value.scope, phase: value.phase,
+      elapsedFromInvocationStartMs: at - timingInvocationStarted });
+  } catch { acceptanceIncomplete = true; }
+}
+
+afterEach(async () => {
+  try { await timedAsync('cleanup.fixture', async () => { for (const close of cleanup.splice(0).reverse()) await close(); }); }
+  finally { emitAcceptanceTiming(); }
+});
 const save = (file: string, value: unknown) => writeFileSync(file, canonical(value) + '\n', { mode: 0o600 });
 const json = (file: string) => JSON.parse(readFileSync(file, 'utf8'));
 function git(repo: string, ...args: string[]): string {
-  return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-C', repo, ...args], {
-    encoding: 'utf8', timeout: 10_000, env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' } }).trim();
+  return timedSync('git.operation', () => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-C', repo, ...args], {
+    encoding: 'utf8', timeout: 10_000, env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' } }).trim());
 }
 async function fixture() {
   expect(homedir()).not.toBe(process.env.ASHLR_VITEST_REAL_HOME);
@@ -174,7 +277,7 @@ async function fixture() {
 
 describe.runIf(process.platform === 'darwin')('actual standing engineering mission', () => {
   it('reconciles scope one after owner restart, proposes and executes scope two on the same ledger, then honors stop', async () => {
-    const f = await fixture(); const stop = new AbortController(); const phases: string[] = [];
+    const f = await timedAsync('fixture', fixture); const stop = new AbortController(); const phases: string[] = [];
     const failureDiagnostics = (invocation: 'first' | 'second'): void => {
       try {
         let attempts: Array<Record<string, unknown>> | null = null;
@@ -192,14 +295,17 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     // window. Report actual transitions, rather than a timer that hides stalls.
     let lastProgress = '';
     const reportPhase = (value: { scope: number; phase: string }): void => {
+      // Keep repeated executing observations: source brackets console start with them.
+      observeMissionTransition(value);
       const next = `${value.scope}:${value.phase}`;
       if (next === lastProgress) return;
       lastProgress = next;
       console.error(`[mission-fixture] scope ${value.scope} phase ${value.phase}`);
     };
-    const first = await runResourceEngineeringMission(f.config, { signal: stop.signal, onProgress(value) {
+    timingInvocation = 'first'; timingInvocationStarted = timingClock();
+    const first = await timedAsync('mission.first', () => runResourceEngineeringMission(f.config, { signal: stop.signal, onProgress(value) {
       phases.push(`${value.scope}:${value.phase}`); if (value.scope === 1 && value.phase === 'verifying') stop.abort(); reportPhase(value);
-    } });
+    } }));
     if (first.state !== 'stopped' || first.scopesReserved !== 1 || first.deadlineAt !== f.config.deadlineAt ||
       f.calls.generation !== 2 || f.calls.successor !== 1 || f.calls.mission !== 0) failureDiagnostics('first');
     expect(first, JSON.stringify({ first, phases, calls: f.calls, errors: f.errors })).toMatchObject({ state: 'stopped', scopesReserved: 1, deadlineAt: f.config.deadlineAt });
@@ -207,7 +313,8 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     expect(readEngineeringMissionInvocations(f.config)).toMatchObject({ count: 1, unfinishedCount: 0,
       latest: { outcome: { state: 'stopped', reason: first.reason } } });
     const firstRows = readEngineeringMissionRecords(f.config); expect(firstRows.some(row => row.kind === 'settled')).toBe(true);
-    const second = await runResourceEngineeringMission(f.config, { onProgress(value) { phases.push(`${value.scope}:${value.phase}`); reportPhase(value); } });
+    timingInvocation = 'second'; timingInvocationStarted = timingClock();
+    const second = await timedAsync('mission.second', () => runResourceEngineeringMission(f.config, { onProgress(value) { phases.push(`${value.scope}:${value.phase}`); reportPhase(value); } }));
     if (second.state !== 'completed' || second.reason !== 'stop-requested' || second.scopesReserved !== 2 ||
       second.deadlineAt !== f.config.deadlineAt) failureDiagnostics('second');
     expect(second, JSON.stringify({ second, phases, calls: f.calls, errors: f.errors })).toMatchObject({ state: 'completed', reason: 'stop-requested', scopesReserved: 2, deadlineAt: f.config.deadlineAt });
@@ -230,8 +337,9 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     // Completed history remains inspectable under an explicit stop; replay must
     // neither restart a console nor propose a replacement task on any scope.
     const stopped = new AbortController(); stopped.abort(); const replayPhases: string[] = []; const replayUrls: Array<string | null> = [];
-    const replay = await runResourceEngineeringMission(f.config, { signal: stopped.signal,
-      onProgress(value) { replayPhases.push(`${value.scope}:${value.phase}`); reportPhase(value); replayUrls.push(value.consoleUrl); } });
+    timingInvocation = 'replay'; timingInvocationStarted = timingClock();
+    const replay = await timedAsync('mission.replay', () => runResourceEngineeringMission(f.config, { signal: stopped.signal,
+      onProgress(value) { replayPhases.push(`${value.scope}:${value.phase}`); reportPhase(value); replayUrls.push(value.consoleUrl); } }));
     expect(replay).toEqual(second); expect(replayPhases).toContain('2:reconciling');
     // Observer exceptions are intentionally isolated by the runner, so assertions
     // belong outside that callback where a regression can actually fail the test.

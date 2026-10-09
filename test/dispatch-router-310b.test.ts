@@ -28,6 +28,7 @@ import {
   laneOfSeat,
   resolveLaneEngines,
   routeWorkItem,
+  executionForSeat,
   routingRequestFor,
   type DispatchRouterContext,
   type LanePlan,
@@ -191,6 +192,32 @@ function item(over: Partial<WorkItem> = {}): WorkItem {
 }
 
 const LEGACY_LOCAL: LegacyRoute = { backend: 'builtin' as EngineId, tier: 'local', reason: 'legacy: builtin' };
+
+describe('exact candidate model identity', () => {
+  it('preserves a captured same-engine model unless the operator explicitly changes it', () => {
+    const legacy: LegacyRoute = { backend: 'claude', tier: 'frontier', model: 'captured-model', reason: 'captured' };
+    const capacity = claude(10, 10);
+    expect(executionForSeat(item(), legacy, capacity, ctx([capacity]))?.model).toBe('captured-model');
+    const cfg = { foundry: { models: { claude: ' explicit-model ' } } } as AshlrConfig;
+    for (const work of [item(), item({ tags: ['outcome-manager'], source: 'goal', effort: 5 })]) {
+      expect(executionForSeat(work, legacy, capacity, ctx([capacity], { cfg }))?.model).toBe('explicit-model');
+    }
+  });
+
+  it('never carries another backend model into the selected local candidate', () => {
+    const legacy: LegacyRoute = { backend: 'claude', tier: 'frontier', model: 'cloud-model', reason: 'cloud' };
+    const cfg = { foundry: { models: { 'llama-server': 'local-selected-model' } } } as AshlrConfig;
+    const execution = executionForSeat(item(), legacy, local(), ctx([local()], { cfg }));
+    expect(execution?.backend).toBe('llama-server');
+    expect(execution?.model).toBe('local-selected-model');
+  });
+
+  it('uses the concrete Grok default for low-difficulty work without a family-based fast substitution', () => {
+    const execution = executionForSeat(item({ effort: 1, score: 1 }), LEGACY_LOCAL, grok(), ctx([grok()]));
+    expect(execution?.backend).toBe('grok-cli');
+    expect(execution?.model).toBe(resolveEngineSpec('grok-cli')?.defaultModel);
+  });
+});
 
 describe('Claude and the 5-hour window (balanced: 70% ceiling, 40% weekly reserve)', () => {
   it('excludes Claude while its 5-hour window is above 70% and routes hard work elsewhere', () => {

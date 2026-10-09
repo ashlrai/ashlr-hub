@@ -1536,6 +1536,36 @@ describe('reset-aware selected batch — real routing seam with injected advice'
     expect(hooks.route(item(),CFG).backend).toBe('grok-cli');
     if(when==='advice')expect(recordScheduling.mock.calls[0]?.[0].accounts.find(v=>v.seatId==='claude')?.forecast).toBeNull();
   });
+  it('forecasts and admits the configured exact model, then refuses a live pin change without substituting it', async () => {
+    const cfg = { ...CFG, foundry: { ...CFG.foundry, models: { claude: 'selected-model' } } } as AshlrConfig;
+    let liveCfg = cfg;
+    const { hooks, recordScheduling } = batchHarness(async () => null, {
+      capacitySnapshot: () => ({ v: 1, publishedAt: NOW_ISO, seats: [claudeSeat()] }),
+      legacyRoute: () => ({ backend: 'claude', tier: 'frontier', model: 'older-inferred-model', reason: 'legacy fixture' }),
+      liveLeaderConfig: () => liveCfg,
+      workHistory: async () => [{ id: 'completed', engine: 'claude', model: 'selected-model', seatId: null,
+        taskKind: 'todo', completed: true, durationMs: 10000, tokens: 1000 }],
+    });
+    // Select the intended Claude producer through the actual grant, rather than
+    // relying on inferred tier rank over the otherwise fully idle local lane.
+    policy = { ...policy!, spend: { ...policy!.spend, seats: {
+      claude: policy!.spend.seats.claude!,
+      local: { ...policy!.spend.seats.local!, roles: ['judge'] },
+    } } };
+    const work = item();
+    hooks.effectiveConfig(cfg);
+    await hooks.beforeTick({ ...hookCtx, cfg });
+    await hooks.prepareDispatchPlan!([work], cfg);
+    const forecast = recordScheduling.mock.calls[0]?.[0].accounts.find(row => row.seatId === 'claude')?.forecast;
+    expect(forecast?.cohort).toMatchObject({ engine: 'claude', model: 'selected-model' });
+    const route = hooks.route(work, cfg);
+    expect(route).toMatchObject({ backend: 'claude', model: 'selected-model', hold: null });
+    const admission = { maxPercent: 90, itemId: work.id, model: route.model!, seatId: 'claude' };
+    expect(hooks.seatAllows('claude', admission).allowed).toBe(true);
+    liveCfg = { ...cfg, foundry: { ...cfg.foundry, models: { claude: 'replacement-model' } } } as AshlrConfig;
+    expect(hooks.seatAllows('claude', admission).allowed).toBe(false);
+    expect(route.model).toBe('selected-model');
+  });
   it('checks current Stop/authority again after asynchronous display-cache publication',async()=>{
     let stopped=false;
     const {hooks}=batchHarness(async()=>null,{killActive:()=>stopped,recordScheduling:async()=>{stopped=true;}});

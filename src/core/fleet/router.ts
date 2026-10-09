@@ -6,14 +6,15 @@
  * that should attempt it, honoring cfg.foundry.allowedBackends, PATH
  * availability, quota limits, and subscription windows.
  *
- * M128 adds: routeTask() enriches RouteDecision with {model, reason} by
- * delegating to run/router.ts#routeTask after the engine tier is selected.
+ * Model enrichment keeps the chosen engine: explicit configuration, existing
+ * authenticated opt-in learning, then its concrete registry/API default.
  *
  * GUARDRAILS:
  *  - NEVER returns a backend not in allowedBackends (default ['builtin']).
  *  - NEVER returns an external backend that fails engineInstalled() — falls back
  *    to 'builtin' (which is always available).
- *  - Pure except for engineInstalled()'s PATH/URL probe (read-only, never throws).
+ *  - Read-only registry/installation metadata and explicit opt-in learning;
+ *    resolution does not authorize inference or spending.
  *  - local-coder (mid-tier) NEVER gains main-merge authority — only frontier
  *    backends (claude/codex) carry engineTier === 'frontier' which is the gate
  *    requirement for auto-merge to main.
@@ -47,12 +48,10 @@
  *  frontier routing regardless of effort/score.
  *
  * M128 MODEL ENRICHMENT:
- *  After the engine tier is chosen, routeBackend calls routeTask() from
- *  run/router.ts to pick the optimal model within that engine. The model is
- *  returned in RouteDecision.model and a combined reason is surfaced.
- *  The judge/manager/strategist always get a STRONG model (opus/sonnet or the
- *  72b) — this is handled by callers setting the engine override; the router
- *  does not regress managerJudgeModel behavior.
+ *  After the engine tier is chosen, modelForSelectedEngine resolves that
+ *  engine's identity without a second provider-selection pass or inferred
+ *  catalog quality/size/effort fallback. Defaults are not measured quality.
+ *  Separate role defaults and generated repair trust remain unchanged.
  *
  * LOCAL-ONLY (policy/local-only.ts):
  *  A cloud backend must be UNREACHABLE, not merely deprioritised. Three seams
@@ -77,7 +76,7 @@
 import type { AshlrConfig, EngineId, EngineTier, WorkItem } from '../types.js';
 import { engineInstalled } from '../run/engines.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
-import { routeTask, isSubstantiveItem, SUBSTANTIVE_SOURCES, type RoutingContext } from '../run/router.js';
+import { modelForSelectedEngine, isSubstantiveItem, SUBSTANTIVE_SOURCES } from '../run/router.js';
 import {
   isTrustedCaptureRepairItem,
   isTrustedDiagnosticResliceItem,
@@ -434,23 +433,11 @@ function decide(backend: EngineId, reason: string, cfg?: AshlrConfig): Omit<Rout
 }
 
 /**
- * Build the RoutingContext required by routeTask from the list of available engines.
- * The available engines are those already selected by availableFrom across all tiers.
- */
-function buildRoutingContext(
-  frontiers: EngineId[],
-  mids: EngineId[],
-): RoutingContext {
-  return { availableEngines: [...frontiers, ...mids, 'builtin'] };
-}
-
-/**
  * Route a WorkItem to the backend AND model that should attempt it.
  *
- * M128: Extends the M115 engine-tier decision with model-granular selection
- * via routeTask(). The RouteDecision now includes a `model` field.
+ * Enriches the existing engine-tier decision with that engine's model identity.
  *
- * PURE + DETERMINISTIC (modulo engineInstalled's read-only PATH/URL probe).
+ * Read-only registry/installation and explicitly enabled learning metadata.
  * Never throws. Honors allowedBackends and availability — see module heuristic.
  *
  * M115 three-tier policy:
@@ -496,7 +483,6 @@ function enforceLocalOnlyRouteDecision(
 function routeBackendUnenforced(item: WorkItem, cfg: AshlrConfig): RouteDecision {
   const frontiers = availableFrontier(cfg);
   const mids = availableMid(cfg);
-  const ctx = buildRoutingContext(frontiers, mids);
   const isNoDiffRepair = isGeneratedNoDiffProposalRepair(item);
   const isCaptureRepair = isGeneratedCaptureProposalRepair(item);
   const isProposalRepair = isTrustedProposalRepairItem(item);
@@ -662,16 +648,12 @@ function routeBackendUnenforced(item: WorkItem, cfg: AshlrConfig): RouteDecision
       baseReason = `frontier: generated proposal repair (source=${item.source}) → ${chosen}`;
     }
 
-    // M128: enrich with model selection
-    const taskRoute = routeTask(item, cfg, { ...ctx, availableEngines: [chosen, ...ctx.availableEngines] });
-    const engineReason = taskRoute.engine === chosen
-      ? baseReason
-      : baseReason; // engine from task routing may differ — use the tier-selected engine
-    const modelTag = taskRoute.engine === chosen ? taskRoute.model : null;
-    const modelSuffix = modelTag ? ` [model:${modelTag}]` : '';
+    const selected = modelForSelectedEngine(item, chosen, cfg);
+    const modelTag = selected.model;
+    const modelSuffix = modelTag ? ` [model:${modelTag}] ${selected.reason}` : '';
 
     return {
-      ...decide(chosen, `${engineReason}${modelSuffix}`, cfg),
+      ...decide(chosen, `${baseReason}${modelSuffix}`, cfg),
       model: modelTag,
     };
   }
@@ -684,10 +666,9 @@ function routeBackendUnenforced(item: WorkItem, cfg: AshlrConfig): RouteDecision
     const effort = typeof item.effort === 'number' ? item.effort : 3;
     const baseReason = `local-mid bulk: ${chosen} (source=${item.source}, effort=${effort}) — frontier reserved for hard items`;
 
-    // M128: enrich with model selection
-    const taskRoute = routeTask(item, cfg, { ...ctx, availableEngines: [chosen, ...frontiers, 'builtin'] });
-    const modelTag = taskRoute.engine === chosen ? taskRoute.model : null;
-    const modelSuffix = modelTag ? ` [model:${modelTag}]` : '';
+    const selected = modelForSelectedEngine(item, chosen, cfg);
+    const modelTag = selected.model;
+    const modelSuffix = modelTag ? ` [model:${modelTag}] ${selected.reason}` : '';
 
     return {
       ...decide(chosen, `${baseReason}${modelSuffix}`, cfg),
@@ -702,10 +683,9 @@ function routeBackendUnenforced(item: WorkItem, cfg: AshlrConfig): RouteDecision
     const chosen = pickFrom(frontiers, item)!;
     const baseReason = `frontier-fallback: no mid backend allowed+installed → ${chosen} (source=${item.source})`;
 
-    // M128: enrich with model selection
-    const taskRoute = routeTask(item, cfg, { ...ctx, availableEngines: [chosen, 'builtin'] });
-    const modelTag = taskRoute.engine === chosen ? taskRoute.model : null;
-    const modelSuffix = modelTag ? ` [model:${modelTag}]` : '';
+    const selected = modelForSelectedEngine(item, chosen, cfg);
+    const modelTag = selected.model;
+    const modelSuffix = modelTag ? ` [model:${modelTag}] ${selected.reason}` : '';
 
     return {
       ...decide(chosen, `${baseReason}${modelSuffix}`, cfg),

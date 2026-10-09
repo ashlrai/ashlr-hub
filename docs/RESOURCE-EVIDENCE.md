@@ -124,6 +124,11 @@ latency averages remain diagnostics, rather than exact account/model/task
 measurements. A Devin SWE name does not prove included funding. Account-bound
 native pricing and execution checks still apply.
 
+Local coding dispatch binds the observed local seat to a tool-capable runtime,
+such as llama-server or local-coder. The builtin planning loop cannot consume
+that coding lane; if no capable local adapter is available, another eligible
+account can run the work. Otherwise, the item waits.
+
 This scope does not replace every legacy worker selection policy or establish
 measured-quality learning. See the shared [seat router](../src/core/routing/router.ts)
 and [Auto adviser](../src/core/verse/multimodel/advisor.ts).

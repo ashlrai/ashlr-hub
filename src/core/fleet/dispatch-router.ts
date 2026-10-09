@@ -60,7 +60,7 @@ import { engineLocality, engineMeteredness } from '../policy/local-only.js';
 import { LEADER_LIMITS, type LeaderDirectivesV1 } from '../vision/leader-types.js';
 import type { HarnessRoutingWeights } from '../learn/harness-types.js';
 import { registryEngineForFleetEngine, resolveEngineSpec } from '../run/engine-registry.js';
-import { GROK_CLI_FAST_MODEL, pickModel } from '../run/model-catalog.js';
+import { GROK_CLI_FAST_MODEL, pickModel, resolveSelectedEngineModel } from '../run/model-catalog.js';
 import { planAutonomousBestOfN, type AutonomousBestOfNPlan } from '../run/best-of-n-policy.js';
 import {
   DEVIN_CLI_CONTEXT_TOKENS,
@@ -606,13 +606,12 @@ export function executionForSeat(item: WorkItem, legacy: LegacyRoute, seat: Seat
     (lane !== 'local' || supportsRoleExecution(legacy.backend, ctx.cfg ?? {} as AshlrConfig)) &&
     (!isOutcomeManagerWorkItem(item) || supportsRoleExecution(legacy.backend, ctx.cfg ?? {} as AshlrConfig));
   const backend = keepLegacy ? legacy.backend : installed;
-  const candidateModel = (backend === legacy.backend ? legacy.model ?? undefined : configuredModel(ctx.cfg, backend))
-    ?? (lane === 'grok-cli' && routingRequestFor(item).difficulty === 'low' ? grokFastModel() : undefined);
-  // Cache the manager's concrete model before exact-route admission. Filling
-  // a default later in the daemon would change the route it was admitted for.
-  const model = isOutcomeManagerWorkItem(item)
-    ? candidateModel?.trim() || configuredModel(ctx.cfg, backend)?.trim() || resolveEngineSpec(backend, ctx.cfg)?.defaultModel || resolveEngineSpec(backend, ctx.cfg)?.api?.defaultModel
-    : candidateModel;
+  // Capture one concrete candidate before forecasting/admission. A configured
+  // pin beats retained same-engine metadata; another backend's model never does.
+  const captured = backend === legacy.backend ? { engine: legacy.backend, model: legacy.model } : null;
+  const selected = { engine: backend, configured: configuredModel(ctx.cfg, backend), captured };
+  const model = resolveSelectedEngineModel(selected) ??
+    resolveSelectedEngineModel({ ...selected, spec: resolveEngineSpec(backend, ctx.cfg) });
   return { backend, reason: 'Exact candidate execution for observed task fit.', tier: backend === legacy.backend ? legacyTier(legacy, ctx) : ctx.tierOf(backend) ?? 'local',
     ...(model ? { model } : {}) };
 }

@@ -461,10 +461,10 @@ source documentation cannot establish that it is active on a particular Mac.
 ## Resources, on every page
 
 Press **⌘.** (or click the tab on the right edge, or run "Open Resources" from ⌘K) to open the Resources drawer:
-connected resources grouped by their configured routing tier. **Elite**, **Fast**
-and **Free · local** influence ranking; they are not measured quality or speed
-scores, and do not restrict Leader or Manager roles. A tier can depend on the
-selected model, including local Qwen. Cards show the available account, model,
+connected resources grouped by their legacy display tier. **Elite**, **Fast**
+and **Free · local** are labels, not quality or speed measurements. Shared seat
+selection ranks eligible resources by current headroom and independent funding,
+without inferring quality from a provider or model family. Cards show the available account, model,
 billing and readiness evidence; unknown readings stay unknown. Chat sign-in,
 quota collection and fleet authority are separate checks. The drawer opens over
 your work or pins beside it. See [resource evidence](docs/RESOURCE-EVIDENCE.md)
