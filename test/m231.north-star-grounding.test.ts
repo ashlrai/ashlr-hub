@@ -73,16 +73,16 @@ describe('northStarDocSummary', () => {
     expect(summary).toMatch(/composition/i);
   });
 
-  it('grounds planning in Ashlrverse and verified engineering yield', async () => {
+  it('grounds planning in Phantom and verified engineering yield', async () => {
     const { _resetNorthStarDocCache, northStarDocSummary } = await import(
       '../src/core/ecosystem/map.js'
     );
     _resetNorthStarDocCache();
     const summary = northStarDocSummary();
-    // NORTH-STAR.md renamed the product vision from "Ashlr Universe" to
-    // "Ashlrverse"; "Universe" now names only the experiment runtime. The
-    // grounding must carry the current product name into the vision line.
-    expect(summary).toContain('Build Ashlrverse into an agent-native operating system');
+    // Phantom is the current product; Universe remains an experiment-runtime
+    // compatibility name, rather than the name carried into active prompts.
+    expect(summary).toContain('Build Phantom into an agent-native operating system');
+    expect(summary).not.toContain('Ashlrverse');
     expect(summary).not.toContain('Ashlr Universe');
     expect(summary).toContain('useful accepted changes per measured token and hour');
     expect(summary).toContain('unknown usage is not zero');
@@ -97,14 +97,15 @@ describe('northStarDocSummary', () => {
     expect(summary).toMatch(/measure.*grand|grand.*not.*vanity/i);
   });
 
-  it('contains the substantive value≥4 + repo-bound directive', async () => {
+  it('recommends useful repo-bound work without categorical bans or a score threshold', async () => {
     const { _resetNorthStarDocCache, northStarDocSummary } = await import(
       '../src/core/ecosystem/map.js'
     );
     _resetNorthStarDocCache();
     const summary = northStarDocSummary();
-    expect(summary).toMatch(/value.*[≥>=].*4|substant/i);
-    expect(summary).toMatch(/repo|enrolled/i);
+    expect(summary).toContain('Prefer useful outcomes in concrete repos');
+    expect(summary).toContain('Docs, maintenance and release work can be valuable');
+    expect(summary).not.toMatch(/MUST|value.*[≥>=].*4|NOT docs/i);
   });
 
   it('respects maxChars bound', async () => {
