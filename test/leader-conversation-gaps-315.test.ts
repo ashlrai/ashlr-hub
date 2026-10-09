@@ -8,8 +8,8 @@
  *   2. The help text says what Approve really does (applies a scheduled
  *      class-B action early, or records approval of a class-C ask).
  *   3. One directive limit for server and Verse (OPERATOR_DIRECTIVE_MAX = 300).
- *   5. Conversation replies NEVER use Claude, even with
- *      `foundry.leader.claudeFallback: true`; memo runs still honour the opt-in.
+ *   5. Conversation replies and memos use the same provider-neutral router:
+ *      admitted Claude is available, and current capacity/reserves still apply.
  *
  * Hermetic: tmp HOME, a fake Bot API transport, fake seats. No model, no network.
  */
@@ -156,7 +156,7 @@ describe('directive length limit', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Replies never use Claude
+// Replies use shared provider-neutral account admission
 // ---------------------------------------------------------------------------
 
 const NOW = Date.parse('2026-09-27T12:00:00.000Z');
@@ -172,7 +172,7 @@ function seat(id: string, engine: VerseSeat['engine'], model: string): VerseSeat
 }
 
 const CLAUDE: LeaderSeatCandidate = { seat: seat('claude', 'claude', 'claude-opus-5-5'), launcher: ['node', '/profiles/claude/launcher.js'], ollamaBaseUrl: null };
-const GROK: LeaderSeatCandidate = { seat: seat('grok', 'grok', 'grok-4.6'), launcher: ['node', '/profiles/grok/launcher.js'], ollamaBaseUrl: null };
+const GROK: LeaderSeatCandidate = { seat: seat('grok', 'grok', 'grok-4.7'), launcher: ['node', '/profiles/grok/launcher.js'], ollamaBaseUrl: null };
 const CLAUDE_OK: SeatCapacity = {
   seatId: 'claude', engine: 'claude', label: 'claude', free: false, signedOut: false, reachable: null, contextWindow: 200_000, observedAt: OBSERVED, spentTodayUsd: null,
   windows: [
@@ -185,11 +185,11 @@ const GROK_OK: SeatCapacity = {
   windows: [{ id: 'weekly', usedPercent: 20, resetsAt: '2026-09-28T00:00:00.000Z', resetDescription: null, limitReached: false }],
 };
 
-const FALLBACK_ON = { foundry: { leader: { claudeFallback: true } } } as unknown as AshlrConfig;
+const LEADER_CONFIG = {} as AshlrConfig;
 
-function seatDeps(candidates: LeaderSeatCandidate[], snapshot: SeatCapacity[], calls: string[]): LeaderSeatDeps {
+function seatDeps(candidates: LeaderSeatCandidate[], snapshot: SeatCapacity[], calls: string[], claudeFailure = false): LeaderSeatDeps {
   return {
-    cfg: FALLBACK_ON,
+    cfg: LEADER_CONFIG,
     now: () => NOW,
     candidates: async () => candidates,
     capacitySnapshot: () => ({ publishedAt: OBSERVED, seats: snapshot }),
@@ -202,21 +202,22 @@ function seatDeps(candidates: LeaderSeatCandidate[], snapshot: SeatCapacity[], c
     transports: {
       local: () => async () => { calls.push('local'); return '{}'; },
       grok: () => async () => { calls.push('grok'); return JSON.stringify({ reply: 'grok here' }); },
-      claude: () => async () => { calls.push('claude'); throw new Error('claude must not be called for a reply'); },
+      claude: () => async () => {
+        calls.push('claude');
+        if (claudeFailure) throw new Error('native transport unavailable');
+        return JSON.stringify({ reply: 'claude here' });
+      },
     },
     claudeCredential: async () => undefined,
   };
 }
 
 describe('resolveLeaderSeat purpose: reply', () => {
-  it('with claudeFallback on and only Claude viable, a reply gets no seat (and says why); a memo run still gets Claude', async () => {
+  it('a granted Claude account can serve replies and ordinary memos without a provider opt-in', async () => {
     const calls: string[] = [];
     const deps = seatDeps([CLAUDE], [CLAUDE_OK], calls);
     const reply = await resolveLeaderSeat(deps, { deep: false, promptChars: 20_000, purpose: 'reply' });
-    expect(reply.ok).toBe(false);
-    if (!reply.ok) expect(reply.reason).toBe('Conversation replies never use Claude, and no grok or local seat is available.');
-
-    // Memo runs are unchanged: the opt-in still admits Claude as the fallback.
+    expect(reply.ok && reply.choice.engine).toBe('claude');
     const memo = await resolveLeaderSeat(deps, { deep: false, promptChars: 20_000 });
     expect(memo.ok && memo.choice.engine).toBe('claude');
     const plan = await planLeaderSeats(deps, { deep: false, promptChars: 20_000, mode: 'full' });
@@ -224,20 +225,27 @@ describe('resolveLeaderSeat purpose: reply', () => {
     expect(calls).toEqual([]);
   });
 
-  it('a reply with grok available uses grok and records Claude as passed over', async () => {
+  it('reply selection uses quality/headroom ranking; exhausted Claude capacity falls to Grok', async () => {
     const calls: string[] = [];
     const r = await resolveLeaderSeat(seatDeps([CLAUDE, GROK], [CLAUDE_OK, GROK_OK], calls), { deep: false, promptChars: 20_000, purpose: 'reply' });
-    expect(r.ok && r.choice.engine).toBe('grok');
+    expect(r.ok && r.choice.engine).toBe('claude');
+    const spent = { ...CLAUDE_OK, windows: CLAUDE_OK.windows.map((w) => ({ ...w, usedPercent: 100, limitReached: true })) };
+    const fallback = await resolveLeaderSeat(seatDeps([CLAUDE, GROK], [spent, GROK_OK], calls), { deep: false, promptChars: 20_000, purpose: 'reply' });
+    expect(fallback.ok && fallback.choice.engine).toBe('grok');
+    expect(calls).toEqual([]);
   });
 
-  it('even the deep flag cannot put Claude on a reply', async () => {
+  it('the deep flag preserves shared reply admission, while missing capacity still refuses the account', async () => {
     const r = await resolveLeaderSeat(seatDeps([CLAUDE], [CLAUDE_OK], []), { deep: true, promptChars: 20_000, purpose: 'reply' });
-    expect(r.ok).toBe(false);
+    expect(r.ok && r.choice.engine).toBe('claude');
+    const unknown = await resolveLeaderSeat(seatDeps([CLAUDE], [], []), { deep: true, promptChars: 20_000, purpose: 'reply' });
+    expect(unknown.ok).toBe(false);
+    if (!unknown.ok) expect(unknown.reason).toMatch(/reading|usage|headroom/i);
   });
 });
 
-describe('conversation replies never use Claude (end to end through appendMasonMessage)', () => {
-  function world(candidates: LeaderSeatCandidate[], snapshot: SeatCapacity[]): { calls: string[] } {
+describe('provider-neutral conversation replies (end to end through appendMasonMessage)', () => {
+  function world(candidates: LeaderSeatCandidate[], snapshot: SeatCapacity[], claudeFailure = false): { calls: string[] } {
     const calls: string[] = [];
     const ledger = fakeLedger();
     const policy = () => makePolicy();
@@ -256,23 +264,31 @@ describe('conversation replies never use Claude (end to end through appendMasonM
     // The seat router keeps the fixture clock (NOW): the capacity readings are
     // stamped OBSERVED = NOW − 1 min, and routing refuses a reading older than
     // 15 min — a wall-clock router here made this test fail later in the day.
-    const seatD = seatDeps(candidates, snapshot, calls);
-    const deps: LeaderRunDeps = { cfg: FALLBACK_ON, now: () => Date.now(), sources, seat: seatD, apply };
+    const seatD = seatDeps(candidates, snapshot, calls, claudeFailure);
+    const deps: LeaderRunDeps = { cfg: LEADER_CONFIG, now: () => Date.now(), sources, seat: seatD, apply };
     setLeaderThreadDepsForTest({ loadRunDeps: async () => deps });
     return { calls };
   }
 
-  it('claudeFallback on + only Claude viable ⇒ the honest "I can\'t think right now: …" reply; Claude is never called', async () => {
+  it('only Claude viable serves the reply through its admitted transport', async () => {
     const w = world([CLAUDE], [CLAUDE_OK]);
     const { reply } = await appendMasonMessage('What is the plan this week?', { channel: 'verse' });
-    expect(reply!.text).toBe("I can't think right now: Conversation replies never use Claude, and no grok or local seat is available.");
-    expect(w.calls).toEqual([]);
+    expect(reply!.text).toBe('claude here');
+    expect(w.calls).toEqual(['claude']);
   });
 
-  it('with grok also viable, the reply comes from grok', async () => {
-    const w = world([CLAUDE, GROK], [CLAUDE_OK, GROK_OK]);
+  it('exhausted Claude with Grok viable gets a Grok reply without attempting the excluded account', async () => {
+    const spent = { ...CLAUDE_OK, windows: CLAUDE_OK.windows.map((w) => ({ ...w, usedPercent: 100, limitReached: true })) };
+    const w = world([CLAUDE, GROK], [spent, GROK_OK]);
     const { reply } = await appendMasonMessage('Status?', { channel: 'verse' });
     expect(reply!.text).toBe('grok here');
     expect(w.calls).toEqual(['grok']);
+  });
+
+  it('a failed admitted transport returns an honest error rather than claiming a successful reply', async () => {
+    const w = world([CLAUDE], [CLAUDE_OK], true);
+    const { reply } = await appendMasonMessage('Status?', { channel: 'verse' });
+    expect(reply!.text).toBe("I can't think right now: the claude seat failed: native transport unavailable");
+    expect(w.calls).toEqual(['claude']);
   });
 });

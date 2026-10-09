@@ -37,6 +37,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   size ordered goal plans to the work rather than padding or truncating them.
 - Include eligible Codex resources in balanced routing; preserve manual choices
   and explicit account permissions. Optional Leader run limits remain explicit.
+- Size native fleet lanes from account eligibility instead of a default Codex
+  lock or a blanket Claude presence lock; retain allowance and funding checks.
+- Check captured Locus authority before host-native account metadata access;
+  unsupported sealed-job identity bridges stay separate from host invocations.
 - Format Telegram dates in the operator's timezone and use concise Phantom
   wording for generated briefs while preserving user text and technical records.
 - Use writable isolated Cargo runtime state and reuse unchanged source hashes

@@ -6,13 +6,13 @@
  *      `updatedAt`, as on 2026-09-25) is a LOWER BOUND with a caveat — never
  *      `null` (which the model read as "zero active goals" while the digest
  *      showed 21) — and the Leader and the digest count the same open goals.
- *   2. Seat chain: router-approved seats in order grok → fast local → large
- *      local → (opt-in) Claude; never codex; per-attempt timeouts sized to the
+ *   2. Seat chain: shared provider-neutral router ordering, with qualified
+ *      account adapters and current capacity; per-attempt timeouts sized to the
  *      model; the memo records every attempt; a failed full run schedules a
  *      bounded retry.
  *   3. Health: GET-state carries `health` (healthy / degraded / down + why).
  *   4. Cadence: working-hours check-ins (advisory, cheap, material change
- *      only) under a total cap, and the poller's cheap wake check.
+ *      only), explicit optional daily preferences, and the poller's cheap wake check.
  *   (The streamed local transport is covered in leader-local-transport-314, real-io lane.)
  *
  * Hermetic: tmp HOME, fake ledger / sources / seats; no model is called.
@@ -103,7 +103,7 @@ const LOCAL_27B: LeaderSeatCandidate = { seat: seat('local:qwen3.8:27b-ctx64k', 
 const LOCAL_FAST: LeaderSeatCandidate = { seat: seat('local:gpt-oss:20b', 'local', 'gpt-oss:20b'), launcher: null, ollamaBaseUrl: 'http://127.0.0.1:11434' };
 const GROK: LeaderSeatCandidate = { seat: seat('grok', 'grok', 'grok-4.7', 200_000), launcher: ['node', '/profiles/grok/launcher.js'], ollamaBaseUrl: null };
 const CLAUDE: LeaderSeatCandidate = { seat: seat('claude', 'claude', 'claude-opus-5-5', 200_000), launcher: ['node', '/profiles/claude/launcher.js'], ollamaBaseUrl: null };
-const CODEX: LeaderSeatCandidate = { seat: seat('codex-personal', 'codex', 'gpt-5.5', 200_000), launcher: ['node', '/profiles/codex/launcher.js'], ollamaBaseUrl: null };
+const CODEX: LeaderSeatCandidate = { seat: seat('codex-personal', 'codex', 'gpt-6.1-sol', 200_000), launcher: ['node', '/profiles/codex/launcher.js'], ollamaBaseUrl: null };
 
 function paidCapacity(id: string, engine: SeatCapacity['engine'], windows: SeatCapacity['windows']): SeatCapacity {
   return { seatId: id, engine, label: id, free: false, windows, signedOut: false, reachable: null, contextWindow: 200_000, observedAt: OBSERVED, spentTodayUsd: null };
@@ -281,45 +281,43 @@ describe('seat plan (pure policy)', () => {
 });
 
 describe('planLeaderSeats', () => {
-  it('with a grant: grok → fast local → large local; Claude and codex are passed over with reasons', async () => {
+  it('uses shared quality/headroom ranking; a missing account-bound Codex adapter has a specific reason', async () => {
     const { deps } = seatDeps({ candidates: [LOCAL_27B, CODEX, CLAUDE, LOCAL_FAST, GROK], snapshot: [GROK_OK, CLAUDE_OK] });
     const plan = await planLeaderSeats(deps, { deep: false, promptChars: 20_000, mode: 'full' });
     expect(plan.ok).toBe(true);
     if (!plan.ok) return;
-    expect(plan.steps.map((s) => s.choice.seatId)).toEqual(['grok', 'local:gpt-oss:20b', 'local:qwen3.8:27b-ctx64k']);
-    const why = Object.fromEntries(plan.skipped.map((s) => [s.seatId, s.reason]));
-    expect(why['claude']).toMatch(/only for the weekly deep run/);
-    expect(why['codex-personal']).toMatch(/never uses codex/);
+    expect(plan.steps.map((s) => s.choice.seatId)).toEqual(['local:qwen3.8:27b-ctx64k', 'claude', 'grok', 'local:gpt-oss:20b']);
+    expect(plan.skipped.find((s) => s.seatId === 'claude')).toBeUndefined();
+    expect(plan.skipped.find((s) => s.seatId === 'codex-personal')?.reason).toBe('The account-bound role adapter is unavailable.');
     expect(plan.steps[0]!.budget.timeoutMs).toBeGreaterThan(0);
   });
 
-  it('with no grant: local models only, fast first — no paid seat, no cloud fallback', async () => {
-    const { deps } = seatDeps({ candidates: [GROK, LOCAL_27B, LOCAL_FAST], standing: null, snapshot: [GROK_OK] });
+  it('with no grant: local models only, quality first — no paid seat, no cloud fallback', async () => {
+    const { deps } = seatDeps({ candidates: [GROK, CLAUDE, LOCAL_27B, LOCAL_FAST], standing: null, snapshot: [GROK_OK, CLAUDE_OK] });
     const plan = await planLeaderSeats(deps, { deep: true, promptChars: 20_000, mode: 'full' });
-    expect(plan.ok && plan.steps.map((s) => s.choice.seatId)).toEqual(['local:gpt-oss:20b', 'local:qwen3.8:27b-ctx64k']);
-    if (plan.ok) expect(plan.skipped.find((s) => s.seatId === 'grok')?.reason).toMatch(/No standing grant/);
+    expect(plan.ok && plan.steps.map((s) => s.choice.seatId)).toEqual(['local:qwen3.8:27b-ctx64k', 'local:gpt-oss:20b']);
+    if (plan.ok) for (const id of ['grok', 'claude']) expect(plan.skipped.find((s) => s.seatId === id)?.reason).toMatch(/No standing grant/);
   });
 
-  it('the weekly deep run keeps Claude first (the router pick), then falls back to grok and local', async () => {
+  it('deep and ordinary runs preserve the same router-ranked accounts without provider-specific reordering', async () => {
     const { deps } = seatDeps({ candidates: [CLAUDE, GROK, LOCAL_27B, LOCAL_FAST], snapshot: [GROK_OK, CLAUDE_OK] });
-    const plan = await planLeaderSeats(deps, { deep: true, promptChars: 20_000, mode: 'full' });
-    expect(plan.ok && plan.steps.map((s) => s.choice.seatId)).toEqual(['claude', 'grok', 'local:gpt-oss:20b', 'local:qwen3.8:27b-ctx64k']);
+    for (const deep of [false, true]) {
+      const plan = await planLeaderSeats(deps, { deep, promptChars: 20_000, mode: 'full' });
+      expect(plan.ok && plan.steps.map((s) => s.choice.seatId)).toEqual(['local:qwen3.8:27b-ctx64k', 'claude', 'grok', 'local:gpt-oss:20b']);
+    }
   });
 
-  it('Claude as the LAST fallback only when opted in, never in reserve mode, never on a check-in', async () => {
-    const cfg = { foundry: { leader: { claudeFallback: true } } } as unknown as AshlrConfig;
-    const on = seatDeps({ candidates: [CLAUDE, GROK, LOCAL_FAST], snapshot: [GROK_OK, CLAUDE_OK], cfg });
-    const plan = await planLeaderSeats(on.deps, { deep: false, promptChars: 20_000, mode: 'full' });
-    expect(plan.ok && plan.steps.map((s) => s.choice.seatId)).toEqual(['grok', 'local:gpt-oss:20b', 'claude']);
-
-    const reserve = seatDeps({ candidates: [CLAUDE, GROK, LOCAL_FAST], snapshot: [GROK_OK, CLAUDE_OK], cfg, budget: () => ({ ...defaultBudgetPolicy(), mode: 'reserve' }) });
+  it('Claude participates in full runs and check-ins without opt-in; explicit reserves still exclude depleted capacity', async () => {
+    const on = seatDeps({ candidates: [CLAUDE, GROK, LOCAL_FAST], snapshot: [GROK_OK, CLAUDE_OK] });
+    for (const mode of ['full', 'checkin'] as const) {
+      const plan = await planLeaderSeats(on.deps, { deep: false, promptChars: 20_000, mode });
+      expect(plan.ok && plan.steps.map((s) => s.choice.seatId)).toEqual(['claude', 'grok', 'local:gpt-oss:20b']);
+    }
+    const reservedClaude = { ...CLAUDE_OK, windows: CLAUDE_OK.windows.map((w) => ({ ...w, usedPercent: 20 })) };
+    const reserve = seatDeps({ candidates: [CLAUDE, GROK, LOCAL_FAST], snapshot: [GROK_OK, reservedClaude], budget: () => ({ ...defaultBudgetPolicy(), mode: 'reserve' }) });
     const r = await planLeaderSeats(reserve.deps, { deep: false, promptChars: 20_000, mode: 'full' });
     expect(r.ok && r.steps.map((s) => s.choice.engine)).not.toContain('claude');
-    if (r.ok) expect(r.skipped.find((s) => s.seatId === 'claude')?.reason).toMatch(/reserve/);
-
-    const checkin = await planLeaderSeats(on.deps, { deep: true, promptChars: 20_000, mode: 'checkin' });
-    expect(checkin.ok && checkin.steps.map((s) => s.choice.engine)).not.toContain('claude');
-    if (checkin.ok) expect(checkin.skipped.find((s) => s.seatId === 'claude')?.reason).toMatch(/check-in never uses Claude/);
+    if (r.ok) expect(r.skipped.find((s) => s.seatId === 'claude')?.reason).toBe('The weekly window is 20% used; 85% is kept for you, so autonomy stops at 15%.');
   });
 
   it('localOnly (a check-in in reserve mode) passes over grok', async () => {
@@ -341,53 +339,53 @@ describe('the fallback chain in a run', () => {
   it('a failing first seat falls through to the next; the memo records who served and why others did not', async () => {
     const { deps, calls } = world({
       now: () => T0,
-      behave: { 'local gpt-oss:20b': async () => { throw new TypeError('fetch failed', { cause: new Error('Headers Timeout Error') }); } },
+      behave: { 'local qwen3.8:27b-ctx64k': async () => { throw new TypeError('fetch failed', { cause: new Error('Headers Timeout Error') }); } },
     });
     const r = await runLeader(deps, 'schedule');
     expect(r.outcome).toBe('ok');
-    expect(calls).toEqual(['local gpt-oss:20b', 'local qwen3.8:27b-ctx64k']);
-    expect(r.memo).toMatchObject({ seatId: 'local:qwen3.8:27b-ctx64k', mode: 'full' });
+    expect(calls).toEqual(['local qwen3.8:27b-ctx64k', 'local gpt-oss:20b']);
+    expect(r.memo).toMatchObject({ seatId: 'local:gpt-oss:20b', mode: 'full' });
     expect(r.memo!.attempts!.map((a) => [a.seatId, a.outcome])).toEqual([
-      ['local:gpt-oss:20b', 'failed'],
-      ['local:qwen3.8:27b-ctx64k', 'served'],
+      ['local:qwen3.8:27b-ctx64k', 'failed'],
+      ['local:gpt-oss:20b', 'served'],
     ]);
     expect(r.memo!.attempts![0]!.reason).toMatch(/fetch failed \(Headers Timeout Error\)/);
     const state = readLeaderRunState();
-    expect(state.lastServed).toMatchObject({ seatId: 'local:qwen3.8:27b-ctx64k' });
+    expect(state.lastServed).toMatchObject({ seatId: 'local:gpt-oss:20b' });
     expect(state.retry).toBeNull();
     // Health: served, but only after a fallback ⇒ degraded, and it says why.
     const health = buildLeaderState(T0).health!;
     expect(health.status).toBe('degraded');
-    expect(health.summary).toMatch(/after a fallback: local:gpt-oss:20b failed/);
+    expect(health.summary).toMatch(/after a fallback: local:qwen3.8:27b-ctx64k failed/);
   });
 
   it('a per-attempt timeout is recorded as a timeout', async () => {
     const { deps } = world({
       now: () => T0,
-      behave: { 'local gpt-oss:20b': async () => { throw new LeaderTimeoutError(6 * MIN); } },
+      behave: { 'local qwen3.8:27b-ctx64k': async () => { throw new LeaderTimeoutError(18 * MIN); } },
     });
     const r = await runLeader(deps, 'manual');
-    expect(r.memo!.attempts![0]).toMatchObject({ outcome: 'timeout', timeoutMs: 6 * MIN });
+    expect(r.memo!.attempts![0]).toMatchObject({ outcome: 'timeout', timeoutMs: 18 * MIN });
   });
 
   it('an unparseable answer moves on to the next FREE seat', async () => {
-    const { deps, calls } = world({ now: () => T0, behave: { 'local gpt-oss:20b': async () => 'not json' } });
+    const { deps, calls } = world({ now: () => T0, behave: { 'local qwen3.8:27b-ctx64k': async () => 'not json' } });
     const r = await runLeader(deps, 'manual');
     expect(r.outcome).toBe('ok');
     // one free re-ask on the same seat, then the next local seat
-    expect(calls).toEqual(['local gpt-oss:20b', 'local gpt-oss:20b', 'local qwen3.8:27b-ctx64k']);
+    expect(calls).toEqual(['local qwen3.8:27b-ctx64k', 'local qwen3.8:27b-ctx64k', 'local gpt-oss:20b']);
     expect(r.memo!.attempts!.map((a) => a.outcome)).toEqual(['parse-failed', 'served']);
   });
 
   it('every seat failing ⇒ a failed memo and a bounded, backed-off retry (not tomorrow)', async () => {
     let now = Date.parse('2026-09-26T06:30:05.000Z');
     const fail: Behaviour = async () => { throw new TypeError('fetch failed'); };
-    const { deps, calls } = world({ now: () => now, behave: { 'local gpt-oss:20b': fail, 'local qwen3.8:27b-ctx64k': fail } });
+    const { deps, calls } = world({ now: () => now, cfg: { foundry: { leaderPreferences: { maxFullRunsPerDay: 3, maxTotalRunsPerDay: 8 } } } as AshlrConfig, behave: { 'local qwen3.8:27b-ctx64k': fail, 'local gpt-oss:20b': fail } });
     const quiet = { mergesSinceLastRun: 0, revertsSinceLastRun: 0, seatResetSinceLastRun: false, highInsightSinceLastRun: false };
 
     const first = await runLeader(deps, 'schedule');
     expect(first.outcome).toBe('failed');
-    expect(first.reason).toMatch(/^Every seat failed: local:gpt-oss:20b failed; local:qwen3.8:27b-ctx64k failed/);
+    expect(first.reason).toMatch(/^Every seat failed: local:qwen3.8:27b-ctx64k failed; local:gpt-oss:20b failed/);
     expect(calls).toHaveLength(2);
     let state = readLeaderRunState();
     expect(state.retry).toMatchObject({ attempt: 1, of: 'schedule', at: new Date(now + 15 * MIN).toISOString() });
@@ -402,7 +400,7 @@ describe('the fallback chain in a run', () => {
     expect((await runLeader(deps, 'retry')).outcome).toBe('failed');
     state = readLeaderRunState();
     expect(state.retry).toMatchObject({ attempt: 2, of: 'schedule', at: new Date(now + 45 * MIN).toISOString() });
-    // Retries count toward the 3 full runs a day: the third run is the last one today.
+    // Retries count toward the explicitly configured 3 full runs a day: the third run is the last one today.
     now += 46 * MIN;
     expect((await runLeader(deps, 'retry')).outcome).toBe('failed');
     state = readLeaderRunState();
@@ -413,12 +411,12 @@ describe('the fallback chain in a run', () => {
   it('the retries are bounded: after the third retry fails, the Leader is down until the next slot', async () => {
     let now = Date.parse('2026-09-26T06:30:05.000Z');
     const fail: Behaviour = async () => { throw new TypeError('fetch failed'); };
-    const { deps } = world({ now: () => now, behave: { 'local gpt-oss:20b': fail, 'local qwen3.8:27b-ctx64k': fail } });
+    const { deps } = world({ now: () => now, behave: { 'local qwen3.8:27b-ctx64k': fail, 'local gpt-oss:20b': fail } });
     // `no-seat`-free failures, run through the retries (manual runs are not capped by evidence).
     await runLeader(deps, 'schedule');
     for (const gap of [16, 46, 121]) {
       now += gap * MIN;
-      // The cap would stop the third retry; lift it for this bound check by clearing today's count.
+      // Clear the recorded daily count to isolate the retry bound from cadence preferences.
       const s = readLeaderRunState();
       s.runDays = {};
       writeFileSync(join(home.home(), '.ashlr', 'vision', 'leader', 'state.json'), `${JSON.stringify(s)}\n`);
@@ -433,7 +431,7 @@ describe('the fallback chain in a run', () => {
   it('single flight across processes: a held run lock skips; a tick whose view went stale is not repeated (daemon + poller)', async () => {
     let now = Date.parse('2026-09-26T06:30:05.000Z');
     const fail: Behaviour = async () => { throw new TypeError('fetch failed'); };
-    const { deps, calls } = world({ now: () => now, behave: { 'local gpt-oss:20b': fail, 'local qwen3.8:27b-ctx64k': fail } });
+    const { deps, calls } = world({ now: () => now, behave: { 'local qwen3.8:27b-ctx64k': fail, 'local gpt-oss:20b': fail } });
 
     // Another process (the resident daemon) holds the run lock.
     const { acquireLocalStoreLock, releaseLocalStoreLock } = await import('../src/core/fleet/local-store-lock.js');
@@ -488,7 +486,7 @@ describe('health', () => {
     await runLeader(deps, 'schedule');
     const h = buildLeaderState(T0 + MIN).health!;
     expect(h).toMatchObject({ status: 'healthy', lastRunOutcome: 'ok', consecutiveFailures: 0, lastFailure: null });
-    expect(h.servedBy).toMatchObject({ seatId: 'local:gpt-oss:20b' });
+    expect(h.servedBy).toMatchObject({ seatId: 'local:qwen3.8:27b-ctx64k' });
     expect(h.seats.map((s) => s.outcome)).toEqual(['served']);
     expect(h.lastSuccessAt).toBe(new Date(T0).toISOString());
   });
@@ -523,9 +521,9 @@ describe('cadence: check-ins, caps and the wake check', () => {
   const quiet = { mergesSinceLastRun: 0, revertsSinceLastRun: 0, seatResetSinceLastRun: false, highInsightSinceLastRun: false };
 
   it('config: default every 2 h in 08–22; 0 disables; values are clamped', () => {
-    expect(resolveLeaderCadence(undefined)).toMatchObject({ checkinHours: 2, workingHours: { start: 8, end: 22 }, maxRunsPerDay: 3, maxRunsPerDayTotal: 8 });
+    expect(resolveLeaderCadence(undefined)).toMatchObject({ checkinHours: 2, workingHours: { start: 8, end: 22 }, maxRunsPerDay: null, maxRunsPerDayTotal: null });
     const off = resolveLeaderCadence({ foundry: { leader: { checkinHours: 0 } } } as unknown as AshlrConfig);
-    expect(off).toMatchObject({ checkinHours: 0, maxRunsPerDayTotal: 3 });
+    expect(off).toMatchObject({ checkinHours: 0, maxRunsPerDayTotal: null });
     expect(resolveLeaderCadence({ foundry: { leader: { checkinHours: 0.1 } } } as unknown as AshlrConfig).checkinHours).toBe(1);
     expect(resolveLeaderCadence({ foundry: { leader: { checkinHours: 99, workingHours: { start: 9, end: 18 } } } } as unknown as AshlrConfig))
       .toMatchObject({ checkinHours: 24, workingHours: { start: 9, end: 18 } });
@@ -551,14 +549,15 @@ describe('cadence: check-ins, caps and the wake check', () => {
     expect(leaderRunDue(Date.parse('2026-09-24T09:02:00.000Z'), looked, quiet, cadence).trigger).toBe('checkin');
   });
 
-  it('check-ins have their own room: 3 full runs a day, 8 in total', () => {
-    const cadence = resolveLeaderCadence(undefined);
+  it('explicit daily preferences keep separate check-in room; defaults do not cap useful runs', () => {
+    const cadence = resolveLeaderCadence({ foundry: { leaderPreferences: { maxFullRunsPerDay: 3, maxTotalRunsPerDay: 8 } } } as AshlrConfig);
     const at = Date.parse('2026-09-24T15:00:00.000Z');
     const base: LeaderRunState = { ...EMPTY_STATE, lastRun: { at: '2026-09-24T12:00:00.000Z', outcome: 'ok', reason: null, memoId: null, trigger: 'merges' }, lastMemoAt: '2026-09-24T12:00:00.000Z' };
     const fullSpent = { ...base, runDays: { '2026-09-24': 3 } };
     expect(leaderRunDue(at, fullSpent, { ...quiet, revertsSinceLastRun: 2 }, cadence)).toMatchObject({ due: true, trigger: 'checkin' });
     const allSpent = { ...base, runDays: { '2026-09-24': 8 }, checkinDays: { '2026-09-24': 5 } };
     expect(leaderRunDue(at, allSpent, quiet, cadence)).toMatchObject({ due: false, reason: 'The Leader already ran 8 times today.' });
+    expect(leaderRunDue(at, allSpent, { ...quiet, revertsSinceLastRun: 1 }, resolveLeaderCadence(undefined))).toMatchObject({ due: true, trigger: 'revert' });
     // With check-ins counted separately, full runs still have room after 5 check-ins.
     const checkinsOnly = { ...base, runDays: { '2026-09-24': 5 }, checkinDays: { '2026-09-24': 5 } };
     expect(leaderRunDue(at, checkinsOnly, { ...quiet, revertsSinceLastRun: 1 }, cadence)).toMatchObject({ due: true, trigger: 'revert' });
@@ -614,7 +613,7 @@ describe('cadence: check-ins, caps and the wake check', () => {
     const seen: string[] = [];
     let now = Date.parse('2026-09-24T06:30:10.000Z');
     const capture: Behaviour = async (_s, u) => { seen.push(u); return reply(); };
-    const { deps } = world({ now: () => now, behave: { 'local gpt-oss:20b': capture } });
+    const { deps } = world({ now: () => now, behave: { 'local qwen3.8:27b-ctx64k': capture } });
     await runLeader(deps, 'schedule');
     goalsStore.createGoal('Material change');
     now += 3 * 60 * MIN;
