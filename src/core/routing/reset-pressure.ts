@@ -3,6 +3,7 @@ import { assessSeat, classifyWindow, HEADROOM_READING_MAX_AGE_MS, type SeatCapac
 import { costBasisOf } from './tiers.js';
 import type { SeatBudgetPolicy } from './types.js';
 import type { AccountSchedulingView, ResetProvenance, TaskWorkForecast } from './scheduling-types.js';
+import { narrowClaudeApiGrantReadView } from '../resources/claude-api-grant-types.js';
 
 export const UNKNOWN_RESET: Readonly<ResetProvenance> = Object.freeze({ kind: 'unknown', at: null, description: null, source: null });
 
@@ -35,6 +36,25 @@ export function forecastFit(forecast: { durationMs: Pick<NonNullable<TaskWorkFor
 
 export function assessResetOpportunity(seat: SeatCapacity, policy: SeatBudgetPolicy, nowMs: number,
   forecast: TaskWorkForecast | null = null): AccountSchedulingView {
+  if (seat.engine === 'claude-api' || seat.seatId.toLowerCase() === 'claude-api') {
+    const grant = narrowClaudeApiGrantReadView({ v: 1, state: 'healthy', rows: [seat.claudeApiGrant] })?.rows[0];
+    const captured = grant?.capturedAt === null ? NaN : Date.parse(grant?.capturedAt ?? '');
+    const cutoff = grant?.admissionCutoff ?? null;
+    const fresh = Number.isFinite(captured) && captured <= nowMs && nowMs - captured <= HEADROOM_READING_MAX_AGE_MS;
+    const duration = forecast?.durationMs;
+    const knownDuration = forecast?.cohort.engine === 'claude-api' &&
+      (forecast.cohort.seatId === null || forecast.cohort.seatId === seat.seatId) && duration !== null && duration !== undefined &&
+      Number.isFinite(duration.p25) && Number.isFinite(duration.p75) && duration.p25 > 0 && duration.p75 >= duration.p25;
+    const hasBalance = grant?.remainingUsdMicros != null && grant.totalUsdMicros !== null && BigInt(grant.remainingUsdMicros) > 0n;
+    const fit = fresh && hasBalance && knownDuration ? forecastFit(forecast, cutoff, nowMs) : 'unknown';
+    // Expiry fit is an estimate against a conservative cutoff, not a reset or
+    // permission to spend. Current signed grants contain no Claude API lane.
+    return { seatId: seat.seatId, observedAt: grant?.capturedAt ?? null, admission: 'held', headroomPercent: null,
+      reset: { kind: 'balance', at: null, description: cutoff === null ? 'API credit expiry is unknown.'
+        : `API admission cutoff: ${cutoff}.`, source: 'claude-api-grant-display' },
+      opportunity: { kind: 'held', reason: 'Claude API is not commissioned in the signed grant; credit history does not authorize spending.' },
+      forecast: forecast === null ? null : { ...forecast, fit } };
+  }
   const assessment = assessSeat(seat, policy, { nowMs });
   const observed = seat.observedAt === null ? NaN : Date.parse(seat.observedAt);
   const fresh = seat.free || Number.isFinite(observed) && observed <= nowMs && nowMs - observed <= HEADROOM_READING_MAX_AGE_MS;

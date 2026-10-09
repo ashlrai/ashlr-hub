@@ -107,7 +107,7 @@ import {
   resolveEngineSpec,
   resolveGrokCliSeat,
 } from './engine-registry.js';
-import { buildOpenAICompatibleClient } from './provider-client.js';
+import { buildOpenAICompatibleClient, buildAnthropicMessagesClient, type ClaudeApiExecutionBinding } from './provider-client.js';
 import {
   applyHarnessToEngineCommand,
   describeHarnessApplication,
@@ -257,6 +257,8 @@ export interface RunEngineSandboxedOptions {
   onSelectedDevinSpawn?: (model: string, binding: DevinCliExecutionBinding) => void;
   /** Host-only exact selected Claude account/authority fence; never model input. */
   selectedClaudeAdmission?: () => boolean;
+  /** Source-owned API grant/ledger authority, never populated from CLI or HTTP JSON. */
+  claudeApiGrantBinding?: ClaudeApiExecutionBinding;
   /** Caller-owned current outcome revision, ignored for immutable signed shadows. */
   selectedOutcomeAdmission?: () => boolean;
   /** Internal whole-attempt generation for mutating-tool evidence. */
@@ -3414,8 +3416,16 @@ export async function runApiModelSandboxed(
     ? (_fields: Parameters<typeof writeSandboxedRunAgentAction>[0]) => {}
     : writeSandboxedRunAgentAction;
   const spec = resolveEngineSpec(engine, cfg);
-  if (!spec || spec.kind !== 'api-model' || !spec.api) {
-    const outcome = proposalOutcome('engine-unsupported', `engine "${engine}" is not an api-model — cannot run in-process`);
+  const isClaudeApi = engine === 'claude-api';
+  const apiGrantHeld = isClaudeApi && (!opts.claudeApiGrantBinding || opts.budget?.allowCloud !== true || !cfg.foundry?.allowedBackends?.includes('claude-api'));
+  if (!spec || spec.kind !== 'api-model' || !spec.api || apiGrantHeld ||
+    (isClaudeApi && spec.api.protocol !== 'anthropic-messages') ||
+    (!isClaudeApi && spec.api.protocol === 'anthropic-messages')) {
+    const outcome = proposalOutcome('engine-unsupported', apiGrantHeld
+      ? 'Claude API held: source-owned grant binding and explicit cloud opt-in required.'
+      : !spec || spec.kind !== 'api-model' || !spec.api
+        ? `engine "${engine}" is not an api-model — cannot run in-process`
+        : `engine "${engine}" has an unsupported API protocol — cannot run in-process`);
     const unsupportedRunId = `run-${Date.now().toString(36)}`;
     writeApiModelTerminalAction({
       engine,
@@ -3808,7 +3818,9 @@ export async function runApiModelSandboxed(
     // M195: source the bearer key via the engine-auth mechanism (phantom vault
     // first, then process.env) so NVIDIA_NIM_API_KEY etc. work whether stored in
     // the phantom vault or the raw env. The VALUE is never logged or returned.
-    const apiKey = (spec.api.envKey && resolveProviderKey(spec.api.envKey, cfg)?.trim()) || '';
+    // The API credit client resolves its exact credential only AFTER reserving
+    // durable exposure. Ordinary OpenAI-compatible engines keep their path.
+    const apiKey = isClaudeApi ? '' : (spec.api.envKey && resolveProviderKey(spec.api.envKey, cfg)?.trim()) || '';
 
     // qwen2.5:72b confirms tool_calls — treat all local-coder models as tool-capable.
     const supportsTools = true;
@@ -3822,7 +3834,12 @@ export async function runApiModelSandboxed(
     const harnessLine = describeHarnessApplication(engine, harnessTuning, harnessRequest.application);
     if (harnessLine) emitSinkEvent(streamSink, { kind: 'log', taskId: 't1', text: harnessLine });
 
-    const client = buildOpenAICompatibleClient(
+    const client = isClaudeApi
+      ? buildAnthropicMessagesClient(cfg, model, opts.claudeApiGrantBinding!, {
+          beforeRequest: () => assertSelectedOutcomeAdmission(opts.selectedOutcomeAdmission),
+          onRequestStart: noteProviderContacted,
+        })
+      : buildOpenAICompatibleClient(
       baseUrl,
       apiKey,
       model,
@@ -4022,7 +4039,10 @@ export async function runApiModelSandboxed(
 
     const finalUsage: RunUsage = {
       ...usage,
-      estCostUsd: estCostUsd(engine, usage.tokensIn, usage.tokensOut, 0, 0, 0, cfg),
+      ...(client.getApiBillingSummary ? {
+        apiBilling: client.getApiBillingSummary(),
+        estCostUsd: Number(client.getApiBillingSummary().settledUsdMicros) / 1_000_000,
+      } : { estCostUsd: estCostUsd(engine, usage.tokensIn, usage.tokensOut, 0, 0, 0, cfg) }),
     };
     setRunActionCount(actionCounts, 'modelSteps', steps.filter((step) => step.kind === 'model').length);
     setRunActionCount(actionCounts, 'toolSteps', steps.filter((step) => step.kind === 'tool').length);

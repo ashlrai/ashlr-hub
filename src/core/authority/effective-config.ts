@@ -135,9 +135,12 @@ export function configConstraints(cfg: AshlrConfig | null): ConfigConstraints {
  * own grant engine — never `claude-cli` (the old fallthrough), so a grant
  * that enables Devin authorizes nothing on the Claude lane and vice versa.
  */
-export function fleetEngineOfSeat(seatId: string): GrantEngine {
+export function fleetEngineOfSeat(seatId: string): GrantEngine | null {
   const engine: BudgetEngine = engineOfSeatId(seatId);
   switch (engine) {
+    // The current signed vocabulary has no API lane. Never inherit Claude CLI.
+    case 'claude-api':
+      return null;
     case 'local':
       return 'local';
     case 'grok':
@@ -242,9 +245,10 @@ export function computeEffectivePolicy(input: EffectivePolicyInput): EffectivePo
 
   const seats: Record<string, EffectiveSeatPolicy> = {};
   for (const [seatId, seat] of Object.entries(grant.spend.seats)) {
+    const lane = fleetEngineOfSeat(seatId);
     seats[seatId] = {
       seatId,
-      enabled: seat.enabled && engines.includes(fleetEngineOfSeat(seatId)),
+      enabled: seat.enabled && lane !== null && engines.includes(lane),
       reserveFloorPercent: seat.reserveFloorPercent,
       maxSessionWindowPercent: seat.maxSessionWindowPercent ?? null,
       roles: Object.freeze([...seat.roles]),
@@ -387,7 +391,7 @@ export function clampBudgetPolicy(
   for (const seatId of ids) {
     const current = effectiveSeatPolicy(modeClamped, seatId);
     const granted = standingSeatFor(standing.spend, seatId);
-    if (!granted) {
+    if (!granted || fleetEngineOfSeat(seatId) === null) {
       seats[seatId] = { ...current, seatId, enabled: false };
       continue;
     }
@@ -408,7 +412,7 @@ export function clampBudgetPolicy(
 
 /** Filter a capacity list to the seats the grant lets autonomy use at all. */
 export function standingSeatCapacity<T extends { seatId: string }>(capacity: readonly T[], standing: Pick<EffectivePolicy, 'spend'>): T[] {
-  return capacity.filter((seat) => standingSeatFor(standing.spend, seat.seatId)?.enabled === true);
+  return capacity.filter((seat) => fleetEngineOfSeat(seat.seatId) !== null && standingSeatFor(standing.spend, seat.seatId)?.enabled === true);
 }
 
 // ---------------------------------------------------------------------------

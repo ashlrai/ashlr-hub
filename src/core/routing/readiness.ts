@@ -186,6 +186,9 @@ function rolesText(roles: readonly string[]): string {
 // ---------------------------------------------------------------------------
 
 function paidChat(seat: VerseSeat | null, account: ReadinessAccount | null, input: ReadinessInput): ReadinessVerdict {
+  if ((seat?.id ?? account?.id)?.toLowerCase() === 'claude-api') {
+    return verdict(false, 'blocked', 'Not commissioned', 'Claude API is not commissioned in the signed grant.');
+  }
   if (seat === null) {
     return verdict(false, 'blocked', 'Not found', "Verse did not discover this account's pinned profile, so no chat can start on it.");
   }
@@ -271,6 +274,9 @@ function fleetGate(input: ReadinessInput, seatId: string): { gate: FleetReadines
     return { gate: fleet(verdict(false, 'off', 'Off in the grant', 'The standing grant lists this seat but switches it off.'), roles), roles };
   }
   const lane = fleetEngineOfSeat(seatId);
+  if (lane === null) {
+    return { gate: fleet(verdict(false, 'blocked', 'Not commissioned', 'Claude API is not commissioned in the signed grant.'), roles), roles };
+  }
   if (!standing.policy.engines.includes(lane as never)) {
     return { gate: fleet(verdict(false, 'off', 'Not in this stage', `${stageSentence(standing, lane)}`), roles), roles };
   }

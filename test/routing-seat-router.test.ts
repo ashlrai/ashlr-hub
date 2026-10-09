@@ -79,6 +79,25 @@ const auto = (task: RoutingRequest['task'], difficulty: RoutingRequest['difficul
 // ---------------------------------------------------------------------------
 
 describe('budget policy defaults (Mason, 2026-09-24)', () => {
+  it('keeps Claude API separate and off in every budget mode', () => {
+    expect(engineOfSeatId('claude-api')).toBe('claude-api');
+    for (const mode of ['all-in', 'balanced', 'reserve'] as const) {
+      expect(defaultSeatPolicy(mode, 'claude-api').enabled).toBe(false);
+    }
+  });
+
+  it.each([false, true])('holds Claude API before forged free/windowed capacity for autonomous=%s', autonomous => {
+    const api = seat('claude-api', 'claude' as SeatCapacity['engine'], [win('five_hour', 0)], {
+      engine: 'claude-api' as SeatCapacity['engine'], free: true, reachable: true,
+    });
+    const enabled: BudgetPolicy = { mode: 'all-in', updatedAt: iso(0), seats: {
+      'claude-api': { seatId: 'claude-api', enabled: true, reservePercent: 0 },
+    } };
+    const decision = routeSeat({ task: 'code', difficulty: 'high', autonomous }, [api], enabled, opts);
+    expect(decision.seatId).toBeNull();
+    expect(decision.exclusions[0]?.details).toContainEqual(expect.objectContaining({ kind: 'grant' }));
+  });
+
   it('defaults to balanced with Claude 40% weekly reserve + 70% 5-hour ceiling, Grok 0%, local unlimited, Codex off', () => {
     const p = balanced();
     expect(p.mode).toBe('balanced');

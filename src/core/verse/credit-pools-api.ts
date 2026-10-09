@@ -1,5 +1,7 @@
 /** Lazy, read-only display of account-bound credit evidence. */
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { readClaudeApiGrantViews } from '../resources/claude-api-grant.js';
+import type { ClaudeApiGrantReadView } from '../resources/claude-api-grant-types.js';
 import { getVerseAccountCollector, verseCollectorLive } from './accounts.js';
 import { resolveAccountsRoot } from './seats.js';
 import { normalizeCreditIdentitySnapshots, normalizeInvalidatedAccountIds } from '../resources/credit-pool-snapshot.js';
@@ -7,12 +9,33 @@ import type { ReadProjectionReader } from '../web/read-projections.js';
 import { validResourceAccountIdentityWitness, type ResourceAccountIdentitySnapshot } from '../resources/account-identity-witness.js';
 import { sendJson } from '../web/api.js';
 import type { VerseApiContext } from './verse-api.js';
-import { CREDIT_POOLS_PATH, type CreditPoolsRead } from './credit-pools-api-types.js';
+import { CREDIT_POOLS_PATH, type CreditPoolsRead, type CreditPoolsReadV1 } from './credit-pools-api-types.js';
 
 const REFRESH_MS = 30_000;
-interface Entry { key: string; value: CreditPoolsRead; at: number; pending: Promise<void> | null; failed: boolean }
+interface Entry { key: string; value: CreditPoolsReadV1; at: number; pending: Promise<void> | null; failed: boolean }
 let cache = new WeakMap<ReadProjectionReader, Entry>();
-export function _resetCreditPoolsCacheForTest(): void { cache = new WeakMap(); }
+interface ApiEntry { root: string; value: ClaudeApiGrantReadView | null; at: number; pending: Promise<void> | null }
+let apiCache = new WeakMap<ReadProjectionReader, ApiEntry>();
+export function _resetCreditPoolsCacheForTest(): void { cache = new WeakMap(); apiCache = new WeakMap(); }
+
+/** Independent bounded disk read: a stalled subscription worker cannot hide API records. */
+function apiReading(reader: ReadProjectionReader, root: string): ClaudeApiGrantReadView | null {
+  let entry = apiCache.get(reader);
+  if (!entry || entry.root !== root) {
+    entry = { root, value: null, at: 0, pending: null };
+    apiCache.set(reader, entry);
+  }
+  const age = Date.now() - entry.at;
+  if (!entry.pending && (!entry.at || age < 0 || age >= REFRESH_MS)) {
+    const current = entry;
+    current.pending = Promise.resolve().then(() => readClaudeApiGrantViews(root)).then(value => {
+      current.value = value; current.at = Date.now();
+    }, () => {
+      current.value = { v: 1, state: 'unavailable', rows: [] }; current.at = Date.now();
+    }).finally(() => { current.pending = null; });
+  }
+  return entry.value;
+}
 
 /** Pure in-memory collector access only: no touch, IO, acquisition or native probe. */
 interface IdentityInput { identitySnapshots: ResourceAccountIdentitySnapshot[]; invalidatedAccountIds: string[]; revision: number | null }
@@ -65,5 +88,10 @@ export async function handleCreditPoolsApi(ctx: VerseApiContext, req: IncomingMe
   const stale = age < 0 || age >= REFRESH_MS;
   if (!entry.at || stale) refresh(reader, entry, input, ctx);
   const state = entry.value.pools === null ? entry.failed ? 'unavailable' : 'warming' : stale || entry.failed ? 'stale' : 'current';
-  sendJson(res, 200, { ...entry.value, state } satisfies CreditPoolsRead); return true;
+  const apiGrants = apiReading(reader, resolveAccountsRoot(ctx.cfg));
+  // No API record retains the exact original V1 wire contract. Historical API
+  // records remain readable while execution is off; no read can commission it.
+  const body: CreditPoolsRead = apiGrants && apiGrants.state !== 'missing'
+    ? { ...entry.value, v: 2, state, apiGrants } : { ...entry.value, state };
+  sendJson(res, 200, body); return true;
 }

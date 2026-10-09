@@ -17,6 +17,8 @@ import { SectionVisibilityProvider, usePollWhileVisible } from '../shell/section
 import { buildCapacityRows, type CapacityRow, type CapacityWindowRow } from '../usage/capacity-strip-model.js';
 import { capacity, nativeSeat, seatWindow } from '../seat-fixtures.test-support.js';
 import { barRows, ResourcesBar } from './ResourcesBar.js';
+import { creditPoolsQuery } from './CreditPools.js';
+import type { CreditPoolsRead, CreditPoolsReadV2 } from '../../../../core/verse/credit-pools-api-types.js';
 import { getResourcesUi, reloadResourcesUiForTest, RESOURCES_STORAGE_KEY, setResourcesBar, openResources, closeResources } from './resources-store.js';
 import { reloadResourceOrderForTest, RESOURCE_ORDER_KEY } from './resource-order.js';
 
@@ -649,4 +651,140 @@ describe('Devin sidebar cached refresh lifetime', () => {
     view.unmount();
   });
 
+});
+
+
+describe('recorded Claude API promotion in the resource bar', () => {
+  let recorded: CreditPoolsReadV2;
+  const apiRow = (container: HTMLElement) => container.querySelector<HTMLElement>('[data-resource-id="budget:claude-api-promotions"]')!;
+  beforeEach(() => {
+    localStorage.removeItem(RESOURCES_STORAGE_KEY); reloadResourcesUiForTest(); closeResources();
+    vi.spyOn(Date, 'now').mockReturnValue(NOW);
+    vi.mocked(useCapacityData).mockReturnValue({ seats: [nativeSeat(capacity(), { id: 'claude', engine: 'claude', label: 'Claude subscription' })],
+      health: null, budget: null, loading: false, refreshing: false, readFailed: false, rosterUnavailable: false, pendingSeatIds: [] });
+    recorded = { v: 2, state: 'warming', refreshedAt: null, pools: null, apiGrants: { v: 1, state: 'healthy', rows: [{
+      v: 1, state: 'recorded', remainingUsdMicros: '200000000', totalUsdMicros: '200000000',
+      capturedAt: '2026-10-09T12:00:00.000Z', expiryDate: '2026-10-24', admissionCutoff: '2026-10-24T00:00:00.000Z',
+      cutoffPolicy: 'expiry-day-start/v1', automaticAdmission: 'held',
+    }] } };
+    vi.mocked(useQuery).mockImplementation(query => ({ data: query.key === creditPoolsQuery.key
+      ? { value: recorded, available: true, reason: null } : undefined } as never));
+  });
+  afterEach(() => {
+    cleanup(); closeResources(); vi.restoreAllMocks(); vi.mocked(useQuery).mockReturnValue({ data: undefined } as never);
+    localStorage.removeItem(RESOURCES_STORAGE_KEY); reloadResourcesUiForTest();
+  });
+
+  it('shows recorded dollars and Held separately from the unchanged subscription, opens Resources and explains the hold', async () => {
+    const view = render(<ResourcesBar expanded />);
+    const api = within(apiRow(view.container));
+    const button = api.getByRole('button', { name: /Claude API promotion: \$200 last recorded.*held.*Open Resources/ });
+    expect(api.getByText('$200 last recorded')).toBeVisible(); expect(api.getByText('Held')).toBeVisible();
+    expect(button).toHaveAttribute('title', 'Exact recorded balance: 200.000000 USD');
+    expect(apiRow(view.container).querySelector('[class*="battery"]')).toBeNull();
+    expect(view.container.querySelector('[data-resource-id="account:claude"]')).not.toBeNull();
+    fireEvent.focus(button);
+    expect(await screen.findByText('Expires 2026-10-24 UTC')).toBeVisible();
+    expect(screen.getByText(/billing, account binding and signed API authority need verification/)).toBeVisible();
+    fireEvent.click(button); expect(getResourcesUi().open).toBe(true);
+  });
+
+  it('keeps dollars and Held visible in the compact rail without manufacturing capacity', () => {
+    const view = render(<ResourcesBar expanded={false} />); const api = within(apiRow(view.container));
+    expect(api.getByText('$200')).toBeVisible(); expect(api.getByText('Held')).toBeVisible();
+    expect(apiRow(view.container)).not.toHaveTextContent('%');
+    expect(apiRow(view.container).querySelector('[class*="battery"]')).toBeNull();
+  });
+
+  it.each([['0', '$0 last recorded'], [null, 'API promotional balance unknown']] as const)(
+    'keeps recorded %s distinct from unknown and never enables use', (micros, label) => {
+      recorded.apiGrants.rows[0]!.remainingUsdMicros = micros;
+      const view = render(<ResourcesBar expanded />); const api = within(apiRow(view.container));
+      expect(api.getByText(label)).toBeVisible(); expect(api.getByText('Held')).toBeVisible();
+    });
+
+  it('counts multiple records without summing dollars or inventing an account identity', async () => {
+    recorded.apiGrants.rows.push({ ...recorded.apiGrants.rows[0]!, remainingUsdMicros: '100000000' });
+    const view = render(<ResourcesBar expanded />); const api = within(apiRow(view.container));
+    expect(api.getByText('2 records')).toBeVisible(); expect(api.queryByText('$300')).toBeNull();
+    fireEvent.focus(api.getByRole('button', { name: /Claude API promotion: 2 records/ }));
+    expect(await screen.findByText('$200 last recorded')).toBeVisible(); expect(screen.getByText('$100 last recorded')).toBeVisible();
+    expect(view.container.querySelectorAll('[data-resource-id^="account:"]')).toHaveLength(1);
+  });
+
+  it('does not manufacture a promotion from an older, empty, unavailable or failed read', () => {
+    for (const value of [{ v: 1, state: 'warming', refreshedAt: null, pools: null },
+      { ...recorded, apiGrants: { v: 1, state: 'missing', rows: [] } },
+      { ...recorded, apiGrants: { v: 1, state: 'unavailable', rows: [] } }, null]) {
+      vi.mocked(useQuery).mockImplementation(query => ({ data: query.key === creditPoolsQuery.key ? { value } : undefined } as never));
+      const view = render(<ResourcesBar expanded />); expect(apiRow(view.container)).toBeNull(); view.unmount();
+    }
+    vi.mocked(useQuery).mockImplementation(query => ({ data: query.key === creditPoolsQuery.key ? { value: recorded } : undefined,
+      error: new Error('read failed') } as never));
+    const view = render(<ResourcesBar expanded />); expect(apiRow(view.container)).toBeNull();
+  });
+
+  it('reuses the shared cache and existing visible cadence without polling an open drawer or hidden bar', () => {
+    const view = render(<ResourcesBar expanded />);
+    expect(useQuery).toHaveBeenCalledWith(creditPoolsQuery, { enabled: true, freshMs: 15_000 });
+    expect(usePollWhileVisible).toHaveBeenCalledWith(expect.any(Function), 15_000, { enabled: true });
+    openResources(); view.rerender(<ResourcesBar expanded />);
+    expect(usePollWhileVisible).toHaveBeenCalledWith(expect.any(Function), 15_000, { enabled: false });
+    setResourcesBar(false); view.rerender(<ResourcesBar expanded />);
+    expect(useQuery).toHaveBeenCalledWith(creditPoolsQuery, { enabled: false, freshMs: 15_000 });
+  });
+});
+
+
+describe('API promotion cold-start cached refresh', () => {
+  let value: CreditPoolsRead;
+  let fetch: MockInstance<typeof creditPoolsQuery.fetch>;
+  const advance = async (ms: number) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); };
+  const mount = () => render(<SectionVisibilityProvider visible><ResourcesBar expanded /></SectionVisibilityProvider>);
+  beforeEach(async () => {
+    evictAll(); localStorage.removeItem(RESOURCES_STORAGE_KEY); reloadResourcesUiForTest(); closeResources();
+    vi.useFakeTimers(); vi.setSystemTime(NOW);
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+    const hooks = await vi.importActual<typeof import('../../../data/hooks.js')>('../../../data/hooks.js');
+    const visibility = await vi.importActual<typeof import('../shell/section-visibility.js')>('../shell/section-visibility.js');
+    vi.mocked(useQuery).mockImplementation((query, options) => query.key === creditPoolsQuery.key
+      ? hooks.useQuery(creditPoolsQuery, options) : { data: undefined } as never);
+    vi.mocked(usePollWhileVisible).mockImplementation(visibility.usePollWhileVisible);
+    vi.mocked(useCapacityData).mockReturnValue({ seats: [], health: null, budget: null, loading: false, refreshing: false,
+      readFailed: false, rosterUnavailable: false, pendingSeatIds: [] });
+    value = { v: 1, state: 'warming', refreshedAt: null, pools: null };
+    fetch = vi.spyOn(creditPoolsQuery, 'fetch').mockImplementation(async () => ({ value, available: true, reason: null }));
+  });
+  afterEach(() => {
+    cleanup(); evictAll(); vi.useRealTimers(); vi.restoreAllMocks();
+    vi.mocked(useQuery).mockReturnValue({ data: undefined } as never); vi.mocked(usePollWhileVisible).mockImplementation(() => {});
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+    localStorage.removeItem(RESOURCES_STORAGE_KEY); reloadResourcesUiForTest(); closeResources();
+  });
+
+  it('receives the real cached API view after two seconds and stops quick polling while native pools still warm', async () => {
+    mount(); await advance(0); expect(fetch).toHaveBeenCalledTimes(1);
+    value = { v: 2, state: 'warming', refreshedAt: null, pools: null, apiGrants: { v: 1, state: 'healthy', rows: [{
+      v: 1, state: 'recorded', remainingUsdMicros: '200000000', totalUsdMicros: '200000000', capturedAt: new Date(NOW).toISOString(),
+      expiryDate: '2026-10-24', admissionCutoff: '2026-10-24T00:00:00.000Z', cutoffPolicy: 'expiry-day-start/v1', automaticAdmission: 'held',
+    }] } };
+    await advance(1999); expect(fetch).toHaveBeenCalledTimes(1); expect(screen.queryByText('$200 last recorded')).toBeNull();
+    await advance(1); expect(fetch).toHaveBeenCalledTimes(2); expect(screen.getByText('$200 last recorded')).toBeVisible();
+    await advance(14_999); expect(fetch).toHaveBeenCalledTimes(2);
+    await advance(1); expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('bounds cold polling to thirty seconds and preserves document and section visibility pauses', async () => {
+    const view = mount(); await advance(0); await advance(30_000);
+    const afterCold = fetch.mock.calls.length; expect(afterCold).toBe(16);
+    await advance(14_999); expect(fetch).toHaveBeenCalledTimes(afterCold);
+    await advance(1); expect(fetch).toHaveBeenCalledTimes(afterCold + 1);
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    await advance(30_000); expect(fetch).toHaveBeenCalledTimes(afterCold + 1);
+    view.rerender(<SectionVisibilityProvider visible={false}><ResourcesBar expanded /></SectionVisibilityProvider>);
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    await advance(30_000); expect(fetch).toHaveBeenCalledTimes(afterCold + 1);
+  });
 });

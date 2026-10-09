@@ -24,6 +24,31 @@ const cohort={engine:'grok-cli',model:'model-a',seatId:null,taskKind:'todo'};
 const sample=(id:string,over:Partial<WorkHistorySample>={}):WorkHistorySample=>({id,...cohort,completed:true,durationMs:10000,tokens:1000,...over});
 
 describe('reset provenance and opportunity',()=>{
+  it('estimates API cutoff fit only from matched work, without admitting the historical credit view', () => {
+    const api = seat('claude-api', { engine: 'claude-api', windows: [], costBasis: 'credits',
+      claudeApiGrant: { v: 1, state: 'recorded', remainingUsdMicros: '200000000', totalUsdMicros: '200000000',
+        capturedAt: at(0), expiryDate: '2026-10-01', admissionCutoff: at(60000),
+        cutoffPolicy: 'verified-instant/v1', automaticAdmission: 'held' } });
+    const known = forecastWork('task', { ...cohort, engine: 'claude-api' },
+      [sample('api-completed', { engine: 'claude-api', durationMs: 10000 })]);
+    const view = assessResetOpportunity(api, enabled, now, known);
+    expect(view).toMatchObject({ admission: 'held', headroomPercent: null, reset: { kind: 'balance', at: null },
+      opportunity: { kind: 'held' }, forecast: { fit: 'likely-before-reset' } });
+    expect(opportunityPriority(view, now)).toBe(0);
+    expect(routeSeat(request, [api], policy, { nowMs: now, scheduling: { 'claude-api': view } }).seatId).toBeNull();
+    const longer = { ...known, durationMs: { ...known.durationMs!, p25: 70000, p75: 80000 } };
+    expect(assessResetOpportunity(api, enabled, now, longer).forecast?.fit).toBe('unlikely-before-reset');
+    for (const changed of [
+      { ...api, claudeApiGrant: { ...api.claudeApiGrant!, capturedAt: at(-16 * 60000) } },
+      { ...api, claudeApiGrant: { ...api.claudeApiGrant!, remainingUsdMicros: null } },
+      { ...api, claudeApiGrant: { ...api.claudeApiGrant!, remainingUsdMicros: '0' } },
+      { ...api, claudeApiGrant: { ...api.claudeApiGrant!, expiryDate: null, admissionCutoff: null, cutoffPolicy: null } },
+    ]) expect(assessResetOpportunity(changed, enabled, now, known).forecast?.fit).toBe('unknown');
+    expect(assessResetOpportunity(api, enabled, now + 60000, known).forecast?.fit).toBe('unknown');
+    expect(assessResetOpportunity(api, enabled, now, { ...known, cohort }).forecast?.fit).toBe('unknown');
+    expect(assessResetOpportunity(api, enabled, now, { ...known, cohort: { ...known.cohort, seatId: 'other' } }).forecast?.fit).toBe('unknown');
+    expect(assessResetOpportunity(api, enabled, now).forecast).toBeNull();
+  });
   it('fixed provider period retains the real interval; date-only reset is ordinary',()=>{
     const reported=seat();expect(assessResetOpportunity(reported,enabled,now).opportunity.kind).toBe('before-reset');
     const dateOnly=seat('b',{windows:reported.windows.map(({resetProvenance:_,...window})=>window)});

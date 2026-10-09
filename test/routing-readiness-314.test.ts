@@ -131,6 +131,19 @@ function input(over: Partial<ReadinessInput> = {}): ReadinessInput {
 const row = (r: ReturnType<typeof buildResourceReadiness>, id: string) => r.resources.find((x) => x.id === id)!;
 
 describe('readiness — the machine as diagnosed (idle Verse, empty capacity snapshot)', () => {
+  it('never reports chat or fleet ready for an API seat using native Claude facts', () => {
+    const s = standing();
+    s.grant!.seats = { ...s.grant!.seats, 'claude-api': grantSeat(['producer'], 0) };
+    s.policy!.spend.seats['claude-api'] = { seatId: 'claude-api', enabled: true, reserveFloorPercent: 0,
+      maxSessionWindowPercent: null, roles: ['producer'] };
+    const r = buildResourceReadiness(input({ standing: s,
+      accounts: [{ id: 'claude-api', label: 'Claude API', provider: 'claude', state: 'observed', observedAt: FRESH }],
+      seats: [nativeSeat(unread, { id: 'claude-api', accountId: 'claude-api' })],
+      capacity: [paid('claude-api', 'claude-api', 'Claude API', { free: true, reachable: true, observedAt: FRESH })],
+    }));
+    expect(row(r, 'claude-api').chat).toMatchObject({ ready: false, word: 'Not commissioned' });
+    expect(row(r, 'claude-api').fleet).toMatchObject({ ready: false, word: 'Not commissioned' });
+  });
   const r = buildResourceReadiness(input());
 
   it('lists every account in roster order, then Local, then Cloud', () => {

@@ -156,7 +156,7 @@ function SeatRow({ row, saving, readOnly, onSeat }: SeatRowProps) {
   return (
     <li className={styles.seat} aria-labelledby={headingId} data-status={row.status} aria-busy={saving || undefined}>
       <div className={styles.seatHead}>
-        <EngineMarker engine={row.engine} className={styles.marker} />
+        <EngineMarker engine={row.engine === 'claude-api' ? 'claude' : row.engine} className={styles.marker} />
         {/* The name may truncate in a narrow sheet; the full name rides in the tooltip. */}
         <span id={headingId} className={styles.seatName} title={row.label}>{row.label}</span>
         <span className={styles.status} data-status={row.status}>{STATUS_WORDS[row.status]}</span>

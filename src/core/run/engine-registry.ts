@@ -188,6 +188,21 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
   // Driven via buildOpenAICompatibleClient (provider-client.ts); no CLI argv.
   // ---------------------------------------------------------------------------
 
+  // Separate metered API resource; never substitutes for Claude Code quota.
+  // Opt-in alone is insufficient: the Messages adapter requires an owned grant.
+  'claude-api': {
+    id: 'claude-api',
+    kind: 'api-model',
+    tier: 'mid',
+    api: {
+      envKey: 'ANTHROPIC_API_KEY',
+      defaultBaseUrl: 'https://api.anthropic.com/v1',
+      defaultModel: 'claude-sonnet-4-6',
+      protocol: 'anthropic-messages',
+    },
+    capabilities: ['agent', 'edit', 'tools'],
+  },
+
   // NVIDIA NIM — OpenAI-compatible cloud inference for NVIDIA-hosted open models.
   // Default model: meta/llama-3.1-70b-instruct (strong open model, mid tier).
   // Env: NVIDIA_NIM_API_KEY (set via: phantom add NVIDIA_NIM_API_KEY)

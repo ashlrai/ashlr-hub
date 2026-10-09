@@ -26,6 +26,7 @@ import {
   grantSeatFor,
   grokDispatchBatchCapacity,
   planLanes,
+  laneOfSeat,
   resolveLaneEngines,
   routeWorkItem,
   routingRequestFor,
@@ -295,6 +296,13 @@ describe('split items never go local', () => {
 });
 
 describe('lane cap reasons are plain sentences at the source', () => {
+  it('does not open the native Claude producer lane with an API-only seat', () => {
+    expect(laneOfSeat({ engine: 'claude-api' })).toBeNull();
+    const p = policy();
+    p.spend.seats = { 'claude-api': seat('claude-api', ['producer']) };
+    const planned = planLanes({ policy: p, directives: null, presence: ABSENT, localServingSlots: 4, engineUnavailable: {} });
+    expect(planned['claude-cli'].slots).toBe(0);
+  });
   // The Verse UI prints these as they arrive, so the router must never write
   // "slot(s)", an action class, or a lane id like "grok-cli" into them.
   const plan = (over: Partial<Parameters<typeof planLanes>[0]>) => planLanes({
