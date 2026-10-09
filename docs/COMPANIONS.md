@@ -80,3 +80,66 @@ Exit 0 means the inventory completed, including missing/incompatible tools;
 exit 2 means invalid arguments. Use the per-tool status for first-run decisions.
 
 See [product names](PHANTOM-BRAND.md) and [first-run guidance](QUICKSTART.md#open-verse).
+
+## Verify a local provisioning plan
+
+The following commands are implemented in this unreleased source change. The
+published 3.29.4 package still provides inventory only.
+
+An operator can review an expanded local artifact file set against an
+independently verified manifest SHA256 before planning installation:
+
+```sh
+phm companions plan --artifacts /absolute/reviewed-artifacts \
+  --manifest manifest.json --sha256 VERIFIED_MANIFEST_SHA256 \
+  --root /absolute/existing-destination-parent --json
+```
+
+Both roots must already exist as canonical absolute directories without
+symlink components. The manifest path is relative to the artifact root. Obtain
+the complete manifest digest from a separately reviewed release record; taking
+it from the unverified artifact directory itself provides no independent trust.
+The manifest must bind the exact reviewed product version/source/release URL,
+host platform, explicit file names, sizes, SHA256 values and intended modes.
+It must mark the artifact qualified; a declaration alone is not release evidence.
+No manifest or qualification assertion is generated from installed versions.
+
+The command checks complete file bytes, refuses unsafe links and unexpected
+destination contents, and reports `create`, `replace` or `retain` observations.
+Existing file hashes describe before images; no backup or installation occurs.
+`installed:false`, `runtimeCapability:"not-inspected"`, `effects:[]` and required
+revalidation remain explicit. Exit 0 means a verified plan, exit 1 a blocked
+plan, and exit 2 bad usage. There is no download, archive extraction, source-build
+fallback or apply flag. A future installer must safely revalidate artifacts and
+before images at application time and preserve owner approval boundaries.
+
+Locus 0.5.0 release archives lack published checksum sidecars. Do not invent a
+qualified manifest or execute its unpinned source fallback to fill that gap.
+Cross-platform artifacts, installation and clean-machine MCP acceptance remain
+separate qualification steps.
+
+## Register Lexicon for one project and client
+
+Read-only ecosystem discovery now includes Lexicon. It reports service state
+as unverified and does not register Lexicon into global workbench settings.
+Select an existing project and an intended client explicitly:
+
+```sh
+phm mcp ecosystem --only lexicon --project /absolute/project \
+  --client intended-client --config /absolute/project/.mcp.json
+```
+
+After reviewing the selected installed executable and project binding, adding
+`--write` creates or extends only that project-local config. Existing unrelated
+entries are preserved. Malformed, mismatched, escaping or dangling symlinked,
+or multiply linked configurations are refused. An existing in-project symlink
+resolves to its canonical target; repeating the same registration makes no write.
+The direct `lexicon-mcp` entry uses no arguments, while a selected `lexicon`
+CLI uses `mcp`. The entry has explicit `LEXICON_CWD` and a project/client-scoped
+`LEXICON_PATH` under `.phantom/lexicon`. No vocabulary is opened, project trust
+granted or MCP server started by registration.
+
+Point the intended MCP client at that project config. This does not automatically
+add project-local servers to the workbench gateway or prove client identity,
+MCP initialize/tools discovery, vocabulary acceptance or provider availability.
+No identity is re-pinned and no resident grant is changed.

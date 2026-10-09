@@ -1,5 +1,6 @@
 import { isAbsolute, join } from 'node:path';
 import { inventoryCompanions, type CompanionId, type CompanionInventoryOptions } from '../core/companion-inventory.js';
+import { planCompanionProvisioning } from '../core/companion-provisioning.js';
 
 const HELP = `Usage: phm companions [--json] [--root <absolute-install-root>] [--bin-dir <absolute-dir>]\n  [--secrets-bin <absolute-file>] [--locus-bin <absolute-file>] [--lexicon-bin <absolute-file>]
 
@@ -11,9 +12,57 @@ No configuration, vault, provider, trust, MCP or service state is inspected.
 Nothing is bundled, installed, registered or enabled. Exit 0: inventory completed;
 missing/incompatible companions are reported individually. Exit 2: bad usage.\n`;
 
+const PLAN_HELP = `Usage: phm companions plan --artifacts <absolute-directory> --manifest <relative-file>\n  --sha256 <independently-verified-manifest-digest> --root <absolute-destination> [--json]
+
+Verify an expanded local artifact file set against an independently reviewed manifest digest.
+No download, extraction, executable probe, installation, configuration, trust or service changes.
+The destination before images are observations, not backups or permission to apply changes.
+Exit 0: verified plan; exit 1: blocked; exit 2: bad usage.\n`;
+
+function cmdCompanionPlan(args: string[]): number {
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(PLAN_HELP);
+    return 0;
+  }
+  const values = new Map<string, string>();
+  let json = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === '--json' && !json) { json = true; continue; }
+    if (!['--artifacts', '--manifest', '--sha256', '--root'].includes(arg) || values.has(arg)) {
+      process.stderr.write('Invalid or duplicate companion plan option.\n');
+      return 2;
+    }
+    const value = args[++i];
+    if (!value || value.startsWith('--')) {
+      process.stderr.write(`${arg} requires a value.\n`);
+      return 2;
+    }
+    values.set(arg, value);
+  }
+  if (values.size !== 4 || !isAbsolute(values.get('--artifacts')!) || !isAbsolute(values.get('--root')!) ||
+      isAbsolute(values.get('--manifest')!) || !/^[a-f0-9]{64}$/u.test(values.get('--sha256')!)) {
+    process.stderr.write('Companion plan requires absolute artifact/destination roots, a relative manifest and verified SHA256.\n');
+    return 2;
+  }
+  const plan = planCompanionProvisioning({
+    artifactRoot: values.get('--artifacts')!, destinationRoot: values.get('--root')!,
+    manifestPath: values.get('--manifest')!, trustedManifestSha256: values.get('--sha256')!,
+  });
+  if (json) process.stdout.write(JSON.stringify(plan, null, 2) + '\n');
+  else {
+    process.stdout.write(`Phantom companion artifact plan: ${plan.status}; installed: no; runtime: not inspected\n`);
+    for (const blocker of plan.blockers) process.stdout.write(`  Blocked: ${blocker}\n`);
+    for (const file of plan.files) process.stdout.write(`  ${file.action}: ${file.path}\n`);
+    process.stdout.write('No effects applied. Revalidate artifacts and before images before any future authorized installation.\n');
+  }
+  return plan.status === 'verified-plan' ? 0 : 1;
+}
+
 export async function cmdCompanions(args: string[]): Promise<number> {
+  if (args[0] === 'plan') return cmdCompanionPlan(args.slice(1));
   if (args.includes('--help') || args.includes('-h') || args[0] === 'help') {
-    process.stdout.write(HELP);
+    process.stdout.write(HELP + '\nOffline artifact verification: phm companions plan --help\n');
     return 0;
   }
   const options: CompanionInventoryOptions = { binaries: {} };
