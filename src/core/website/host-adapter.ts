@@ -78,6 +78,13 @@ export function inventoryToolTree(root: string): string {
 import { readdirSync } from 'node:fs';
 function requireDirectoryEntries(path: string): string[] { return readdirSync(path).sort(); }
 
+// Next/Vercel can spawn their own package installer after the first npm ci.
+// Keep those installers offline and on the same qualified public cache too.
+export const WEBSITE_OFFLINE_BUILD_ENV = Object.freeze({
+  NPM_CONFIG_OFFLINE: 'true', NPM_CONFIG_IGNORE_SCRIPTS: 'true',
+  NPM_CONFIG_CACHE: '/opt/phantom-publisher/npm-cache', NPM_CONFIG_AUDIT: 'false', NPM_CONFIG_FUND: 'false',
+});
+
 /** Only browser-public, source-needed settings enter the credential-free builder. */
 export async function readWebsitePublicBuildEnv(api: (endpoint: string) => Promise<Record<string, unknown>>): Promise<Record<string, string>> {
   const keys = ['NEXT_PUBLIC_SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_ANON_KEY', 'NEXT_PUBLIC_POSTHOG_KEY', 'NEXT_PUBLIC_POSTHOG_HOST'];
@@ -281,6 +288,7 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
         let buildError: unknown = null; let cleanupError: unknown = null;
         try {
           await run(commission.toolchain.docker, ['run', '--rm', '--name', container, '--pull=never', '--platform=linux/amd64', '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', `--user=${userInfo().uid}:${userInfo().gid}`,
+            ...Object.entries(WEBSITE_OFFLINE_BUILD_ENV).flatMap(([key, value]) => ['-e', `${key}=${value}`]),
         '--tmpfs=/tmp:rw,nosuid,nodev,mode=1777', '--mount', `type=bind,src=${sourceRoot},dst=/source,readonly`, '--mount', `type=bind,src=${prepared},dst=/prepared,readonly`, '--mount', `type=bind,src=${join(root, 'upload')},dst=/output`,
         '-e', 'HOME=/tmp/home', '-e', 'CI=1', '-e', 'NEXT_TELEMETRY_DISABLED=1', '-e', 'VERCEL_TELEMETRY_DISABLED=1', commission.toolchain.image, '/bin/sh', '-c', script], { env: hostEnv(), signal: lease.signal, timeout: 30 * 60_000 });
         } catch (error) { buildError = error; } finally {
