@@ -18,6 +18,7 @@ import { join } from 'node:path';
 
 import { adapterFor, type VerseAdapter, type VerseAdapterTurnContext, type VerseParsedEvent } from '../src/core/verse/adapters/index.js';
 import { createVerseEngine, preflightLocalEndpoint, VerseError, buildTurnEnv, type VerseEngineHandle, type VerseEngineOptions, type VerseSeatLaunch } from '../src/core/verse/session-engine.js';
+import { completedLocalTurnThroughput } from '../src/core/verse/local-throughput.js';
 import { createVerseSessionStore } from '../src/core/verse/session-store.js';
 import { isTransientVerseEvent, VERSE_MAX_TURN_TEXT_BYTES, type VerseEngine, type VerseEvent, type VerseModelOption, type VerseSeat, type VerseUsage } from '../src/core/verse/types.js';
 
@@ -140,8 +141,11 @@ function answer() {
   const sid = flag('--session-id') || flag('--resume') || 'unknown';
   out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'claude says: ' } } });
   out({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: prompt } } });
-  out({ type: 'assistant', message: { content: [{ type: 'text', text: 'claude says: ' + prompt }], usage: { input_tokens: 10 * n, cache_read_input_tokens: 1000 * n, cache_creation_input_tokens: 50, output_tokens: 8 } } });
-  out({ type: 'result', subtype: 'success', is_error: false, session_id: sid, num_turns: 1, usage: { input_tokens: 10 * n, cache_read_input_tokens: 1000 * n, cache_creation_input_tokens: 50, output_tokens: 8 } });
+  const usage = prompt.includes('TOKEN_PARTIAL') ? { output_tokens: 8 }
+    : prompt.includes('TOKEN_ZERO') ? { input_tokens: 0, output_tokens: 8, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    : { input_tokens: 10 * n, cache_read_input_tokens: 1000 * n, cache_creation_input_tokens: 50, output_tokens: 8 };
+  out({ type: 'assistant', message: { content: [{ type: 'text', text: 'claude says: ' + prompt }], usage } });
+  out({ type: 'result', subtype: 'success', is_error: false, session_id: sid, num_turns: 1, usage });
   process.exit(0);
 }
 `;
@@ -253,6 +257,54 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('createSession', () => {
+  it('retains missing token evidence through the local CLI and a cold durable read', async () => {
+    const created = engine.createSession({ projectPath: project, seatId: LOCAL_SEAT.id }, nativeLaunch(LOCAL_SEAT));
+    const done = untilTurnDone(engine, created.id);
+    await engine.sendTurn(created.id, 'TOKEN_PARTIAL');
+    const events = await done;
+    const usage = events.find((event) => event.type === 'usage');
+    expect(usage).toMatchObject({ usage: { inputTokens: 0, outputTokens: 8, cacheReadTokens: 0, cacheCreationTokens: 0 },
+      reportedTokenFields: { inputTokens: false, outputTokens: true, cacheReadTokens: false, cacheCreationTokens: false } });
+    const cold = createVerseSessionStore(root).readEvents(created.id);
+    const completed = events.find((event) => event.type === 'turn-done')!;
+    expect(completedLocalTurnThroughput(cold)).toMatchObject({ at: completed.at,
+      durationMs: completed.type === 'turn-done' ? completed.durationMs : 0,
+      inputTokens: null, outputTokens: 8, cacheReadTokens: null, cacheCreationTokens: null });
+  });
+
+  it('retains explicitly reported zeros through a cold durable read', async () => {
+    const created = engine.createSession({ projectPath: project, seatId: LOCAL_SEAT.id }, nativeLaunch(LOCAL_SEAT));
+    const done = untilTurnDone(engine, created.id);
+    await engine.sendTurn(created.id, 'TOKEN_ZERO');
+    await done;
+    const cold = createVerseSessionStore(root).readEvents(created.id);
+    expect(cold.find(event => event.type === 'usage')).toMatchObject({
+      reportedTokenFields: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true } });
+    expect(completedLocalTurnThroughput(cold)).toMatchObject({ inputTokens: 0, outputTokens: 8, cacheReadTokens: 0, cacheCreationTokens: 0 });
+  });
+
+  it('sanitizes diagnostic evidence without evaluating getters or retaining unknown fields', async () => {
+    let getterCalls = 0;
+    engine.close();
+    engine = createEngine({ root, adapterFor: withAdapters({ local: patched(adapterFor('local'), { map: event => {
+      if (event.type !== 'usage') return [event];
+      const evidence = { outputTokens: true, cacheReadTokens: true, cacheCreationTokens: 'yes', extra: 'discard' };
+      Object.defineProperty(evidence, 'inputTokens', { get() { getterCalls += 1; throw new Error('must not run'); } });
+      return [{ ...event, usage: { ...event.usage, cacheReadTokens: 0.5 }, reportedTokenFields: evidence as unknown as Extract<VerseParsedEvent, { type: 'usage' }>['reportedTokenFields'] }];
+    } }) }) });
+    const created = engine.createSession({ projectPath: project, seatId: LOCAL_SEAT.id }, nativeLaunch(LOCAL_SEAT));
+    const done = untilTurnDone(engine, created.id);
+    await engine.sendTurn(created.id, 'TOKEN_ZERO');
+    await done;
+    const cold = createVerseSessionStore(root).readEvents(created.id);
+    expect(getterCalls).toBe(0);
+    const usage = cold.find(event => event.type === 'usage');
+    expect(usage).toMatchObject({ usage: { cacheReadTokens: 0 },
+      reportedTokenFields: { inputTokens: false, outputTokens: true, cacheReadTokens: false, cacheCreationTokens: false } });
+    expect(usage?.type === 'usage' ? Object.keys(usage.reportedTokenFields!) : []).toEqual(['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens']);
+    expect(completedLocalTurnThroughput(cold)).toMatchObject({ inputTokens: null, cacheReadTokens: null, cacheCreationTokens: null });
+  });
+
   it('validates project, seat, model and mints native ids per engine', () => {
     expect(() => engine.createSession({ projectPath: join(work, 'missing'), seatId: 'claude-max' }, nativeLaunch(CLAUDE_SEAT)))
       .toThrow(expect.objectContaining({ code: 'VERSE_INVALID', status: 400 }));

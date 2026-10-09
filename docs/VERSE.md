@@ -1321,8 +1321,10 @@ and input, output, cache-read and cache-write token deltas from the same bound
 successful turn, with two significant figures. These details retain their own
 completion time even when a newer warm-up supplies the speed reading. Duration
 includes tools and other turn overhead; it is not time to first token. Missing
-recorded fields remain unknown, and stored zero counts do not prove that every
-provider originally reported that category. Older servers may omit these details.
+recorded fields remain unknown. A zero is shown only when the selected CLI usage
+source explicitly reported that category. Historical events without token-field
+evidence do not supply an exact turn speed or token breakdown; their accumulated
+usage totals remain unchanged. Older servers may omit these details.
 Opening Resources reads observations without warming a model or starting inference. Missing or conflicting measurements
 remain unavailable rather than being borrowed from another model.
 
@@ -1723,6 +1725,14 @@ with the exact candidate source, attested hosted bundle and signed finalizer
 outputs. Inspection does not install; applying is an explicit maintenance
 operation and can remain held or roll back. This is distinct from an ordinary
 DMG download and does not rebuild, repack, sign, grant or resume work.
+
+For maintainer diagnostics, add `--timings` to the same installer invocation.
+It emits JSON stage and operation spans to stderr; the final result stays
+unchanged. Records contain fixed labels, span IDs, outcomes and monotonic
+durations, without paths, command arguments or provider content. Repeated
+checks have distinct spans. Nested durations overlap, so do not sum them as
+wall time. An unavailable clock produces an unknown duration. Timings are
+diagnostics, not installation or release evidence, and do not skip any checks.
 
 With Phantom running, right-click its Dock icon → **Options → Keep in Dock**.
 

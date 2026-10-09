@@ -79,6 +79,7 @@ import {
   type VerseThinkingKind,
   type VerseTurnLaunch,
   type VerseUsage,
+  type VerseReportedTokenFields,
 } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
 import { localHarnessInvocation } from '../local-harness.js';
@@ -210,6 +211,13 @@ function readAnthropicUsage(usage: unknown): AnthropicUsage | null {
     cacheRead: num(usage['cache_read_input_tokens']),
     cacheCreation: num(usage['cache_creation_input_tokens']),
   };
+}
+
+function reportedAnthropicTokens(usage: unknown): VerseReportedTokenFields {
+  const raw = isObject(usage) ? usage : {};
+  const reported = (key: string): boolean => typeof raw[key] === 'number' && Number.isSafeInteger(raw[key]) && raw[key] >= 0;
+  return { inputTokens: reported('input_tokens'), outputTokens: reported('output_tokens'),
+    cacheReadTokens: reported('cache_read_input_tokens'), cacheCreationTokens: reported('cache_creation_input_tokens') };
 }
 
 interface AnthropicUsage {
@@ -524,6 +532,9 @@ export function createAnthropicStreamParser(
    * prompt size is the live context occupancy.
    */
   const calls = new Map<string, AnthropicUsage>();
+  // Observe calls even when their usage is absent, so partial totals cannot look complete.
+  const callReported = new Map<string, VerseReportedTokenFields>();
+  let resultReported = reportedAnthropicTokens(null);
   /** The call the wire stream is currently inside (set by `message_start`). */
   let currentCall: string | null = null;
   /** When the current call's first content block opened (output-rate clock). */
@@ -553,6 +564,27 @@ export function createAnthropicStreamParser(
   function syntheticKey(kind: string): string {
     syntheticCalls += 1;
     return `${kind}#${syntheticCalls}`;
+  }
+
+  function recordReported(key: string, raw: unknown): void {
+    const next = reportedAnthropicTokens(raw);
+    const previous = callReported.get(key);
+    callReported.set(key, { inputTokens: next.inputTokens || previous?.inputTokens === true,
+      outputTokens: next.outputTokens || previous?.outputTokens === true,
+      cacheReadTokens: next.cacheReadTokens || previous?.cacheReadTokens === true,
+      cacheCreationTokens: next.cacheCreationTokens || previous?.cacheCreationTokens === true });
+  }
+
+  function callsReported(): VerseReportedTokenFields {
+    const buckets = { inputTokens: 'input', outputTokens: 'output', cacheReadTokens: 'cacheRead', cacheCreationTokens: 'cacheCreation' } as const;
+    const complete = (key: keyof VerseReportedTokenFields): boolean => callReported.size > 0 && [...callReported].every(([id, fields]) => {
+      // A later invalid maximum must not inherit an earlier valid field's evidence.
+      // Validate each selected call before summing: fractions can add to an integer.
+      const value = calls.get(id)?.[buckets[key]];
+      return fields[key] && typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+    });
+    return { inputTokens: complete('inputTokens'), outputTokens: complete('outputTokens'),
+      cacheReadTokens: complete('cacheReadTokens'), cacheCreationTokens: complete('cacheCreationTokens') };
   }
 
   function recordCall(key: string, usage: AnthropicUsage): void {
@@ -802,13 +834,15 @@ export function createAnthropicStreamParser(
     // `result.usage` is the CLI's own turn total and wins — except when it is
     // all zeros while calls were observed: grok documents an all-zero result
     // usage as "unknown", not "free", so the observed calls are the better truth.
-    const totals = resultTotals && !(isZeroUsage(resultTotals) && !isZeroUsage(summed)) ? resultTotals : summed;
+    const useResult = resultTotals !== null && !(isZeroUsage(resultTotals) && !isZeroUsage(summed));
+    const totals = useResult ? resultTotals! : summed;
+    const reportedTokenFields = useResult ? resultReported : callsReported();
     const last = lastCall() ?? resultTotals;
     if (!last && postCompactionTokens === null) return;
     usageEmitted = true;
     const contextTokens = postCompactionTokens
       ?? (last ? last.input + last.cacheRead + last.cacheCreation : 0);
-    out.push({ type: 'usage', turnId, usage: toVerseUsage(totals, contextTokens, runtimeWindow) });
+    out.push({ type: 'usage', turnId, usage: toVerseUsage(totals, contextTokens, runtimeWindow), reportedTokenFields });
   }
 
   function handleWireEvent(out: VerseParsedEvent[], ev: JsonObject): void {
@@ -819,6 +853,7 @@ export function createAnthropicStreamParser(
         currentCall = str(message?.['id']) || syntheticKey('wire');
         currentCallFirstBlockAt = null;
         if (typeof message?.['model'] === 'string' && message['model']) frameModel = message['model'];
+        recordReported(currentCall, message?.['usage']);
         const usage = readAnthropicUsage(message?.['usage']);
         if (usage) recordCall(currentCall, usage);
         open.clear();
@@ -905,6 +940,7 @@ export function createAnthropicStreamParser(
         const usage = readAnthropicUsage(ev['usage']);
         if (usage) {
           if (!currentCall) currentCall = syntheticKey('wire');
+          recordReported(currentCall, ev['usage']);
           recordCall(currentCall, usage);
           // The call's output count is final here: measure its rate over the
           // time its content streamed (from the first block, so the prompt's
@@ -964,7 +1000,7 @@ export function createAnthropicStreamParser(
   function handleResult(out: VerseParsedEvent[], ev: JsonObject): void {
     if (typeof ev['session_id'] === 'string' && ev['session_id']) nativeId = ev['session_id'];
     const usage = readAnthropicUsage(ev['usage']);
-    if (usage) resultTotals = usage;
+    if (usage) { resultTotals = usage; resultReported = reportedAnthropicTokens(ev['usage']); }
     runtimeWindow = runtimeContextWindow(ev['modelUsage'], initModel ?? frameModel);
     const subtype = str(ev['subtype']);
     const errors = resultErrorsText(ev['errors']);
@@ -995,11 +1031,10 @@ export function createAnthropicStreamParser(
         if (!message) return true;
         if (type === 'assistant') {
           if (typeof message['model'] === 'string' && message['model']) frameModel = message['model'];
+          const key = str(message['id']) || currentCall || syntheticKey('envelope');
+          recordReported(key, message['usage']);
           const usage = readAnthropicUsage(message['usage']);
-          if (usage) {
-            const key = str(message['id']) || currentCall || syntheticKey('envelope');
-            recordCall(key, usage);
-          }
+          if (usage) recordCall(key, usage);
         }
         const content = message['content'];
         if (typeof content === 'string') {

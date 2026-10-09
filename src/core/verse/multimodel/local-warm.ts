@@ -130,7 +130,7 @@ export async function warmLocalModel(
     const ms = now() - started;
     const out = Number(body.usage?.output_tokens);
     const tokPerSec = Number.isFinite(out) && Number.isFinite(ms) && out > 0 && ms > 0 ? out / (ms / 1000) : null;
-    if (binding && tokPerSec !== null) recordThroughput(binding, { tokPerSec, source: 'turn', scope: 'warm-end-to-end', at: new Date(now()).toISOString() });
+    if (binding && tokPerSec !== null) recordThroughput(binding, { tokPerSec, source: 'warm', scope: 'warm-end-to-end', at: new Date(now()).toISOString() });
     return { seatId: target.seatId, ok: true, ms, loadMs: null, tokPerSec, tokPerSecScope: tokPerSec === null ? null : 'warm-end-to-end', error: null };
   } catch {
     const ms = now() - started;

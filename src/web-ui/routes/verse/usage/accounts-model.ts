@@ -78,6 +78,15 @@ const WINDOW_LABELS: Record<string, string> = {
   codex: 'Week · Codex',
   primary: 'Primary window',
   secondary: 'Secondary window',
+  grok_unified: 'Shared consumer allowance',
+  grok_unified_weekly: 'Shared consumer · weekly',
+  grok_unified_monthly: 'Shared consumer · monthly',
+  grok_build: 'Build allowance',
+  grok_build_weekly: 'Build · weekly',
+  grok_build_monthly: 'Build · monthly',
+  grok_credits: 'Native allowance',
+  grok_credits_weekly: 'Native allowance · weekly',
+  grok_credits_monthly: 'Native allowance · monthly',
 };
 
 export function windowLabel(w: AccountWindow): string {

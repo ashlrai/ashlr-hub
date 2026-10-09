@@ -5,6 +5,8 @@ import {createHash} from 'node:crypto';
 import * as fs from 'node:fs';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {userInfo} from 'node:os';
+import {AsyncLocalStorage} from 'node:async_hooks';
+import {performance} from 'node:perf_hooks';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {observeBuild} from '../.github/scripts/ci-pack-smoke.mjs';
@@ -20,30 +22,63 @@ const digest = data => createHash('sha256').update(data).digest('hex');
 const same = (a, b) => ['dev','ino','uid','mode','nlink','size','mtimeMs','ctimeMs'].every(k => a[k] === b[k]);
 // These labels identify the failed boundary, never the error's private details.
 const FAILURE_PHASES = new Set(['preflight','implementation','finalized-artifacts','manifest-signature','artifact-bytes','artifact-signature','app-record','package-archive','source','hosted-proof','current','app-identity','aliases','quiescence','staging','package','late-artifacts','late-source','late-implementation','late-hosted-proof','late-package','late-current','late-aliases','late-quiescence','app-transaction','app-move','app-signature','app-launch','owned-health','pointer-switch','alias-create','pointer-recovery','destination','late-destination']);
+const timingScope = new AsyncLocalStorage();
+const TIMED_OPERATIONS = new Map([['/usr/bin/ditto','archive-copy'],['/usr/bin/plutil','bundle-identity'],['/usr/bin/codesign','signature-verify'],['/usr/bin/open','app-open'],['/bin/ps','process-observation'],['/usr/sbin/lsof','socket-observation']]);
+
+/** Opt-in diagnostic spans, never installation evidence. Observer failures are inert. */
+export function withArtifactInstallTiming(operation,{emit,now=()=>performance.now()}) {
+  const tracer={emit,now,sequence:0,span:0};
+  return timingScope.run({tracer,parentSpanId:null},operation);
+}
+function timed(label,operation,kind='stage') {
+  const scope=timingScope.getStore();
+  if (!scope || !(kind==='stage'?FAILURE_PHASES.has(label):[...TIMED_OPERATIONS.values()].includes(label))) return operation();
+  const {tracer,parentSpanId}=scope,spanId=++tracer.span;
+  const clock=()=>{try{const value=tracer.now();return typeof value==='number' && Number.isFinite(value)?value:null;}catch{return null;}};
+  const record=value=>{try{
+    const emitted=tracer.emit({schemaVersion:1,kind:'artifact-install-timing',sequence:++tracer.sequence,spanId,parentSpanId,category:kind,label,...value});
+    if (emitted && typeof emitted.then==='function') Promise.resolve(emitted).catch(()=>{});
+  }catch{/* Diagnostics cannot change admission or rollback. */}};
+  const start=clock();record({event:'started'});
+  const finish=outcome=> {
+    const end=clock(),elapsed=start===null || end===null?null:end-start;
+    const unknownReason=elapsed===null || !Number.isFinite(elapsed)?'clock-unavailable':elapsed<0?'clock-reversed':null;
+    const durationMs=unknownReason?null:elapsed>Number.MAX_VALUE/1000?elapsed:Math.round(elapsed*1000)/1000;
+    record({event:'finished',outcome,durationMs,...(unknownReason?{unknownReason}:{})});
+  };
+  return timingScope.run({tracer,parentSpanId:spanId},()=> {
+    try {
+      const result=operation();
+      if (result && typeof result.then==='function') return result.then(value=>{finish('returned');return value;},error=>{finish('threw');throw error;});
+      finish('returned');return result;
+    } catch(error) {finish('threw');throw error;}
+  });
+}
 function phaseError(phase,error) {
   const failure=error instanceof Error?error:new Error('Installer boundary refused');
   if (!FAILURE_PHASES.has(failure.installerPhase)) failure.installerPhase=phase;
   return failure;
 }
 function boundary(phase,operation) {
-  try {
+  return timed(phase,()=>{try {
     const result=operation();
     return result && typeof result.then==='function'?result.catch(error=>{throw phaseError(phase,error);}):result;
-  } catch(error) {throw phaseError(phase,error);}
+  } catch(error) {throw phaseError(phase,error);}});
 }
 export function artifactInstallFailure(error) {
   return {state:['rolled-back','rollback-held'].includes(error?.installationState)?error.installationState:'held',
     phase:FAILURE_PHASES.has(error?.installerPhase)?error.installerPhase:'preflight',installationAccepted:false,authorityResumed:false};
 }
-const USAGE = 'node scripts/install-desktop-artifacts.mjs --candidate-source <qualified-checkout> --bundle <signed-hosted-bundle> --artifacts <private-finalizer-output> [--published-release] [--apply]';
+const USAGE = 'node scripts/install-desktop-artifacts.mjs --candidate-source <qualified-checkout> --bundle <signed-hosted-bundle> --artifacts <private-finalizer-output> [--published-release] [--apply] [--timings]';
 
 export function parseArtifactInstallArguments(argv) {
   if (argv.length === 1 && ['--help','-h'].includes(argv[0])) return {help:true};
-  const flags = {}; let apply = false, publishedRelease = false;
+  const flags = {}; let apply = false, publishedRelease = false, timings = false;
   for (let i=0;i<argv.length;i++) {
     const flag = argv[i];
     if (flag === '--apply') {assert.equal(apply,false,'duplicate apply');apply=true;continue;}
     if (flag === '--published-release') {assert.equal(publishedRelease,false,'duplicate published release');publishedRelease=true;continue;}
+    if (flag === '--timings') {assert.equal(timings,false,'duplicate timings');timings=true;continue;}
     assert.ok(['--candidate-source','--bundle','--artifacts'].includes(flag) && !Object.hasOwn(flags,flag),'unknown or duplicate argument');
     const value = argv[++i];
     assert.ok(typeof value === 'string' && value.length > 0 && resolve(value) === value && !value.startsWith('--'),'expected canonical absolute directory');
@@ -51,7 +86,7 @@ export function parseArtifactInstallArguments(argv) {
   }
   assert.equal(Object.keys(flags).length,3,'all three input directories are required');
   assert.ok(new Set(Object.values(flags)).size === 3,'input directories must be distinct');
-  return {candidateRoot:flags['--candidate-source'],bundle:flags['--bundle'],artifacts:flags['--artifacts'],apply,...(publishedRelease?{publishedRelease:true}:{})};
+  return {candidateRoot:flags['--candidate-source'],bundle:flags['--bundle'],artifacts:flags['--artifacts'],apply,...(publishedRelease?{publishedRelease:true}:{}),...(timings?{timings:true}:{})};
 }
 
 function directory(path, privateMode = true) {
@@ -203,7 +238,7 @@ export async function applyInspectedDesktopArtifacts(result) {
     assert.ok(['/usr/bin/ditto','/usr/bin/plutil','/usr/bin/codesign','/usr/bin/open','/bin/ps','/usr/sbin/lsof'].includes(bin),'unsupported installer command');
     if (bin==='/usr/bin/codesign') assert.ok(argv[0]==='--verify','signing is not an installer operation');
     if (bin==='/usr/bin/plutil') assert.ok(argv[0]==='-extract','plist modification is not an installer operation');
-    const child=spawnSync(bin,argv,{cwd:ROOT,encoding:'utf8',timeout:120_000,maxBuffer:1024*1024,env:d.environment});
+    const child=timed(TIMED_OPERATIONS.get(bin),()=>spawnSync(bin,argv,{cwd:ROOT,encoding:'utf8',timeout:120_000,maxBuffer:1024*1024,env:d.environment}),'operation');
     const status=child.error?1:child.status??1;
     if (status!==0 && !['/bin/ps','/usr/sbin/lsof'].includes(bin)) throw phaseError(bin==='/usr/bin/open'?'app-launch':bin==='/usr/bin/codesign'?'app-signature':bin==='/usr/bin/plutil'?'app-identity':'app-transaction',new Error('Installer command refused'));
     return {status,stdout:child.stdout??''};
@@ -324,8 +359,12 @@ async function main() {
     // while the gh child uses its separately closed normal-profile environment.
     const home=userInfo().homedir;for(const key of Object.keys(process.env)) delete process.env[key];
     Object.assign(process.env,{HOME:home,PATH:'/usr/bin:/bin:/usr/sbin:/sbin',LANG:'C',LC_ALL:'C'});
-    const deps=await boundary('implementation',productionInstallerDependencies), inspected=await boundary('preflight',()=>inspectDesktopArtifactInstall(input,deps));
-    console.log(JSON.stringify(input.apply?await applyInspectedDesktopArtifacts(inspected):inspected));
+    const install=async()=> {
+      const deps=await boundary('implementation',productionInstallerDependencies), inspected=await boundary('preflight',()=>inspectDesktopArtifactInstall(input,deps));
+      console.log(JSON.stringify(input.apply?await applyInspectedDesktopArtifacts(inspected):inspected));
+    };
+    if (input.timings) await withArtifactInstallTiming(install,{emit:record=>console.error(JSON.stringify(record))});
+    else await install();
   } catch(error) {
     console.error(JSON.stringify(artifactInstallFailure(error)));process.exitCode=1;
   }

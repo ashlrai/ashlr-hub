@@ -142,7 +142,7 @@ describe('routes', () => {
   it('GET /context: learned table, per-engine ROI, local-only, and local badges (private only on loopback)', async () => {
     await post('/api/verse/multimodel/outcome', { seatId: 'claude', kind: 'review', signal: 'up' });
     events['q'] = [
-      { seq: 1, at: new Date(NOW - 10_000).toISOString(), type: 'usage', turnId: 't1', usage: { inputTokens: 10, outputTokens: 400, cacheReadTokens: 0, cacheCreationTokens: 0, contextTokens: 0, contextWindow: 65_536 } },
+      { seq: 1, at: new Date(NOW - 10_000).toISOString(), type: 'usage', reportedTokenFields: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true }, turnId: 't1', usage: { inputTokens: 10, outputTokens: 400, cacheReadTokens: 0, cacheCreationTokens: 0, contextTokens: 0, contextWindow: 65_536 } },
       { seq: 2, at: new Date(NOW).toISOString(), type: 'turn-done', turnId: 't1', ok: true, durationMs: 10_000, nativeSessionId: null },
     ] as unknown as VerseEvent[];
     sessions.push(session('q', { engine: 'local', seatId: 'local:qwen3.6:27b', model: 'qwen3.6:27b', turnCount: 1 }));
@@ -332,9 +332,40 @@ describe('warmLocalModel', () => {
 describe('local speed attribution and measurement time', () => {
   const current = () => localSpeedBinding(SEATS[1]!, 'qwen3.6:27b', LAUNCHES.get(SEATS[1]!.id)!)!;
   const turn = (at: number, outputTokens = 400): VerseEvent[] => [
-    { seq: 1, at: new Date(at - 10_000).toISOString(), type: 'usage', turnId: 't', usage: { inputTokens: 0, outputTokens, cacheReadTokens: 0, cacheCreationTokens: 0, contextTokens: 0, contextWindow: 65_536 } },
+    { seq: 1, at: new Date(at - 10_000).toISOString(), type: 'usage', reportedTokenFields: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true }, turnId: 't', usage: { inputTokens: 0, outputTokens, cacheReadTokens: 0, cacheCreationTokens: 0, contextTokens: 0, contextWindow: 65_536 } },
     { seq: 2, at: new Date(at).toISOString(), type: 'turn-done', turnId: 't', ok: true, nativeSessionId: null, durationMs: 10_000 },
   ];
+  it('leaves legacy normalized counters unknown and preserves a newer independent warm reading', async () => {
+    const rows = turn(NOW);
+    const legacy = rows.map(event => {
+      if (event.type !== 'usage') return event;
+      const { reportedTokenFields: _evidence, ...historical } = event;
+      return historical;
+    });
+    expect(completedLocalTurnThroughput(legacy)).toBeNull();
+    expect(legacy[0]).toMatchObject({ usage: { inputTokens: 0, outputTokens: 400 } });
+    sessions = [session('q', { engine: 'local', seatId: current().seatId, model: current().model })]; events.q = legacy;
+    recordThroughput(current(), { tokPerSec: 90, source: 'warm', scope: 'warm-decode', at: new Date(NOW).toISOString() });
+    expect((await localBadges(deps, { seats: SEATS, launches: LAUNCHES }))[0]).toMatchObject({ tokPerSec: 90, completedTurn: null });
+  });
+  it('keeps unknown token details sticky while retaining evidenced output speed and measured zeros', () => {
+    const rows = turn(NOW);
+    const first = rows[0] as Extract<VerseEvent, { type: 'usage' }>;
+    const partial = { ...first, reportedTokenFields: { inputTokens: false, outputTokens: true, cacheReadTokens: false, cacheCreationTokens: false } };
+    expect(completedLocalTurnThroughput([partial, { ...first, seq: 2 }, rows[1]!])).toMatchObject({
+      tokPerSec: 80, inputTokens: null, outputTokens: 800, cacheReadTokens: null, cacheCreationTokens: null });
+    expect(completedLocalTurnThroughput(rows)).toMatchObject({ inputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 });
+    const unknownOutput = { ...first, reportedTokenFields: { ...first.reportedTokenFields!, outputTokens: false } };
+    expect(completedLocalTurnThroughput([unknownOutput, { ...first, seq: 2 }, rows[1]!])).toBeNull();
+    const overflow = { ...first, usage: { ...first.usage, outputTokens: Number.MAX_SAFE_INTEGER } };
+    expect(completedLocalTurnThroughput([overflow, first, rows[1]!])).toBeNull();
+  });
+  it('does not invoke accessors in malformed historical diagnostic evidence', () => {
+    const rows = turn(NOW);
+    const first = rows[0] as Extract<VerseEvent, { type: 'usage' }>;
+    const evidence = Object.defineProperty({}, 'outputTokens', { get() { throw new Error('must not run'); } });
+    expect(completedLocalTurnThroughput([{ ...first, reportedTokenFields: evidence as typeof first.reportedTokenFields }, rows[1]!])).toBeNull();
+  });
   it('refreshes an older cached measurement from a newer valid completed turn with its original time', async () => {
     recordThroughput(current(), { tokPerSec: 90.12345, source: 'warm', scope: 'warm-decode', at: new Date(NOW - 60_000).toISOString() });
     sessions = [session('q', { engine: 'local', seatId: current().seatId, model: current().model })];
@@ -349,8 +380,8 @@ describe('local speed attribution and measurement time', () => {
     const usage = { inputTokens: 1234, outputTokens: 400, cacheReadTokens: 0, cacheCreationTokens: 50, contextTokens: 1234, contextWindow: 65_536 };
     sessions = [session('q', { engine: 'local', seatId: current().seatId, model: current().model })];
     events.q = [
-      { seq: 1, at: new Date(at - 10_000).toISOString(), type: 'usage', turnId: 't', usage },
-      { seq: 2, at: new Date(at - 1000).toISOString(), type: 'usage', turnId: 't', usage: { ...usage, inputTokens: 22, outputTokens: 173, cacheReadTokens: 20, cacheCreationTokens: 0 } },
+      { seq: 1, at: new Date(at - 10_000).toISOString(), type: 'usage', reportedTokenFields: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true }, turnId: 't', usage },
+      { seq: 2, at: new Date(at - 1000).toISOString(), type: 'usage', reportedTokenFields: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true }, turnId: 't', usage: { ...usage, inputTokens: 22, outputTokens: 173, cacheReadTokens: 20, cacheCreationTokens: 0 } },
       { seq: 3, at: new Date(at).toISOString(), type: 'turn-done', turnId: 't', ok: true, nativeSessionId: null, durationMs: 12_345 },
     ];
     recordThroughput(current(), { tokPerSec: 90, source: 'warm', scope: 'warm-decode', at: new Date(NOW).toISOString() });
@@ -432,4 +463,6 @@ it('end-to-end warm speed includes body generation instead of stopping at respon
     ollamaBaseUrl: 'http://127.0.0.1:11434', anthropicBaseUrl: 'http://127.0.0.1:8099' },
   { now: () => clock, fetchImpl: (async () => response) as typeof fetch });
   expect(result).toMatchObject({ ms: 1400, tokPerSec: 10 / 1.4, tokPerSecScope: 'warm-end-to-end' });
+  expect(lastThroughput({ seatId: 'local:test', model: 'test', endpoint: 'http://127.0.0.1:8099', contextWindow: 65_536 }))
+    .toEqual({ tokPerSec: 10 / 1.4, source: 'warm', scope: 'warm-end-to-end', at: new Date(clock).toISOString() });
 });

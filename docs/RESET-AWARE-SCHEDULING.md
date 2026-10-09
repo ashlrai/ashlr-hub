@@ -126,6 +126,14 @@ verified no-spillover boundary in this source and remain held for reserve
 shrinking. Grok's on-demand UI setting alone is not billing enforcement.
 [Claude documents that disabling usage credits leaves included plan usage](https://support.claude.com/en/articles/12429409-manage-usage-credits-for-paid-claude-plans).
 
+The production fleet does not yet supply the native execution-match source
+required by reserve shrinking. Enrolling an account therefore does not establish
+live tapering, even when Claude's billing report is valid. Connecting that source
+needs the original collector identity evidence carried to the selected native
+invocation; the historical reading cache cannot provide it. Codex's
+credits-disabled boundary currently has a validator but no native writer.
+Ordinary admitted work and qualified deadline priority remain available.
+
 A selected task needs compatible completed engine/model/task-kind observations;
 missing history keeps the saved reserve and ordinary admitted work can build
 observations. Exact immutable attempt records can attribute explicitly bound

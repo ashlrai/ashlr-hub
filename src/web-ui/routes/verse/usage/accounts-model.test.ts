@@ -153,6 +153,26 @@ describe('toWindowView — the sentinel 100 is a flag, not a measurement', () =>
     expect(windowLabel(win({ id: 'seven_day_fable' }))).toBe('Week · Fable');
     expect(windowLabel(win({ id: 'five_hour' }))).toBe('Session · rolling 5h');
   });
+
+  it('keeps provider labels and unknown scopes instead of inferring Grok capacity', () => {
+    expect(windowLabel(win({ id: 'grok_unified_weekly', label: 'Provider-reported window' }))).toBe('Provider-reported window');
+    expect(windowLabel(win({ id: 'grok_bot_weekly' }))).toBe('grok_bot_weekly');
+    expect(windowLabel(win({ id: 'grok_future_window' }))).toBe('grok_future_window');
+    const source = win({ id: 'grok_credits', usedPercent: null, resetsAt: null });
+    const before = { ...source };
+    expect(toWindowView(source).label).toBe('Native allowance');
+    expect(toWindowView(source).usedPct).toBeNull();
+    expect(toWindowView(source).resetsAt).toBeNull();
+    expect(source).toEqual(before);
+  });
+
+  it('changes only the label of a measured native Grok window', () => {
+    const source = win({ id: 'grok_unified_weekly', usedPercent: 32.125, resetsAt: '2026-10-10T12:00:00.000Z' });
+    const before = { ...source };
+    const view = toWindowView(source, Date.parse('2026-10-09T12:00:00.000Z'));
+    expect(view).toMatchObject({ id: source.id, label: 'Shared consumer · weekly', usedPct: source.usedPercent, resetsAt: source.resetsAt });
+    expect(source).toEqual(before);
+  });
 });
 
 describe('accountVerdict — credits are independent of the window', () => {

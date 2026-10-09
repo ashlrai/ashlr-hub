@@ -12,7 +12,7 @@ import {readPinnedRuntimeArchive,extractPinnedRuntimeArchive} from '../src/core/
 import {verifyUpdateManifest,verifyCompatibleUpdateManifest,desktopUpdateProfileForPackage,getDesktopUpdateProfile,verifyMinisign,verifyUpdateBundleRecord} from '../src/core/desktop/update-manifest.js';
 import {inspectSignedAppArchive,extractSignedAppArchive,verifyInstalledRuntimeArchive} from '../src/core/desktop/qualified-update.js';
 import {qualifiedFixture} from '../.github/tests/helpers/hosted-artifact-fixture.mjs';
-import {artifactInstallFailure,applyInspectedDesktopArtifacts,assertPairedHostedProof,inspectDesktopArtifactInstall,parseArtifactInstallArguments,readFinalizedDesktopArtifacts,verifyManualDesktopSource} from '../scripts/install-desktop-artifacts.mjs';
+import {artifactInstallFailure,applyInspectedDesktopArtifacts,assertPairedHostedProof,inspectDesktopArtifactInstall,parseArtifactInstallArguments,readFinalizedDesktopArtifacts,verifyManualDesktopSource,withArtifactInstallTiming} from '../scripts/install-desktop-artifacts.mjs';
 import type {CompatibleUpdateManifest,DesktopUpdateProfileName,UpdateTrust} from '../src/core/desktop/update-manifest.js';
 
 const ownPorts=vi.hoisted(()=>({trust:null as any,dirty:false}));
@@ -154,6 +154,72 @@ describe.skipIf(process.platform==='win32')('manual original paired artifact ins
     expect(parseArtifactInstallArguments(['--published-release','--candidate-source','/a','--bundle','/b','--artifacts','/c']).publishedRelease).toBe(true);
     expect(()=>parseArtifactInstallArguments(['--published-release','--published-release'])).toThrow(/duplicate/);
     for(const flag of ['--trust','--public-key','--historical-proof','--profile'])expect(()=>parseArtifactInstallArguments([flag,'/fake'])).toThrow();
+  });
+  it('timings is opt-in and duplicate-refusing without changing input or apply admission',()=> {
+    const args=['--candidate-source','/a','--bundle','/b','--artifacts','/c'];
+    expect(parseArtifactInstallArguments([...args,'--timings'])).toEqual({...parseArtifactInstallArguments(args),timings:true});
+    expect(()=>parseArtifactInstallArguments([...args,'--timings','--timings'])).toThrow(/duplicate/);
+  });
+  it('records separate nested and repeated monotonic spans without changing real install checks',async()=> {
+    const f=fixture(),records:any[]=[];let clock=0;
+    const result=await withArtifactInstallTiming(async()=> {
+      const inspected=await inspectDesktopArtifactInstall(f.input,f.deps);
+      return applyInspectedDesktopArtifacts(inspected);
+    },{emit:(record:any)=>records.push(record),now:()=>++clock});
+    expect(result).toMatchObject({state:'installed',installationPerformed:true,authorityResumed:false});
+    expect(ports.verify).toHaveBeenCalledTimes(4);
+    const starts=records.filter(record=>record.event==='started'),finishes=records.filter(record=>record.event==='finished');
+    expect(starts.length).toBeGreaterThan(20);expect(finishes).toHaveLength(starts.length);
+    expect(new Set(starts.map(record=>record.spanId)).size).toBe(starts.length);
+    expect(starts.some(record=>record.parentSpanId!==null)).toBe(true);
+    expect(starts.filter(record=>record.label==='late-hosted-proof')).toHaveLength(3);
+    for(const finish of finishes) {
+      expect(finish).toMatchObject({schemaVersion:1,kind:'artifact-install-timing',outcome:'returned'});
+      expect(finish.durationMs).toBeGreaterThanOrEqual(0);
+      expect(starts.find(start=>start.spanId===finish.spanId)?.label).toBe(finish.label);
+      if(finish.parentSpanId!==null)expect(starts.some(start=>start.spanId===finish.parentSpanId)).toBe(true);
+      expect(Object.keys(finish).sort()).toEqual(['category','durationMs','event','kind','label','outcome','parentSpanId','schemaVersion','sequence','spanId']);
+    }
+    expect(records.map(record=>record.sequence)).toEqual(records.map((_,index)=>index+1));
+    expect(JSON.stringify(records)).not.toContain(f.root);
+    expect(JSON.stringify(records)).not.toMatch(/argv|ownerToken|credential|stdout|manifestText/);
+  });
+  it('retains synchronous and async failures without exposing private errors',async()=> {
+    const f=fixture(),records:any[]=[];
+    const privateError=new Error('/private/credential diagnostic payload');
+    f.deps.implementationSnapshot.mockRejectedValueOnce(privateError);
+    await expect(withArtifactInstallTiming(()=>inspectDesktopArtifactInstall(f.input,f.deps),{emit:(record:any)=>records.push(record)})).rejects.toBe(privateError);
+    expect(records.find(record=>record.event==='finished' && record.label==='implementation')).toMatchObject({outcome:'threw'});
+    expect(privateError).toHaveProperty('installerPhase','implementation');
+    records.length=0;
+    ports.source.mockImplementationOnce(()=>{throw privateError;});
+    await expect(withArtifactInstallTiming(()=>inspectDesktopArtifactInstall(f.input,f.deps),{emit:(record:any)=>records.push(record)})).rejects.toBe(privateError);
+    expect(records.find(record=>record.event==='finished' && record.label==='source')).toMatchObject({outcome:'threw'});
+    expect(JSON.stringify(records)).not.toMatch(/private|credential|payload/);
+  });
+  it.each(['missing','throws','reversed'] as const)('keeps %s clock readings unknown rather than inventing zero durations',async kind=> {
+    const f=fixture(),records:any[]=[];let clock=1000;
+    const now=()=>{if(kind==='throws')throw Error('private clock');return kind==='missing'?NaN:--clock;};
+    await withArtifactInstallTiming(()=>inspectDesktopArtifactInstall(f.input,f.deps),{emit:(record:any)=>records.push(record),now});
+    const finishes=records.filter(record=>record.event==='finished');expect(finishes.length).toBeGreaterThan(0);
+    for(const finish of finishes)expect(finish).toMatchObject({durationMs:null,unknownReason:kind==='reversed'?'clock-reversed':'clock-unavailable',outcome:'returned'});
+  });
+  it.each(['synchronous','asynchronous'] as const)('%s diagnostic sink failure cannot prevent installation or erase rollback evidence',async kind=> {
+    const f=fixture(),emit=vi.fn(()=>{if(kind==='asynchronous')return Promise.reject(Error('/private/log sink failed'));throw Error('/private/log sink failed');});
+    const inspected=await withArtifactInstallTiming(()=>inspectDesktopArtifactInstall(f.input,f.deps),{emit});
+    f.setHealth(false);
+    const error=await withArtifactInstallTiming(()=>applyInspectedDesktopArtifacts(inspected),{emit}).catch((error:unknown)=>error);
+    expect(emit).toHaveBeenCalled();expect(error).toBeInstanceOf(Error);
+    expect(artifactInstallFailure(error)).toEqual({state:'rollback-held',phase:'owned-health',installationAccepted:false,authorityResumed:false});
+    expect([...f.stages.keys()].map(owner=>JSON.parse(fs.readFileSync(join(f.applications,basename(owner),'transaction.json'),'utf8')).phase)).toEqual(['rollback-held']);
+  });
+  it('keeps concurrent timing scopes independent and leaves later ordinary inspection untraced',async()=> {
+    const first=fixture(),second=fixture(),a:any[]=[],b:any[]=[];
+    await Promise.all([withArtifactInstallTiming(()=>inspectDesktopArtifactInstall(first.input,first.deps),{emit:(record:any)=>a.push(record)}),
+      withArtifactInstallTiming(()=>inspectDesktopArtifactInstall(second.input,second.deps),{emit:(record:any)=>b.push(record)})]);
+    for(const rows of [a,b])expect(rows.map(record=>record.sequence)).toEqual(rows.map((_,index)=>index+1));
+    const count=a.length+b.length;
+    await inspectDesktopArtifactInstall(second.input,second.deps);expect(a.length+b.length).toBe(count);
   });
   it('forwards public admission at all four real transaction boundaries without hosted adoption, clears no Stop and resumes no authority',async()=> {
     const f=fixture(),input={...f.input,publishedRelease:true},cap=Object.freeze({});

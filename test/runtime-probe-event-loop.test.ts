@@ -8,15 +8,16 @@
  *     blocking fork+exec for a `binPath` the probe never reads;
  *   - the `ps -axww` table (up to 16 MB) was parsed in one synchronous block.
  *
- * Each test drives the real code with a fake heavy input — a synchronous
- * spawn that busy-waits 60 ms, or a ~16 MB process table — and measures the
- * longest synchronous slice the loop saw while the probe ran.
+ * Heavy process-table checks measure the longest synchronous slice. The
+ * status-path regression uses deferred HTTP reads and forbidden sync-spawn
+ * assertions: elapsed callback gaps also include CI scheduling and cannot
+ * isolate a blocking binary lookup from unrelated host load.
  *
  * HOME-isolated (test/setup/home.ts): the probe stats the kill switch, the
  * launch-agent plist and the ownership record under HOME. No real process is
  * spawned — both child_process entry points the probe could reach are faked.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /** What the fake `ps` prints; set per test. */
 const fakePs = vi.hoisted(() => ({ stdout: '' }));
@@ -107,6 +108,7 @@ const refused: FetchLike = async () => {
 beforeEach(() => {
   fakePs.stdout = '';
 });
+afterEach(() => vi.unstubAllGlobals());
 
 describe('ps table parse (fake 16 MB table)', () => {
   const table = heavyProcessTable(8080);
@@ -132,15 +134,42 @@ describe('ps table parse (fake 16 MB table)', () => {
 });
 
 describe('the runtime probe path', () => {
-  it('statusLocalRuntime never runs the synchronous binary lookup', async () => {
+  it('statusLocalRuntime yields while endpoint reads are pending without synchronous binary lookup', async () => {
     const cp = await import('node:child_process');
-    // Warm once (module init, fetch internals), then measure a steady-state
-    // poll — the one the UI repeats every few seconds.
-    await statusLocalRuntime({ runtime: { port: 1 } });
-    const slice = await maxSyncSlice(() => statusLocalRuntime({ runtime: { port: 1 } }));
-    expect(cp.execFileSync).not.toHaveBeenCalled();
-    expect(cp.spawnSync).not.toHaveBeenCalled();
-    expect(slice).toBeLessThan(BUDGET_MS);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const requests: string[] = [];
+    const fetchImpl = vi.fn<FetchLike>(async (url) => {
+      const endpoint = new URL(url).pathname;
+      requests.push(endpoint);
+      await gate;
+      return { ok: true, status: 200, json: async () => endpoint === '/health' ? { status: 'ok' }
+        : endpoint === '/props' ? { total_slots: 2, default_generation_settings: { n_ctx: 4096 } }
+        : [{ is_processing: false }, { is_processing: true }] };
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const order: string[] = [];
+    const pending = statusLocalRuntime({ runtime: { port: 1 } }).then((snapshot) => {
+      order.push('snapshot'); return snapshot;
+    });
+    try {
+      // All three real endpoint reads start before any answer is released.
+      expect(requests).toEqual(['/health', '/props', '/slots']);
+      await new Promise<void>((resolve) => setImmediate(() => { order.push('loop'); resolve(); }));
+      expect(order).toEqual(['loop']);
+      expect(cp.execFileSync).not.toHaveBeenCalled();
+      expect(cp.spawnSync).not.toHaveBeenCalled();
+      release();
+      const snapshot = await pending;
+      expect(order).toEqual(['loop', 'snapshot']);
+      expect(snapshot).toMatchObject({ state: 'up', runtimeKind: 'llama-server', host: '127.0.0.1', port: 1,
+        slots: { configured: 2, busy: 1, idle: 1, source: 'props' }, contextPerSlot: 4096, contextTotal: 8192 });
+      expect(cp.execFileSync).not.toHaveBeenCalled();
+      expect(cp.spawnSync).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await pending;
+    }
   });
 
   it('still applies the loopback gate to an override on the spawn-free path', async () => {
