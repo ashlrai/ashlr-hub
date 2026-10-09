@@ -247,7 +247,7 @@ describe('actions', () => {
 
     expect((await call('POST', '/api/verse/authority', { action: 're-approve', draftDigest: digest }))?.status).toBe(400);
     const granted = await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: digest });
-    expect(granted?.status).toBe(200);
+    expect(granted?.status, JSON.stringify(granted?.body)).toBe(200);
     expect(granted?.body).toMatchObject({ grant: { state: 'active', grantSeq: 1 }, maxSwitchWithoutGrant: 'autonomous' });
     // A draft is single-use.
     expect((await call('POST', '/api/verse/authority', { action: 'grant', draftDigest: digest }))?.body).toMatchObject({ code: 'draft-expired' });
