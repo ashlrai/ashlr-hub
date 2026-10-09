@@ -972,6 +972,23 @@ describe('review c9 — the Leader\'s class-B Codex enable passes the final seat
     if (routed.backend === ('codex' as EngineId)) expect(hooks.seatAllows(routed.backend, { maxPercent: 90 }).allowed).toBe(true);
   });
 
+  it('pins the cached Codex hint to the exact routing source and refuses replacement before dispatch', async () => {
+    const original = {...codexSeat(),accountHint:'a'.repeat(64)};
+    const world = codexWorld(original);
+    let snapshot = {v:1 as const,publishedAt:NOW_ISO,seats:[original]};
+    const hooks = createLiveTickHooks({deps:{...world.deps,capacitySnapshot:()=>snapshot}});
+    hooks.effectiveConfig(CODEX_CFG);await hooks.beforeTick({...hookCtx,cfg:CODEX_CFG});
+    // Refresh the mutable capacity container without refreshing router.capacity.
+    snapshot = {...snapshot,seats:[{...original,accountHint:'b'.repeat(64)}]};
+    expect(hooks.seatAllows('codex',{maxPercent:90,itemId:'unrouted-refresh',seatId:'codex'}).allowed).toBe(false);
+    const task = item({id:'original-source',effort:5});
+    const route = hooks.route(task,CODEX_CFG);
+    expect(route).toMatchObject({backend:'codex',hold:null,seatDecision:{seatId:'codex'},selectedAccountHint:'a'.repeat(64)});
+    expect(hooks.route(task,CODEX_CFG).selectedAccountHint).toBe('a'.repeat(64));
+    expect(hooks.seatAllows('codex',{maxPercent:90,itemId:task.id,seatId:'codex',model:route.model}).allowed).toBe(false);
+    expect(world.calls).toEqual([]);
+  });
+
   it('still applies the window ceiling to a directive-enabled Codex seat', async () => {
     const world = codexWorld(codexSeat(95, 10));
     const hooks = createLiveTickHooks({ deps: world.deps });

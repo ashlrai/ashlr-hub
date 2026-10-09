@@ -369,8 +369,8 @@ export function phantomWrap(cmd: EngineCommand, _cfg: AshlrConfig): EngineComman
 export interface SpawnEngineOptions {
   /** Source-owned bounded prompt/request; absent preserves closed stdin. */
   stdin?: string;
-  /** Native profile wrappers keep the original Claude stream identity. */
-  nativeEngine?: 'claude';
+  /** Native profiles retain their host-selected Claude/Codex protocol identity. */
+  nativeEngine?: 'claude' | 'codex';
   /** Caller-owned revision fence, evaluated at each actual spawn including recovery. */
   selectedOutcomeAdmission?: () => boolean;
   env?: NodeJS.ProcessEnv;
@@ -488,7 +488,7 @@ export async function spawnEngine(
       };
     }
     const first = await spawnEngineInner(cmd, cfg, opts);
-    const recovery = codexReasoningConfigRecovery(cmd, first);
+    const recovery = codexReasoningConfigRecovery(cmd, first, opts?.nativeEngine === 'codex');
     if (!recovery) return first;
     if (opts?.signal?.aborted) return cancelledEngineResult(first.output, first.usage);
     const recovered = await spawnEngineInner(recovery, cfg, opts);
@@ -507,11 +507,12 @@ function codexReasoningConfigRecovery(
     error?: string;
     terminationReason?: TerminationReason;
   },
+  nativeCodex = false,
 ): EngineCommand | null {
   if (result.ok || !result.error) return null;
   if (result.output.trim() || result.usage || result.terminationReason) return null;
   const bin = basename(cmd.bin).toLowerCase();
-  if (bin !== 'codex' && bin !== 'codex.exe') return null;
+  if (!nativeCodex && bin !== 'codex' && bin !== 'codex.exe') return null;
   if (!/model_reasoning_effort/i.test(result.error)) return null;
   if (!/(?:unknown variant|expected one of|error loading config)/i.test(result.error)) return null;
   if (hasCodexConfigKey(cmd.args, 'model_reasoning_effort')) return null;
@@ -885,7 +886,9 @@ async function spawnEngineInner(
     let stderrBuf = '';
     const callerOnEvent = opts?.onEvent;
     // One normaliser per spawn: Anthropic-wire tool calls span several lines.
-    const normaliser = createEngineOutputNormaliser(cmd);
+    // Classification is host-owned metadata; the actual executable remains pinned.
+    const protocolCommand = opts?.nativeEngine === 'codex' ? {...cmd,bin:'codex'} : cmd;
+    const normaliser = createEngineOutputNormaliser(protocolCommand);
     const captureClaudeRateLimitEvents = opts?.nativeEngine === 'claude' || isClaudeEngineBin(cmd.bin);
     const ownsProcessGroup = opts?.signal !== undefined && platform !== 'win32';
     const processKill = opts?._processKill ?? ((pid: number, signal: NodeJS.Signals | 0) => {
@@ -973,7 +976,7 @@ async function spawnEngineInner(
     } {
       const lines = stdoutBuf.trim() ? [...stdoutLines, stdoutBuf] : stdoutLines;
       const output = lines.join('\n').trim();
-      const usage = parseUsageFromLines(lines, cmd);
+      const usage = parseUsageFromLines(lines, protocolCommand);
       return usage ? { output, usage } : { output };
     }
 
@@ -1241,7 +1244,7 @@ async function spawnEngineInner(
 
       const exitedClean = code === 0 && signal === null;
       const rawOutput = stdoutLines.join('\n').trim();
-      const usage = parseUsageFromLines(stdoutLines, cmd);
+      const usage = parseUsageFromLines(stdoutLines, protocolCommand);
 
       if (terminationRequested && ownsProcessGroup) {
         const groupState = probeOwnedGroup();

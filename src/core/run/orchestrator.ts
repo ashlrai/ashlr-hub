@@ -2916,6 +2916,7 @@ async function runGoalInternal(
               ...(opts.selectedDevinAdmission ? { selectedDevinAdmission: opts.selectedDevinAdmission } : {}),
               ...(opts.onSelectedDevinSpawn ? { onSelectedDevinSpawn: opts.onSelectedDevinSpawn } : {}),
               ...(opts.selectedClaudeAdmission ? { selectedClaudeAdmission: opts.selectedClaudeAdmission } : {}),
+              ...(opts.selectedCodexAccount ? { selectedCodexAccount: opts.selectedCodexAccount } : {}),
               ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
               ...(opts.harness ? { harness: opts.harness } : {}),
             });
@@ -3021,6 +3022,7 @@ async function runGoalInternal(
                   try { opts.onSelectedDevinSpawn?.(model, binding); } catch { /* observer only */ }
                 } } : opts.onSelectedDevinSpawn ? { onSelectedDevinSpawn: opts.onSelectedDevinSpawn } : {}),
                 ...(opts.selectedClaudeAdmission ? { selectedClaudeAdmission: opts.selectedClaudeAdmission } : {}),
+                ...(opts.selectedCodexAccount ? { selectedCodexAccount: opts.selectedCodexAccount } : {}),
                 ...(opts.selectedOutcomeAdmission ? { selectedOutcomeAdmission: opts.selectedOutcomeAdmission } : {}),
                 ...(opts.harness ? { harness: opts.harness } : {}),
                 deferTerminalAction: true,

@@ -792,7 +792,7 @@ interface TickContext {
   budget: BudgetPolicy;
   enrolled: string[];
   pathOfRepo: Map<string, string>;
-  routeCache: Map<string, DispatchRoute>;
+  routeCache: Map<string, DispatchRoute & { selectedAccountHint?: string | null }>;
   /** Null until the loop identifies the selected batch; probes never reserve. */
   plannedItemIds: Set<string> | null;
   /** Primary lane slots after best-of-N reserve, consumed once per newly routed item. */
@@ -2127,7 +2127,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       if (!current) return noContextRoute(item, cfg);
       if (!current.itemInfo.has(item.id)) current.itemInfo.set(item.id, { title: item.title, source: item.source });
       const cached = current.routeCache.get(item.id);
-      let decision: DispatchRoute;
+      let decision: DispatchRoute & { selectedAccountHint?: string | null };
       if (cached) {
         decision = cached;
       } else {
@@ -2156,10 +2156,17 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
               : plan.capReason,
           }];
         })) as Record<FleetEngine, LanePlan>;
-        decision = routeWorkItem(item, legacy, { ...current.router, lanes, cfg,
+        const routeContext = { ...current.router, lanes, cfg,
           budget: budgetForItem(current,item.id,resolveSubscriptionMaxPercent(cfg)),
           scheduling: current.itemScheduling.get(item.id),
-          advisorySeatId: current.advisedPair?.taskId === item.id ? current.advisedPair.seatId : null });
+          advisorySeatId: current.advisedPair?.taskId === item.id ? current.advisedPair.seatId : null };
+        decision = routeWorkItem(item, legacy, routeContext);
+        if (!decision.hold && decision.lane === 'codex') {
+          // current.capacity can refresh without current.router. Bind the
+          // exact source passed to routing, then retain it with the decision.
+          const selected = routeContext.capacity.filter(seat => seat.engine === 'codex' && seat.seatId === decision.seatDecision?.seatId);
+          decision = { ...decision, selectedAccountHint:selected.length === 1 ? selected[0]!.accountHint ?? null : null };
+        }
         if (planning && !decision.hold && decision.lane !== null) {
           current.plannedLaneUse[decision.lane] = (current.plannedLaneUse[decision.lane] ?? 0) + 1;
         }
@@ -2181,6 +2188,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         ...(decision.model ? { model: decision.model } : {}),
         reason: decision.reason,
         seatDecision: decision.seatDecision,
+        ...(decision.selectedAccountHint !== undefined ? {selectedAccountHint:decision.selectedAccountHint} : {}),
         hold: decision.hold,
       };
     },
@@ -2196,6 +2204,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       }
       if (lane === DEVIN_CLI_LANE) return devinCliSeatAllows(current);
       const selectedClaude = lane === 'claude-cli' && opts.seatId !== undefined;
+      const selectedCodex = lane === 'codex' && opts.seatId !== undefined;
       if (opts.itemId !== undefined || (lane === 'grok-cli' || selectedClaude) && opts.seatId !== undefined) {
         // Selected-account execution may follow awaited planning or sandbox
         // setup. Re-read its actual authority and telemetry synchronously;
@@ -2230,8 +2239,12 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       }
       const routed = opts.itemId ? current.routeCache.get(opts.itemId) : undefined;
       if (opts.itemId && (!routed || routed.hold || routed.backend !== engine || (opts.model ?? null) !== (routed.model ?? null) ||
-        selectedClaude && routed.seatDecision?.seatId !== opts.seatId)) {
+        (selectedClaude || selectedCodex) && routed.seatDecision?.seatId !== opts.seatId)) {
         return {allowed:false,reason:'The current task engine/model route changed; a fresh admitted route is required.'};
+      }
+      if (selectedCodex && routed && (typeof routed.selectedAccountHint !== 'string' ||
+          current.capacity.find(seat => seat.engine === 'codex' && seat.seatId === opts.seatId)?.accountHint !== routed.selectedAccountHint)) {
+        return {allowed:false,reason:'The selected Codex account identity changed or is unavailable; a fresh route is required.'};
       }
       const taskBudget = budgetForItem(current,opts.itemId,opts.maxPercent);
       if (!current.policy.engines.includes(grantEngineOfLane(lane))) {

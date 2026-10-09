@@ -42,6 +42,8 @@ import type { DispatchOutcome, FleetEngine, LandingRecord, RouteHold } from '../
 export interface TickRouteDecision extends RouteDecision {
   /** The A9 SeatRouter decision behind this route ("why this seat"); null when none was consulted. */
   seatDecision: SeatDecision | null;
+  /** Original routing-source account identity; host-local and never an admission by itself. */
+  selectedAccountHint?: string | null;
   /**
    * Non-null ⇒ do NOT dispatch this item this tick (parked until a seat
    * reopens, or too large for any eligible seat and must be split — never

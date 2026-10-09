@@ -2225,6 +2225,8 @@ export interface RunOptions {
   onSelectedDevinSpawn?: (model: string, binding: DevinCliExecutionBinding) => void;
   /** Host-only exact selected Claude account/authority fence; never model input. */
   selectedClaudeAdmission?: () => boolean;
+  /** Original routed Codex principal plus current host admission; never serialized. */
+  selectedCodexAccount?: { readonly accountHint: string; admitted(): boolean };
   /** Internal caller-owned outcome revision fence; never persisted or sent to a model. */
   selectedOutcomeAdmission?: () => boolean;
   /** Partial budget overrides (merged over defaults). */

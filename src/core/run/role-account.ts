@@ -1,6 +1,7 @@
 /** Native account identity for a selected quota reading. Metadata probes never
  * request inference or grant funding; the role's admission owns those checks. */
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { lstatSync } from 'node:fs';
 import type { AshlrConfig } from '../types.js';
 import { resolveAccountsRoot } from '../verse/seats.js';
 import { canonical } from '../universe/artifacts.js';
@@ -54,4 +55,13 @@ export async function observeRoleAccount(options: {
   }
   const after = roleAccountEpoch(cfg, launch, accountHint);
   return { epoch: observed && !signal.aborted && admitted() && before === after ? after : null, uncertain };
+}
+
+/** Host-only stat seal shared by selected native roles and producers. */
+export function nativeLaunchEpoch(launch: NativeSeatLaunch): string {
+  return canonical([launch, ...[...launch.command,launch.executable,join(dirname(launch.command[1]),'profile.json')].map(path => {
+    const s=lstatSync(path,{bigint:true});
+    if (!s.isFile() || s.isSymbolicLink()) throw new Error('Native launch identity unavailable');
+    return [path,s.dev,s.ino,s.size,s.mtimeNs,s.ctimeNs].map(String);
+  })]);
 }

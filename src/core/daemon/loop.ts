@@ -163,6 +163,7 @@ import { supportsRoleExecution } from '../run/role-invocation.js';
 import { grantEngineOfLane } from '../fleet/fleet-types.js';
 import { fleetLaneOf, routingRequestFor } from '../fleet/dispatch-router.js';
 import { routeSeat } from '../routing/router.js';
+import { readCapacitySnapshot } from '../routing/budget-store.js';
 import { engineOfSeatId } from '../routing/policy.js';
 // Type-only: erased at compile time, so this does NOT eagerly load
 // self-improve.js/post-merge-credit.js at module init (those are still
@@ -7783,6 +7784,13 @@ export async function tick(
             try { return hooks.seatAllows(backend!, { maxPercent:resolveSubscriptionMaxPercent(routingCfg), itemId:item.id, model }).allowed === true ? selectedDevinBinding : null; }
             catch { return null; }
           } : undefined;
+        const selectedCodexAccount = standingSeatId && fleetLaneOf(backend, routingCfg) === 'codex'
+          ? { accountHint:standingRoute?.selectedAccountHint ?? '', admitted:() => {
+            const hint = standingRoute?.selectedAccountHint;
+            if (typeof hint !== 'string' || !/^[a-f0-9]{64}$/.test(hint) || !selectedDispatchAdmission()) return false;
+            const rows = readCapacitySnapshot()?.seats.filter(row => row.engine === 'codex' && row.seatId === standingSeatId);
+            return rows?.length === 1 && rows[0]!.accountHint === hint;
+          } } : undefined;
         const selectedClaudeAdmission = standingSeatId && ['claude','claude-cli'].includes(String(backend))
           ? () => {
             if (!stillOwnsTick() || stopRequested() || dispatchSignal.aborted) return false;
@@ -7805,6 +7813,7 @@ export async function tick(
               ...(selectedGrokAdmission ? { selectedGrokAdmission } : {}),
               ...(selectedDevinAdmission ? { selectedDevinAdmission } : {}),
               ...(selectedClaudeAdmission ? { selectedClaudeAdmission } : {}),
+              ...(selectedCodexAccount ? { selectedCodexAccount } : {}),
               ...(dispatchHarness ? { harness: dispatchHarness } : {}),
               budget: itemBudget,
               ...(_bonCandidates ? { candidates: _bonCandidates as never } : {}),
@@ -7961,6 +7970,7 @@ export async function tick(
               ...(selectedDevinAdmission ? { selectedDevinAdmission } : {}),
               ...(onSelectedDevinSpawn ? { onSelectedDevinSpawn } : {}),
               ...(selectedClaudeAdmission ? { selectedClaudeAdmission } : {}),
+              ...(selectedCodexAccount ? { selectedCodexAccount } : {}),
               ...(outcomeDispatch || selectedTaskAdmission ? { selectedOutcomeAdmission: selectedDispatchAdmission } : {}),
               ...(dispatchHarness ? { harness: dispatchHarness } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,

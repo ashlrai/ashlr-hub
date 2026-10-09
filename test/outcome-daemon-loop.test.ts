@@ -18,6 +18,7 @@ vi.mock('../src/core/run/best-of-n.js', async original => ({ ...await original<t
 vi.mock('../src/core/portfolio/backlog.js', async original => ({ ...await original<typeof import('../src/core/portfolio/backlog.js')>(), buildBacklog: (...args: unknown[]) => mocks.backlog(...args) }));
 vi.mock('../src/core/fleet/automerge-pass.js', async original => ({ ...await original<typeof import('../src/core/fleet/automerge-pass.js')>(), runAutoMergePass: async () => ({ merged: 0, attempted: 0, judged: 0, judgePerPass: 0 }) }));
 import { tick } from '../src/core/daemon/loop.js';
+import { writeCapacitySnapshot } from '../src/core/routing/budget-store.js';
 import { OutcomeManagerCoordinator } from '../src/core/goals/outcome-manager.js';
 import { saveRun } from '../src/core/run/orchestrator.js';
 import { prepareResourceNativeProfile, resolveNativeSeatLaunch } from '../src/core/resources/native-profile.js';
@@ -94,6 +95,25 @@ describe('durable outcomes through the real resident tick', () => {
     expect(f.node().attempts).toHaveLength(1); expect(f.node().attempts[0]).toMatchObject({ state: 'failed', proposalId: null });
     mocks.backlog.mockResolvedValue({ generatedAt: new Date().toISOString(), repos: [f.repo.dir], items: [f.item] });
     await f.drive(); expect(mocks.goal).toHaveBeenCalledTimes(1); expect(f.node().attempts).toHaveLength(1); expect(f.coordinator.project().complete).toBe(false);
+  });
+  it('passes the original routed Codex identity and refuses same-seat replacement in its live host binding', async () => {
+    const f = await fixture();
+    const hint = 'a'.repeat(64),seatId = 'codex-original';
+    const capacity = (accountHint:string) => ({seatId,engine:'codex' as const,label:'Offline Codex',free:false,windows:[],
+      signedOut:false,reachable:null,contextWindow:256000,observedAt:new Date().toISOString(),spentTodayUsd:null,accountHint});
+    writeCapacitySnapshot([capacity(hint)]);
+    f.hooks.route = () => ({backend:'codex',tier:'frontier',model:null,hold:null,reason:'original offline route',selectedAccountHint:hint,
+      seatDecision:{seatId,candidates:[seatId],exclusions:[],why:'offline',summary:'offline',mode:'balanced'}});
+    mocks.goal.mockImplementation(async (goal, _cfg, opts) => {
+      expect(opts.selectedCodexAccount.accountHint).toBe(hint);
+      expect(opts.selectedCodexAccount.admitted()).toBe(true);
+      writeCapacitySnapshot([capacity('b'.repeat(64))]);
+      expect(opts.selectedCodexAccount.accountHint).toBe(hint);
+      expect(opts.selectedCodexAccount.admitted()).toBe(false);
+      return run(opts.runId,opts.engine,goal);
+    });
+    await f.drive();expect(mocks.goal).toHaveBeenCalledTimes(1);
+    expect(f.node().attempts[0]).toMatchObject({state:'failed',proposalId:null});
   });
   it('builtin producer receives the same exact generation/full prompt and selected admission', async () => {
     const f = await fixture('builtin');
@@ -229,7 +249,7 @@ describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'funct
     expect(manager.project().next?.intent).toBe('replan');
     mocks.policy.mockReturnValue({ switch: 'autonomous', repos: [{ nameWithOwner: 'fixture/outcome', maxRisk: 'medium' }],
       engines: ['codex'], spend: { seats: { 'codex-personal': { enabled: true, roles: ['producer'] } } } });
-    f.hooks.route = () => ({ backend: 'codex', tier: 'frontier', model: 'frontier-test', hold: null, reason: 'offline exact manager route',
+    f.hooks.route = () => ({ backend: 'codex', tier: 'frontier', model: 'frontier-test', hold: null, reason: 'offline exact manager route', selectedAccountHint:'c'.repeat(64),
       seatDecision: { seatId: 'codex-personal', candidates: ['codex-personal'], exclusions: [], why: 'offline', summary: 'offline', mode: 'balanced' } });
     f.cfg.foundry = { ...f.cfg.foundry, allowedBackends: ['codex'], bestOfN: 3, models: { ...f.cfg.foundry?.models, codex: 'frontier-test' } };
     const profiles = join(fx.ashlrDir, 'native-profiles'); mkdirSync(profiles, { recursive: true, mode: 0o700 });
@@ -240,6 +260,8 @@ describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'funct
       { id: 'codex-personal', provider: 'codex', command: profile.command },
     ] }), { mode: 0o600 });
     f.cfg.verse = { ...f.cfg.verse, accountsRoot };
+    writeCapacitySnapshot([{seatId:'codex-personal',engine:'codex',label:'Offline Manager',free:false,windows:[],
+      signedOut:false,reachable:null,contextWindow:256000,observedAt:new Date().toISOString(),spentTodayUsd:null,accountHint:'c'.repeat(64)}]);
     expect(resolveNativeSeatLaunch({ accountsRoot, provider: 'codex', seatId: 'codex-personal' }).ok).toBe(true);
     mocks.goal.mockClear();
     return { ...f, manager, profile, accountsRoot, admission };
@@ -270,6 +292,8 @@ describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'funct
       expect(opts).toMatchObject({ engine: 'codex', seatId: 'codex-personal', model: 'frontier-test', tools: true,
         sandboxEngine: true, requireSandbox: true, workItemId: stage.workItemId, workItemGenerationId: stage.generationId });
       expect(opts.selectedOutcomeAdmission()).toBe(true);
+      expect(opts.selectedCodexAccount.accountHint).toBe('c'.repeat(64));
+      expect(opts.selectedCodexAccount.admitted()).toBe(true);
       expect(stage.route).toEqual({ engine: 'codex', seatId: 'codex-personal', model: 'frontier-test', tier: 'frontier' });
       expect(goal).toContain('tool-capable manager');
       const result = managerRun(opts.runId, goal);
