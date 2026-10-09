@@ -14,19 +14,28 @@ import type { PlaybookMatch, PlaybookRef, TaskKind } from './types.js';
  * Fleet: append the playbook a daemon work item asks for (by `!macro` in its
  * title/detail — goals, Leader dispatches) or auto-matches, and record the
  * use against the dispatch `runId`, which the resulting Proposal carries.
- * Synchronous (fleet goal assembly is). Never throws.
+ * Synchronous (fleet goal assembly is). Never throws. Read-only routing previews
+ * pass recordUse:false, rendering the same block without recording a launch.
  */
-export function withFleetPlaybook(goal: string, item: { repo: string; title: string; detail: string }, runId: string): string {
+export interface PreparedFleetPlaybook {
+  prompt: string;
+  use: { ref: PlaybookRef; match: PlaybookMatch } | null;
+}
+/** Read-only resolution/rendering; the selected immutable ref can be recorded after admission. */
+export function prepareFleetPlaybook(goal: string, item: { repo: string; title: string; detail: string }): PreparedFleetPlaybook {
   try {
     const resolved = resolvePlaybookSync({ text: `${item.title}\n${item.detail}`, repo: item.repo });
-    if (!resolved) return goal;
+    if (!resolved) return { prompt: goal, use: null };
     const block = renderPlaybookBlock(resolved.playbook);
-    if (!block) return goal;
-    void recordPlaybookUse({ lane: 'fleet', key: runId, ref: resolved.ref, match: resolved.match });
-    return appendPlaybookBlock(goal, block);
-  } catch {
-    return goal;
-  }
+    return block ? { prompt: appendPlaybookBlock(goal, block), use: { ref: resolved.ref, match: resolved.match } }
+      : { prompt: goal, use: null };
+  } catch { return { prompt: goal, use: null }; }
+}
+export function withFleetPlaybook(goal: string, item: { repo: string; title: string; detail: string }, runId: string,
+  opts: { recordUse?: boolean } = {}): string {
+  const prepared = prepareFleetPlaybook(goal, item);
+  if (opts.recordUse !== false && prepared.use) void recordPlaybookUse({ lane: 'fleet', key: runId, ...prepared.use });
+  return prepared.prompt;
 }
 
 export type LaunchPlaybook =
