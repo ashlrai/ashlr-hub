@@ -2,10 +2,9 @@
  * V3.10 Track B (U5): the fleet dispatch router — SPEC-310B §3 "Routing" /
  * "Lanes" / §7 U5 key tests:
  *   - Claude is excluded while its 5-hour window is above 70%;
- *   - Codex waits for its machine `resetsAt`, and stays off until the Leader
- *     enables its lanes;
+ *   - Codex waits for its machine `resetsAt`, with explicit Off respected;
  *   - an item that fits no seat is split — NEVER sent to a local model;
- *   - presence caps (local 2, Claude producer slice closed; unknown = present);
+ *   - presence protects the shared local runtime without closing native lanes;
  *   - lanes outside the grant, seats without the producer role, demoted routes.
  * Pure: no I/O, fixed clock.
  */
@@ -233,24 +232,53 @@ describe('Codex waits for its reset', () => {
     expect(route.backend).not.toBe('llama-server');
   });
 
-  it('stays off (zero Codex slots) until the Leader enables Codex lanes', () => {
+  it.each([null, true])('opens grant-authorized Codex lanes with directive %s', (codexEnabled) => {
     const planned = planLanes({
       policy: policy(),
-      directives: null,
+      directives: { v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: null, codexEnabled },
       presence: ABSENT,
       localServingSlots: 4,
       engineUnavailable: {},
     });
-    expect(planned.codex.slots).toBe(0);
-    expect(planned.codex.capReason).toBe('Codex stays off until the Leader turns it on after the usage reset (you can veto it).');
-    const enabled = planLanes({
-      policy: policy(),
-      directives: { v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: null, codexEnabled: true },
+    expect(planned.codex).toEqual({ lane: 'codex', slots: 2, capReason: null });
+  });
+
+  it('opens eligible Codex without a Leader directive, but preserves explicit Off', () => {
+    const input = {
+      policy: policy(), directives: null,
       presence: ABSENT,
       localServingSlots: 4,
       engineUnavailable: {},
-    });
-    expect(enabled.codex.slots).toBe(2);
+    };
+    const open = planLanes(input);
+    expect(open.codex.slots).toBe(2);
+    const capacity = [codex(20, IN_3H)];
+    const work = item({ tags: ['difficulty:high', 'context:150000'] });
+    expect(routeWorkItem(work, LEGACY_LOCAL, ctx(capacity, { lanes: open })).backend).toBe('codex');
+    const off = planLanes({ ...input, directives: { v: 1, updatedAt: NOW_ISO, routerTuning: null, grokLanes: null, codexEnabled: false } });
+    expect(off.codex).toEqual({ lane: 'codex', slots: 0, capReason: 'The Leader has switched Codex lanes off.' });
+    expect(routeWorkItem(work, LEGACY_LOCAL, ctx(capacity, { lanes: off })).hold?.kind).toBe('park');
+  });
+
+  it.each(['off', 'stale', 'unknown', 'exhausted'] as const)('still denies Codex with %s account evidence despite an open lane', (state) => {
+    const reading = codex(state === 'exhausted' ? 100 : 20, IN_3H);
+    if (state === 'stale') reading.observedAt = new Date(NOW - 60 * 60_000).toISOString();
+    if (state === 'unknown') { reading.observedAt = null; reading.windows = []; }
+    const budget = defaultBudgetPolicy();
+    if (state === 'off') budget.seats[reading.seatId] = { seatId: reading.seatId, enabled: false, reservePercent: 0 };
+    const planned = planLanes({ policy: policy(), directives: null, presence: ABSENT, localServingSlots: 4, engineUnavailable: {} });
+    const route = routeWorkItem(item({ tags: ['difficulty:high', 'context:150000'] }), LEGACY_LOCAL, ctx([reading], { budget, lanes: planned }));
+    expect(planned.codex.slots).toBe(2);
+    expect(route.hold?.kind).toBe('park');
+    expect(route.backend).toBe('builtin');
+  });
+
+  it('keeps Codex grant roles and unavailable-engine checks authoritative', () => {
+    const input = { policy: policy(), directives: null, presence: ABSENT, localServingSlots: 4, engineUnavailable: {} };
+    const p = policy();
+    p.spend.seats['codex-personal'] = seat('codex-personal', ['judge']);
+    expect(planLanes({ ...input, policy: p }).codex.slots).toBe(0);
+    expect(planLanes({ ...input, engineUnavailable: { codex: 'Account-bound native adapter unavailable.' } }).codex).toMatchObject({ slots: 0, capReason: 'Account-bound native adapter unavailable.' });
   });
 
   it('routes to Codex once its window has headroom and its lane is open', () => {
@@ -348,12 +376,12 @@ describe('presence caps', () => {
     expect(planLanes({ ...input, engineUnavailable: { local: 'Runtime unavailable' } }).local).toMatchObject({ slots: 0, capReason: 'Runtime unavailable' });
   });
 
-  it('holds the local lane to 2 and closes the Claude producer slice while Mason is present', () => {
+  it('protects the local runtime while keeping the Claude producer lane available when present', () => {
     const present: OperatorPresence = { present: true, reason: 'A Verse chat turn is running.', evidenceAt: NOW_ISO };
     const planned = planLanes({ policy: policy(), directives: null, presence: present, localServingSlots: 4, engineUnavailable: {} });
     expect(planned.local.slots).toBe(2);
     expect(planned.local.capReason).toMatch(/You are active/);
-    expect(planned['claude-cli'].slots).toBe(0);
+    expect(planned['claude-cli'].slots).toBe(1);
   });
 
   it('treats unknown presence as present', () => {
@@ -361,6 +389,18 @@ describe('presence caps', () => {
     const planned = planLanes({ policy: policy(), directives: null, presence: unknown, localServingSlots: 4, engineUnavailable: {} });
     expect(planned.local.slots).toBe(2);
     expect(planned.local.capReason).toMatch(/Presence is unknown/);
+    expect(planned['claude-cli'].slots).toBe(1);
+  });
+
+  it.each([true, null])('routes eligible Claude work with presence %s using actual account limits', (present) => {
+    const planned = planLanes({ policy: policy(), directives: null, presence: { present, reason: 'Interactive state', evidenceAt: null }, localServingSlots: 4, engineUnavailable: {} });
+    const work = item({ tags: ['difficulty:high', 'context:150000'] });
+    expect(routeWorkItem(work, LEGACY_LOCAL, ctx([claude(20, 20)], { lanes: planned })).backend).toBe('claude');
+    for (const reading of [claude(75, 20), claude(20, 70)]) {
+      const held = routeWorkItem(work, LEGACY_LOCAL, ctx([reading], { lanes: planned }));
+      expect(held.hold?.kind).toBe('park');
+      expect(held.backend).toBe('builtin');
+    }
   });
 
   it('runs the full local width when absent, bounded by the runtime\'s serving slots', () => {

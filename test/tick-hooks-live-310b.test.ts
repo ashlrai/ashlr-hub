@@ -26,7 +26,7 @@ import { fleetLaneOf } from '../src/core/fleet/dispatch-router.js';
 import { resolveEngineSpec } from '../src/core/run/engine-registry.js';
 import { fleetPrKey, type ObservedPrState, type OpenFleetPrRef } from '../src/core/fleet/backpressure.js';
 import { emptyBackpressureState } from '../src/core/fleet/backpressure.js';
-import { defaultBudgetPolicy } from '../src/core/routing/policy.js';
+import { defaultBudgetPolicy, defaultSeatPolicy } from '../src/core/routing/policy.js';
 import type { SeatCapacity } from '../src/core/routing/headroom.js';
 import type { EffectivePolicy, LedgerEntry } from '../src/core/authority/types.js';
 import type { DispatchOutcome, FleetTask, LandingRecord, RepoHold, SetRepoHoldRequest } from '../src/core/fleet/fleet-types.js';
@@ -933,11 +933,14 @@ describe('review c9 — the Leader\'s class-B Codex enable passes the final seat
       engines: ['local', 'grok-cli', 'claude-cli', 'codex'],
       spend: { ...base.spend, seats: { ...base.spend.seats, codex: { seatId: 'codex', enabled: true, reserveFloorPercent: 0, maxSessionWindowPercent: null, roles: ['producer', 'judge'] } } },
     };
-    // Master's gate re-reads Mason's STORED budget, where Codex is off in every
-    // mode — exactly what the real subscriptionAllows answers.
+    // A stored legacy Off preference is distinct from the current balanced
+    // default. The directive changes this tick while master's mock still reads Off.
     const calls: string[] = [];
     const deps = {
       ...h.deps,
+      loadBudget: () => ({ ...defaultBudgetPolicy(), seats: {
+        codex: { ...defaultSeatPolicy('balanced', 'codex', 'codex'), enabled: false },
+      } }),
       capacitySnapshot: () => ({ v: 1 as const, publishedAt: NOW_ISO, seats: [grokSeat(), claudeSeat(), seat] }),
       directives: () => ({ v: 1 as const, updatedAt: NOW_ISO, routerTuning: null, grokLanes: null, codexEnabled: true }),
       subscriptionAllows: (engine: EngineId) => {
@@ -954,7 +957,7 @@ describe('review c9 — the Leader\'s class-B Codex enable passes the final seat
     hooks.effectiveConfig(CODEX_CFG);
     await hooks.beforeTick({ ...hookCtx, cfg: CODEX_CFG });
     const verdict = hooks.seatAllows('codex' as EngineId, { maxPercent: 90 });
-    expect(verdict).toMatchObject({ allowed: true });
+    expect(verdict, JSON.stringify(verdict)).toMatchObject({ allowed: true });
     expect(verdict.reason).toMatch(/enabled by the Leader/);
     expect(world.calls).toEqual([]);
     // The router and the gate agree: work routed to Codex is not stranded.

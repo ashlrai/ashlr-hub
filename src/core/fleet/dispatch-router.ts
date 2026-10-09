@@ -19,15 +19,16 @@
  *  - Claude is excluded while its 5-hour window is above the grant's session
  *    ceiling (70% by decision) and whenever the weekly reserve is reached —
  *    A9's `assessSeat`, applied over the CLAMPED policy.
- *  - Codex runs only after the Leader enabled its lanes (class B, after the
- *    reset) AND the grant lists it; a spent Codex window parks work until its
- *    machine `resetsAt`.
+ *  - Native lanes follow their grant and account policy without requiring a
+ *    provider-specific enable action. An explicit Codex Off directive holds
+ *    its lane; a spent window parks work until its machine `resetsAt`.
  *  - An item that fits no seat's context is held as `split` — it is NEVER
  *    sent to a local model instead. An item that would fit a seat that is only
  *    budget-excluded is held as `park` until the earliest known reopening.
  *  - Presence caps: while Mason is present (a live Verse turn or a Claude Code
- *    transcript under 15 minutes old) the local lane runs at most 2 agents and
- *    the Claude producer slice is closed. Unknown presence counts as present.
+ *    transcript under 15 minutes old) the local lane runs at most 2 agents.
+ *    Unknown presence counts as present for that shared local runtime. Native
+ *    subscription workers use their measured account reserves and windows.
  *  - A lane outside the grant's current rollout stage has zero slots.
  *  - A seat is a PRODUCER only when the grant gives it the `producer` role;
  *    claude-a is judge / Leader only by default.
@@ -81,8 +82,8 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * Default slots per lane (SPEC-310B §3 table). Codex is 2 once the Leader has
- * enabled it (it is 0 until then — see `planLanes`).
+ * Default slots per lane (SPEC-310B §3 table), narrowed by actual readiness,
+ * grant scope and explicit lane controls in `planLanes`.
  */
 export const LANE_DEFAULT_SLOTS: Readonly<Record<FleetEngine, number>> = Object.freeze({
   local: 4,
@@ -330,12 +331,9 @@ export function planLanes(input: LanePlanInput): Record<FleetEngine, LanePlan> {
       }
     }
     if (lane === 'codex') {
-      if (input.directives?.codexEnabled !== true) {
+      if (input.directives?.codexEnabled === false) {
         slots = 0;
-        // Enabling Codex is a class-B Leader action: it waits out a veto
-        // window, which is what the operator can act on — say that, not the
-        // action class.
-        capReason = 'Codex stays off until the Leader turns it on after the usage reset (you can veto it).';
+        capReason = 'The Leader has switched Codex lanes off.';
       }
     }
     if (lane === 'local') {
@@ -359,8 +357,6 @@ export function planLanes(input: LanePlanInput): Record<FleetEngine, LanePlan> {
     if (lane === 'claude-cli') {
       if (!grantHasProducerFor(input.policy, 'claude-cli')) {
         narrow(0, 'The grant gives claude-a no producer role — it judges and runs the Leader only.');
-      } else if (presentOrUnknown) {
-        narrow(0, 'You are active (or presence is unknown), so the Claude producer slice is held for your own session.');
       }
     } else if (lane === DEVIN_CLI_LANE) {
       if (!grantHasProducerFor(input.policy, lane)) narrow(0, 'The grant gives Devin no producer seat.');
