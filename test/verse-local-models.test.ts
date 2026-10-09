@@ -410,6 +410,8 @@ describe('verse seats — local seat visibility by tool capability', () => {
       fs.writeFileSync(path.join(root, 'connections.json'), JSON.stringify({ accounts: [] }));
       const discovery = await discoverSeats(makeConfig(), {
         accountsRoot: root,
+        // Capability discovery tests metadata; never probe the operator's login shell.
+        localHarness: async () => ({ executable: '/inert/claude', path: '/inert' }),
         ollamaBaseUrl: 'http://127.0.0.1:11434',
         claudeUsage: () => ({ tokens5h: 0, tokens7d: 0, messages5h: 0, messages7d: 0, readAt: 0, filesScanned: 0 }),
         fetchImpl: fakeFetch({
