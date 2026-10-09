@@ -388,8 +388,11 @@ the session between **Standard** and **Expansive**, from the next turn:
 | Engine | Standard (default for new chats) | Expansive |
 |---|---|---|
 | Claude 1M models (Fable, Opus 5.x / 4.8, Sonnet 5) | compacts at ≈367k | compacts at ≈967k |
-| Codex GPT-6 / GPT-5.6 | 258.4k window, compacts at ≈245k | 828.4k window, compacts at ≈785k |
-| Grok, local, Claude 200k models, GPT-5.5 | their native window | not offered |
+| Codex GPT-6.1 Sol / GPT-6 / GPT-5.6 | 258.4k window, compacts at ≈245k | 828.4k window, compacts at ≈785k |
+| Grok, local, Claude 200k models | their native window | not offered |
+
+Saved GPT-5.5 sessions retain their native-window compatibility; it is not in
+the default model list. A seat's own catalog takes precedence over these defaults.
 
 Expansive costs more usage on **every** later turn, because each turn re-sends
 the whole conversation; it pays off for coupled, cross-cutting work that needs a
@@ -705,7 +708,7 @@ number comes from, is `docs/VERSE-CONTEXT.md` §1.
 |--------|----------------|----------------------|-----------------|
 | `claude` | Fable 5.1, Opus 5.5, Fable 5, Opus 5, Opus 4.8, Sonnet 5 | 1M · ≈367k (≈967k expansive) | `#c96442` |
 | `claude` | Opus 4.5, Haiku 4.5 | 200k · ≈167k | `#c96442` |
-| `codex` | the seat's own catalog — GPT-6 Astra / Sol / Luna, GPT-5.6 Sol / Terra / Luna, GPT-5.5 | 258.4k · ≈245k (828.4k · ≈785k expansive, not GPT-5.5) | `#10a37f` |
+| `codex` | the seat's own catalog — GPT-6.1 Sol, GPT-6 Astra / Sol / Luna, GPT-5.6 Sol / Terra / Luna | 258.4k · ≈245k (828.4k · ≈785k expansive) | `#10a37f` |
 | `grok` | the seat's own catalog — Grok 4.7, Grok 4.7 Fast, Grok 4.6, Grok 4.5 | 500k · 400k | `#6b7280` |
 | `local` | Ollama tags that support tool use | what the runner serves · window − 33k | `#7c5cff` |
 
@@ -921,9 +924,10 @@ reasoning, and writes a memo: the bottleneck, one move with an expected result
 and a date, goals, standards, and questions for you. It runs daily and after
 notable events, with three full runs a day by default and optional unlimited
 Leader preferences, plus check-ins every 2 hours in
-working hours when the evidence changed. Seats fall back Grok → fast local →
-large local, with Claude only for a weekly deep run that fits inside your
-reserve (or by opt-in), and never Codex. Failed runs retry at 15 minutes, 45
+working hours when the evidence changed. Eligible account-bound Claude,
+Codex, Grok, Devin and local resources share provider-neutral role selection;
+the standing grant, available usage, reserve settings and local-only mode
+determine which can run. Failed runs retry at 15 minutes, 45
 minutes and 2 hours. With no standing grant it runs on free local models or not
 at all.
 From the CLI, `ashlr leader tick` is the same pass the daemon makes: it applies
