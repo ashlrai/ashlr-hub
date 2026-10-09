@@ -70,6 +70,13 @@ credits and Bot on-demand billing are not included allowance to spend before a r
 Expand the local resource to inspect host CPU, RAM, runtime-reported model
 residency and recorded task speed. These measurements have different meanings:
 
+The fleet also uses complete, fresh runtime slot activity to size new local
+work. Total serving capacity and currently available slots are separate facts.
+Existing experiment reservations and observed occupancy are counted once;
+new experiments reserve their slots after the observation. Unknown or stale
+activity retains the existing configured-capacity policy. CPU, RAM and warm
+decoder speed do not impose additional routing limits.
+
 - **Host CPU** is busy time across all cores over the displayed sampling interval.
 - **Host RAM** is total and OS free memory. Free memory is not macOS memory
   pressure or a safe model-allocation limit; model residency is reported separately.

@@ -526,6 +526,36 @@ describe('slot capacity', () => {
     const capacity = deriveSlotCapacity(reading({ body: { total_slots: 2 } }), reading({ body: [{ state: 1 }, { state: 0 }] }));
     expect(capacity.busy).toBe(1);
   });
+
+  it.each([
+    [{ is_processing: false }],
+    [{}, { is_processing: false }],
+    [null, { is_processing: false }],
+    [{ state: NaN }, { state: 0 }],
+    [{ state: Infinity }, { state: 0 }],
+    [{ state: 0.5 }, { state: 0 }],
+    [{ id: 0, is_processing: false }, { id: 0, is_processing: false }],
+    [{ id: 0, is_processing: false }, { id: '0', is_processing: false }],
+    [{ id: {}, is_processing: false }, { id: 1, is_processing: false }],
+    [{ state: 0 }, { state: 0 }, { state: 0 }],
+  ].map((body) => ({ body })))('retains total capacity without inventing idle from incomplete activity %j', ({ body }) => {
+    expect(deriveSlotCapacity(reading({ body: { total_slots: 2 } }), reading({ body })))
+      .toEqual({ configured: 2, busy: null, idle: null, source: 'props' });
+  });
+
+  it('does not treat an unsuccessful slot response as available work', () => {
+    expect(deriveSlotCapacity(reading({ body: { total_slots: 2 } }), reading({ httpStatus: 503, body: [{ state: 0 }, { state: 0 }] })))
+      .toEqual({ configured: 2, busy: null, idle: null, source: 'props' });
+    expect(deriveSlotCapacity(reading({ body: { total_slots: 2 } }), reading({ error: 'invalid body', body: [{ state: 0 }, { state: 0 }] })))
+      .toEqual({ configured: 2, busy: null, idle: null, source: 'props' });
+  });
+
+  it('uses explicit modern processing flags and keeps total distinct from full occupancy', () => {
+    expect(deriveSlotCapacity(reading({ body: { total_slots: 2 } }), reading({ body: [{ id: 0, is_processing: true }, { id: 1, is_processing: true }] })))
+      .toEqual({ configured: 2, busy: 2, idle: 0, source: 'props' });
+    expect(deriveSlotCapacity(reading({ body: { total_slots: 1 } }), reading({ body: [{ is_processing: false, state: 1 }] })))
+      .toEqual({ configured: 1, busy: 0, idle: 1, source: 'props' });
+  });
 });
 
 describe('snapshot composition', () => {

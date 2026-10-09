@@ -190,15 +190,29 @@ export function deriveSlotCapacity(props: EndpointReading, slots: EndpointReadin
   }
 
   let busy: number | null = null;
-  if (slotList !== null) {
-    busy = slotList.filter((slot) => {
-      if (typeof slot !== 'object' || slot === null) return false;
+  if (slots.httpStatus === 200 && slots.error === null && slotList !== null && slotList.length === configured) {
+    const ids = new Set<string>();
+    const activity = slotList.map((slot): boolean | null => {
+      if (typeof slot !== 'object' || slot === null) return null;
       const record = slot as Record<string, unknown>;
-      if (record['is_processing'] === true) return true;
+      // IDs are optional in older builds. Identifiable duplicates cannot
+      // establish complete coverage, even when the array length matches.
+      if (Object.hasOwn(record, 'id')) {
+        const id = record['id'];
+        if (!(typeof id === 'number' && Number.isSafeInteger(id) && id >= 0)
+          && !(typeof id === 'string' && id.trim().length > 0)) return null;
+        const key = String(id).trim();
+        if (ids.has(key)) return null;
+        ids.add(key);
+      }
+      if (typeof record['is_processing'] === 'boolean') return record['is_processing'];
       // Older builds report a numeric state; 0 is idle, anything else is not.
       const state = record['state'];
-      return typeof state === 'number' && state !== 0;
-    }).length;
+      return typeof state === 'number' && Number.isSafeInteger(state) ? state !== 0 : null;
+    });
+    // Unknown or partial activity must not masquerade as an idle slot. Total
+    // configured capacity remains independently usable by existing callers.
+    if (activity.every((value) => value !== null)) busy = activity.filter(Boolean).length;
   }
 
   const idle = configured !== null && busy !== null ? Math.max(0, configured - busy) : null;
