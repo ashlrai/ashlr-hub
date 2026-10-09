@@ -1,7 +1,7 @@
 //! Mason's personal lexicon (`lexicon serve`, 127.0.0.1:41733) from Rust.
 //!
 //! The Verse page never talks to it: the bearer token lives in
-//! `~/.config/lexicon/serve.json` and a browser-origin call would need a CORS
+//! Lexicon's `serve.json` and a browser-origin call would need a CORS
 //! entry. Native reads the token per request, sends it only to the loopback
 //! port named in that same file, and never logs it or puts it in an error.
 //!
@@ -11,7 +11,9 @@
 //!   whenever the server answers; when it does not, the cached term map is
 //!   applied locally (whole-word, case-insensitive alias → canonical) and the
 //!   final is marked `cached` (the pill shows a quiet "raw" badge).
-//! - Partials only ever use the in-memory cached map: no HTTP per partial.
+//!   Only confirmed global terms are cached: project trust can change while
+//!   the server is offline, so project corrections require live normalize.
+//! - Partials only use a cached map for their exact cwd: no HTTP per partial.
 //! - `GET /export/whisper-prompt` biases the whisper fallback.
 
 use std::{
@@ -33,7 +35,7 @@ const FETCH_BUDGET: Duration = Duration::from_secs(3);
 const CACHE_REFRESH: Duration = Duration::from_secs(10 * 60);
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
-/// `~/.config/lexicon/serve.json` → `(port, token)`.
+/// Lexicon's `serve.json` → `(port, token)`.
 #[derive(Deserialize)]
 struct ServeConfig {
     port: Option<u16>,
@@ -41,7 +43,31 @@ struct ServeConfig {
 }
 
 pub fn default_serve_config_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/lexicon/serve.json"))
+    serve_config_path(
+        std::env::var_os("LEXICON_PATH").as_deref(),
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+}
+
+fn serve_config_path(
+    lexicon_path: Option<&std::ffi::OsStr>,
+    config_home: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    // Lexicon places serve.json beside the global lexicon, including a
+    // relative LEXICON_PATH override. Empty overrides fall through.
+    if let Some(path) = lexicon_path.filter(|p| !p.is_empty()) {
+        let path = Path::new(path);
+        return Some(path.parent().unwrap_or(path).join("serve.json"));
+    }
+    // Lexicon trims XDG_CONFIG_HOME and ignores blank/relative values.
+    if let Some(path) = config_home.and_then(|p| p.to_str()).map(str::trim) {
+        if Path::new(path).is_absolute() {
+            return Some(PathBuf::from(path).join("lexicon/serve.json"));
+        }
+    }
+    home.map(|home| PathBuf::from(home).join(".config/lexicon/serve.json"))
 }
 
 fn read_serve_config(path: &Path) -> Option<(u16, String)> {
@@ -169,6 +195,8 @@ pub struct CachedTerm {
     pub aliases: Vec<String>,
     #[serde(default, rename = "caseSensitive")]
     pub case_sensitive: bool,
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,8 +209,24 @@ fn term_map_from_lexicon_response(body: &[u8]) -> Option<TermMap> {
     #[derive(Deserialize)]
     struct Resp {
         lexicon: TermMap,
+        #[serde(default, rename = "projectTrust")]
+        project_trust: Option<String>,
+        #[serde(default)]
+        paths: std::collections::HashMap<String, String>,
     }
-    let resp: Resp = serde_json::from_slice(body).ok()?;
+    let mut resp: Resp = serde_json::from_slice(body).ok()?;
+    // Project entries can override globals and declare scope=global. Require
+    // positive server provenance, rather than trusting a term's own scope.
+    // Any project context (even untrusted/changed) remains live-only.
+    let global_only = resp
+        .paths
+        .get("global")
+        .is_some_and(|path| !path.is_empty())
+        && !resp.paths.contains_key("project")
+        && resp.project_trust.is_none();
+    resp.lexicon
+        .terms
+        .retain(|term| global_only && term.scope.as_deref() == Some("global"));
     Some(resp.lexicon)
 }
 
@@ -319,9 +363,46 @@ pub(crate) fn apply_dry_run(text: &str, raw: &[u8]) -> Option<String> {
 pub struct Lexicon {
     serve_config: Option<PathBuf>,
     cache_path: PathBuf,
-    map: Mutex<Option<TermMap>>,
-    refreshed: Mutex<Option<Instant>>,
+    cache: Mutex<Option<ScopedCache>>,
     status: Mutex<LexiconStatus>,
+}
+
+/// Old unscoped cache files cannot establish which project supplied their
+/// terms. Require a versioned envelope and the config source on reload.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopedCache {
+    version: u8,
+    cwd: Option<String>,
+    serve_config: Option<PathBuf>,
+    source_stamp: Option<ConfigStamp>,
+    map: TermMap,
+    #[serde(skip)]
+    refreshed: Option<Instant>,
+}
+
+/// Config rotation invalidates fallback without persisting or hashing its
+/// bearer. This detects ordinary rewrites/atomic replacements, not deliberate
+/// tampering by a local user who can also edit the cache itself.
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+struct ConfigStamp {
+    len: u64,
+    modified_secs: u64,
+    modified_nanos: u32,
+}
+
+fn config_stamp(path: Option<&Path>) -> Option<ConfigStamp> {
+    let metadata = std::fs::metadata(path?).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(ConfigStamp {
+        len: metadata.len(),
+        modified_secs: modified.as_secs(),
+        modified_nanos: modified.subsec_nanos(),
+    })
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -333,10 +414,25 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl Lexicon {
     pub fn new(serve_config: Option<PathBuf>, cache_path: PathBuf) -> Self {
-        let map = std::fs::read(&cache_path)
+        let cache = std::fs::read(&cache_path)
             .ok()
-            .and_then(|raw| serde_json::from_slice::<TermMap>(&raw).ok());
-        let status = if map.is_some() {
+            .and_then(|raw| serde_json::from_slice::<ScopedCache>(&raw).ok())
+            .filter(|cache| {
+                cache.version == 1
+                    && cache.serve_config == serve_config
+                    && cache.source_stamp == config_stamp(serve_config.as_deref())
+            })
+            .map(|mut cache| {
+                cache
+                    .map
+                    .terms
+                    .retain(|term| term.scope.as_deref() == Some("global"));
+                cache
+            });
+        let status = if cache
+            .as_ref()
+            .is_some_and(|cache| !cache.map.terms.is_empty())
+        {
             LexiconStatus::Cached
         } else {
             LexiconStatus::None
@@ -344,8 +440,7 @@ impl Lexicon {
         Self {
             serve_config,
             cache_path,
-            map: Mutex::new(map),
-            refreshed: Mutex::new(None),
+            cache: Mutex::new(cache),
             status: Mutex::new(status),
         }
     }
@@ -358,10 +453,19 @@ impl Lexicon {
         read_serve_config(self.serve_config.as_deref()?)
     }
 
-    /// Cheap, local, for partials.
-    pub fn apply_cached(&self, text: &str) -> String {
-        match lock(&self.map).as_ref() {
-            Some(map) => apply_terms(text, map),
+    fn cache_matches(&self, cache: &ScopedCache, cwd: Option<&str>) -> bool {
+        cache.cwd.as_deref() == cwd
+            && cache.source_stamp == config_stamp(self.serve_config.as_deref())
+    }
+
+    /// Cheap, local, for partials. Exact cwd matching deliberately avoids
+    /// conflating symlinks or inferring project ancestry across trust scopes.
+    pub fn apply_cached(&self, text: &str, cwd: Option<&str>) -> String {
+        match lock(&self.cache)
+            .as_ref()
+            .filter(|cache| self.cache_matches(cache, cwd))
+        {
+            Some(cache) => apply_terms(text, &cache.map),
             None => text.to_string(),
         }
     }
@@ -371,6 +475,7 @@ impl Lexicon {
         if text.trim().is_empty() {
             return (text.to_string(), self.status());
         }
+        let source_stamp = config_stamp(self.serve_config.as_deref());
         if let Some((port, token)) = self.config() {
             // Latency: a normalize that APPLIES also records hits (a disk
             // write) — measured ~290 ms vs ~5-25 ms for a dry run. So the
@@ -380,14 +485,22 @@ impl Lexicon {
             if let Some(cwd) = cwd {
                 body["cwd"] = serde_json::Value::String(cwd.to_string());
             }
-            if let Ok((200, raw)) = http(
+            let answer = http(
                 port,
                 &token,
                 "POST",
                 "/normalize",
                 Some(&body.to_string()),
                 NORMALIZE_BUDGET,
-            ) {
+            );
+            if source_stamp != config_stamp(self.serve_config.as_deref()) {
+                self.invalidate_cache();
+                return (text.to_string(), LexiconStatus::None);
+            }
+            if matches!(answer, Ok((401 | 403, _))) {
+                self.invalidate_cache();
+            }
+            if let Ok((200, raw)) = answer {
                 if let Some(output) = apply_dry_run(text, &raw) {
                     *lock(&self.status) = LexiconStatus::Live;
                     if output != text {
@@ -408,61 +521,102 @@ impl Lexicon {
                 }
             }
         }
-        let has_map = lock(&self.map).is_some();
+        let cache = lock(&self.cache);
+        let cached = cache
+            .as_ref()
+            .filter(|cache| self.cache_matches(cache, cwd));
+        let has_map = cached.is_some_and(|cache| !cache.map.terms.is_empty());
         let status = if has_map {
             LexiconStatus::Cached
         } else {
             LexiconStatus::None
         };
         *lock(&self.status) = status;
-        (self.apply_cached(text), status)
+        let output = cached.map_or_else(|| text.to_string(), |cache| apply_terms(text, &cache.map));
+        (output, status)
     }
 
     /// Refresh the cached term map from `GET /lexicon` if it is stale (or
     /// `force`). Returns the resulting status. Blocking — call off-thread.
     pub fn refresh(&self, cwd: Option<&str>, force: bool) -> LexiconStatus {
-        let fresh = lock(&self.refreshed).is_some_and(|at| at.elapsed() < CACHE_REFRESH);
+        let fresh = lock(&self.cache).as_ref().is_some_and(|cache| {
+            self.cache_matches(cache, cwd)
+                && cache
+                    .refreshed
+                    .is_some_and(|at| at.elapsed() < CACHE_REFRESH)
+        });
         if fresh && !force {
             return self.status();
         }
+        let source_stamp = config_stamp(self.serve_config.as_deref());
         let Some((port, token)) = self.config() else {
-            return self.mark_unreachable();
+            return self.mark_unreachable(cwd);
         };
         let path = match cwd {
             Some(cwd) => format!("/lexicon?cwd={}", percent_encode(cwd)),
             None => "/lexicon".to_string(),
         };
-        match http(port, &token, "GET", &path, None, FETCH_BUDGET) {
+        let answer = http(port, &token, "GET", &path, None, FETCH_BUDGET);
+        if source_stamp != config_stamp(self.serve_config.as_deref()) {
+            self.invalidate_cache();
+            return LexiconStatus::None;
+        }
+        match answer {
             Ok((200, raw)) => match term_map_from_lexicon_response(&raw) {
                 Some(map) => {
+                    let cache = ScopedCache {
+                        version: 1,
+                        cwd: cwd.map(str::to_string),
+                        serve_config: self.serve_config.clone(),
+                        source_stamp,
+                        map,
+                        refreshed: Some(Instant::now()),
+                    };
+                    // Serialize persistence and publication under the same
+                    // lock so concurrent refreshes cannot leave different
+                    // scopes on disk and in memory or race the temp file.
+                    let mut cached = lock(&self.cache);
                     if let Some(parent) = self.cache_path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
-                    if let Ok(json) = serde_json::to_vec(&map) {
+                    if let Ok(json) = serde_json::to_vec(&cache) {
                         let tmp = self.cache_path.with_extension("json.tmp");
                         if std::fs::write(&tmp, json).is_ok() {
                             let _ = std::fs::rename(&tmp, &self.cache_path);
                         }
                     }
-                    *lock(&self.map) = Some(map);
-                    *lock(&self.refreshed) = Some(Instant::now());
+                    *cached = Some(cache);
                     *lock(&self.status) = LexiconStatus::Live;
                     LexiconStatus::Live
                 }
-                None => self.mark_unreachable(),
+                None => self.mark_unreachable(cwd),
             },
-            _ => self.mark_unreachable(),
+            Ok((401 | 403, _)) => {
+                self.invalidate_cache();
+                LexiconStatus::None
+            }
+            _ => self.mark_unreachable(cwd),
         }
     }
 
-    fn mark_unreachable(&self) -> LexiconStatus {
-        let status = if lock(&self.map).is_some() {
+    fn mark_unreachable(&self, cwd: Option<&str>) -> LexiconStatus {
+        let status = if lock(&self.cache)
+            .as_ref()
+            .is_some_and(|cache| self.cache_matches(cache, cwd) && !cache.map.terms.is_empty())
+        {
             LexiconStatus::Cached
         } else {
             LexiconStatus::None
         };
         *lock(&self.status) = status;
         status
+    }
+
+    fn invalidate_cache(&self) {
+        let mut cache = lock(&self.cache);
+        *cache = None;
+        let _ = std::fs::remove_file(&self.cache_path);
+        *lock(&self.status) = LexiconStatus::None;
     }
 
     /// `GET /export/whisper-prompt` — comma-separated canonicals for whisper's
@@ -496,16 +650,19 @@ mod tests {
                     canonical: "Ashlr.AI".into(),
                     aliases: vec!["Ashler".into(), "Ashlar".into(), "ash ler".into()],
                     case_sensitive: false,
+                    scope: Some("global".into()),
                 },
                 CachedTerm {
                     canonical: "Ashlr Verse".into(),
                     aliases: vec!["ashler verse".into()],
                     case_sensitive: false,
+                    scope: Some("global".into()),
                 },
                 CachedTerm {
                     canonical: "Grok".into(),
                     aliases: vec!["GROC".into()],
                     case_sensitive: true,
+                    scope: Some("global".into()),
                 },
             ],
         }
@@ -647,10 +804,275 @@ mod tests {
         dir
     }
 
+    fn write_cache(path: &Path, cwd: Option<&str>, cfg: Option<&Path>) {
+        let cache = ScopedCache {
+            version: 1,
+            cwd: cwd.map(str::to_string),
+            serve_config: cfg.map(Path::to_path_buf),
+            source_stamp: config_stamp(cfg),
+            map: map(),
+            refreshed: None,
+        };
+        std::fs::write(path, serde_json::to_vec(&cache).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn config_discovery_matches_lexicon_overrides() {
+        use std::ffi::OsStr;
+        let resolve = |lex: Option<&str>, xdg: Option<&str>, home: Option<&str>| {
+            serve_config_path(
+                lex.map(OsStr::new),
+                xdg.map(OsStr::new),
+                home.map(OsStr::new),
+            )
+        };
+        assert_eq!(
+            resolve(None, None, Some("/home/m")),
+            Some("/home/m/.config/lexicon/serve.json".into())
+        );
+        assert_eq!(
+            resolve(Some("/custom/words.yaml"), Some("/xdg"), None),
+            Some("/custom/serve.json".into())
+        );
+        assert_eq!(
+            resolve(Some("words.yaml"), Some("/xdg"), None),
+            Some("serve.json".into())
+        );
+        assert_eq!(resolve(Some("/"), None, None), Some("/serve.json".into()));
+        assert_eq!(
+            resolve(Some(""), Some(" /xdg "), None),
+            Some("/xdg/lexicon/serve.json".into())
+        );
+        for invalid in ["", "  ", "relative/config"] {
+            assert_eq!(
+                resolve(None, Some(invalid), Some("/home/m")),
+                Some("/home/m/.config/lexicon/serve.json".into())
+            );
+        }
+        assert_eq!(resolve(None, None, None), None);
+    }
+
+    #[test]
+    fn only_confirmed_global_terms_without_a_project_merge_are_cacheable() {
+        let raw = br#"{"paths":{"global":"/global/lexicon.yaml"},"lexicon":{"terms":[{"canonical":"Global","aliases":["g"],"scope":"global"},{"canonical":"Project","aliases":["p"],"scope":"project"},{"canonical":"Unknown","aliases":["u"]}]}}"#;
+        let map = term_map_from_lexicon_response(raw).unwrap();
+        assert_eq!(apply_terms("g p u", &map), "Global p u");
+        let mut response: serde_json::Value = serde_json::from_slice(raw).unwrap();
+        response["projectTrust"] = serde_json::json!("trusted");
+        assert!(
+            term_map_from_lexicon_response(&serde_json::to_vec(&response).unwrap())
+                .unwrap()
+                .terms
+                .is_empty()
+        );
+        response["projectTrust"] = serde_json::Value::Null;
+        response["paths"] = serde_json::json!({"project":"/project/.lexicon.yaml"});
+        assert!(
+            term_map_from_lexicon_response(&serde_json::to_vec(&response).unwrap())
+                .unwrap()
+                .terms
+                .is_empty()
+        );
+        // A project term may spoof global scope. Response provenance still
+        // excludes it, before and after trust changes.
+        response["lexicon"]["terms"][1]["scope"] = serde_json::json!("global");
+        for trust in ["trusted", "changed", "untrusted"] {
+            response["projectTrust"] = serde_json::json!(trust);
+            let map =
+                term_map_from_lexicon_response(&serde_json::to_vec(&response).unwrap()).unwrap();
+            assert_eq!(apply_terms("g p", &map), "g p");
+        }
+        response.as_object_mut().unwrap().remove("projectTrust");
+        response.as_object_mut().unwrap().remove("paths");
+        assert!(
+            term_map_from_lexicon_response(&serde_json::to_vec(&response).unwrap())
+                .unwrap()
+                .terms
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn authorization_failure_discards_memory_and_disk_cache() {
+        for (status, refresh) in [(401, false), (403, true)] {
+            let (port, server) =
+                fake_server(vec![format!("HTTP/1.1 {status} Forbidden\r\n\r\n{{}}")]);
+            let dir = scratch("revoked");
+            let path = dir.join("cache.json");
+            let cfg = dir.join("serve.json");
+            std::fs::write(&cfg, format!(r#"{{"port":{port},"token":"t"}}"#)).unwrap();
+            write_cache(&path, Some("/a"), Some(&cfg));
+            let lex = Lexicon::new(Some(cfg.clone()), path.clone());
+            assert_eq!(lex.apply_cached("ashler", Some("/a")), "Ashlr.AI");
+            if refresh {
+                assert_eq!(lex.refresh(Some("/a"), true), LexiconStatus::None);
+            } else {
+                assert_eq!(
+                    lex.normalize("ashler", Some("/a")),
+                    ("ashler".into(), LexiconStatus::None)
+                );
+            }
+            server.join().unwrap();
+            assert_eq!(lex.apply_cached("ashler", Some("/a")), "ashler");
+            assert!(!path.exists());
+            assert_eq!(Lexicon::new(Some(cfg), path).status(), LexiconStatus::None);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn trusted_project_normalizes_live_without_persisting_project_terms() {
+        let response = r#"{"paths":{"global":"/global/lexicon.yaml","project":"/a/.lexicon.yaml"},"projectTrust":"trusted","lexicon":{"terms":[{"canonical":"ProjectSecretName","aliases":["project alias"],"scope":"global"}]}}"#;
+        let normalized = r#"{"input":"project alias","replacements":[{"start":0,"end":13,"replacement":"ProjectSecretName"}]}"#;
+        let (port, server) = fake_server(vec![
+            format!("HTTP/1.1 200 OK\r\n\r\n{response}"),
+            format!("HTTP/1.1 200 OK\r\n\r\n{normalized}"),
+            "HTTP/1.1 200 OK\r\n\r\n{}".into(),
+        ]);
+        let dir = scratch("project-live");
+        let cfg = dir.join("serve.json");
+        let path = dir.join("cache.json");
+        std::fs::write(&cfg, format!(r#"{{"port":{port},"token":"t"}}"#)).unwrap();
+        let lex = Lexicon::new(Some(cfg.clone()), path.clone());
+        assert_eq!(lex.refresh(Some("/a"), true), LexiconStatus::Live);
+        assert_eq!(
+            lex.apply_cached("project alias", Some("/a")),
+            "project alias"
+        );
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("ProjectSecretName"));
+        assert_eq!(
+            lex.normalize("project alias", Some("/a")),
+            ("ProjectSecretName".into(), LexiconStatus::Live)
+        );
+        server.join().unwrap();
+        let restored = Lexicon::new(Some(cfg), path);
+        assert_eq!(
+            restored.normalize("project alias", Some("/a")),
+            ("project alias".into(), LexiconStatus::None)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn project_cache_never_corrects_another_project_or_unscoped_partials() {
+        let dir = scratch("scope");
+        let path = dir.join("cache.json");
+        write_cache(&path, Some("/project/a"), None);
+        let lex = Lexicon::new(None, path);
+        assert_eq!(lex.apply_cached("ashler", Some("/project/a")), "Ashlr.AI");
+        assert_eq!(
+            lex.normalize("ashler", Some("/project/a")),
+            ("Ashlr.AI".into(), LexiconStatus::Cached)
+        );
+        for cwd in [Some("/project/b"), Some("/project/a/subdir"), None] {
+            assert_eq!(lex.apply_cached("ashler", cwd), "ashler");
+            assert_eq!(
+                lex.normalize("ashler", cwd),
+                ("ashler".into(), LexiconStatus::None)
+            );
+            assert_eq!(lex.refresh(cwd, false), LexiconStatus::None);
+        }
+        // Switching away did not change the provenance of the surviving map.
+        assert_eq!(lex.apply_cached("ashler", Some("/project/a")), "Ashlr.AI");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn legacy_or_wrong_config_cache_is_not_adopted() {
+        let dir = scratch("migration");
+        let path = dir.join("cache.json");
+        std::fs::write(&path, serde_json::to_vec(&map()).unwrap()).unwrap();
+        let lex = Lexicon::new(None, path.clone());
+        assert_eq!(
+            lex.normalize("ashler", None),
+            ("ashler".into(), LexiconStatus::None)
+        );
+        write_cache(&path, None, Some(Path::new("/old/serve.json")));
+        let lex = Lexicon::new(Some("/new/serve.json".into()), path.clone());
+        assert_eq!(
+            lex.normalize("ashler", None),
+            ("ashler".into(), LexiconStatus::None)
+        );
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        raw["version"] = serde_json::json!(2);
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert_eq!(
+            Lexicon::new(Some("/old/serve.json".into()), path).status(),
+            LexiconStatus::None
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn config_rotation_invalidates_partials_freshness_and_restart_fallback() {
+        let dir = scratch("config-rotation");
+        let cfg = dir.join("serve.json");
+        let path = dir.join("cache.json");
+        std::fs::write(&cfg, r#"{"port":1,"token":"old"}"#).unwrap();
+        write_cache(&path, Some("/a"), Some(&cfg));
+        let lex = Lexicon::new(Some(cfg.clone()), path.clone());
+        lock(&lex.cache).as_mut().unwrap().refreshed = Some(Instant::now());
+        assert_eq!(lex.apply_cached("ashler", Some("/a")), "Ashlr.AI");
+        // Different size guarantees detection even on a coarse clock.
+        std::fs::write(&cfg, r#"{"port":1,"token":"replacement"}"#).unwrap();
+        assert_eq!(lex.apply_cached("ashler", Some("/a")), "ashler");
+        assert_eq!(lex.refresh(Some("/a"), false), LexiconStatus::None);
+        assert_eq!(
+            lex.normalize("ashler", Some("/a")),
+            ("ashler".into(), LexiconStatus::None)
+        );
+        let restored = Lexicon::new(Some(cfg.clone()), path);
+        assert_eq!(restored.status(), LexiconStatus::None);
+        std::fs::remove_file(cfg).unwrap();
+        assert_eq!(lex.apply_cached("ashler", Some("/a")), "ashler");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn switching_projects_bypasses_freshness_and_persists_only_its_scope() {
+        let response = |name: &str| {
+            format!(
+            "HTTP/1.1 200 OK\r\n\r\n{{\"paths\":{{\"global\":\"/global/lexicon.yaml\"}},\"lexicon\":{{\"terms\":[{{\"canonical\":\"{name}\",\"aliases\":[\"alias\"],\"scope\":\"global\"}}]}}}}"
+        )
+        };
+        let (port, server) = fake_server(vec![response("ProjectA"), response("ProjectB")]);
+        let dir = scratch("switch");
+        let cfg = dir.join("serve.json");
+        let path = dir.join("cache.json");
+        std::fs::write(&cfg, format!(r#"{{"port":{port},"token":"t"}}"#)).unwrap();
+        let lex = Lexicon::new(Some(cfg.clone()), path.clone());
+        assert_eq!(lex.refresh(Some("/a"), false), LexiconStatus::Live);
+        assert_eq!(lex.refresh(Some("/a"), false), LexiconStatus::Live);
+        assert_eq!(lex.apply_cached("alias", Some("/a")), "ProjectA");
+        assert_eq!(lex.refresh(Some("/b"), false), LexiconStatus::Live);
+        let seen = server.join().unwrap();
+        assert_eq!(
+            seen.len(),
+            2,
+            "same scope reuses freshness; different scope fetches"
+        );
+        assert!(seen[1].starts_with("GET /lexicon?cwd=/b "));
+        assert_eq!(lex.apply_cached("alias", Some("/a")), "alias");
+        assert_eq!(lex.apply_cached("alias", Some("/b")), "ProjectB");
+        // The server has exited. Reloaded cache still respects the project.
+        let restored = Lexicon::new(Some(cfg), path);
+        assert_eq!(
+            restored.normalize("alias", Some("/a")),
+            ("alias".into(), LexiconStatus::None)
+        );
+        assert_eq!(
+            restored.normalize("alias", Some("/b")),
+            ("ProjectB".into(), LexiconStatus::Cached)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn live_normalize_sends_the_token_and_cwd_and_caches_the_map() {
-        let lexicon_body =
-            r#"{"lexicon":{"version":1,"terms":[{"canonical":"Ashlr.AI","aliases":["Ashler"]}]}}"#;
+        let lexicon_body = r#"{"paths":{"global":"/global/lexicon.yaml"},"lexicon":{"version":1,"terms":[{"canonical":"Ashlr.AI","aliases":["Ashler"],"scope":"global"}]}}"#;
         let normalize_body = r#"{"input":"hi ashler","output":"hi ashler","replacements":[{"start":3,"end":9,"replacement":"Ashlr.AI"}],"changed":false}"#;
         let (port, server) = fake_server(vec![
             format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{lexicon_body}"),
@@ -673,7 +1095,10 @@ mod tests {
             cache.exists(),
             "the term map is cached for when serve is down"
         );
-        assert_eq!(lex.apply_cached("ashler"), "Ashlr.AI");
+        assert_eq!(
+            lex.apply_cached("ashler", Some("/Users/m/my repo")),
+            "Ashlr.AI"
+        );
 
         let (text, status) = lex.normalize("hi ashler", Some("/Users/m/repo"));
         assert_eq!(
@@ -708,7 +1133,6 @@ mod tests {
     fn when_serve_is_down_the_cached_map_applies_and_says_so() {
         let dir = scratch("down");
         let cache = dir.join("lexicon-cache.json");
-        std::fs::write(&cache, serde_json::to_vec(&map()).unwrap()).unwrap();
         // A port nothing listens on.
         let unused = TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -717,6 +1141,7 @@ mod tests {
             .port();
         let cfg = dir.join("serve.json");
         std::fs::write(&cfg, format!(r#"{{"port":{unused},"token":"t"}}"#)).unwrap();
+        write_cache(&cache, None, Some(&cfg));
         let lex = Lexicon::new(Some(cfg), cache);
         let (text, status) = lex.normalize("open ashler verse", None);
         assert_eq!(text, "open Ashlr Verse");
