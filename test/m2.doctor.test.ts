@@ -10,10 +10,11 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import type { AshlrConfig, ProviderRegistry, PhantomStatus } from '../src/core/types.js';
 import type { LocusProbeResult } from '../src/core/integrations/locus.js';
 import {
-  mkdtempSync, mkdirSync, writeFileSync, rmSync,
+  copyFileSync, mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync, rmSync,
 } from 'node:fs';
 import { join, delimiter } from 'node:path';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 
 // ---------------------------------------------------------------------------
 // Mock phantom.ts, providers.ts, locus.ts BEFORE importing doctor.
@@ -220,6 +221,7 @@ const origHome = process.env.HOME;
 const origUserProfile = process.env.USERPROFILE;
 const origAshlrHome = process.env.ASHLR_HOME;
 const origPath = process.env.PATH;
+const origNodeVersion = Object.getOwnPropertyDescriptor(process, 'version')!;
 
 function makeTmpHome(): string {
   return mkdtempSync(join(tmpdir(), 'ashlr-doctor-test-'));
@@ -246,19 +248,36 @@ function restoreFixtureHome(): void {
  * installed there). Install a fake `ashlr` shim in a tmp bin dir prepended to
  * PATH so the healthy-scenario tests do not depend on the host machine.
  */
-function installAshlrShim(tmpH: string): void {
+function installAshlrShim(tmpH: string, command: 'ashlr' | 'phm' | 'phantom' = 'ashlr'): void {
   const binDir = join(tmpH, 'bin');
   mkdirSync(binDir, { recursive: true });
   if (process.platform === 'win32') {
     // `where ashlr` resolves names via PATHEXT, so the shim must be ashlr.cmd
     // (an extensionless `ashlr` file is invisible to `where`).
-    writeFileSync(join(binDir, 'ashlr.cmd'), '@echo off\r\nexit /b 0\r\n');
+    writeFileSync(join(binDir, `${command}.cmd`), '@echo off\r\nexit /b 0\r\n');
   } else {
-    const shim = join(binDir, 'ashlr');
+    const shim = join(binDir, command);
     writeFileSync(shim, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   }
   // Use the platform PATH separator (';' on win32, ':' elsewhere).
   process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ''}`;
+}
+
+/** Retain the real PATH locator but hide all host workbench executables. */
+function isolateCommandPath(): void {
+  const finder = process.platform === 'win32' ? 'where' : 'which';
+  const located = spawnSync(finder, [finder], { encoding: 'utf8' });
+  expect(located.status).toBe(0);
+  const finderPath = located.stdout.trim().split(/\r?\n/)[0]!;
+  const binDir = join(tmpHome, 'bin');
+  if (process.platform === 'win32') {
+    copyFileSync(finderPath, join(binDir, 'where.exe'));
+  } else {
+    // Keep the platform binary in place; copied macOS system executables can
+    // be killed by code-signing enforcement outside their original location.
+    symlinkSync(finderPath, join(binDir, 'which'));
+  }
+  process.env.PATH = binDir;
 }
 
 function makeConfig(tmpH: string): AshlrConfig {
@@ -347,6 +366,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  Object.defineProperty(process, 'version', origNodeVersion);
   privateStorageHarness.adapterHome = null;
   privateStorageHarness.adapterAshlrHome = null;
   rmSync(tmpHome, { recursive: true, force: true });
@@ -694,15 +714,79 @@ describe('runDoctor — config check', () => {
 // ---------------------------------------------------------------------------
 
 describe('runDoctor — compatible CLI installation guidance', () => {
-  it('uses the scoped package when the compatible ashlr command is absent', async () => {
+  it('uses the canonical package when both workbench commands are absent', async () => {
     process.env.PATH = '';
     const report = await runDoctor(makeConfig(tmpHome));
     expect(report.checks.find(check => check.id === 'ashlr')).toMatchObject({
-      label: 'Phantom CLI installed (ashlr)', status: 'fail',
-      fix: 'Run: npm install -g @ashlr/hub  (or ensure ~/.local/bin is on PATH)',
+      label: 'Phantom CLI installed (phm / ashlr)', status: 'fail',
+      fix: 'Run: npm install -g @ashlr/phantom  (or ensure ~/.local/bin is on PATH)',
     });
     expect(report.checks.find(check => check.id === 'mcp-plugin')?.label)
       .toBe('Phantom MCP plugin registered (ashlr)');
+  });
+
+  it('recognizes the canonical phm command and prefers it over ashlr', async () => {
+    installAshlrShim(tmpHome, 'phm');
+    isolateCommandPath();
+    const report = await runDoctor(makeConfig(tmpHome));
+    expect(report.checks.find(check => check.id === 'ashlr')).toMatchObject({
+      status: 'pass',
+      detail: join(tmpHome, 'bin', process.platform === 'win32' ? 'phm.cmd' : 'phm'),
+    });
+  });
+
+  it('still recognizes the compatible ashlr launcher', async () => {
+    isolateCommandPath();
+    const report = await runDoctor(makeConfig(tmpHome));
+    expect(report.checks.find(check => check.id === 'ashlr')).toMatchObject({
+      status: 'pass',
+      detail: join(tmpHome, 'bin', process.platform === 'win32' ? 'ashlr.cmd' : 'ashlr'),
+    });
+  });
+
+  it('recognizes phm when the compatible launcher is absent', async () => {
+    installAshlrShim(tmpHome, 'phm');
+    rmSync(join(tmpHome, 'bin', process.platform === 'win32' ? 'ashlr.cmd' : 'ashlr'));
+    isolateCommandPath();
+    const report = await runDoctor(makeConfig(tmpHome));
+    expect(report.checks.find(check => check.id === 'ashlr')?.status).toBe('pass');
+  });
+
+  it('does not treat the separate phantom Secrets binary as the workbench', async () => {
+    installAshlrShim(tmpHome, 'phantom');
+    rmSync(join(tmpHome, 'bin', process.platform === 'win32' ? 'ashlr.cmd' : 'ashlr'));
+    isolateCommandPath();
+    const report = await runDoctor(makeConfig(tmpHome));
+    expect(report.checks.find(check => check.id === 'ashlr')?.status).toBe('fail');
+  });
+});
+
+describe('runDoctor — Node runtime minimum', () => {
+  it.each([
+    ['v18.20.8', 'fail'],
+    ['v20.19.0', 'fail'],
+    ['v22.0.0', 'fail'],
+    ['v22.14.9', 'fail'],
+    ['v22.15.0', 'pass'],
+    ['v22.15.1', 'pass'],
+    ['v22.22.3', 'pass'],
+    ['v23.0.0', 'pass'],
+    ['v24.0.0', 'pass'],
+    ['v22.15.0-rc.1', 'fail'],
+    ['v24.0.0-nightly.1', 'fail'],
+    ['v22.invalid', 'fail'],
+  ])('reports %s as %s', async (version, status) => {
+    Object.defineProperty(process, 'version', { ...origNodeVersion, value: version });
+    const report = await runDoctor(makeConfig(tmpHome));
+    const node = report.checks.find(check => check.id === 'node');
+    expect(node?.status).toBe(status);
+    expect(node?.detail).toContain('22.15.0');
+    if (status === 'fail') expect(node?.fix).toContain('22.15.0+');
+  });
+
+  it('matches the package engine requirement', () => {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    expect(pkg.engines.node).toBe('>=22.15.0');
   });
 });
 
@@ -725,6 +809,10 @@ describe('runDoctor — fix hints', () => {
     // At least one problematic phantom check should have a fix suggestion.
     const hasFix = failing.some(c => typeof c.fix === 'string' && c.fix.length > 0);
     expect(hasFix).toBe(true);
+    expect(report.checks.find(c => c.id === 'phantom')).toMatchObject({
+      label: 'Phantom Secrets CLI (phantom)',
+      fix: 'Install Phantom Secrets (phantom): https://github.com/ashlrai/phantom-secrets#installation',
+    });
   });
 });
 
