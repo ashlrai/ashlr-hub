@@ -2,7 +2,7 @@
 
 The Phantom by AshlrAI landing page and ecosystem page at **verse.ashlr.ai**.
 The domain, CLI, package and installation names stay compatible; see
-[the product naming guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/PHANTOM-BRAND.md).
+[the product naming guide](https://github.com/ashlrai/phantom/blob/master/docs/PHANTOM-BRAND.md).
 
 Two standalone HTML pages (`index.html` and `ecosystem.html`). No source build,
 runtime dependencies, or framework; Vercel's root configuration skips package

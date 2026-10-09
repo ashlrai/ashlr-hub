@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const workflowText = readFileSync(join(repoRoot, '.github/workflows/release.yml'), 'utf8');
-const releaseDocs = readFileSync(join(repoRoot, 'docs/RELEASING.md'), 'utf8');
+const releaseDocs = readFileSync(join(repoRoot, 'docs/RELEASING-HISTORICAL.md'), 'utf8');
 const workflow = parse(workflowText) as {
   env?: Record<string, string>;
   jobs: Record<string, {

@@ -166,7 +166,7 @@ describe('release scripts', () => {
 describe('release workflow', () => {
   const workflow = readFileSync(join(REPO_ROOT, '.github/workflows/release.yml'), 'utf8');
   const ciWorkflow = readFileSync(join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
-  const releaseDocs = readFileSync(join(REPO_ROOT, 'docs/RELEASING.md'), 'utf8');
+  const releaseDocs = readFileSync(join(REPO_ROOT, 'docs/RELEASING-HISTORICAL.md'), 'utf8');
   interface WorkflowStep {
     name?: string;
     uses?: string;

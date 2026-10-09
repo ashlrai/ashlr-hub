@@ -40,7 +40,7 @@ const workflowText = readFileSync(
   join(root, '.github/workflows/finalize-github-release.yml'),
   'utf8',
 ).replace(/\r\n?/gu, '\n');
-const releasing = readFileSync(join(root, 'docs/RELEASING.md'), 'utf8').replace(/\r\n?/gu, '\n');
+const releasing = readFileSync(join(root, 'docs/RELEASING-HISTORICAL.md'), 'utf8').replace(/\r\n?/gu, '\n');
 const contract = readFileSync(join(root, 'docs/contracts/CONTRACT-M523.md'), 'utf8')
   .replace(/\r\n?/gu, '\n');
 const changelog = readFileSync(join(root, 'CHANGELOG.md'), 'utf8').replace(/\r\n?/gu, '\n');

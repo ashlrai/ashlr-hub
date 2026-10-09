@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -6,6 +7,7 @@ import { parse as parseYaml } from 'yaml';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const releaseDocs = readFileSync(join(repoRoot, 'docs/RELEASING.md'), 'utf8');
+const historicalDocs = readFileSync(join(repoRoot, 'docs/RELEASING-HISTORICAL.md'), 'utf8');
 
 describe('M522 — production-promotion operator boundary', () => {
   it('states commissioned canonical publishing ahead of the separate historical lane', () => {
@@ -24,7 +26,28 @@ describe('M522 — production-promotion operator boundary', () => {
     expect(currentNote).toMatch(/Publication does not activate provider credentials, spending permissions or resident autonomy/u);
     const currentRelease = releaseDocs.split('> **Verified distribution state')[0]!;
     expect(currentRelease.replace(/\s+/g, ' ')).toMatch(/candidate version bump does not become a publication claim/u);
-    expect(releaseDocs).toContain('**Verified distribution state — 2026-09-05 UTC:** `@ashlr/hub@3.3.2`');
+    expect(releaseDocs).toContain('(RELEASING-HISTORICAL.md)');
+    expect(releaseDocs).not.toContain('Keep Actions disabled');
+    expect(historicalDocs).toContain('**Verified distribution state — 2026-09-05 UTC:** `@ashlr/hub@3.3.2`');
+  });
+
+  it('preserves the original archive bytes without treating its directives as current', () => {
+    const marker = '> **Verified distribution state — 2026-09-05 UTC:**';
+    expect(historicalDocs.split(marker)).toHaveLength(2);
+    const body = historicalDocs.slice(historicalDocs.indexOf(marker));
+    expect(createHash('sha256').update(body).digest('hex'))
+      .toBe('6df3f0d204c501eba917d0052c4a7f070ad2bb755e912d111d4a9f54e16547dc');
+    expect(historicalDocs).toContain('not current release instructions');
+    expect(historicalDocs).toContain('Keep Actions disabled');
+    expect(releaseDocs).not.toContain('all successor verification runs locally');
+    expect(releaseDocs).not.toContain('npm trust github @ashlr/hub');
+    expect(releaseDocs).toContain('## Qualified CI build handoff');
+    expect(releaseDocs).toContain('Local feedback and\n`prepublishOnly` do not replace those gates.');
+    const locally = readFileSync(join(repoRoot, 'docs/RELEASING-LOCALLY.md'), 'utf8');
+    const feedback = locally.split('## Local qualification fallback\n')[1]!.split('## ')[0]!;
+    expect(feedback).toContain('Local packaging does not authorize canonical publication');
+    expect(feedback).toContain('(#canonical-npm-trusted-publishing)');
+    expect(feedback).not.toMatch(/^npm publish /mu);
   });
 
   it('binds the documented provenance and consumer-before-latest sequence to the canonical publisher', () => {

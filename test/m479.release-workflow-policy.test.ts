@@ -15,7 +15,7 @@ import { describe, expect, it } from 'vitest';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..');
 const workflowText = readFileSync(resolve(repoRoot, '.github/workflows/release.yml'), 'utf8');
-const releaseDocs = readFileSync(resolve(repoRoot, 'docs/RELEASING.md'), 'utf8');
+const releaseDocs = readFileSync(resolve(repoRoot, 'docs/RELEASING-HISTORICAL.md'), 'utf8');
 const workflow = parse(workflowText) as Record<string, unknown>;
 const jobs = workflow.jobs as Record<string, Record<string, unknown>>;
 const releaseCanary = jobs.release_canary;

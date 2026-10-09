@@ -28,6 +28,29 @@ function releaseBlock(version: string): string {
 }
 
 describe('emergency authority release truth', () => {
+  it('keeps current install discovery separate from candidate and dated release examples', () => {
+    const latest = 'https://github.com/ashlrai/phantom/releases/latest';
+    const version = (JSON.parse(read('package.json')) as { version: string }).version;
+    const candidate = `This source tree targets version ${version}; check canonical release availability and exact matching assets before installation.`;
+    for (const file of ['README.md', 'docs/QUICKSTART.md', 'desktop/README.md']) {
+      const source = read(file);
+      expect(source, file).toContain(latest);
+      expect(source.split(candidate), file).toHaveLength(2);
+      expect(source, file).not.toMatch(/Phantom \d+\.\d+\.\d+ is published|canonical \d+\.\d+\.\d+ release is published|The current published release is \[\d|the published \d+\.\d+\.\d+ package is/u);
+    }
+    const appInstall = read('README.md').split('## The desktop app (macOS)')[1]!.split('```')[0]!;
+    expect(appInstall).toContain(latest);
+    expect(appInstall).not.toMatch(/releases\/tag\/v\d/u);
+    const desktop = read('desktop/README.md');
+    expect(desktop).toContain('Phantom_<version>_aarch64.app.tar.gz');
+    expect(desktop).toContain(`${latest}/download/latest.json`);
+    expect(desktop).toContain('Match desktop artifacts to that version.');
+    const site = read('site/index.html');
+    expect(site).toContain('signed arm64 app archive and paired update manifest');
+    expect(site).not.toContain('Apple silicon desktop app, locally signed; unsigned DMG; neither Apple notarized');
+    expect(read('site/README.md')).toContain('https://github.com/ashlrai/phantom/blob/master/docs/PHANTOM-BRAND.md');
+  });
+
   it('preserves the published 3.3.0 record and binds the 3.3.2 successor', () => {
     const historical = releaseBlock('3.3.0');
     const failed = releaseBlock('3.3.1');

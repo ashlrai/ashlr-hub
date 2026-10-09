@@ -8,7 +8,8 @@ Installing Phantom, enrolling a repo, starting a resident fleet and publishing
 its work are distinct steps.
 
 The primary CLI is `phm`; `ashlr` remains compatible. Current source uses
-`@ashlr/phantom` in `ashlrai/phantom`; the canonical 3.29.3 release is published.
+`@ashlr/phantom` in `ashlrai/phantom`. Find the current qualified release at
+[GitHub releases](https://github.com/ashlrai/phantom/releases/latest).
 This source tree targets version 3.29.5; check canonical release availability and exact matching assets before installation.
 The verified 3.25.3 compatibility release remains `@ashlr/hub`.
 Local routes remain `/verse/`, and the published macOS app is `Phantom.app`. See
@@ -46,8 +47,10 @@ installation and fleet activation are separate steps.
 
 ### Desktop app on Apple silicon Mac
 
-The [3.29.3 release](https://github.com/ashlrai/phantom/releases/tag/v3.29.3)
-provides a signed arm64 app archive and paired update manifest, not a DMG.
+The [current qualified macOS release](https://github.com/ashlrai/phantom/releases/latest)
+provides the signed `Phantom_<version>_aarch64.app.tar.gz` archive and paired
+[`latest.json`](https://github.com/ashlrai/phantom/releases/latest/download/latest.json),
+rather than a DMG. Match these artifacts to the installed CLI version.
 Use the qualified signed-update flow in an eligible installed app, or the
 maintainer artifact path in the
 [desktop installation guide](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install).
