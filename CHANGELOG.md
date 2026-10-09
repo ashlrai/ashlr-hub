@@ -28,8 +28,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   physical occupancy is unknown. CPU and RAM remain descriptive host metrics.
 - Remove the hidden daily Leader conversation cap and propagate cancellation to
   native replies. Existing funding rules and explicit stop controls remain.
-- Separate project inventory estimates from the context a particular task needs,
-  so a large repository does not prevent creating a narrow local-model task.
+- Clarify that project inventory estimates differ from the context a particular
+  task needs; a large repository need not prevent a narrow local-model task.
 - Explain resource evidence and configured routing priors without presenting
   estimated context, hardware readings or configured tiers as measured capability.
 - Update release guidance for the commissioned original-artifact trusted publisher.
