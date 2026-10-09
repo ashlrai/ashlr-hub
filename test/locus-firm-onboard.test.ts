@@ -13,6 +13,7 @@
  * SAFETY:
  *  - Isolated HOME via makeFixture; NEVER touches real ~/.ashlr.
  *  - locusAvailable / confirm injected via _firmOfferInternals (no PATH/TTY).
+ *  - Optional Stack advisory injected; never invokes an ambient Stack CLI.
  *  - Every it() ends with expect.hasAssertions().
  */
 
@@ -21,7 +22,10 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
 
-const { readinessSpy, tickSpy } = vi.hoisted(() => ({
+const { stackInstalledSpy, stackStatusSpy, stackProjectConfiguredSpy, readinessSpy, tickSpy } = vi.hoisted(() => ({
+  stackInstalledSpy: vi.fn(() => false),
+  stackStatusSpy: vi.fn(() => ({ ok: false, detail: 'stack not installed' })),
+  stackProjectConfiguredSpy: vi.fn(() => false),
   readinessSpy: vi.fn(),
   tickSpy: vi.fn(async (_cfg: unknown, opts: { dryRun: boolean }) => ({
     ts: new Date().toISOString(),
@@ -32,6 +36,13 @@ const { readinessSpy, tickSpy } = vi.hoisted(() => ({
   })),
 }));
 
+// Stack behavior is qualified in m71.onboard-stack; this firm fixture must not
+// inherit its optional status subprocess (and 5s deadline) from ambient PATH.
+vi.mock('../src/core/integrations/stack.js', () => ({
+  stackInstalled: stackInstalledSpy,
+  stackStatus: stackStatusSpy,
+  stackProjectConfigured: stackProjectConfiguredSpy,
+}));
 vi.mock('../src/core/readiness.js', () => ({ buildReadiness: readinessSpy }));
 vi.mock('../src/core/daemon/loop.js', () => ({ tick: tickSpy }));
 
@@ -92,6 +103,9 @@ beforeEach(() => {
   };
   _internals.confirm = confirmSpy;
   readinessSpy.mockResolvedValue(readyReport());
+  stackInstalledSpy.mockReset().mockReturnValue(false);
+  stackStatusSpy.mockReset().mockReturnValue({ ok: false, detail: 'stack not installed' });
+  stackProjectConfiguredSpy.mockReset().mockReturnValue(false);
   tickSpy.mockClear();
   delete process.env.ASHLR_LOCUS_FIRM;
   setTty(false);
@@ -262,6 +276,8 @@ describe('cmdOnboard firm soft-offer', () => {
     expect(code).toBe(0);
     expect(configFirm()).toBe(false);
     expect(confirmSpy).not.toHaveBeenCalled();
+    expect(stackInstalledSpy).toHaveBeenCalled();
+    expect(stackStatusSpy).not.toHaveBeenCalled();
   });
 
   it('--yes --locus-firm sets firm without enroll / without confirm', async () => {
