@@ -96,7 +96,7 @@ See [Automatic work](docs/AUTOMATIC-OUTCOMES.md) for chat routing, editable outc
 
 <a id="whats-in-verse-324"></a>
 
-### What's in Phantom 3.25
+### What's in Phantom
 
 Choose **Manager** in a chat’s **Auto seat** menu, or **Enable manager** on a
 saved Fleet outcome, for planning, delegation and review under the fleet’s
