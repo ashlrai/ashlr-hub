@@ -31,6 +31,13 @@ import { hashDiff, signLocalMergeIntent, signLocalRealizedMergeReceipt } from '.
 import { mirrorPathFor } from '../src/core/fleet/mirrors.js';
 import { enroll, unenroll } from '../src/core/sandbox/policy.js';
 import { DEFAULT_TICK_HOOKS, type TickHooks } from '../src/core/daemon/tick-hooks.js';
+import { savePlaybook, readPlaybookUses } from '../src/core/playbooks/store.js';
+import { noteIdFor, knowledgePath, updateKnowledge, readKnowledgeHits } from '../src/core/learn/retro/store.js';
+import type { KnowledgeNoteV1 } from '../src/core/learn/retro/types.js';
+import { routingRequestFor, ROUTING_SESSION_OVERHEAD_TOKENS } from '../src/core/fleet/dispatch-router.js';
+import { routeSeat } from '../src/core/routing/router.js';
+import { defaultBudgetPolicy } from '../src/core/routing/policy.js';
+import type { WorkItem } from '../src/core/types.js';
 import type { AshlrConfig, EngineId, RunState, ProposalLocalMergeIntent } from '../src/core/types.js';
 import type { DaemonActivationCapability } from '../src/core/daemon/activation-permit.js';
 import { makeCfg, makeFixture, type H1Fixture } from './helpers/h1-fixture.js';
@@ -275,6 +282,100 @@ describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'funct
     expect(state.nodes[state.activeNodeIds[0]!]!.basis.definition.key).toBe('recover');
     expect(state.nodes[state.activeNodeIds[0]!]!.completion).toBeNull();
     expect(state.nodes[state.activeNodeIds[0]!]!.attempts).toEqual([]);
+  });
+  it('routes a real Manager prompt and guidance inside a 64k window while preserving private scope and effort', async () => {
+    const f = await managerFixture(); const nativeRoute = f.hooks.route; const note = await managerGuidance();
+    const guidance = 'Inspect the named file before editing. ' + 'g'.repeat(2000);
+    Object.assign(f.hooks, { dispatchHarness: () => ({ versionId: 'saved-harness', producerPrompt: guidance }) });
+    let routedItem: WorkItem | undefined;
+    f.hooks.route = (item, config) => {
+      routedItem = item;
+      const request = routingRequestFor(item);
+      const policy = defaultBudgetPolicy();
+      policy.seats['codex-personal'] = { seatId: 'codex-personal', enabled: true, reservePercent: 0 };
+      const decision = routeSeat(request, [{ seatId: 'codex-personal', engine: 'codex', label: 'Offline native', free: false,
+        windows: [{ id: 'primary', usedPercent: 0, resetsAt: null, resetDescription: null, limitReached: false }],
+        signedOut: false, reachable: true, contextWindow: 65536, observedAt: new Date().toISOString(), spentTodayUsd: null }],
+        policy, { nowMs: Date.now() });
+      expect(decision.seatId).toBe('codex-personal');
+      return nativeRoute(item, config);
+    };
+    mocks.goal.mockImplementation(async (goal, _cfg, opts) => {
+      expect(routedItem?.effort).toBe(5);
+      expect(goal).toContain(f.scope.acceptance[0]); expect(goal).toContain(guidance);
+      expect(goal).toContain(note.text); expect(goal).toContain('Keep original scope.');
+      expect(routingRequestFor(routedItem!).contextTokens).toBe(Math.ceil(goal.length / 4) + ROUTING_SESSION_OVERHEAD_TOKENS);
+      expect(routingRequestFor({ ...routedItem!, tags: routedItem!.tags.filter(tag => !tag.startsWith('context:')) }).contextTokens).toBeGreaterThan(65536);
+      expect(JSON.stringify(routedItem)).not.toContain(f.scope.acceptance[0]); expect(JSON.stringify(routedItem)).not.toContain(guidance);
+      expect(opts.selectedOutcomeAdmission()).toBe(true);
+      const result = managerRun(opts.runId, goal); saveRun(result); return result;
+    });
+    await f.drive(); expect(mocks.goal).toHaveBeenCalledTimes(1);
+    expect(f.store.read().state!.manager!.stages.at(-1)?.state).toBe('succeeded');
+    await vi.waitFor(async () => {
+      expect([...await readPlaybookUses()].map(([, use]) => use.ref.id)).toEqual(['aaa-manager-guidance']);
+      expect((await readKnowledgeHits()).get(note.id)?.hits).toBe(1);
+    });
+  });
+  async function managerGuidance() {
+    expect((await savePlaybook([
+      '---', 'id: aaa-manager-guidance', 'name: Manager guidance', 'macro: !aaa-manager-guidance',
+      'description: Keep manager plans grounded.', 'kinds: [other]', 'repos: []', 'globs: []', 'auto: true',
+      'done-when:', '  - The plan retains acceptance.', '---', '', '## Outcome', '', 'Keep original scope.',
+      '', '## Procedure', '', '1. Read the named file.', '',
+    ].join('\n'))).ok).toBe(true);
+    const scope = { repo: null, pathGlobs: [], taskKinds: [] };
+    const text = 'Use causal run evidence to replan the unfinished outcome.';
+    const note: KnowledgeNoteV1 = { v: 1, id: noteIdFor(text, scope), text, scope, status: 'approved',
+      retroId: null, source: 'mason', createdAt: '2026-10-02T00:00:00.000Z', decidedAt: '2026-10-02T00:00:00.000Z',
+      edited: false, hits: 0, lastHitAt: null, seen: 1, agentsMdTaskId: null };
+    await updateKnowledge(() => ({ notes: [note], result: undefined }));
+    expect((await readPlaybookUses()).size).toBe(0);
+    expect((await readKnowledgeHits()).size).toBe(0);
+    return note;
+  }
+  it('refuses changed guidance after routing without creating a Manager stage or contacting its provider', async () => {
+    const f = await managerFixture(); await managerGuidance();
+    let guidance = 'Original adopted guidance';
+    Object.assign(f.hooks, { dispatchHarness: () => ({ versionId: 'saved-harness', producerPrompt: guidance }) });
+    // The live allowance recheck is after route selection and before execution
+    // assembly. A concurrent guidance edit here must remain a refused preview.
+    f.hooks.seatAllows = (_engine, options) => {
+      if (options?.itemId?.startsWith('outcome-manager:')) guidance = 'Changed guidance ' + 'g'.repeat(3000);
+      return { allowed: true, reason: 'offline native allowance' };
+    };
+    await f.drive(); expect(mocks.goal).not.toHaveBeenCalled(); expect(mocks.bon).not.toHaveBeenCalled();
+    expect(f.store.read().state!.manager!.stages).toEqual([]);
+    expect(f.manager.project().next).not.toBeNull();
+    expect((await readPlaybookUses()).size).toBe(0);
+    expect((await readKnowledgeHits()).size).toBe(0);
+  });
+  it('refuses a replaced knowledge identity even when its rendered guidance is unchanged', async () => {
+    const f = await managerFixture(); const note = await managerGuidance(); const nativeRoute = f.hooks.route;
+    f.hooks.route = (item, config) => {
+      const route = nativeRoute(item, config);
+      writeFileSync(knowledgePath(), JSON.stringify({ v: 1, notes: [{ ...note, id: 'kn_0123456789abcdef' }] }), { mode: 0o600 });
+      return route;
+    };
+    await f.drive();
+    expect(mocks.goal).not.toHaveBeenCalled(); expect(mocks.bon).not.toHaveBeenCalled();
+    expect(f.store.read().state!.manager!.stages).toEqual([]);
+    expect((await readPlaybookUses()).size).toBe(0);
+    expect((await readKnowledgeHits()).size).toBe(0);
+  });
+  it('refuses a revised saved outcome after discovery rather than using its earlier forecast', async () => {
+    const f = await managerFixture(); const nativeRoute = f.hooks.route; let edited = false;
+    f.hooks.route = (item, config) => {
+      const route = nativeRoute(item, config);
+      if (!edited) {
+        edited = true;
+        expect(f.coordinator.editScope(f.command(), { ...f.scope, acceptance: ['Revised full acceptance ' + 'x'.repeat(90000)] }).ok).toBe(true);
+      }
+      return route;
+    };
+    await f.drive(); expect(edited).toBe(true); expect(mocks.goal).not.toHaveBeenCalled();
+    expect(f.store.read().state!.manager!.stages).toEqual([]);
+    expect(f.store.read().state!.scope.acceptance[0]).toContain('Revised full acceptance');
   });
   it('does not contact a manager provider when selected account allowance is unavailable', async () => {
     const f = await managerFixture(); f.hooks.seatAllows = () => ({ allowed: false, reason: 'Subscription window is exhausted' });
