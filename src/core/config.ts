@@ -664,7 +664,7 @@ function warnUnknownFoundryKeys(parsed: Record<string, unknown>, configPath: str
   const unknown = Object.keys(foundry).filter((k) => !KNOWN_FOUNDRY_KEYS.has(k)).sort();
   if (unknown.length === 0) return;
   console.warn(
-    `[ashlr] Warning: ${configPath} has foundry key(s) not recognized by this ashlr version ` +
+    `[ashlr] Warning: ${configPath} has foundry key(s) not recognized by this Phantom version ` +
     `(typo, removed, or consumed by an external tool?): ${unknown.join(', ')}`,
   );
 }
