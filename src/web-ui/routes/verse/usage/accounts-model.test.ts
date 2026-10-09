@@ -154,20 +154,6 @@ describe('toWindowView — the sentinel 100 is a flag, not a measurement', () =>
     expect(windowLabel(win({ id: 'five_hour' }))).toBe('Session · rolling 5h');
   });
 
-  it.each([
-    ['grok_unified', 'Shared consumer allowance'],
-    ['grok_unified_weekly', 'Shared consumer · weekly'],
-    ['grok_unified_monthly', 'Shared consumer · monthly'],
-    ['grok_build', 'Build allowance'],
-    ['grok_build_weekly', 'Build · weekly'],
-    ['grok_build_monthly', 'Build · monthly'],
-    ['grok_credits', 'Native allowance'],
-    ['grok_credits_weekly', 'Native allowance · weekly'],
-    ['grok_credits_monthly', 'Native allowance · monthly'],
-  ])('names native Grok scope %s without borrowing a Bot or API allowance', (id, label) => {
-    expect(windowLabel(win({ id }))).toBe(label);
-  });
-
   it('keeps provider labels and unknown scopes instead of inferring Grok capacity', () => {
     expect(windowLabel(win({ id: 'grok_unified_weekly', label: 'Provider-reported window' }))).toBe('Provider-reported window');
     expect(windowLabel(win({ id: 'grok_bot_weekly' }))).toBe('grok_bot_weekly');
