@@ -227,10 +227,10 @@ describe('gate data files', () => {
   it('every gate build asset script is still a step of `npm run build` (reused, never forked)', () => {
     const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
     const buildSteps = String(pkg.scripts.build).split('&&').map((step) => step.trim());
-    // tsc runs first in both; every asset step the gate runs must appear after it, in the same order.
-    expect(buildSteps[0]).toBe('tsc -p tsconfig.json');
+    // Public version consistency precedes compilation; the gate reuses every asset step after tsc.
+    expect(buildSteps.slice(0, 2)).toEqual(['npm run check:version', 'tsc -p tsconfig.json']);
     const positions = GATE_BUILD_ASSET_SCRIPTS.map((script) => buildSteps.indexOf(`node ${script}`));
-    for (const [i, pos] of positions.entries()) expect(pos, GATE_BUILD_ASSET_SCRIPTS[i]).toBeGreaterThan(0);
+    for (const [i, pos] of positions.entries()) expect(pos, GATE_BUILD_ASSET_SCRIPTS[i]).toBeGreaterThan(1);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
   });
 

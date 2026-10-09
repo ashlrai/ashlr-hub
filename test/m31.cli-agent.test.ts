@@ -155,6 +155,15 @@ describe('agent docs surfaces', () => {
     for (const t of cliSurfaced) expect(text).toContain(t.name);
   });
 
+  it('website discovery separates an exact publication request from a verified deployment', () => {
+    const text = agentDocsText();
+    expect(text).toContain('ashlr_website_status');
+    expect(text).toContain('profile=phantom-public-web and expectedMerge=<40-hex SHA>');
+    expect(text).toContain('is not a deployment receipt');
+    expect(text).toContain('do not create credentials or commission publishing');
+    expect(text).toContain('Inbox approval stays human-only');
+  });
+
   it('claudeMdSnippet teaches orient-at-session-start and forbids the human gates', () => {
     const snippet = claudeMdSnippet();
     expect(snippet).toContain('## Phantom (portfolio command center');

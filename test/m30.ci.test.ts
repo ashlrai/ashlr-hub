@@ -308,7 +308,7 @@ describe('M30 CI workflow', () => {
     // The emitted core build checks the same config instead of repeating it
     // in a no-emit step. Neither a transpile-only build nor a masked failure
     // can stand in for that compiler invocation.
-    expect(pkg.scripts?.build?.split(' && ')[0]).toBe('tsc -p tsconfig.json');
+    expect(pkg.scripts?.build?.split(' && ').slice(0, 2)).toEqual(['npm run check:version', 'tsc -p tsconfig.json']);
     expect(pkg.scripts?.['typecheck:web']).toBe('tsc --noEmit -p src/web-ui/tsconfig.json');
     expect(ciYml).toContain('npm run lint');
     const docs = ciYml.match(/^ {6}- name: Check documentation[\s\S]*?(?=^ {6}- name:)/gm) ?? [];

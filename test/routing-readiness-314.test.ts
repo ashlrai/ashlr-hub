@@ -217,12 +217,16 @@ describe('readiness — once readings reach the snapshot (the fix working)', () 
     expect(row(r, 'grok').fleet).toMatchObject({ ready: true, word: 'Ready', reservePercent: 0 });
   });
 
-  it('Codex at a Codex stage: off in balanced mode until the Leader turns the lanes on; then ready behind the 40% floor', () => {
-    const off = buildResourceReadiness(input({ capacity: live, standing: standing(4) }));
+  it('eligible Codex is ready by default; an explicit disable and admitted directive remain visible', () => {
+    const ready = buildResourceReadiness(input({ capacity: live, standing: standing(4) }));
+    expect(row(ready, 'codex-cmp').fleet).toMatchObject({ ready: true, word: 'Ready', reservePercent: 40 });
+    const budget: ReadinessInput['budget'] = { mode: 'balanced',
+      seats: { 'codex-cmp': { seatId: 'codex-cmp', enabled: false, reservePercent: 40 } }, updatedAt: FRESH };
+    const off = buildResourceReadiness(input({ capacity: live, standing: standing(4), budget }));
     expect(row(off, 'codex-cmp').fleet).toMatchObject({ ready: false, tone: 'off', word: 'Off in balanced' });
     expect(row(off, 'codex-cmp').fleet.detail).toContain('until the Leader turns the Codex lanes on');
 
-    const on = buildResourceReadiness(input({ capacity: live, standing: standing(4), codexDirective: true }));
+    const on = buildResourceReadiness(input({ capacity: live, standing: standing(4), budget, codexDirective: true }));
     expect(row(on, 'codex-cmp').fleet).toMatchObject({ ready: true, word: 'Ready', reservePercent: 40 });
   });
 
