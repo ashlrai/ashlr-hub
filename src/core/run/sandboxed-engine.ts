@@ -3017,7 +3017,12 @@ export async function runEngineSandboxed(
                     } catch { codexCaptureDenied = true; return null; }
                     if (!selectedCodexCurrent(repairSpawn)) {
                       const finished = finishAutonomousSpawn(repairSpawn,{output:''});
-                      await claudeEvidence(finished); // Shared bounded native confinement evidence.
+                      if (finished.violations.length) await recordAutonomousViolations({ engine, sourceRepo:opts.sourceRepo, runId:id, operations:finished.violations });
+                      // A refused repair still owns a prepared spawn: unknown
+                      // kernel evidence must hold the rollout, never count as clean.
+                      if (finished.violationsKnown !== true) {
+                        await recordSandboxEvidenceUnknown({ engine, sourceRepo: opts.sourceRepo, runId: id, evidence: finished.kernelEvidence });
+                      }
                       codexCaptureDenied = true;
                       return null;
                     }

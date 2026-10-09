@@ -210,8 +210,8 @@ describe('producers pass finishAutonomousSpawn().violationsKnown into the ledger
     return sites.length;
   }
 
-  it('sandboxed-engine: initial, refused Devin/Grok repairs, completed repair and throw-path finishes record it', () => {
-    expect(eachFinishRecordsUnknown(source('src/core/run/sandboxed-engine.ts'))).toBe(5);
+  it('sandboxed-engine: initial, refused Codex/Devin/Grok repairs, completed repair and throw-path finishes record it', () => {
+    expect(eachFinishRecordsUnknown(source('src/core/run/sandboxed-engine.ts'))).toBe(6);
   });
 
   it('fleet manager: the confined judge spawn records it', () => {

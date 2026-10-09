@@ -13,8 +13,11 @@ import * as leases from '../src/core/sandbox/execution-leases.js';
 import * as engines from '../src/core/run/engines.js';
 import * as accounts from '../src/core/run/role-account.js';
 import * as worktree from '../src/core/sandbox/worktree.js';
+import * as rollout from '../src/core/authority/rollout.js';
+import { ledgerSnapshot, resetLedgerCachesForTest } from '../src/core/authority/ledger.js';
 import { runEngineSandboxed } from '../src/core/run/sandboxed-engine.js';
 import { runCompletenessGate } from '../src/core/run/completeness-gate.js';
+import { makeGrant } from './helpers/authority-310b.js';
 
 const host = vi.hoisted(() => ({policy:null as EffectivePolicy | null}));
 vi.mock('../src/core/authority/effective-config.js',async original => ({
@@ -152,6 +155,38 @@ describe.runIf(process.platform==='darwin' && typeof process.execve==='function'
     const result=await runEngineSandboxed('codex','Read input and edit',f.cfg,f.opts);
     expect(f.spawns).toHaveLength(1);expect(f.reply()).toMatchObject({binary:'B',repair:false});expect(result.proposalId).toBeUndefined();
     expect(result.state.status).toBe('failed');expect(result.state.usage.steps).toBe(1);expect(leases.countLiveExecutionLeases()).toBe(0);
+  });
+  it('records unknown kernel evidence when a prepared repair is refused before inference',async() => {
+    const f=fixture(),prepare=autonomous.prepareAutonomousSpawn;
+    host.policy={...host.policy!,grantId:makeGrant().grantId};
+    resetLedgerCachesForTest();
+    let watchers=0;
+    autonomous.setKernelEvidenceWatcherForTest(tag=>{
+      const repair=++watchers===2;
+      return {tag,ready:true,finish:()=>({source:'kernel-log',state:repair?'incomplete':'complete',reason:repair?'fixture repair end barrier unavailable':null,denials:[]}),abort(){}};
+    });
+    const recordUnknown=rollout.recordSandboxEvidenceUnknown;
+    // The recorder's dynamic effective-config import does not inherit Vitest's
+    // module mock. Use its existing standing-grant seam, retaining the real
+    // durable writer rather than replacing evidence with a mock result.
+    const unknown=vi.spyOn(rollout,'recordSandboxEvidenceUnknown').mockImplementation(input=>
+      recordUnknown(input,{standingGrantId:()=>host.policy?.grantId??null}));
+    const prepared=vi.spyOn(autonomous,'prepareAutonomousSpawn').mockImplementation(input=>{
+      const value=prepare(input);
+      if(watchers===2)repinResourceNativeProfile({directory:dirname(f.b.profile.command[1]),executable:f.a.executable});
+      return value;
+    });
+    f.cfg.foundry!.completenessGate=true;f.cfg.foundry!.verifyToGreen={enabled:true,maxIterations:1};
+    vi.mocked(runCompletenessGate).mockResolvedValue({pass:false,reason:'fixture needs repair'});
+    try {
+      const result=await runEngineSandboxed('codex','Read input and edit',f.cfg,f.opts);
+      expect(prepared).toHaveBeenCalledTimes(2);expect(f.spawns).toHaveLength(1);
+      expect(f.reply()).toMatchObject({binary:'B',repair:false});
+      expect(result.state.status).toBe('failed');expect(result.state.usage.steps).toBe(1);expect(result.proposalId).toBeUndefined();
+      expect(unknown).toHaveBeenCalledExactlyOnceWith({engine:'codex',sourceRepo:f.repo,runId:result.state.id,evidence:expect.objectContaining({state:'incomplete',reason:'fixture repair end barrier unavailable'})});
+      expect(ledgerSnapshot().index.evidence.map(row=>row.kind)).toEqual(['sandbox:evidence-unknown']);
+      expect(leases.countLiveExecutionLeases()).toBe(0);
+    } finally {resetLedgerCachesForTest();}
   });
   it('recovers supported Codex config for a versioned B executable with unchanged account and capture',async() => {
     const f=fixture();const result=await runEngineSandboxed('codex','CONFIG_RECOVERY Read and edit',f.cfg,{...f.opts,propose:false});
