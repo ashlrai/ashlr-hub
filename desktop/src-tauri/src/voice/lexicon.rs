@@ -363,8 +363,21 @@ pub(crate) fn apply_dry_run(text: &str, raw: &[u8]) -> Option<String> {
 pub struct Lexicon {
     serve_config: Option<PathBuf>,
     cache_path: PathBuf,
-    cache: Mutex<Option<ScopedCache>>,
+    cache: Mutex<CacheState>,
     status: Mutex<LexiconStatus>,
+}
+
+struct CacheState {
+    generation: u64,
+    source_stamp: Option<ConfigStamp>,
+    entry: Option<ScopedCache>,
+}
+
+/// A request may publish/return authorized data only in the generation and
+/// config source it started under. HTTP always runs outside the cache lock.
+struct RequestEpoch {
+    generation: u64,
+    source_stamp: Option<ConfigStamp>,
 }
 
 /// Old unscoped cache files cannot establish which project supplied their
@@ -384,7 +397,7 @@ struct ScopedCache {
 /// Config rotation invalidates fallback without persisting or hashing its
 /// bearer. This detects ordinary rewrites/atomic replacements, not deliberate
 /// tampering by a local user who can also edit the cache itself.
-#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ConfigStamp {
     len: u64,
     modified_secs: u64,
@@ -437,15 +450,21 @@ impl Lexicon {
         } else {
             LexiconStatus::None
         };
+        let source_stamp = config_stamp(serve_config.as_deref());
         Self {
             serve_config,
             cache_path,
-            cache: Mutex::new(cache),
+            cache: Mutex::new(CacheState {
+                generation: 0,
+                source_stamp,
+                entry: cache,
+            }),
             status: Mutex::new(status),
         }
     }
 
     pub fn status(&self) -> LexiconStatus {
+        self.sync_source(&mut lock(&self.cache));
         *lock(&self.status)
     }
 
@@ -458,10 +477,44 @@ impl Lexicon {
             && cache.source_stamp == config_stamp(self.serve_config.as_deref())
     }
 
+    fn clear_cache(&self, state: &mut CacheState) {
+        state.generation = state.generation.wrapping_add(1);
+        state.entry = None;
+        let _ = std::fs::remove_file(&self.cache_path);
+        *lock(&self.status) = LexiconStatus::None;
+    }
+
+    fn sync_source(&self, state: &mut CacheState) {
+        let stamp = config_stamp(self.serve_config.as_deref());
+        if state.source_stamp != stamp {
+            self.clear_cache(state);
+            state.source_stamp = stamp;
+        }
+    }
+
+    fn request_epoch(&self) -> RequestEpoch {
+        let mut state = lock(&self.cache);
+        self.sync_source(&mut state);
+        RequestEpoch {
+            generation: state.generation,
+            source_stamp: state.source_stamp.clone(),
+        }
+    }
+
+    fn request_is_current(&self, state: &mut CacheState, epoch: &RequestEpoch) -> bool {
+        // A delayed old-source response can observe a changed config, but
+        // cannot clear a newer cache that already adopted that config.
+        self.sync_source(state);
+        state.generation == epoch.generation && state.source_stamp == epoch.source_stamp
+    }
+
     /// Cheap, local, for partials. Exact cwd matching deliberately avoids
     /// conflating symlinks or inferring project ancestry across trust scopes.
     pub fn apply_cached(&self, text: &str, cwd: Option<&str>) -> String {
-        match lock(&self.cache)
+        let mut state = lock(&self.cache);
+        self.sync_source(&mut state);
+        match state
+            .entry
             .as_ref()
             .filter(|cache| self.cache_matches(cache, cwd))
         {
@@ -475,7 +528,7 @@ impl Lexicon {
         if text.trim().is_empty() {
             return (text.to_string(), self.status());
         }
-        let source_stamp = config_stamp(self.serve_config.as_deref());
+        let epoch = self.request_epoch();
         if let Some((port, token)) = self.config() {
             // Latency: a normalize that APPLIES also records hits (a disk
             // write) — measured ~290 ms vs ~5-25 ms for a dry run. So the
@@ -493,12 +546,13 @@ impl Lexicon {
                 Some(&body.to_string()),
                 NORMALIZE_BUDGET,
             );
-            if source_stamp != config_stamp(self.serve_config.as_deref()) {
-                self.invalidate_cache();
+            let mut state = lock(&self.cache);
+            if !self.request_is_current(&mut state, &epoch) {
                 return (text.to_string(), LexiconStatus::None);
             }
             if matches!(answer, Ok((401 | 403, _))) {
-                self.invalidate_cache();
+                self.clear_cache(&mut state);
+                return (text.to_string(), LexiconStatus::None);
             }
             if let Ok((200, raw)) = answer {
                 if let Some(output) = apply_dry_run(text, &raw) {
@@ -521,8 +575,12 @@ impl Lexicon {
                 }
             }
         }
-        let cache = lock(&self.cache);
-        let cached = cache
+        let mut state = lock(&self.cache);
+        if !self.request_is_current(&mut state, &epoch) {
+            return (text.to_string(), LexiconStatus::None);
+        }
+        let cached = state
+            .entry
             .as_ref()
             .filter(|cache| self.cache_matches(cache, cwd));
         let has_map = cached.is_some_and(|cache| !cache.map.terms.is_empty());
@@ -539,7 +597,8 @@ impl Lexicon {
     /// Refresh the cached term map from `GET /lexicon` if it is stale (or
     /// `force`). Returns the resulting status. Blocking — call off-thread.
     pub fn refresh(&self, cwd: Option<&str>, force: bool) -> LexiconStatus {
-        let fresh = lock(&self.cache).as_ref().is_some_and(|cache| {
+        let epoch = self.request_epoch();
+        let fresh = lock(&self.cache).entry.as_ref().is_some_and(|cache| {
             self.cache_matches(cache, cwd)
                 && cache
                     .refreshed
@@ -548,17 +607,16 @@ impl Lexicon {
         if fresh && !force {
             return self.status();
         }
-        let source_stamp = config_stamp(self.serve_config.as_deref());
         let Some((port, token)) = self.config() else {
-            return self.mark_unreachable(cwd);
+            return self.mark_unreachable(cwd, &epoch);
         };
         let path = match cwd {
             Some(cwd) => format!("/lexicon?cwd={}", percent_encode(cwd)),
             None => "/lexicon".to_string(),
         };
         let answer = http(port, &token, "GET", &path, None, FETCH_BUDGET);
-        if source_stamp != config_stamp(self.serve_config.as_deref()) {
-            self.invalidate_cache();
+        let mut state = lock(&self.cache);
+        if !self.request_is_current(&mut state, &epoch) {
             return LexiconStatus::None;
         }
         match answer {
@@ -568,14 +626,13 @@ impl Lexicon {
                         version: 1,
                         cwd: cwd.map(str::to_string),
                         serve_config: self.serve_config.clone(),
-                        source_stamp,
+                        source_stamp: epoch.source_stamp,
                         map,
                         refreshed: Some(Instant::now()),
                     };
                     // Serialize persistence and publication under the same
                     // lock so concurrent refreshes cannot leave different
                     // scopes on disk and in memory or race the temp file.
-                    let mut cached = lock(&self.cache);
                     if let Some(parent) = self.cache_path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
@@ -585,22 +642,31 @@ impl Lexicon {
                             let _ = std::fs::rename(&tmp, &self.cache_path);
                         }
                     }
-                    *cached = Some(cache);
+                    state.entry = Some(cache);
                     *lock(&self.status) = LexiconStatus::Live;
                     LexiconStatus::Live
                 }
-                None => self.mark_unreachable(cwd),
+                None => self.mark_unreachable_locked(&state, cwd),
             },
             Ok((401 | 403, _)) => {
-                self.invalidate_cache();
+                self.clear_cache(&mut state);
                 LexiconStatus::None
             }
-            _ => self.mark_unreachable(cwd),
+            _ => self.mark_unreachable_locked(&state, cwd),
         }
     }
 
-    fn mark_unreachable(&self, cwd: Option<&str>) -> LexiconStatus {
-        let status = if lock(&self.cache)
+    fn mark_unreachable(&self, cwd: Option<&str>, epoch: &RequestEpoch) -> LexiconStatus {
+        let mut state = lock(&self.cache);
+        if !self.request_is_current(&mut state, epoch) {
+            return LexiconStatus::None;
+        }
+        self.mark_unreachable_locked(&state, cwd)
+    }
+
+    fn mark_unreachable_locked(&self, state: &CacheState, cwd: Option<&str>) -> LexiconStatus {
+        let status = if state
+            .entry
             .as_ref()
             .is_some_and(|cache| self.cache_matches(cache, cwd) && !cache.map.terms.is_empty())
         {
@@ -612,26 +678,29 @@ impl Lexicon {
         status
     }
 
-    fn invalidate_cache(&self) {
-        let mut cache = lock(&self.cache);
-        *cache = None;
-        let _ = std::fs::remove_file(&self.cache_path);
-        *lock(&self.status) = LexiconStatus::None;
-    }
-
     /// `GET /export/whisper-prompt` — comma-separated canonicals for whisper's
     /// initial prompt, capped so it stays inside whisper's prompt window.
     pub fn whisper_prompt(&self, cwd: Option<&str>) -> Option<String> {
+        let epoch = self.request_epoch();
         let (port, token) = self.config()?;
         let path = match cwd {
             Some(cwd) => format!("/export/whisper-prompt?cwd={}", percent_encode(cwd)),
             None => "/export/whisper-prompt".to_string(),
         };
-        match http(port, &token, "GET", &path, None, FETCH_BUDGET) {
+        let answer = http(port, &token, "GET", &path, None, FETCH_BUDGET);
+        let mut state = lock(&self.cache);
+        if !self.request_is_current(&mut state, &epoch) {
+            return None;
+        }
+        match answer {
             Ok((200, raw)) => {
                 let text = String::from_utf8(raw).ok()?;
                 let text: String = text.trim().chars().take(800).collect();
                 (!text.is_empty()).then_some(text)
+            }
+            Ok((401 | 403, _)) => {
+                self.clear_cache(&mut state);
+                None
             }
             _ => None,
         }
@@ -920,6 +989,186 @@ mod tests {
         }
     }
 
+    /// Read a complete synthetic request before letting the test release its
+    /// response. Tests control ordering with sockets/joins, never sleeps.
+    fn accept_request(listener: &TcpListener) -> TcpStream {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let n = socket.read(&mut buffer).unwrap();
+            assert!(n > 0, "request ended before its body");
+            request.extend_from_slice(&buffer[..n]);
+            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                let len = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + len {
+                    return socket;
+                }
+            }
+        }
+    }
+
+    fn cache_response(canonical: &str) -> String {
+        format!("HTTP/1.1 200 OK\r\n\r\n{{\"paths\":{{\"global\":\"/global/lexicon.yaml\"}},\"lexicon\":{{\"terms\":[{{\"canonical\":\"{canonical}\",\"aliases\":[\"alias\"],\"scope\":\"global\"}}]}}}}")
+    }
+
+    #[test]
+    fn delayed_refresh_cannot_republish_after_authorization_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dir = scratch("generation-revoked");
+        let cfg = dir.join("serve.json");
+        let path = dir.join("cache.json");
+        std::fs::write(&cfg, format!(r#"{{"port":{port},"token":"t"}}"#)).unwrap();
+        write_cache(&path, None, Some(&cfg));
+        let lex = std::sync::Arc::new(Lexicon::new(Some(cfg.clone()), path.clone()));
+        let pending = {
+            let lex = lex.clone();
+            std::thread::spawn(move || lex.refresh(None, true))
+        };
+        let mut old = accept_request(&listener);
+        let rejected = {
+            let lex = lex.clone();
+            std::thread::spawn(move || lex.refresh(None, true))
+        };
+        let mut revoked = accept_request(&listener);
+        revoked
+            .write_all(b"HTTP/1.1 401 Unauthorized\r\n\r\n{}")
+            .unwrap();
+        drop(revoked);
+        assert_eq!(rejected.join().unwrap(), LexiconStatus::None);
+        old.write_all(cache_response("StaleCanonical").as_bytes())
+            .unwrap();
+        drop(old);
+        assert_eq!(pending.join().unwrap(), LexiconStatus::None);
+        assert_eq!(lex.apply_cached("alias", None), "alias");
+        assert_eq!(lex.status(), LexiconStatus::None);
+        assert!(!path.exists());
+        assert_eq!(Lexicon::new(Some(cfg), path).status(), LexiconStatus::None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn old_source_response_cannot_erase_a_new_authorized_cache() {
+        let old_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let new_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let old_port = old_listener.local_addr().unwrap().port();
+        let new_port = new_listener.local_addr().unwrap().port();
+        let dir = scratch("generation-rotated");
+        let cfg = dir.join("serve.json");
+        let path = dir.join("cache.json");
+        std::fs::write(&cfg, format!(r#"{{"port":{old_port},"token":"old"}}"#)).unwrap();
+        let lex = std::sync::Arc::new(Lexicon::new(Some(cfg.clone()), path.clone()));
+        let pending = {
+            let lex = lex.clone();
+            std::thread::spawn(move || lex.refresh(None, true))
+        };
+        let mut old = accept_request(&old_listener);
+        std::fs::write(
+            &cfg,
+            format!(r#"{{"port":{new_port},"token":"new-longer-token"}}"#),
+        )
+        .unwrap();
+        let current = {
+            let lex = lex.clone();
+            std::thread::spawn(move || lex.refresh(None, true))
+        };
+        let mut new = accept_request(&new_listener);
+        new.write_all(cache_response("NewCanonical").as_bytes())
+            .unwrap();
+        drop(new);
+        assert_eq!(current.join().unwrap(), LexiconStatus::Live);
+        let published = std::fs::read(&path).unwrap();
+        old.write_all(cache_response("OldCanonical").as_bytes())
+            .unwrap();
+        drop(old);
+        assert_eq!(pending.join().unwrap(), LexiconStatus::None);
+        assert_eq!(lex.apply_cached("alias", None), "NewCanonical");
+        assert_eq!(lex.status(), LexiconStatus::Live);
+        assert_eq!(std::fs::read(&path).unwrap(), published);
+        let restored = Lexicon::new(Some(cfg), path);
+        assert_eq!(restored.apply_cached("alias", None), "NewCanonical");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn whisper_authorization_failure_discards_cache() {
+        for status in [401, 403] {
+            let (port, server) =
+                fake_server(vec![format!("HTTP/1.1 {status} Forbidden\r\n\r\n{{}}")]);
+            let dir = scratch("prompt-revoked");
+            let cfg = dir.join("serve.json");
+            let path = dir.join("cache.json");
+            std::fs::write(&cfg, format!(r#"{{"port":{port},"token":"t"}}"#)).unwrap();
+            write_cache(&path, None, Some(&cfg));
+            let lex = Lexicon::new(Some(cfg), path.clone());
+            assert_eq!(lex.apply_cached("ashler", None), "Ashlr.AI");
+            assert_eq!(lex.whisper_prompt(None), None);
+            server.join().unwrap();
+            assert_eq!(lex.apply_cached("ashler", None), "ashler");
+            assert_eq!(lex.status(), LexiconStatus::None);
+            assert!(!path.exists());
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn delayed_live_outputs_are_rejected_after_authorization_failure() {
+        for prompt in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let dir = scratch("live-revoked");
+            let cfg = dir.join("serve.json");
+            std::fs::write(&cfg, format!(r#"{{"port":{port},"token":"t"}}"#)).unwrap();
+            let lex = std::sync::Arc::new(Lexicon::new(Some(cfg), dir.join("cache.json")));
+            let pending = {
+                let lex = lex.clone();
+                std::thread::spawn(move || {
+                    if prompt {
+                        lex.whisper_prompt(None)
+                    } else {
+                        let (text, status) = lex.normalize("alias", None);
+                        assert_eq!(status, LexiconStatus::None);
+                        Some(text)
+                    }
+                })
+            };
+            let mut old = accept_request(&listener);
+            let rejected = {
+                let lex = lex.clone();
+                std::thread::spawn(move || lex.refresh(None, true))
+            };
+            let mut revoked = accept_request(&listener);
+            revoked
+                .write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n{}")
+                .unwrap();
+            drop(revoked);
+            assert_eq!(rejected.join().unwrap(), LexiconStatus::None);
+            let body = if prompt {
+                "StaleCanonical"
+            } else {
+                r#"{"input":"alias","replacements":[{"start":0,"end":5,"replacement":"StaleCanonical"}]}"#
+            };
+            old.write_all(format!("HTTP/1.1 200 OK\r\n\r\n{body}").as_bytes())
+                .unwrap();
+            drop(old);
+            assert_eq!(
+                pending.join().unwrap(),
+                if prompt { None } else { Some("alias".into()) }
+            );
+            assert_eq!(lex.status(), LexiconStatus::None);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
     #[test]
     fn trusted_project_normalizes_live_without_persisting_project_terms() {
         let response = r#"{"paths":{"global":"/global/lexicon.yaml","project":"/a/.lexicon.yaml"},"projectTrust":"trusted","lexicon":{"terms":[{"canonical":"ProjectSecretName","aliases":["project alias"],"scope":"global"}]}}"#;
@@ -1014,7 +1263,7 @@ mod tests {
         std::fs::write(&cfg, r#"{"port":1,"token":"old"}"#).unwrap();
         write_cache(&path, Some("/a"), Some(&cfg));
         let lex = Lexicon::new(Some(cfg.clone()), path.clone());
-        lock(&lex.cache).as_mut().unwrap().refreshed = Some(Instant::now());
+        lock(&lex.cache).entry.as_mut().unwrap().refreshed = Some(Instant::now());
         assert_eq!(lex.apply_cached("ashler", Some("/a")), "Ashlr.AI");
         // Different size guarantees detection even on a coarse clock.
         std::fs::write(&cfg, r#"{"port":1,"token":"replacement"}"#).unwrap();
