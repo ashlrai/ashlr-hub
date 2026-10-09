@@ -281,18 +281,18 @@ describe('seat plan (pure policy)', () => {
 });
 
 describe('planLeaderSeats', () => {
-  it('uses shared quality/headroom ranking; a missing account-bound Codex adapter has a specific reason', async () => {
+  it('uses neutral shared headroom ranking; a missing account-bound Codex adapter has a specific reason', async () => {
     const { deps } = seatDeps({ candidates: [LOCAL_27B, CODEX, CLAUDE, LOCAL_FAST, GROK], snapshot: [GROK_OK, CLAUDE_OK] });
     const plan = await planLeaderSeats(deps, { deep: false, promptChars: 20_000, mode: 'full' });
     expect(plan.ok).toBe(true);
     if (!plan.ok) return;
-    expect(plan.steps.map((s) => s.choice.seatId)).toEqual(['local:qwen3.8:27b-ctx64k', 'claude', 'grok', 'local:gpt-oss:20b']);
+    expect(plan.steps.map((s) => s.choice.seatId)).toEqual(['local:qwen3.8:27b-ctx64k', 'local:gpt-oss:20b', 'grok', 'claude']);
     expect(plan.skipped.find((s) => s.seatId === 'claude')).toBeUndefined();
     expect(plan.skipped.find((s) => s.seatId === 'codex-personal')?.reason).toBe('The account-bound role adapter is unavailable.');
     expect(plan.steps[0]!.budget.timeoutMs).toBeGreaterThan(0);
   });
 
-  it('with no grant: local models only, quality first — no paid seat, no cloud fallback', async () => {
+  it('with no grant: local models only, configured discovery order — no paid seat, no cloud fallback', async () => {
     const { deps } = seatDeps({ candidates: [GROK, CLAUDE, LOCAL_27B, LOCAL_FAST], standing: null, snapshot: [GROK_OK, CLAUDE_OK] });
     const plan = await planLeaderSeats(deps, { deep: true, promptChars: 20_000, mode: 'full' });
     expect(plan.ok && plan.steps.map((s) => s.choice.seatId)).toEqual(['local:qwen3.8:27b-ctx64k', 'local:gpt-oss:20b']);
@@ -303,7 +303,7 @@ describe('planLeaderSeats', () => {
     const { deps } = seatDeps({ candidates: [CLAUDE, GROK, LOCAL_27B, LOCAL_FAST], snapshot: [GROK_OK, CLAUDE_OK] });
     for (const deep of [false, true]) {
       const plan = await planLeaderSeats(deps, { deep, promptChars: 20_000, mode: 'full' });
-      expect(plan.ok && plan.steps.map((s) => s.choice.seatId)).toEqual(['local:qwen3.8:27b-ctx64k', 'claude', 'grok', 'local:gpt-oss:20b']);
+      expect(plan.ok && plan.steps.map((s) => s.choice.seatId)).toEqual(['local:qwen3.8:27b-ctx64k', 'local:gpt-oss:20b', 'grok', 'claude']);
     }
   });
 
@@ -311,7 +311,7 @@ describe('planLeaderSeats', () => {
     const on = seatDeps({ candidates: [CLAUDE, GROK, LOCAL_FAST], snapshot: [GROK_OK, CLAUDE_OK] });
     for (const mode of ['full', 'checkin'] as const) {
       const plan = await planLeaderSeats(on.deps, { deep: false, promptChars: 20_000, mode });
-      expect(plan.ok && plan.steps.map((s) => s.choice.seatId)).toEqual(['claude', 'grok', 'local:gpt-oss:20b']);
+      expect(plan.ok && plan.steps.map((s) => s.choice.seatId)).toEqual(['local:gpt-oss:20b', 'grok', 'claude']);
     }
     const reservedClaude = { ...CLAUDE_OK, windows: CLAUDE_OK.windows.map((w) => ({ ...w, usedPercent: 20 })) };
     const reserve = seatDeps({ candidates: [CLAUDE, GROK, LOCAL_FAST], snapshot: [GROK_OK, reservedClaude], budget: () => ({ ...defaultBudgetPolicy(), mode: 'reserve' }) });

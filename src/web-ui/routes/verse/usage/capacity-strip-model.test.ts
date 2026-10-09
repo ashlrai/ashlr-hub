@@ -26,6 +26,7 @@ import {
   buildCapacityRows,
   CAPACITY_MAX_WINDOWS,
   capacityHeadline,
+  hasCurrentUsage,
   capacityRowFor,
   orderAccountRows,
   percentText,
@@ -129,7 +130,7 @@ describe('buildCapacityRows', () => {
       health: [report('grok', { connection: 'signed-out', reasons: ['Grok is signed out.'], fix: { kind: 'reauth' } })],
     });
     expect(row).toMatchObject({ cls: 'blocked', word: 'blocked', summary: 'Grok is signed out.' });
-    expect(capacityHeadline([row!])).toBe('0 of 1 account usable');
+    expect(capacityHeadline([row!])).toBe('0 of 1 account with current usage · 1 usage unconfirmed');
   });
 
   it('collapses several local seats into one row, in the first local position', () => {
@@ -151,9 +152,37 @@ describe('buildCapacityRows', () => {
 });
 
 describe('capacityHeadline', () => {
+  const NOW = Date.parse('2026-10-01T12:00:00.000Z');
+  const RESET = new Date(NOW + 86_400_000).toISOString();
+  it('distinguishes observed usage from account connection and preserves the row data', () => {
+    const unread = { ...UNREAD_SEAT, id: 'connected-unread' };
+    const rows = buildCapacityRows([CLAUDE, CLAUDE_MAX_SEAT, unread, LOCAL_SEAT_V2], {
+      health: [report(unread.id)], now: NOW,
+    });
+    const before = structuredClone(rows);
+    expect(hasCurrentUsage(rows[0]!)).toBe(true);
+    expect(hasCurrentUsage(rows[1]!)).toBe(true); // A reached limit is current usage evidence, not availability.
+    expect(accountStatus(rows[2]!, { healthRead: true, now: NOW }).kind).toBe('usable');
+    expect(hasCurrentUsage(rows[2]!)).toBe(false);
+    expect(capacityHeadline(rows)).toBe('2 of 3 accounts with current usage · 1 usage unconfirmed · local models ready');
+    expect(rows).toEqual(before);
+  });
+
+  it('excludes expired historical usage without pretending the account was never checked', () => {
+    const seat = nativeSeat(capacity({ windows: [], binding: null, usability: 'unknown' }), { lastKnownUsage: {
+      observedAt: new Date(NOW - 86_400_000).toISOString(), expiresAt: new Date(NOW - 86_400_000 + 5_000).toISOString(),
+      windows: [{ id: 'weekly', usedPercent: 72, resetsAt: RESET }],
+      source: 'native-account-checked-history', identitySource: 'native-account-checked-local-epoch',
+    } });
+    const row = buildCapacityRows([seat], { now: NOW })[0]!;
+    expect(row.historicalUsage?.windows[0]!.usedPercent).toBe(72);
+    expect(hasCurrentUsage(row)).toBe(false);
+    expect(capacityHeadline([row])).toBe('0 of 1 account with current usage · 1 usage unconfirmed');
+  });
+
   it('counts only what was read, and names unread seats', () => {
     const rows = buildCapacityRows([CLAUDE, CLAUDE_MAX_SEAT, UNREAD_SEAT, LOCAL_SEAT_V2]);
-    expect(capacityHeadline(rows)).toBe('1 of 3 accounts usable · 1 not read yet · local models ready');
+    expect(capacityHeadline(rows)).toBe('2 of 3 accounts with current usage · 1 usage unconfirmed · local models ready');
     expect(capacityHeadline(buildCapacityRows([]))).toBe('No accounts connected');
   });
 });
@@ -348,7 +377,7 @@ describe('account status', () => {
     expect(row.lastReading).toBe(true);
     expect(accountStatus(row, { healthRead: true, now: NOW })).toMatchObject({ kind: 'unavailable', label: 'Last reading',
       detail: 'latest check failed · access unconfirmed' });
-    expect(capacityHeadline([row])).toBe('0 of 1 account usable · 1 last reading');
+    expect(capacityHeadline([row])).toBe('0 of 1 account with current usage · 1 usage unconfirmed · 1 last reading');
   });
 
   it('tight seats read as running low, or usable on credits when the window is spent but credits are not', () => {

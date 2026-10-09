@@ -15,6 +15,27 @@
 
 import type { EngineId } from '../types.js';
 
+/** Resolve identity for an already selected engine, without ranking catalog priors. */
+export function resolveSelectedEngineModel(input: {
+  engine: string;
+  configured?: unknown;
+  captured?: { engine: string; model: unknown } | null;
+  spec?: { id: string; kind: string; defaultModel?: string; api?: { defaultModel?: string } };
+}): string | null {
+  const concrete = (value: unknown): string | null =>
+    typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+  const configured = concrete(input.configured);
+  if (configured) return configured;
+  const captured = input.captured?.engine === input.engine ? concrete(input.captured.model) : null;
+  if (captured) return captured;
+  if (!input.spec || input.spec.id !== input.engine) return null;
+  // API execution uses its API default; a native default on the same custom
+  // spec must not silently replace the transport's configured model.
+  return input.spec.kind === 'api-model'
+    ? concrete(input.spec.api?.defaultModel)
+    : concrete(input.spec.defaultModel) ?? concrete(input.spec.api?.defaultModel);
+}
+
 // ---------------------------------------------------------------------------
 // Capability tags
 // ---------------------------------------------------------------------------

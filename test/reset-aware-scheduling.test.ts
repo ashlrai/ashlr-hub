@@ -259,7 +259,7 @@ describe('observed task estimates',()=>{
 });
 
 describe('routing integration',()=>{
-  it('prefers an eligible imminent fixed period within the same quality tier, never a spent account',()=>{
+  it('prefers an eligible imminent fixed period with unknown quality, never a spent account',()=>{
     const later=seat('a');const sooner=seat('b');sooner.windows[0]!.resetsAt=at(60000);sooner.windows[0]!.resetProvenance!.at=at(60000);
     const known=forecastWork('task',cohort,[sample('short',{durationMs:10000})]);
     const views=buildSchedulingView([later,sooner],policy,now,{a:known,b:known});const scheduling=Object.fromEntries(views.accounts.map(v=>[v.seatId,v]));
@@ -267,7 +267,7 @@ describe('routing integration',()=>{
     sooner.windows[0]!.usedPercent=100;
     expect(routeSeat(request,[later,sooner],policy,{nowMs:now,scheduling,advisorySeatId:'b'}).seatId).toBe('a');
   });
-  it('uses a qualified weekly deadline for an actual same-tier choice without widening reserves',()=>{
+  it('uses a qualified weekly deadline for an admitted choice without widening reserves',()=>{
     const ordinary=seat('a',{engine:'claude',windows:[{id:'seven_day',usedPercent:20,resetsAt:null,resetDescription:'Friday',limitReached:false}]});
     const weekly=seat('b',{engine:'claude',windows:[{id:'seven_day',usedPercent:20,resetsAt:at(60000),resetDescription:null,limitReached:false,
       resetProvenance:{kind:'weekly-deadline',at:at(60000),description:null,source:'claude-native-usage-report',plan:'pro'}}]});
@@ -297,14 +297,14 @@ describe('routing integration',()=>{
       expect(ranked.filter(id=>id!=='c')).toEqual(['b','a']);
     }
   });
-  it('advice actually changes an equal-tier tie but cannot bypass a higher quality tier/context or reserve',()=>{
+  it('advice changes an equal-evidence tie without bypassing context; provider family does not establish higher quality',()=>{
     const a=seat('a');const b=seat('b');const views=buildSchedulingView([a,b],policy,now);const scheduling=Object.fromEntries(views.accounts.map(v=>[v.seatId,v]));
     expect(routeSeat(request,[a,b],policy,{nowMs:now,scheduling}).seatId).toBe('a');
     expect(routeSeat(request,[a,b],policy,{nowMs:now,scheduling,advisorySeatId:'b'}).seatId).toBe('b');
     b.contextWindow=10;
     expect(routeSeat({...request,contextTokens:1000},[a,b],policy,{nowMs:now,scheduling,advisorySeatId:'b'}).seatId).toBe('a');
     b.engine='local';b.free=true;
-    expect(routeSeat(request,[a,b],policy,{nowMs:now,scheduling,advisorySeatId:'b'}).seatId).toBe('a');
+    expect(routeSeat(request,[a,b],policy,{nowMs:now,scheduling,advisorySeatId:'b'}).seatId).toBe('b');
   });
 });
 

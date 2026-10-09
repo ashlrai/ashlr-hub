@@ -301,6 +301,20 @@ describe('ResourcesDrawer — usage collection', () => {
 });
 
 describe('ResourcesDrawer — accounts', () => {
+  it('names unconfirmed usage separately from known connection and native Chat/Fleet readiness', async () => {
+    const unknown = { ...CMP, capacity: { ...CMP.capacity!, windows: [], binding: null, usability: 'unknown' as const } };
+    roster = [unknown, LOCAL_SEAT_V2];
+    readiness = READINESS;
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    expect(await screen.findByText('0 of 1 account with current usage · 1 usage unconfirmed · local models ready')).toBeInTheDocument();
+    const status = await screen.findByRole('group', { name: 'Cash Margin Partners: readiness' });
+    expect(within(status).getByText('Ready')).toBeInTheDocument();
+    expect(within(status).getByText('Not in this stage')).toBeInTheDocument();
+    expect(within(cardOf('Cash Margin Partners')).getByText('· no usage reading yet')).toBeInTheDocument();
+    expect(calls.every(call => call.method === 'GET')).toBe(true);
+    expect(unknown.capacity.windows).toEqual([]);
+  });
+
   it('discloses current native credit units and qualified dollar value without admitting Fleet spending', async () => {
     const creditAccount = { ...PERSONAL, capacity: { ...PERSONAL.capacity!,
       credits: { hasCredits: true, unlimited: false, balance: '2500.0000', spendControlReached: false },
@@ -880,14 +894,14 @@ describe('ResourcesDrawer — equal partners (3.15)', () => {
     expect(calls.every((c) => c.method === 'GET')).toBe(true);
   });
 
-  it('each tier section says what the tier means, and the sections come in tier order', async () => {
+  it('keeps legacy display groups in order without claiming measured quality or role restrictions', async () => {
     render(<ResourcesDrawer mode="docked" now={NOW} />);
     await screen.findByRole('heading', { name: /^Cash Margin Partners/ });
     const titles = screen.getAllByRole('heading', { level: 3 }).map((h) => h.textContent);
     expect(titles).toEqual(['Use allowance before resets', 'Elite', 'Fast', 'Free · local', 'Decision layer']);
     expect(within(screen.getByRole('region', { name: 'Elite' })).getByText(/equal partners/)).toBeInTheDocument();
     expect(within(screen.getByRole('region', { name: 'Elite' })).getByText(/does not restrict Leader or Manager roles/)).toBeInTheDocument();
-    expect(within(screen.getByRole('region', { name: 'Fast' })).getByText(/configured preference, not a measured speed or price/)).toBeInTheDocument();
+    expect(within(screen.getByRole('region', { name: 'Fast' })).getByText(/legacy Fast display group.*does not establish measured speed or price/)).toBeInTheDocument();
     expect(within(screen.getByRole('region', { name: 'Free · local' })).getByText(/connected tools can use network services/)).toBeInTheDocument();
   });
 });

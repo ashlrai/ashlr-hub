@@ -1,37 +1,7 @@
-/**
- * Seat router — `routeSeat(req, capacity, policy): SeatDecision` (V3.10 unit A9).
- *
- * PURE and DETERMINISTIC: same inputs, same decision. No clock reads (pass
- * `nowMs`), no I/O, no model calls. That is what lets the fleet run it in
- * SHADOW mode (Track B) — every would-be dispatch is decided and logged next
- * to what actually ran, and the two can be compared before the router is
- * given any authority.
- *
- * STAGES
- *   1. Eligibility. Autonomous work goes through `assessSeat` (budget policy,
- *      reserves, live windows, "unknown usage is not headroom"). Mason's own
- *      interactive work ignores reserves — they exist FOR him — and is refused
- *      only by what would make a turn fail: signed out, spent, unreachable.
- *   2. Fit. A request whose context estimate exceeds 80% of a seat's window
- *      is not sent there; the router never truncates silently.
- *   3. Rank. An explicit TIER order per (mode, task, difficulty) — see
- *      `tierPreference` and routing/tiers.ts (elite · fast · free) — then,
- *      inside a tier, more headroom first, then marginal cost (a subscription
- *      turn before a credits turn), then latency, then seat id. There is NO
- *      provider order: Claude, Codex and Devin are the same tier and nothing
- *      but their live numbers separates them (3.15, "equal partners"). The λ
- *      routing weights (`RouterWeights`, from the harness / Leader
- *      `router.tune`) tilt that order — see `seatScore`.
- *
- * Local models are never excluded for quality; the free tier is ranked after
- * the paid tiers where quality matters (high difficulty, leader work), so
- * work still flows when the paid seats are held back for Mason.
- *
- * DEVIN. Mason's own chats may be routed to a Devin seat like any other
- * elite seat. Autonomous (fleet) work never is: the fleet launches Devin
- * only through devin/fleet-launcher.ts under its grant and ACU reserve, and
- * the capacity snapshot refuses a Devin row — see `devinFleetVerdict`.
- */
+/** Pure account routing: eligibility and task fit precede ranking. Unknown
+ * quality is neutral; provider/model display tiers do not establish capability.
+ * Ranking uses explicit operator preference, admitted headroom and independent
+ * funding category. Legacy aggregate latency remains diagnostic-only. */
 import { opportunityPriority } from './reset-pressure.js';
 import type { AccountSchedulingView } from './scheduling-types.js';
 import { assessSeat, HEADROOM_READING_MAX_AGE_MS, type SeatCapacity } from './headroom.js';
@@ -55,57 +25,37 @@ export const ROUTER_CONTEXT_FIT_FRACTION = 0.8;
 export interface RouteOptions {
   nowMs: number;
   readingMaxAgeMs?: number;
-  /** The λ objective weights; absent = `DEFAULT_ROUTER_WEIGHTS` (today's explicit order). */
+  /** The λ objective weights; absent uses the existing harness baseline. */
   weights?: Partial<RouterWeights>;
   /**
-   * Observed turn latency per seat id, in ms (e.g. a recent median). Only
-   * `lambdaLatency` reads it; a seat absent here is scored neutral. Absent =
-   * no latency evidence, so latency cannot move anything.
+   * Legacy seat/aggregate latency, retained for compatible callers. Without
+   * exact account/model/task/version provenance it does not steer ranking.
    */
   latencyMs?: Readonly<Record<string, number>>;
+  /** Deliberately supplied operator preference, never inferred catalog tiers.
+   * Invocation-only: historical capacity.tier is display metadata. */
+  explicitTiers?: Readonly<Record<string, ResourceTier>>;
   /** Actual selected-task opportunity; eligibility/quality remain mandatory. */
   scheduling?: Readonly<Record<string,AccountSchedulingView>>;
   advisorySeatId?: string | null;
 }
 
-/**
- * The router's λ objective weights — the same three numbers as
- * learn/harness-types.ts `HarnessRoutingWeights` (restated structurally so
- * this browser-safe module does not import the harness). Each λ is ≥ 0.
- *
- *   lambdaCost     — how hard to lean on COST against the mode's
- *                    quality/cost tier order. 1 = the mode's own balance;
- *                    above 1 leans toward cheaper tiers, below 1 toward
- *                    pricier (higher-quality) ones. Inside a tier it also
- *                    scales the marginal-cost term (subscription before
- *                    credits).
- *   lambdaPressure — how much a seat's remaining HEADROOM counts. 1 = the
- *                    deciding key inside one tier; higher lets a much
- *                    emptier seat of a less-preferred tier win; 0 ignores
- *                    headroom.
- *   lambdaLatency  — how much observed LATENCY (`RouteOptions.latencyMs`)
- *                    counts. At the default 0.25 it only separates seats
- *                    whose headroom is equal.
- */
+/** Independent funding-category and headroom weights. lambdaLatency remains
+ * readable for old harness configurations but unqualified aggregate latency
+ * cannot affect the operational rank. These weights authorize no spending. */
 export interface RouterWeights {
   lambdaCost: number;
   lambdaPressure: number;
   lambdaLatency: number;
 }
 
-/**
- * Defaults = the compiled baseline (`BASELINE_HARNESS_CONFIG.routing`; a test
- * pins the two together). At these values `rank` orders seats by tier, then
- * headroom, then marginal cost, then latency.
- */
+/** Existing harness baseline; coefficients are preserved. */
 export const DEFAULT_ROUTER_WEIGHTS: Readonly<RouterWeights> = Object.freeze({
   lambdaCost: 1,
   lambdaPressure: 1,
   lambdaLatency: 0.25,
 });
 
-/** How a tier is named inside a `why` sentence. */
-const TIER_WORDS: Readonly<Record<ResourceTier, string>> = { elite: 'elite', fast: 'fast', free: 'free' };
 
 /** Best tier first — interactive work and hard autonomous work. */
 const QUALITY_FIRST: readonly ResourceTier[] = RESOURCE_TIERS;
@@ -117,40 +67,24 @@ export function capacityTier(capacity: Pick<SeatCapacity, 'engine' | 'tier'>): R
   return capacity.tier ?? engineTier(capacity.engine);
 }
 
-/**
- * A seat's rung on the COST ladder: `free` when a turn costs nothing (every
- * local model — the elite Qwen included — and Devin's plan-included SWE),
- * otherwise its tier. Tier and cost only differ for those free-but-strong
- * seats, which is exactly why they are two axes.
- */
+/** Legacy display helper. This inferred rung is not an operational quality,
+ * price or funding proof, and default account ranking does not consume it. */
 export function costRung(capacity: Pick<SeatCapacity, 'engine' | 'tier' | 'costBasis' | 'free'>): ResourceTier {
   if (capacity.free || (capacity.costBasis ?? costBasisOf(capacity.engine)) === 'free') return 'free';
   return capacityTier(capacity);
 }
 
-/** Relative cost step (0 = free). CHEAP_FIRST is exactly the cost ladder, so it doubles as the table. */
-function costStep(capacity: SeatCapacity): number {
-  return CHEAP_FIRST.indexOf(costRung(capacity));
-}
 
-/**
- * The mode's order for one request: over TIERS (quality) or over the COST
- * ladder, never over providers — which seat of a rung wins is decided by
- * headroom, marginal cost and latency (`seatScore`).
- */
+/** Legacy mode order, used only when a caller explicitly supplies tier
+ * preferences. Catalog tier metadata alone does not request that preference. */
 export interface RankOrder {
-  /** `tier` ranks a seat by what it can do; `cost` by what a turn costs. */
+  /** Historical preference axis, preserved for compatible callers. */
   by: 'tier' | 'cost';
   order: readonly ResourceTier[];
 }
 
-/**
- * Low-difficulty and bulk work always goes to the cheapest capable seat
- * first (the cost ladder — so the free elite Qwen and Devin's free SWE lead);
- * quality-first ordering is reserved for work that needs it. Interactive
- * requests are ordered for "what else can I use right now": the elite
- * partners, then fast, then free.
- */
+/** Historical tier preference table for an explicitly requested preference;
+ * unknown default quality stays neutral regardless of request difficulty. */
 export function tierPreference(mode: BudgetMode, req: RoutingRequest): RankOrder {
   const quality: RankOrder = { by: 'tier', order: QUALITY_FIRST };
   const cheap: RankOrder = { by: 'cost', order: CHEAP_FIRST };
@@ -241,22 +175,8 @@ function compareIds(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-/**
- * Scale of the headroom term at λ = 1: its whole range (100% left vs unknown)
- * is worth half a tier step, so at the default weight it can only order
- * seats of the SAME tier — where it is the deciding key.
- */
+/** Existing headroom coefficient; preserved independently of quality. */
 const PRESSURE_SCALE = 0.5;
-
-/**
- * Scale of the latency term at λ = 1. Headroom percents are whole numbers
- * (headroom.ts rounds them), so one point of headroom is worth
- * PRESSURE_SCALE / 101 ≈ 0.00495 at λ = 1. At the default λ = 0.25 the whole
- * latency range (0.25 × 0.019 = 0.00475) stays below that, which keeps
- * latency a pure tie-breaker; at λ = 10 it is worth ~38 points of headroom
- * and still never a whole tier step (0.5 + 0.1 + 0.19 < 1).
- */
-const LATENCY_SCALE = 0.019;
 
 /** The headroom a windowless seat is ranked with: the middle of the range. */
 const WINDOWLESS_HEADROOM = 50;
@@ -291,88 +211,37 @@ function isDefaultWeights(w: RouterWeights): boolean {
     && w.lambdaLatency === DEFAULT_ROUTER_WEIGHTS.lambdaLatency;
 }
 
-/**
- * Latency per seat normalised to [0, 1] across the seats with evidence
- * (fastest 0, slowest 1). A seat without evidence gets 0.5: unknown latency
- * is neither rewarded nor punished. No evidence anywhere = all 0.
- */
-function latencyTerms(verdicts: readonly Verdict[], latencyMs: RouteOptions['latencyMs']): Map<string, number> {
-  const out = new Map<string, number>();
-  const known = verdicts.flatMap((v) => {
-    const ms = latencyMs?.[v.capacity.seatId];
-    return typeof ms === 'number' && Number.isFinite(ms) && ms >= 0 ? [ms] : [];
-  });
-  if (known.length === 0) return out;
-  const min = Math.min(...known);
-  const span = Math.max(...known) - min;
-  for (const v of verdicts) {
-    const ms = latencyMs?.[v.capacity.seatId];
-    const has = typeof ms === 'number' && Number.isFinite(ms) && ms >= 0;
-    out.set(v.capacity.seatId, !has ? 0.5 : span === 0 ? 0 : (ms - min) / span);
-  }
-  return out;
-}
-
-/**
- * The λ objective for one seat — LOWER is better:
- *
- *   position                                  quality: the mode's TIER order (fixed anchor)
- *   + (λcost − 1)   · costStep                cost:     one tier step per cost step per unit of λ
- *   + λpressure     · PRESSURE_SCALE · p      headroom: p = (100 − left%) / 101, unknown = 1
- *   + λcost         · MARGINAL_COST_SCALE · m marginal: m = 1 for credits / per-token, else 0
- *   + λlatency      · LATENCY_SCALE  · l      latency:  l from `latencyTerms`
- *
- * Why `λcost − 1`: the tier order ALREADY prices cost in for the mode
- * (CHEAP_FIRST is literally the cost ladder), so λcost = 1 must add nothing
- * across tiers. At λcost = 2 a quality-first order flattens (every tier ties
- * and headroom decides); at 0 a cheap-first order does. No term names a
- * provider.
- */
-function seatScore(v: Verdict, position: number, w: RouterWeights, latency: number): number {
-  // A windowless seat (Devin: ACUs / plan usage, no window) has no reading
-  // BY DESIGN — neutral, not the worst. Only interactive work reaches here
-  // with one (autonomous Devin is refused before ranking).
+/** Lower is preferred. Neither unknown quality nor a provider label adds a
+ * score. Cost is a funding category, not a dollar estimate or admission proof. */
+function seatScore(v: Verdict, position: number, w: RouterWeights): number {
   const left = v.headroom?.autonomyHeadroomPercent ?? (v.capacity.windowless ? WINDOWLESS_HEADROOM : -1);
-  const pressure = (100 - left) / 101;
   return position
-    + (w.lambdaCost - 1) * costStep(v.capacity)
-    + w.lambdaPressure * PRESSURE_SCALE * pressure
-    + w.lambdaCost * MARGINAL_COST_SCALE * marginalCost(v.capacity)
-    + w.lambdaLatency * LATENCY_SCALE * latency;
+    + w.lambdaPressure * PRESSURE_SCALE * (100 - left) / 101
+    + w.lambdaCost * MARGINAL_COST_SCALE * marginalCost(v.capacity);
 }
 
-/**
- * Marginal cost of one more turn inside a tier: 0 for a subscription (its
- * window refills) or a free seat, 1 for a seat that spends a balance
- * (credits, ACUs, per-token). Worth a tenth of the headroom range at λ = 1 —
- * about 20 points of headroom — so a metered seat wins only when it has
- * clearly more room than a subscription seat of the same tier.
- */
+/** Existing funding-category coefficient, worth about 20 headroom points
+ * at baseline. This is not a dollar estimate or native billing admission. */
 const MARGINAL_COST_SCALE = 0.1;
 
 function marginalCost(capacity: SeatCapacity): number {
-  const basis = capacity.costBasis ?? costBasisOf(capacity.engine);
-  return COST_BASIS_RANK[basis];
+  // A missing category is neutral, not a fabricated USD0/free resource.
+  // Current projections may supply coarse subscription categories; execution
+  // still requires its independent native billing/account proof.
+  const basis = capacity.free ? 'free' : capacity.costBasis;
+  return basis === undefined ? 0.5 : COST_BASIS_RANK[basis];
 }
 
-/**
- * Rank eligible verdicts by `seatScore`, then the caller's order (seat
- * discovery lists the operator's preferred local tags first —
- * `preferredLocalTags` in seats.ts — so two free local seats with equal
- * headroom resolve to the one he chose), then id. At the default weights this
- * is a lexicographic order — tier, then headroom / marginal cost / latency —
- * because those terms together stay under one tier step.
- */
-function rank(verdicts: Verdict[], rankOrder: RankOrder, w: RouterWeights, latencyMs: RouteOptions['latencyMs'], options?: RouteOptions): Verdict[] {
+/** Rank already eligible rows. Explicit preference may separate groups; legacy
+ * inferred tiers cannot prevent a comparable resource using its allowance. */
+function rank(verdicts: Verdict[], rankOrder: RankOrder, w: RouterWeights, options?: RouteOptions): Verdict[] {
   const position = (capacity: SeatCapacity): number => {
-    const rung = rankOrder.by === 'cost' ? costRung(capacity) : capacityTier(capacity);
-    const index = rankOrder.order.indexOf(rung);
-    return index === -1 ? rankOrder.order.length : index;
+    const tiers = options?.explicitTiers;
+    const tier = tiers && Object.hasOwn(tiers, capacity.seatId) ? tiers[capacity.seatId] : undefined;
+    const index = tier === undefined ? -1 : rankOrder.order.indexOf(tier);
+    return index === -1 ? 0 : index - 1;
   };
-  const latency = latencyTerms(verdicts, latencyMs);
-  const score = new Map(verdicts.map((v) => [
-    v, seatScore(v, position(v.capacity), w, latency.get(v.capacity.seatId) ?? 0),
-  ]));
+  const score = new Map(verdicts.map((v) => [v, seatScore(v, position(v.capacity), w)]));
   const ranked = [...verdicts].sort((a, b) => {
     const diff = score.get(a)! - score.get(b)!;
     if (Math.abs(diff) > SCORE_EPSILON) return diff;
@@ -380,9 +249,8 @@ function rank(verdicts: Verdict[], rankOrder: RankOrder, w: RouterWeights, laten
     return compareIds(a.capacity.seatId, b.capacity.seatId);
   });
   if (!options?.scheduling) return ranked;
-  // Preserve the weighted placement of different tiers. Permute only the
-  // already occupied slots of each tier, rather than mixing two comparators
-  // (which can form cycles when non-default weights interleave tiers).
+  // Preserve explicitly preferred groups. Within a group, reset opportunities
+  // may reorder only already admitted resources, as before.
   const baselineIndex = new Map(ranked.map((v,i)=>[v,i]));
   const groups = new Map<number, number[]>();
   ranked.forEach((v,i) => { const key = position(v.capacity); const indexes = groups.get(key) ?? []; indexes.push(i); groups.set(key,indexes); });
@@ -416,6 +284,44 @@ function lowerFirst(text: string): string {
 
 function describeWork(req: RoutingRequest): string {
   return `${req.difficulty}-difficulty ${req.task} work`;
+}
+
+function routeVerdicts(req: RoutingRequest, capacity: readonly SeatCapacity[], policy: BudgetPolicy,
+  opts: RouteOptions): Verdict[] {
+  const readingMaxAgeMs = opts.readingMaxAgeMs ?? HEADROOM_READING_MAX_AGE_MS;
+  const verdicts = capacity.map((seat, index): Verdict => ({
+    ...(seat.engine === 'claude-api' || seat.seatId.toLowerCase() === CLAUDE_API_SEAT_ID
+      ? { capacity: seat, eligible: false, headroom: null, nextEligibleAt: null,
+        details: [{ kind: 'grant' as const, text: 'Claude API is not commissioned in the signed grant.' }] }
+      : req.autonomous && seat.engine === 'devin' && !(seat.seatId === 'devin-cli' && seat.free === true && seat.costBasis === 'free')
+      ? devinFleetVerdict(seat)
+      : applyFit(
+        req.autonomous
+          ? autonomousVerdict(seat, policy, opts.nowMs, readingMaxAgeMs)
+          : interactiveVerdict(seat, opts.nowMs, readingMaxAgeMs),
+        req.contextTokens,
+      )),
+    index,
+  }));
+
+  if (req.autonomous && opts.scheduling) {
+    for (const v of verdicts) {
+      const advisory = opts.scheduling[v.capacity.seatId];
+      if (v.eligible && advisory?.admission === 'unknown') {
+        v.eligible = false;
+        v.details.push({kind:'unknown-usage',text:'Current account-window evidence is incomplete or has passed its reported period.'});
+      }
+    }
+  }
+  return verdicts;
+}
+
+/** Compare exact model variants which the caller already admitted. Returned
+ * objects retain identity; no virtual seat IDs or new execution permission. */
+export function rankEligibleCapacities(req: RoutingRequest, capacities: readonly SeatCapacity[], policy: BudgetPolicy,
+  opts: RouteOptions): SeatCapacity[] {
+  const verdicts = routeVerdicts(req, capacities, policy, opts);
+  return rank(verdicts.filter(v => v.eligible), tierPreference(policy.mode, req), resolveWeights(opts.weights), opts).map(v => v.capacity);
 }
 
 /**
@@ -455,34 +361,10 @@ export function routeSeat(
   policy: BudgetPolicy,
   opts: RouteOptions,
 ): SeatDecision {
-  const readingMaxAgeMs = opts.readingMaxAgeMs ?? HEADROOM_READING_MAX_AGE_MS;
-  const verdicts = capacity.map((seat, index): Verdict => ({
-    ...(seat.engine === 'claude-api' || seat.seatId.toLowerCase() === CLAUDE_API_SEAT_ID
-      ? { capacity: seat, eligible: false, headroom: null, nextEligibleAt: null,
-        details: [{ kind: 'grant' as const, text: 'Claude API is not commissioned in the signed grant.' }] }
-      : req.autonomous && seat.engine === 'devin' && !(seat.seatId === 'devin-cli' && seat.free === true && seat.costBasis === 'free')
-      ? devinFleetVerdict(seat)
-      : applyFit(
-        req.autonomous
-          ? autonomousVerdict(seat, policy, opts.nowMs, readingMaxAgeMs)
-          : interactiveVerdict(seat, opts.nowMs, readingMaxAgeMs),
-        req.contextTokens,
-      )),
-    index,
-  }));
-
-  if (req.autonomous && opts.scheduling) {
-    for (const v of verdicts) {
-      const advisory = opts.scheduling[v.capacity.seatId];
-      if (v.eligible && advisory?.admission === 'unknown') {
-        v.eligible = false;
-        v.details.push({kind:'unknown-usage',text:'Current account-window evidence is incomplete or has passed its reported period.'});
-      }
-    }
-  }
+  const verdicts = routeVerdicts(req, capacity, policy, opts);
   const order = tierPreference(policy.mode, req);
   const weights = resolveWeights(opts.weights);
-  const eligible = rank(verdicts.filter((v) => v.eligible), order, weights, opts.latencyMs, opts);
+  const eligible = rank(verdicts.filter((v) => v.eligible), order, weights, opts);
   const exclusions: SeatExclusion[] = verdicts
     .filter((v) => !v.eligible)
     .map((v) => ({
@@ -503,28 +385,29 @@ export function routeSeat(
   let why: string;
   let summary: string;
   if (chosen) {
-    const tier = TIER_WORDS[order.by === 'cost' ? costRung(chosen.capacity) : capacityTier(chosen.capacity)];
+    const preference = opts.explicitTiers && Object.hasOwn(opts.explicitTiers, chosen.capacity.seatId) ? opts.explicitTiers[chosen.capacity.seatId] : undefined;
+    const rankReason = preference ? `the explicit ${preference} preference, admitted headroom and funding category` : 'admitted headroom and funding category; quality and comparable latency are unmeasured';
     const room = chosen.headroom?.autonomyHeadroomPercent;
     const windowWord = chosen.headroom?.bindingWindow === 'session' ? '5-hour' : 'weekly';
     const hasRoom = req.autonomous && !chosen.capacity.free && typeof room === 'number';
     const roomText = hasRoom
       ? ` with ${room}% of its ${windowWord} window left for autonomy`
-      : chosen.capacity.free ? ' at no cost' : '';
+      : chosen.capacity.free ? ' with no provider token charge' : '';
     const held = exclusions.length === 0 ? ''
       : `; held back ${exclusions.length === 1 ? '1 seat' : `${exclusions.length} seats`} (${listSeatIds(exclusions.map((e) => e.seatId))})`;
     // Tuned weights can put a seat ahead of the mode's own order, so the
     // sentence names them; at the defaults it stays byte-identical.
     const tuned = isDefaultWeights(weights) ? ''
       : `; routing weights cost ×${formatWeight(weights.lambdaCost)}, headroom ×${formatWeight(weights.lambdaPressure)}, `
-        + `latency ×${formatWeight(weights.lambdaLatency)}`;
+        + `retained latency weight ×${formatWeight(weights.lambdaLatency)} is inactive`;
     why = `Routed ${who}${describeWork(req)} to ${chosen.capacity.label} (${chosen.capacity.seatId})${roomText}: `
-      + `${policy.mode} mode prefers the ${tier} tier first for this work${tuned}${held}.`;
+      + `${policy.mode} mode ranks by ${rankReason}${tuned}${held}.`;
     const lead = hasRoom
       ? ` — ${room}% of its ${windowWord} window left`
-      : chosen.capacity.free ? ' — free, no usage window' : '';
+      : chosen.capacity.free ? ' — no provider token charge, no usage window' : '';
     summary = lead
-      ? `${chosen.capacity.label}${lead}; ${policy.mode} mode prefers the ${tier} tier for this work.`
-      : `${chosen.capacity.label} — ${policy.mode} mode prefers the ${tier} tier for this work.`;
+      ? `${chosen.capacity.label}${lead}; ${policy.mode} mode ranks by ${rankReason}.`
+      : `${chosen.capacity.label} — ${policy.mode} mode ranks by ${rankReason}.`;
   } else if (capacity.length === 0) {
     why = `No seats are known, so ${who}${describeWork(req)} has nowhere to run.`;
     summary = 'No seats are known, so this work has nowhere to run.';

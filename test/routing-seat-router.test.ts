@@ -454,36 +454,36 @@ describe('capacityFromSeat', () => {
 describe('routeSeat — today’s machine in balanced mode', () => {
   const fleet = (): SeatCapacity[] => [claude(15, 20), codexSpent('codex-personal', 30), codexSpent('codex-cmp', 40), grok(12), local()];
 
-  it('medium autonomous code work goes to Grok, with Codex held back and a one-sentence why', () => {
+  it('medium autonomous code work uses admitted headroom without a provider quality prior', () => {
     const d = routeSeat(auto('code', 'medium'), fleet(), balanced(), opts);
-    expect(d.seatId).toBe('grok');
+    expect(d.seatId).toBe('local:qwen3.8:27b-ctx64k');
     expect(d.mode).toBe('balanced');
-    expect(d.candidates).toEqual(['grok', 'local:qwen3.8:27b-ctx64k', 'claude']);
+    expect(d.candidates).toEqual(['local:qwen3.8:27b-ctx64k', 'grok', 'claude']);
     expect(d.exclusions.map((e) => e.seatId)).toEqual(['codex-cmp', 'codex-personal']);
     // Codex is OFF by policy — that is the first reason, and "off" has no reopening date.
     expect(d.exclusions[0]!.reasons[0]).toContain('weekly window is spent');
     expect(d.exclusions[0]!.nextEligibleAt).toBe(iso(40*H));
-    expect(d.why).toMatch(/^Routed autonomous medium-difficulty code work to grok \(grok\) with 88% of its weekly window left for autonomy: balanced mode prefers the fast tier first/);
+    expect(d.why).toContain('quality and comparable latency are unmeasured');
     expect(d.why.split('. ').length).toBe(1);
   });
 
-  it('high-difficulty work prefers Claude inside its capped slice', () => {
+  it('high difficulty does not convert a provider label into measured quality', () => {
     const d = routeSeat(auto('code', 'high'), fleet(), balanced(), opts);
-    expect(d.seatId).toBe('claude');
-    expect(d.why).toContain('40% of its weekly window left for autonomy');
+    expect(d.seatId).toBe('local:qwen3.8:27b-ctx64k');
+    expect(d.candidates).toContain('claude');
   });
 
   it('low-difficulty and bulk work goes local first, at no cost', () => {
     for (const req of [auto('code', 'low'), auto('bulk', 'high')]) {
       const d = routeSeat(req, fleet(), balanced(), opts);
       expect(d.seatId).toBe('local:qwen3.8:27b-ctx64k');
-      expect(d.why).toContain('at no cost');
+      expect(d.why).toContain('no provider token charge');
     }
   });
 
   it('protects a live Claude session: 5-hour above 70% sends high work elsewhere', () => {
     const d = routeSeat(auto('code', 'high'), [claude(75, 20), grok(12), local()], balanced(), opts);
-    expect(d.seatId).toBe('grok');
+    expect(d.seatId).toBe('local:qwen3.8:27b-ctx64k');
     expect(d.exclusions[0]!.reasons[0]).toContain('autonomy stops at 70% to protect your live session');
   });
 
@@ -540,6 +540,31 @@ describe('routeSeat — today’s machine in balanced mode', () => {
   });
 });
 
+describe('neutral quality versus explicit operator preference', () => {
+  it('changing only a provider or catalog family tier does not move equally evidenced resources', () => {
+    const req={task:'code' as const,difficulty:'high' as const,autonomous:false};
+    const rows=[seat('first','grok',[win('weekly',10)],{tier:'fast',costBasis:'subscription'}),
+      seat('second','codex',[win('weekly',10)],{tier:'elite',costBasis:'subscription'})];
+    const original=routeSeat(req,rows,balanced(),opts);
+    const swapped=routeSeat(req,rows.map(row=>({...row,engine:row.engine==='grok'?'claude':'grok',tier:row.tier==='elite'?'free':'elite'})),balanced(),opts);
+    expect(original.candidates).toEqual(['first','second']);
+    expect(swapped.candidates).toEqual(original.candidates);
+    expect(swapped.why).toContain('quality and comparable latency are unmeasured');
+  });
+  it('an explicit invocation preference can move an eligible seat but cannot admit a spent account', () => {
+    const req={task:'code' as const,difficulty:'high' as const,autonomous:false};
+    const rows=[seat('first','grok',[win('weekly',0)],{costBasis:'subscription'}),
+      seat('preferred','codex',[win('weekly',60)],{costBasis:'subscription'})];
+    expect(routeSeat(req,rows,balanced(),opts).seatId).toBe('first');
+    const explicit={...opts,explicitTiers:{first:'fast' as const,preferred:'elite' as const}};
+    expect(routeSeat(req,rows,balanced(),explicit).seatId).toBe('preferred');
+    const spent=[rows[0]!,{...rows[1]!,windows:[win('weekly',100)]}];
+    expect(routeSeat(req,spent,balanced(),explicit).seatId).toBe('first');
+    expect(routeSeat(req,spent,balanced(),explicit).exclusions[0]?.seatId).toBe('preferred');
+    expect(routeSeat(req,rows,balanced(),{...opts,explicitTiers:Object.create(explicit.explicitTiers)}).seatId).toBe('first');
+  });
+});
+
 describe('routeSeat — modes', () => {
   it('reserve mode runs medium work locally and only lets paid seats take a small slice', () => {
     const reserve = applyModeSwitch(balanced(), 'reserve', iso(0));
@@ -549,18 +574,19 @@ describe('routeSeat — modes', () => {
     expect(d.seatId).toBe('local:qwen3.8:27b-ctx64k');
     expect(d.exclusions.map((e) => e.seatId)).toEqual(['claude', 'grok']);
     // …but under it, hard work may use the slice.
-    expect(routeSeat(auto('code', 'high'), [claude(5, 20), grok(10), local()], reserve, opts).seatId).toBe('grok');
+    expect(routeSeat(auto('code', 'high'), [claude(5, 20), grok(10), local()], reserve, opts).candidates).toEqual(['local:qwen3.8:27b-ctx64k', 'grok']);
   });
 
   it('all-in mode lets autonomy use Claude up to its limit', () => {
     const allIn = applyModeSwitch(balanced(), 'all-in', iso(0));
     const d = routeSeat(auto('code', 'high'), [claude(95, 97), grok(10)], allIn, opts);
-    expect(d.seatId).toBe('claude');
+    expect(d.seatId).toBe('grok');
+    expect(d.candidates).toContain('claude');
     // A spent window still blocks in all-in.
     expect(routeSeat(auto('code', 'high'), [claude(100, 97), grok(10)], allIn, opts).seatId).toBe('grok');
   });
 
-  it('preference table — over tiers or the cost ladder, never providers', () => {
+  it('legacy preference table remains available for explicit operator preferences', () => {
     expect(tierPreference('balanced', auto('code', 'medium'))).toEqual({ by: 'cost', order: ['fast', 'free', 'elite'] });
     expect(tierPreference('all-in', auto('code', 'medium'))).toEqual({ by: 'tier', order: ['fast', 'elite', 'free'] });
     expect(tierPreference('balanced', auto('leader', 'low'))).toEqual({ by: 'tier', order: ['elite', 'fast', 'free'] });
@@ -571,16 +597,17 @@ describe('routeSeat — modes', () => {
 });
 
 describe('interactive routing ignores reserves (they exist for Mason)', () => {
-  it('Claude above its autonomy ceiling is still Mason’s first choice', () => {
+  it('interactive Claude above its autonomy ceiling stays eligible without a default quality preference', () => {
     const d = routeSeat({ task: 'code', difficulty: 'high', autonomous: false }, [claude(82, 65), grok(10)], balanced(), opts);
-    expect(d.seatId).toBe('claude');
+    expect(d.seatId).toBe('grok');
+    expect(d.candidates).toContain('claude');
   });
 
   it('unknown usage does not block Mason, but spent and signed-out seats do', () => {
     const d = routeSeat({ task: 'code', difficulty: 'medium', autonomous: false },
       [seat('claude', 'claude', []), codexSpent('codex-personal', 30), grok(10, ), { ...grok(1), seatId: 'grok-b', signedOut: true }],
       balanced(), opts);
-    expect(d.candidates).toEqual(['claude', 'grok']);
+    expect(d.candidates).toEqual(['grok', 'claude']);
     const codex = d.exclusions.find((e) => e.seatId === 'codex-personal')!;
     expect(codex.reasons[0]).toContain('is spent');
     expect(codex.nextEligibleAt).toBe(iso(30 * H));
@@ -591,8 +618,8 @@ describe('interactive routing ignores reserves (they exist for Mason)', () => {
     const capacity = [codexSpent('codex-personal', 30), seat('codex-cmp', 'codex', [win('codex_codex_primary', 20, { resetsAt: iso(H) })]),
       claude(10, 10), grok(10), local()];
     expect(rankAlternatives('codex-personal', capacity, balanced(), opts))
-      .toEqual(['codex-cmp', 'claude', 'grok', 'local:qwen3.8:27b-ctx64k']);
-    expect(rankAlternatives('unknown-seat', capacity, balanced(), opts)[0]).toBe('claude');
+      .toEqual(['codex-cmp', 'local:qwen3.8:27b-ctx64k', 'claude', 'grok']);
+    expect(rankAlternatives('unknown-seat', capacity, balanced(), opts)[0]).toBe('local:qwen3.8:27b-ctx64k');
   });
 });
 
@@ -636,9 +663,9 @@ describe('seat reasons as data (3.10.1)', () => {
 
   it('writes a short summary, and a why that names held-back seats without nesting their reasons', () => {
     const d = routeSeat(auto('code', 'medium'), [claude(15, 70), codexSpent('codex-cmp', 40), codexSpent('codex-personal', 30), grok(6)], balanced(), opts);
-    expect(d.summary).toBe('grok — 94% of its weekly window left; balanced mode prefers the fast tier for this work.');
+    expect(d.summary).toBe('grok — 94% of its weekly window left; balanced mode ranks by admitted headroom and funding category; quality and comparable latency are unmeasured.');
     expect(d.why).toBe('Routed autonomous medium-difficulty code work to grok (grok) with 94% of its weekly window left for autonomy: '
-      + 'balanced mode prefers the fast tier first for this work; held back 3 seats (claude, codex-cmp, codex-personal).');
+      + 'balanced mode ranks by admitted headroom and funding category; quality and comparable latency are unmeasured; held back 3 seats (claude, codex-cmp, codex-personal).');
     expect(d.why).not.toMatch(/…|\(resets/);
   });
 

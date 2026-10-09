@@ -116,7 +116,7 @@ describe('adviseSeat — the choice and its one-line explanation', () => {
   it('a quick question goes to the free local model, and says so in one line', () => {
     const a = advise('what does this regex match?');
     expect(a.choice?.seatId).toBe(QWEN.seatId);
-    expect(a.why).toBe('Qwen 27B (local) — quick explanation — free and private on this Mac.');
+    expect(a.why).toBe('Qwen 27B (local) — quick explanation — no provider token charge on this Mac.');
     expect(a.why.split('\n')).toHaveLength(1);
     expect(a.stay).toBe(false);
     expect(a.alternatives.map((o) => o.seatId)).toEqual(expect.arrayContaining(['claude', 'codex-personal', 'grok']));
@@ -124,17 +124,15 @@ describe('adviseSeat — the choice and its one-line explanation', () => {
     expect(a.factors.some((f) => f.startsWith('Cost weight ×3'))).toBe(true);
   });
 
-  it('hard work goes to the elite tier, and headroom — not the provider — picks the seat', () => {
+  it('hard work uses admitted headroom with unknown quality rather than family tiers', () => {
     const a = advise('refactor the concurrency model of the scheduler across @a.ts and @b.ts');
     expect(a.classification.difficulty).toBe('high');
-    // Claude (70% left) and Codex (80% left) are one tier: the emptier one wins.
-    expect(a.choice?.seatId).toBe('codex-personal');
-    expect(a.why).toBe('Personal Codex — hard refactor needs the strongest model; 80% of its 5-hour window left.');
-    expect(a.routerWhy).toMatch(/^Routed high-difficulty code work to Personal Codex \(codex-personal\).*prefers the elite tier/);
+    expect(a.choice?.seatId).toBe(QWEN.seatId);
+    expect(a.routerWhy).toContain('quality and comparable latency are unmeasured');
     // Flip the headroom and Claude wins the same message — no house favourite.
     const flipped = adviseSeat({
       classification: classifyPrompt('refactor the concurrency model of the scheduler across @a.ts and @b.ts'),
-      seats: [paid('claude', 'claude', 'Claude Max', 10), paid('codex-personal', 'codex', 'Personal Codex', 60), GROK, QWEN],
+      seats: [paid('claude', 'claude', 'Claude Max', 10), paid('codex-personal', 'codex', 'Personal Codex', 60)],
       policy: POLICY, mode: 'auto', nowMs: NOW,
     });
     expect(flipped.choice?.seatId).toBe('claude');
@@ -144,7 +142,8 @@ describe('adviseSeat — the choice and its one-line explanation', () => {
   it('Mason may use the fleet reserve: a Claude seat at 85% is still his (interactive), not held back', () => {
     const tight = paid('claude', 'claude', 'Claude Max', 85);
     const a = adviseSeat({ classification: classifyPrompt('architect the new billing system'), seats: [tight, GROK], policy: POLICY, mode: 'auto', nowMs: NOW });
-    expect(a.choice?.seatId).toBe('claude');
+    expect(a.choice?.seatId).toBe('grok');
+    expect(a.alternatives.map(option=>option.seatId)).toContain('claude');
     expect(a.held).toEqual([]);
   });
 
@@ -156,7 +155,7 @@ describe('adviseSeat — the choice and its one-line explanation', () => {
       classification: classifyPrompt('architect the new billing system'),
       seats: [spent, out, GROK, QWEN], policy: POLICY, mode: 'auto', nowMs: NOW, pinnedSeatId: 'claude', learned,
     });
-    expect(a.choice?.seatId).toBe('grok');
+    expect(a.choice?.seatId).toBe(QWEN.seatId);
     expect(a.held.map((h) => h.seatId).sort()).toEqual(['claude', 'codex-personal']);
     expect(a.held.find((h) => h.seatId === 'codex-personal')?.reason).toMatch(/Signed out/);
     expect(a.alternatives.some((o) => o.seatId === 'claude')).toBe(false);
@@ -195,10 +194,10 @@ describe('adviseSeat — the choice and its one-line explanation', () => {
     expect(advise('can you explain what this does?').choice?.seatId).toBe(QWEN.seatId);
     // …cheap-first comes back down to it even mid-conversation…
     expect(advise('what is 2+2?', { currentSeatId: 'claude', turnCount: 6, mode: 'cheap-first' }).choice?.seatId).toBe(QWEN.seatId);
-    // …and hard work leaves a weaker seat for a stronger (elite) one.
+    // Hard work does not invent a stronger hosted model from its family name.
     const up = advise('architect the replication layer', { currentSeatId: QWEN.seatId, turnCount: 6 });
-    expect(up.choice?.seatId).toBe('codex-personal');
-    expect(up.stay).toBe(false);
+    expect(up.choice?.seatId).toBe(QWEN.seatId);
+    expect(up.stay).toBe(true);
   });
 
   it('cheap-first leans hard on cost for ordinary work but not for hard work', () => {
@@ -207,35 +206,37 @@ describe('adviseSeat — the choice and its one-line explanation', () => {
     expect(weightsFor(classifyPrompt('architect the sync engine'), 'cheap-first').lambdaCost).toBe(1);
     const a = advise('add a null check to parseUser', { mode: 'cheap-first' });
     expect(a.choice?.seatId).toBe(QWEN.seatId);
-    expect(a.why).toContain('local drafts first, escalates only if the draft is weak');
+    expect(a.why).toContain('local resource with admitted capacity');
     // A confident "needs frontier" from the decision layer counts as hard.
     const cls = { ...classifyPrompt('add a null check to parseUser'), decidedBy: 'jev' as const, confidence: 0.92, needsFrontier: 0.9 };
-    expect(advise('', { mode: 'cheap-first' }, cls).choice?.seatId).toBe('codex-personal');
+    expect(advise('', { mode: 'cheap-first' }, cls).choice?.seatId).toBe(QWEN.seatId);
     expect(advise('', { mode: 'cheap-first' }, cls).factors[0]).toContain('labelled by Jev, 92% sure');
   });
 
   it('learns from outcomes: enough evidence re-orders a close call and the line credits it', () => {
     const cls = classifyPrompt('review my change to the parser');
     expect(cls.difficulty).toBe('medium');
-    expect(advise('', {}, cls).choice?.seatId).toBe('codex-personal');
+    expect(advise('', {seats:[CLAUDE,CODEX]}, cls).choice?.seatId).toBe('codex-personal');
     const learned = aggregateOutcomes([
       ...Array.from({ length: 5 }, () => outcome('claude', 'claude', 'review', 'up', NOW - 3_600_000)),
       outcome('codex-personal', 'codex', 'review', 'down', NOW - 3_600_000),
       outcome('codex-personal', 'codex', 'review', 'auto-overridden', NOW - 3_600_000),
       outcome('codex-personal', 'codex', 'review', 'compare-lost', NOW - 3_600_000),
     ], NOW);
-    const a = advise('', { learned }, cls);
+    const a = advise('', { learned, seats:[CLAUDE,CODEX] }, cls);
     expect(a.choice?.seatId).toBe('claude');
     expect(a.why).toBe("Claude Max — review; you've preferred Claude Max for reviews (5 of 5 signals positive); 70% of its 5-hour window left.");
     expect(a.factors).toContain("Learned: you've preferred Claude Max for reviews (5 of 5 signals positive).");
   });
 
-  it('fleet ROI tilts code work by ship rate, within its bound', () => {
+  it('provider-aggregated fleet ROI stays diagnostic even with extreme ship rate and latency', () => {
     const cls = classifyPrompt('add a retry to the upload client');
     const roi = { claude: { dispatches: 40, shipRate: 0.9, avgLatencyMs: 60_000 }, codex: { dispatches: 40, shipRate: 0.3, avgLatencyMs: 90_000 } };
     const a = adviseSeat({ classification: cls, seats: [CLAUDE, CODEX], policy: POLICY, mode: 'auto', nowMs: NOW, roi });
-    expect(a.choice?.seatId).toBe('claude');
-    expect(a.factors.some((f) => f.startsWith('Fleet record: claude ships above the average'))).toBe(true);
+    expect(a.choice?.seatId).toBe('codex-personal');
+    expect(a.factors.some((f) => f.startsWith('Fleet record:'))).toBe(false);
+    const plain=adviseSeat({classification:cls,seats:[CLAUDE,CODEX],policy:POLICY,mode:'auto',nowMs:NOW});
+    expect(a).toEqual(plain);
     // Thin evidence moves nothing: headroom decides (Codex has more).
     const thin = { claude: { dispatches: 3, shipRate: 1, avgLatencyMs: null }, codex: { dispatches: 3, shipRate: 0, avgLatencyMs: null } };
     expect(adviseSeat({ classification: cls, seats: [CLAUDE, CODEX], policy: POLICY, mode: 'auto', nowMs: NOW, roi: thin }).choice?.seatId).toBe('codex-personal');

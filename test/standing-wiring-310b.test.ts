@@ -20,7 +20,7 @@
  *        with, experiments run only in idle / overnight windows and stop when
  *        authority is withdrawn.
  *  U7    best-of-N is planned over this tick's lanes (threshold from the
- *        routing weights), low-difficulty grok-cli work takes the fast model,
+ *        routing weights), grok-cli preserves its exact selected model,
  *        and the restricted-judge credential source carries the claude-a
  *        token only under a standing policy.
  */
@@ -43,7 +43,7 @@ import {
 } from '../src/core/fleet/dispatch-router.js';
 import { emptyBackpressureState } from '../src/core/fleet/backpressure.js';
 import { BASELINE_HARNESS_CONFIG } from '../src/core/learn/harness-registry.js';
-import { GROK_CLI_FAST_MODEL } from '../src/core/run/model-catalog.js';
+import { GROK_CLI_DEFAULT_MODEL, GROK_CLI_FAST_MODEL } from '../src/core/run/model-catalog.js';
 import { defaultBudgetPolicy } from '../src/core/routing/policy.js';
 import type { SeatCapacity } from '../src/core/routing/headroom.js';
 import type { EffectivePolicy, LedgerEntry } from '../src/core/authority/types.js';
@@ -570,16 +570,43 @@ describe('U7 — best-of-N, grok model, routing weights', () => {
     expect(meetsBonThreshold('low', 'medium')).toBe(false);
   });
 
-  it('sends low-difficulty grok-cli work to the fast model, and leaves other work on the default', async () => {
+  it('keeps the selected grok-cli default across difficulty levels', async () => {
     expect(grokFastModel()).toBe(GROK_CLI_FAST_MODEL);
     w.policy = policyFixture({ engines: ['grok-cli'] });
     const hooks = createLiveTickHooks({ deps: deps() });
     await hooks.beforeTick(ctx);
     const low = hooks.route(item({ id: 'low', effort: 1 }), CFG);
-    expect(low).toMatchObject({ backend: 'grok-cli', model: GROK_CLI_FAST_MODEL, hold: null });
+    expect(low).toMatchObject({ backend: 'grok-cli', model: GROK_CLI_DEFAULT_MODEL, hold: null });
     const medium = hooks.route(item({ id: 'medium', effort: 3 }), CFG);
-    expect(medium).toMatchObject({ backend: 'grok-cli', hold: null });
-    expect(medium.model).toBeUndefined();
+    expect(medium).toMatchObject({ backend: 'grok-cli', model: GROK_CLI_DEFAULT_MODEL, hold: null });
+  });
+
+  it('honors a trimmed configured fast-model pin across difficulty levels', async () => {
+    w.policy = policyFixture({ engines: ['grok-cli'] });
+    const cfg = { ...CFG, foundry: { ...CFG.foundry, models: { 'grok-cli': ` ${GROK_CLI_FAST_MODEL} ` } } } as AshlrConfig;
+    const hooks = createLiveTickHooks({ deps: deps() });
+    await hooks.beforeTick({ ...ctx, cfg });
+    for (const effort of [1, 3]) {
+      expect(hooks.route(item({ id: `configured-${effort}`, effort }), cfg)).toMatchObject({
+        backend: 'grok-cli', model: GROK_CLI_FAST_MODEL, hold: null,
+      });
+    }
+  });
+
+  it('retains captured same-engine intent but never borrows another engine\'s model', async () => {
+    w.policy = policyFixture({ engines: ['grok-cli'] });
+    for (const backend of ['grok-cli', 'builtin'] as const) {
+      const hooks = createLiveTickHooks({ deps: {
+        ...deps(),
+        legacyRoute: () => ({ backend, tier: backend === 'builtin' ? 'local' : 'frontier', reason: 'legacy', model: GROK_CLI_FAST_MODEL }),
+      } });
+      await hooks.beforeTick(ctx);
+      for (const effort of [1, 3]) {
+        expect(hooks.route(item({ id: `captured-${backend}-${effort}`, effort }), CFG)).toMatchObject({
+          backend: 'grok-cli', model: backend === 'grok-cli' ? GROK_CLI_FAST_MODEL : GROK_CLI_DEFAULT_MODEL, hold: null,
+        });
+      }
+    }
   });
 });
 

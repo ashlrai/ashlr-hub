@@ -146,12 +146,12 @@ describe('CapacityStrip', () => {
     expect(screen.getAllByRole('img')).toHaveLength(2);
     expect(screen.queryByText(/resets Sep/)).not.toBeInTheDocument();
     // No headline by default in compact.
-    expect(screen.queryByText(/accounts usable/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/accounts with current usage/)).not.toBeInTheDocument();
   });
 
   it('the headline counts only what was read', () => {
     render(<CapacityStrip seats={[CLAUDE, UNREAD_SEAT, LOCAL_SEAT_V2]} />);
-    expect(screen.getByText('1 of 2 accounts usable · 1 not read yet · local models ready')).toBeInTheDocument();
+    expect(screen.getByText('1 of 2 accounts with current usage · 1 usage unconfirmed · local models ready')).toBeInTheDocument();
   });
 
   it('an empty roster says so rather than drawing seats at zero', () => {

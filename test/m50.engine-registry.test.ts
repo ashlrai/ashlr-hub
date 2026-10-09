@@ -19,6 +19,7 @@ import {
 } from '../src/core/run/engine-registry.js';
 import { engineMeteredness, enginePermitted } from '../src/core/policy/local-only.js';
 import { estCostUsd } from '../src/core/run/budget.js';
+import { resolveSelectedEngineModel } from '../src/core/run/model-catalog.js';
 
 const GOAL = 'harden the inbox apply path';
 const CWD = '/tmp/ashlr-wt-xyz';
@@ -43,6 +44,31 @@ function makeConfig(over: Partial<AshlrConfig> = {}): AshlrConfig {
 const KNOWN_ENGINES: EngineId[] = ['builtin', 'ashlrcode', 'aw', 'claude', 'claude-api', 'codex', 'hermes', 'opencode', 'nim', 'kimi', 'openai-compat', 'local-coder', 'meta-muse', 'grok', 'llama-server' as EngineId, 'grok-cli' as EngineId, 'devin-cli' as EngineId];
 
 describe('M50 registry — coverage', () => {
+  it('binds an API model to its resolved API default without borrowing native or other-engine defaults', () => {
+    const api = BUILTIN_ENGINE_REGISTRY['nim']!;
+    const cfg = makeConfig({ foundry: { engines: { nim: {
+      ...api, defaultModel: 'native-looking-default',
+      api: { ...api.api!, defaultModel: 'operator-api-default' },
+    } } } });
+    const spec = resolveEngineSpec('nim', cfg);
+    expect(resolveSelectedEngineModel({ engine: 'nim', spec,
+      captured: { engine: 'claude', model: 'unrelated-model' } })).toBe('operator-api-default');
+    expect(resolveSelectedEngineModel({ engine: 'nim', spec,
+      configured: ' explicit-api-model ' })).toBe('explicit-api-model');
+    expect(resolveSelectedEngineModel({ engine: 'unknown', spec })).toBeNull();
+    expect(resolveSelectedEngineModel({ engine: 'unknown' })).toBeNull();
+  });
+
+  it('passes the normalized selected native model unchanged into the actual command builder', () => {
+    const cfg = makeConfig();
+    const model = resolveSelectedEngineModel({ engine: 'claude', configured: ' operator-native-model ',
+      spec: resolveEngineSpec('claude', cfg) });
+    const command = buildEngineCommand('claude', GOAL, cfg, { cwd: CWD, model: model! });
+    const modelFlag = command!.args.indexOf('--model');
+    expect(modelFlag).toBeGreaterThanOrEqual(0);
+    expect(command!.args[modelFlag + 1]).toBe(model);
+    expect(model).toBe('operator-native-model');
+  });
   it('offers Meta Muse through the existing API loop without granting implicit frontier authority', () => {
     const cfg = makeConfig();
     const spec = resolveEngineSpec('meta-muse' as EngineId, cfg);

@@ -28,6 +28,7 @@ import {
   laneOfSeat,
   resolveLaneEngines,
   routeWorkItem,
+  executionForSeat,
   routingRequestFor,
   type DispatchRouterContext,
   type LanePlan,
@@ -192,6 +193,32 @@ function item(over: Partial<WorkItem> = {}): WorkItem {
 
 const LEGACY_LOCAL: LegacyRoute = { backend: 'builtin' as EngineId, tier: 'local', reason: 'legacy: builtin' };
 
+describe('exact candidate model identity', () => {
+  it('preserves a captured same-engine model unless the operator explicitly changes it', () => {
+    const legacy: LegacyRoute = { backend: 'claude', tier: 'frontier', model: 'captured-model', reason: 'captured' };
+    const capacity = claude(10, 10);
+    expect(executionForSeat(item(), legacy, capacity, ctx([capacity]))?.model).toBe('captured-model');
+    const cfg = { foundry: { models: { claude: ' explicit-model ' } } } as AshlrConfig;
+    for (const work of [item(), item({ tags: ['outcome-manager'], source: 'goal', effort: 5 })]) {
+      expect(executionForSeat(work, legacy, capacity, ctx([capacity], { cfg }))?.model).toBe('explicit-model');
+    }
+  });
+
+  it('never carries another backend model into the selected local candidate', () => {
+    const legacy: LegacyRoute = { backend: 'claude', tier: 'frontier', model: 'cloud-model', reason: 'cloud' };
+    const cfg = { foundry: { models: { 'llama-server': 'local-selected-model' } } } as AshlrConfig;
+    const execution = executionForSeat(item(), legacy, local(), ctx([local()], { cfg }));
+    expect(execution?.backend).toBe('llama-server');
+    expect(execution?.model).toBe('local-selected-model');
+  });
+
+  it('uses the concrete Grok default for low-difficulty work without a family-based fast substitution', () => {
+    const execution = executionForSeat(item({ effort: 1, score: 1 }), LEGACY_LOCAL, grok(), ctx([grok()]));
+    expect(execution?.backend).toBe('grok-cli');
+    expect(execution?.model).toBe(resolveEngineSpec('grok-cli')?.defaultModel);
+  });
+});
+
 describe('Claude and the 5-hour window (balanced: 70% ceiling, 40% weekly reserve)', () => {
   it('excludes Claude while its 5-hour window is above 70% and routes hard work elsewhere', () => {
     const route = routeWorkItem(item({ tags: ['difficulty:high'] }), LEGACY_LOCAL, ctx([claude(75, 20), grok(), local()]));
@@ -203,7 +230,7 @@ describe('Claude and the 5-hour window (balanced: 70% ceiling, 40% weekly reserv
   });
 
   it('uses Claude for hard work when the 5-hour window is under the ceiling and the reserve holds', () => {
-    const route = routeWorkItem(item({ tags: ['difficulty:high'] }), LEGACY_LOCAL, ctx([claude(40, 30), grok(), local()], {
+    const route = routeWorkItem(item({ tags: ['difficulty:high'] }), LEGACY_LOCAL, ctx([claude(40, 30), grok(70)], {
       lanes: lanes({ 'claude-cli': 1 }),
     }));
     expect(route.backend).toBe('claude');
@@ -213,7 +240,10 @@ describe('Claude and the 5-hour window (balanced: 70% ceiling, 40% weekly reserv
   it('keeps Claude off when the grant gives claude-a no producer role, even with headroom', () => {
     const base = policy();
     const p = { ...base, spend: { ...base.spend, seats: { ...base.spend.seats, claude: seat('claude', ['judge', 'leader']) } } };
-    const route = routeWorkItem(item({ tags: ['difficulty:high'] }), LEGACY_LOCAL, ctx([claude(10, 10), grok(), local()], { policy: p }));
+    const work = item({ tags: ['difficulty:high', 'context:80000'] });
+    const capacity = [claude(10, 10), grok(50), local()];
+    expect(routeWorkItem(work, LEGACY_LOCAL, ctx(capacity)).seatDecision?.seatId).toBe('claude');
+    const route = routeWorkItem(work, LEGACY_LOCAL, ctx(capacity, { policy: p }));
     expect(route.backend).toBe('grok-cli');
     const claudeOut = route.seatDecision?.exclusions.find((e) => e.seatId === 'claude');
     expect(claudeOut?.reasons.join(' ')).toMatch(/no producer role/);
@@ -311,8 +341,33 @@ describe('split items never go local', () => {
     const route = routeWorkItem(item({ effort: 1 }), LEGACY_LOCAL, ctx([grok(), local()]));
     expect(route.hold).toBeNull();
     expect(route.lane).toBe('local');
-    // The legacy engine is kept when it already dispatches through the chosen lane.
-    expect(route.backend).toBe('builtin');
+    // A planning-only legacy engine must not absorb the qualified local lane.
+    expect(route.backend).toBe('llama-server');
+  });
+
+  it.each(['llama-server', 'local-coder'] as const)('binds local runtime evidence to the capable %s producer, preserving a real local pin', (engine) => {
+    const context = ctx([local()], { laneEngines: { ...ctx([]).laneEngines, local: engine } });
+    expect(routeWorkItem(item(), LEGACY_LOCAL, context)).toMatchObject({ backend: engine, lane: 'local', hold: null });
+    const pinned: LegacyRoute = { backend: engine, tier: 'mid', model: 'exact-local-model', reason: 'local pin' };
+    expect(routeWorkItem(item(), pinned, context)).toMatchObject({ backend: engine, model: 'exact-local-model', lane: 'local', hold: null });
+  });
+
+  it('rejects a planning-only injected local producer, then uses an eligible coding account', () => {
+    const context = ctx([local(), grok()], { laneEngines: { ...ctx([]).laneEngines, local: 'builtin' } });
+    const route = routeWorkItem(item(), LEGACY_LOCAL, context);
+    expect(route).toMatchObject({ backend: 'grok-cli', lane: 'grok-cli', hold: null });
+    expect(route.seatDecision?.exclusions.find(e => e.seatId === FLEET_LOCAL_SEAT_ID)?.reasons.join(' ')).toMatch(/tool-capable local producer/);
+    const onlyLocal = routeWorkItem(item(), LEGACY_LOCAL, { ...context, capacity: [local()] });
+    expect(onlyLocal.hold?.kind).toBe('park');
+    expect(onlyLocal.lane).toBeNull();
+  });
+
+  it('has no coding lane when only builtin is allowed, including a configured builtin fleet runtime', () => {
+    const resolved = resolveLaneEngines({ allowedBackends: ['builtin'], installed: () => true, localFleetEngine: 'builtin' });
+    expect(resolved.engines.local).toBeNull();
+    const route = routeWorkItem(item(), LEGACY_LOCAL, ctx([local()], { laneEngines: resolved.engines }));
+    expect(route.hold?.kind).toBe('park');
+    expect(route.lane).toBeNull();
   });
 
   it('uses the lane engine when the legacy engine is in another lane', () => {
@@ -438,7 +493,8 @@ describe('presence caps', () => {
     const engines = resolveLaneEngines({ allowedBackends: ['builtin', 'claude'], installed: () => true, localFleetEngine: null });
     expect(engines.engines['grok-cli']).toBeNull();
     expect(engines.unavailable['grok-cli']).toMatch(/not in foundry.allowedBackends/);
-    expect(engines.engines.local).toBe('builtin');
+    expect(engines.engines.local).toBeNull();
+    expect(engines.unavailable.local).toMatch(/No free local engine/);
     const planned = planLanes({ policy: policy(), directives: null, presence: ABSENT, localServingSlots: 4, engineUnavailable: engines.unavailable });
     expect(planned['grok-cli'].slots).toBe(0);
   });
@@ -460,10 +516,12 @@ describe('grant scope and backpressure demotion', () => {
   });
 
   it('skips a demoted engine × repo × kind route and takes the next candidate', () => {
-    const route = routeWorkItem(item({ effort: 3 }), LEGACY_LOCAL, ctx([grok(), local()], {
+    const capacity = [grok(10), claude(50, 40)];
+    expect(routeWorkItem(item({ effort: 3 }), LEGACY_LOCAL, ctx(capacity)).lane).toBe('grok-cli');
+    const route = routeWorkItem(item({ effort: 3 }), LEGACY_LOCAL, ctx(capacity, {
       demotions: [{ engine: 'grok-cli', repo: REPO, kind: 'todo', since: NOW_ISO, until: IN_3H, reason: '3 consecutive rejects.' }],
     }));
-    expect(route.lane).toBe('local');
+    expect(route.lane).toBe('claude-cli');
     const grokOut = route.seatDecision?.exclusions.find((e) => e.seatId === 'grok');
     expect(grokOut?.reasons.join(' ')).toMatch(/demoted until/);
     // 3.10.1: the same reason as data — its end is `resetsAt`, not prose.
@@ -472,18 +530,23 @@ describe('grant scope and backpressure demotion', () => {
 });
 
 describe('routing weights reach the seat ranking', () => {
-  // Medium work in balanced mode prefers Grok, then local. The λ weights the
-  // tick resolves (Leader › harness › baseline) used to stop at best-of-N.
-  it('keeps Grok at the baseline weights and leans to the free local lane when lambdaCost rises', () => {
-    const baseline = routeWorkItem(item({ effort: 3 }), LEGACY_LOCAL, ctx([grok(), local()], {
+  // Explicit category/headroom facts exercise ranking only: a credits label
+  // does not authorize spending or prove a native account's billing boundary.
+  it('trades reported headroom for included funding when lambdaCost rises', () => {
+    const capacity: SeatCapacity[] = [
+      { ...grok(10), costBasis: 'credits' },
+      { ...claude(10, 10), costBasis: 'subscription' },
+    ];
+    const baseline = routeWorkItem(item({ effort: 3 }), LEGACY_LOCAL, ctx(capacity, {
       weights: { lambdaCost: 1, lambdaPressure: 1, lambdaLatency: 0.25 },
     }));
     expect(baseline.lane).toBe('grok-cli');
-    const cheap = routeWorkItem(item({ effort: 3 }), LEGACY_LOCAL, ctx([grok(), local()], {
+    expect(baseline.seatDecision?.candidates).toEqual(['grok', 'claude']);
+    const cheap = routeWorkItem(item({ effort: 3 }), LEGACY_LOCAL, ctx(capacity, {
       weights: { lambdaCost: 3, lambdaPressure: 1, lambdaLatency: 0.25 },
     }));
-    expect(cheap.lane).toBe('local');
-    expect(cheap.seatDecision?.candidates).toEqual([FLEET_LOCAL_SEAT_ID, 'grok']);
+    expect(cheap.lane).toBe('claude-cli');
+    expect(cheap.seatDecision?.candidates).toEqual(['claude', 'grok']);
   });
 });
 
@@ -680,13 +743,21 @@ describe('shared outcome manager routing', () => {
     expect(route.model).toEqual(expect.any(String));
   });
   it('keeps an eligible cheaper native Manager instead of requiring frontier tier', () => {
-    const route = routeWorkItem(manager(), LEGACY_LOCAL, ctx([grok(), claude(10, 10), local()], {
+    const capacity: SeatCapacity[] = [
+      { ...grok(40), costBasis: 'credits' },
+      { ...claude(10, 10), costBasis: 'subscription' },
+    ];
+    const route = routeWorkItem(manager(), LEGACY_LOCAL, ctx(capacity, {
       tierOf: engine => String(engine) === 'grok-cli' ? 'frontier' : 'mid',
     }));
     expect(route.hold).toBeNull();
     expect(route.backend).toBe('claude'); expect(route.tier).toBe('mid');
     expect(route.seatDecision?.seatId).toBe('claude');
+    expect(route.model).toBe(resolveEngineSpec('claude')?.defaultModel);
     expect(route.seatDecision?.exclusions.some(row => row.reasons.some(reason => reason.includes('frontier manager')))).toBe(false);
+    expect(routeWorkItem(manager(), LEGACY_LOCAL, ctx(capacity, {
+      tierOf: engine => String(engine) === 'claude' ? 'frontier' : 'mid',
+    })).seatDecision?.seatId).toBe('claude');
   });
   it('admits qualified non-frontier execution using the same grant and fit checks', () => {
     const route = routeWorkItem(manager(), LEGACY_LOCAL, ctx([grok(), local()], { tierOf: () => 'mid' }));

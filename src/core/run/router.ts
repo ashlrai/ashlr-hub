@@ -41,6 +41,7 @@ import {
   pickModel,
   claude5ExcludeIds,
   CLAUDE5_CATALOG_IDS,
+  resolveSelectedEngineModel,
   type ModelEntry,
   type ModelCapability,
 } from './model-catalog.js';
@@ -245,9 +246,8 @@ export interface RoutingContext {
    * what the reserves protect against. Interactive is the default so every
    * existing caller keeps its behaviour; autonomy must opt in explicitly.
    *
-   * Today fleet/router.ts#routeBackend (daemon, gateway) does not set this: it
-   * calls routeTask only to ENRICH the model tag of an engine it already
-   * chose, and the dispatch itself is gated downstream by daemon/loop.ts and
+   * fleet/router.ts#routeBackend uses exact-engine enrichment with the same
+   * metadata availability check; actual dispatch is gated by daemon/loop.ts and
    * fabric/gateway.ts calling subscriptionAllows directly — whose default is
    * autonomous/fail-closed. So an unset flag there cannot launch an engine.
    */
@@ -413,6 +413,63 @@ function pickForEngine(
   });
 }
 
+function decisionModelFor(entry: ModelEntry): string {
+  return CLAUDE5_CATALOG_IDS.has(entry.id) && entry.apiModelId
+    ? entry.apiModelId
+    : modelTagFrom(entry.id);
+}
+
+function learnedEntryForEngine(
+  engine: EngineId,
+  capability: ModelCapability | null,
+  effortCap: number,
+  excludes: ReadonlySet<string>,
+  scores: EngineScoreMap | null,
+  minShipRate: number,
+): ModelEntry | null {
+  if (!scores || scores.size === 0) return null;
+  const candidates = KNOWN_MODELS.filter((entry) =>
+    !entry.historical && entry.engine === engine &&
+    (!capability || entry.capabilities.includes(capability)) &&
+    entry.minEffort <= effortCap && !excludes.has(entry.id));
+  return selectCostAwareModel(candidates, scores, { minShipRate });
+}
+
+/** Enrich only the chosen backend; default identity is not a quality or funding claim. */
+export function modelForSelectedEngine(item: WorkItem, engine: EngineId, cfg: AshlrConfig): TaskRouteDecision {
+  // Preserve the prior enrichment's quota/subscription metadata refusal.
+  // Actual provider contact still requires downstream task/account admission.
+  if (!engineAvailable(engine, cfg, { availableEngines: [engine] })) {
+    return { engine, model: null, catalogEntry: null, reason: 'Selected engine is unavailable for model enrichment.' };
+  }
+  const configured = resolveSelectedEngineModel({ engine, configured: cfg.foundry?.models?.[engine] });
+  if (configured) return { engine, model: configured,
+    catalogEntry: KNOWN_MODELS.find(entry => entry.engine === engine &&
+      (entry.id === `${engine}:${configured}` || entry.apiModelId === configured)) ?? null,
+    reason: 'Explicit configured model for the selected engine.' };
+  try {
+    const learnedConfig = cfg.foundry?.modelGranularRouting;
+    if (learnedConfig?.enabled === true) {
+      // Keep the existing authenticated opt-in and candidate rules. They are
+      // legacy outcome evidence, not current account/version speed or quality.
+      const effort = typeof item.effort === 'number' ? item.effort : 3;
+      const effortCap = cfg.foundry?.routingPolicy === 'quality' && isSubstantiveItem(item) &&
+        (engine === 'claude' || engine === 'codex') ? 5 : effort;
+      const entry = learnedEntryForEngine(engine, capabilityForSource(item.source), effortCap,
+        claude5ExcludeIds(cfg), operationalProducerScoresForRouting(item.source),
+        typeof learnedConfig.minShipRate === 'number' ? learnedConfig.minShipRate : 0.6);
+      if (entry) return { engine, model: decisionModelFor(entry), catalogEntry: entry,
+        reason: 'M323 qualified learned model for the selected engine.' };
+    }
+    const model = resolveSelectedEngineModel({ engine, spec: resolveEngineSpec(engine, cfg) });
+    return { engine, model, catalogEntry: model ? KNOWN_MODELS.find(entry => entry.engine === engine &&
+      (entry.id === `${engine}:${model}` || entry.apiModelId === model)) ?? null : null,
+      reason: model ? 'Concrete default for the selected engine.' : 'Selected engine has no concrete model default.' };
+  } catch {
+    return { engine, model: null, catalogEntry: null, reason: 'Selected engine model metadata is unavailable.' };
+  }
+}
+
 /**
  * LOCAL-ONLY enforcement for a finished routing decision.
  *
@@ -518,8 +575,8 @@ export function routeTask(
  * Fallback chain: preferred → same-tier alt → free local → builtin.
  * Never throws; always returns a decision (engine='builtin', model=null as last resort).
  *
- * This is called by fleet/router.ts AFTER it has already determined the engine
- * tier. It enriches the decision with model granularity.
+ * Legacy public/cascade selector. Fleet enrichment uses modelForSelectedEngine
+ * so it never borrows a model from a second engine-selection decision.
  */
 function routeTaskUnenforced(
   item: WorkItem,
@@ -547,10 +604,6 @@ function routeTaskUnenforced(
     // carry the full API id ('claude-sonnet-5' — the bare 'sonnet-5' tag is not
     // a documented CLI alias); legacy entries keep their tags unchanged.
     const c5Excludes = claude5ExcludeIds(cfg);
-    const decisionModelFor = (entry: ModelEntry): string =>
-      CLAUDE5_CATALOG_IDS.has(entry.id) && entry.apiModelId
-        ? entry.apiModelId
-        : modelTagFrom(entry.id);
 
     // ── M240: Learned-bias score map ──────────────────────────────────────
     // Build once per routeTask call. Only an explicit true enables learned
@@ -581,15 +634,7 @@ function routeTaskUnenforced(
       effortCap: number,
       overrideReason: string,
     ): TaskRouteDecision | null => {
-      if (!producerScores || producerScores.size === 0) return null;
-      const cands = KNOWN_MODELS.filter(
-        (m) =>
-          !m.historical && m.engine === engine &&
-          (!capability || m.capabilities.includes(capability)) &&
-          m.minEffort <= effortCap &&
-          !c5Excludes.has(m.id),
-      );
-      const learned = selectCostAwareModel(cands, producerScores, { minShipRate });
+      const learned = learnedEntryForEngine(engine, capability, effortCap, c5Excludes, producerScores, minShipRate);
       if (!learned) return null;
       return {
         engine,

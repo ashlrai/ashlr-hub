@@ -225,12 +225,18 @@ describe('resolveLeaderSeat purpose: reply', () => {
     expect(calls).toEqual([]);
   });
 
-  it('reply selection uses quality/headroom ranking; exhausted Claude capacity falls to Grok', async () => {
+  it('reply selection uses observed headroom with equal explicit reserves; exhausted Claude capacity falls to Grok', async () => {
     const calls: string[] = [];
-    const r = await resolveLeaderSeat(seatDeps([CLAUDE, GROK], [CLAUDE_OK, GROK_OK], calls), { deep: false, promptChars: 20_000, purpose: 'reply' });
+    const deps = seatDeps([CLAUDE, GROK], [CLAUDE_OK, GROK_OK], calls);
+    // Equal reserves isolate the measured 90% vs 80% headroom; balanced
+    // intentionally retains a separate interactive Claude reserve.
+    deps.budgetPolicy = () => ({ ...defaultBudgetPolicy(), mode: 'all-in' });
+    const r = await resolveLeaderSeat(deps, { deep: false, promptChars: 20_000, purpose: 'reply' });
     expect(r.ok && r.choice.engine).toBe('claude');
     const spent = { ...CLAUDE_OK, windows: CLAUDE_OK.windows.map((w) => ({ ...w, usedPercent: 100, limitReached: true })) };
-    const fallback = await resolveLeaderSeat(seatDeps([CLAUDE, GROK], [spent, GROK_OK], calls), { deep: false, promptChars: 20_000, purpose: 'reply' });
+    const fallbackDeps = seatDeps([CLAUDE, GROK], [spent, GROK_OK], calls);
+    fallbackDeps.budgetPolicy = deps.budgetPolicy;
+    const fallback = await resolveLeaderSeat(fallbackDeps, { deep: false, promptChars: 20_000, purpose: 'reply' });
     expect(fallback.ok && fallback.choice.engine).toBe('grok');
     expect(calls).toEqual([]);
   });

@@ -1,38 +1,6 @@
-/**
- * The Auto seat — which seat should THIS message go to, and why, in one line.
- *
- * NOT A NEW ROUTER. It asks the seat router (routing/router.ts `routeSeat`)
- * the question the router already answers for Mason's own work
- * (`autonomous: false`: fleet reserves do not bind him, only a signed-out,
- * spent or unreachable seat is refused, and a request that would not fit a
- * seat's window is never sent there). What it adds is the INPUT the router
- * needs and the explanation a person reads:
- *
- *   1. Task + difficulty from classify.ts (or the decision layer, once per send).
- *   2. The router's own λ weights, set per message: a quick question leans on
- *      cost (λcost 3 → local and Grok first), hard work keeps the quality order
- *      (λcost 1). Cheap-first mode leans harder (λcost 4) and only hard work
- *      keeps quality. Latency comes from fleet ROI (M322 avgLatencyMs).
- *   3. Bounded re-ranking of the router's eligible list by:
- *        - stickiness: mid-conversation, the current seat gets a head start —
- *          moving re-sends the context and loses the provider’s prompt cache (a weak head start for hard work and in cheap-first);
- *        - what Mason taught it (learning.ts; at most ±1.5 positions);
- *        - fleet ship rate per engine for code work (M335; at most ±0.75);
- *        - a local model that cannot use tools is last for edit work.
- *      None of these can make an ineligible seat eligible.
- *   4. Privacy: a local-only repo is routed over LOCAL seats only — the
- *      filter runs before the router sees anything.
- *   5. Model fit inside a seat (3.15): a seat that also offers a cheaper-tier
- *      model (Devin's free SWE on the Devin CLI) competes with THAT model for
- *      cheap work, and with its default for everything else.
- *
- * EQUAL PARTNERS. Eligible local and hosted models compete through the same
- * tier, fit, headroom, cost and observed-latency ranking. Locality alone does
- * not establish speed or quality; missing performance evidence stays neutral.
- *
- * PURE and deterministic (callers pass `nowMs`). BROWSER-SAFE: the composer
- * runs it per pause in typing over the seat list it already polls.
- */
+/** Auto applies the shared account rank, then explicit user pins/preferences,
+ * conversation stickiness and tool/privacy facts. Aggregate provider ROI stays
+ * diagnostic-only: it is not exact model/account/task performance evidence. */
 import { assessSeat, type SeatCapacity } from '../../routing/headroom.js';
 import type { BudgetEngine } from '../../routing/policy.js';
 import { COST_BASIS_LABELS, type CostBasis } from '../../routing/tiers.js';
@@ -55,24 +23,17 @@ import type {
  */
 export const ROUTABLE_ENGINES: readonly BudgetEngine[] = ['claude', 'codex', 'devin', 'grok', 'local'];
 
-/**
- * Mid-conversation head start for the current seat, in ranking positions.
- * Moving re-sends the context as a note and drops the provider's prompt
- * cache, so ordinary work stays put (STICKINESS covers the whole engine
- * ladder at the low-difficulty cost weight). It is small where moving is
- * the point: hard work on a weaker seat, and cheap-first, whose purpose is to
- * come back down to the free seat once the hard turn is done.
- */
+/** Existing conversation continuity preference in ranking positions.
+ * Hard and cheap-first work retain the weaker configured preference. */
 export const STICKINESS = 3.5;
 export const STICKINESS_WEAK = 1.25;
-/** Bound on the fleet-ROI tilt, in ranking positions. */
+/** Legacy readable bound; provider-aggregate ROI no longer tilts selection. */
 export const ROI_MAX_TILT = 0.75;
-/** Fleet evidence below this many dispatches per engine is ignored. */
+/** Legacy readable diagnostic threshold; it does not establish exact-model evidence. */
 export const ROI_MIN_DISPATCHES = 10;
 /** Where a tool-less local model lands for edit work: behind everything. */
 const NO_TOOLS_PENALTY = 3;
 const EDIT_KINDS: ReadonlySet<PromptKind> = new Set(['code', 'debug', 'refactor', 'bulk']);
-const ROI_KINDS: ReadonlySet<PromptKind> = new Set(['code', 'debug', 'refactor', 'bulk', 'review']);
 
 export interface AdvisorSeat {
   seatId: string;
@@ -87,11 +48,9 @@ export interface AdvisorSeat {
   /** Can drive an agentic session; null = the runtime did not say (not "no"). */
   supportsTools: boolean | null;
   capacity: SeatCapacity;
-  /**
-   * 3.15: a runnable model of this seat in a CHEAPER tier than its default
-   * (Devin CLI's free SWE), with the capacity it would route as. Used for
-   * cheap work only; absent = the seat has one tier.
-   */
+  /** Explicitly supplied runnable alternative with independent funding category.
+   * Used for cheap work only when that category establishes lower marginal
+   * funding consumption. Catalog family/tier labels never create this variant. */
   cheaper?: { model: string; capacity: SeatCapacity } | null;
 }
 
@@ -114,36 +73,14 @@ export interface AdviseInput {
   pinnedSeatId?: string | null;
 }
 
-/**
- * The λ weights for one message. Only `lambdaCost` moves; pressure and
- * latency keep the router's defaults so headroom stays a tie-breaker inside
- * an engine and latency a tie-breaker inside that.
- */
+/** Existing per-message funding weights. Headroom keeps its existing weight;
+ * legacy aggregate latency remains unqualified and does not steer ranking. */
 export function weightsFor(classification: PromptClassification, mode: AutoMode): RouterWeights {
   const hard = classification.difficulty === 'high' || (classification.needsFrontier ?? 0) >= 0.7;
   let lambdaCost: number;
   if (mode === 'cheap-first') lambdaCost = hard ? 1 : 4;
   else lambdaCost = hard ? 1 : classification.difficulty === 'low' ? 3 : 1.5;
   return { ...DEFAULT_ROUTER_WEIGHTS, lambdaCost };
-}
-
-function roiTilt(roi: AdviseInput['roi'], engine: string, kind: PromptKind): number {
-  if (!roi || !ROI_KINDS.has(kind)) return 0;
-  const rows = Object.values(roi).filter((r) => r.dispatches >= ROI_MIN_DISPATCHES && r.shipRate !== null);
-  const mine = roi[engine];
-  if (!mine || mine.dispatches < ROI_MIN_DISPATCHES || mine.shipRate === null || rows.length < 2) return 0;
-  const mean = rows.reduce((sum, r) => sum + (r.shipRate ?? 0), 0) / rows.length;
-  return -Math.max(-ROI_MAX_TILT, Math.min(ROI_MAX_TILT, (mine.shipRate - mean) * 2));
-}
-
-function latencyFromRoi(seats: readonly AdvisorSeat[], roi: AdviseInput['roi']): Record<string, number> | undefined {
-  if (!roi) return undefined;
-  const out: Record<string, number> = {};
-  for (const seat of seats) {
-    const ms = roi[seat.engine]?.avgLatencyMs;
-    if (typeof ms === 'number' && Number.isFinite(ms) && ms > 0) out[seat.seatId] = ms;
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function windowWord(binding: 'session' | 'weekly' | null): string {
@@ -154,7 +91,7 @@ function windowWord(binding: 'session' | 'weekly' | null): string {
 function windowlessNote(basis: CostBasis | undefined): string {
   if (basis === 'free') return 'free on your plan';
   if (basis === 'credits') return 'spends credits (ACUs)';
-  return `${COST_BASIS_LABELS[basis ?? 'subscription']} · no usage window reported`;
+  return `${basis ? COST_BASIS_LABELS[basis] : 'funding category unknown'} · no usage window reported`;
 }
 
 /** "free · private on this Mac" / "62% of its 5-hour window left" / "no usage reading". */
@@ -179,22 +116,25 @@ interface Ranked {
   seat: AdvisorSeat;
   base: number;
   learned: ReturnType<typeof learnedTilt>;
-  roi: number;
   sticky: number;
   tools: number;
 }
 
 function total(r: Ranked, withLearned = true, withSticky = true): number {
-  return r.base + (withLearned ? r.learned.tilt : 0) + r.roi + (withSticky ? r.sticky : 0) + r.tools;
+  return r.base + (withLearned ? r.learned.tilt : 0) + (withSticky ? r.sticky : 0) + r.tools;
 }
 
-/**
- * The seat as it competes for THIS message: its cheaper-tier model for cheap
- * work (when it has one), else itself.
- */
+/** Use an explicitly supplied cheaper funding variant only for cheap work.
+ * Independent admission remains mandatory for the resulting resource. */
 function forMessage(seat: AdvisorSeat, cheap: boolean): AdvisorSeat {
   if (!cheap || !seat.cheaper) return seat;
-  return { ...seat, model: seat.cheaper.model, capacity: seat.cheaper.capacity };
+  const current = seat.capacity.costBasis;
+  const alternative = seat.cheaper.capacity;
+  // Only an explicitly supplied independent funding category establishes a
+  // cheaper variant. A family/display tier alone cannot change the model.
+  const cheaper = !seat.capacity.free && (alternative.free || alternative.costBasis === 'free') ||
+    (current === 'credits' || current === 'per-token') && alternative.costBasis === 'subscription';
+  return cheaper ? { ...seat, model: seat.cheaper.model, capacity: alternative } : seat;
 }
 
 
@@ -212,7 +152,8 @@ export function adviseSeat(input: AdviseInput): SeatAdvice {
   const { classification: cls, mode, nowMs } = input;
   const localOnly = { on: input.localOnly?.on === true, reason: input.localOnly?.reason ?? null };
   const hard = cls.difficulty === 'high' || (cls.needsFrontier ?? 0) >= 0.7;
-  // Cheap work may use a seat's cheaper-tier model (Devin SWE); hard work never does.
+  // Cheap work may use an explicitly supplied lower-consumption funding variant;
+  // a provider or model-family tier alone never supplies one.
   const cheap = !hard && (mode === 'cheap-first' || cls.difficulty === 'low' || cls.task === 'bulk');
   const known = input.seats
     .filter((s) => (ROUTABLE_ENGINES as readonly string[]).includes(s.engine) && s.model !== null)
@@ -225,12 +166,11 @@ export function adviseSeat(input: AdviseInput): SeatAdvice {
 
   const weights = weightsFor(cls, mode);
   const context = Math.max(0, input.contextTokens ?? 0) + cls.estTokens;
-  const latencyMs = latencyFromRoi(pool, input.roi);
   const decision: SeatDecision = routeSeat(
     { task: cls.task, difficulty: (cls.needsFrontier ?? 0) >= 0.7 && cls.difficulty !== 'high' ? 'high' : cls.difficulty, contextTokens: context, autonomous: false },
     pool.map((s) => s.capacity),
     input.policy,
-    { nowMs, weights, ...(latencyMs ? { latencyMs } : {}) },
+    { nowMs, weights },
   );
 
   const held = decision.exclusions.map((e) => ({
@@ -251,7 +191,6 @@ export function adviseSeat(input: AdviseInput): SeatAdvice {
       seat,
       base: index,
       learned: learnedTilt(input.learned, cls.kind, seat),
-      roi: roiTilt(input.roi, seat.engine, cls.kind),
       sticky: midChat && id === input.currentSeatId ? -stickiness : 0,
       tools: seat.local && seat.supportsTools === false && EDIT_KINDS.has(cls.kind) ? NO_TOOLS_PENALTY : 0,
     }];
@@ -293,9 +232,9 @@ export function adviseSeat(input: AdviseInput): SeatAdvice {
   } else if (toolless.seat.seatId !== seat.seatId && toolless.tools > 0) {
     reason = `${cls.label} edits files, and ${toolless.seat.label} cannot use tools`;
   } else if (seat.local) {
-    reason = mode === 'cheap-first' ? `${cls.label} — local drafts first, escalates only if the draft is weak` : `${cls.label} — free and private on this Mac`;
+    reason = mode === 'cheap-first' ? `${cls.label} — local resource with admitted capacity` : `${cls.label} — no provider token charge on this Mac`;
   } else if (hard) {
-    reason = `${cls.label} needs the strongest model`;
+    reason = `${cls.label} — eligible task fit; model quality is unmeasured`;
   } else {
     reason = cls.label;
   }
@@ -307,7 +246,6 @@ export function adviseSeat(input: AdviseInput): SeatAdvice {
     factors.push(`Cost weight ×${weights.lambdaCost} for ${cls.difficulty}-difficulty work${mode === 'cheap-first' ? ' in cheap-first mode' : ''}.`);
   }
   if (winner.learned.phrase) factors.push(`Learned: ${winner.learned.phrase}.`);
-  if (winner.roi !== 0) factors.push(`Fleet record: ${seat.engine} ships ${winner.roi < 0 ? 'above' : 'below'} the average for code work.`);
   if (held.length > 0) factors.push(`Held back: ${held.map((h) => `${h.label} (${h.reason.replace(/\.$/, '').toLowerCase()})`).join('; ')}.`);
 
   return {

@@ -452,22 +452,25 @@ export function buildCapacityRows(seats: readonly VerseSeat[], inputs: CapacityI
   return out;
 }
 
-/**
- * The strip's one sentence: how many paid seats are usable, and what local
- * adds. Counts only what was READ — an unread seat is named as unread, never
- * folded into "blocked".
- */
+/** Current subscription usage evidence, independent of connection and admission. */
+export function hasCurrentUsage(row: CapacityRow): boolean {
+  return row.kind === 'subscription' && row.cls !== 'unread' && !row.signedOut && !row.lastReading
+    && row.windows.some(w => w.usedPercent !== null || w.limitReached);
+}
+
+/** Account rows with current usage, then unconfirmed usage and local readiness. */
 export function capacityHeadline(rows: readonly CapacityRow[]): string {
   const paid = rows.filter((r) => r.kind === 'subscription');
   const local = rows.filter((r) => r.kind === 'local');
-  const usable = paid.filter((r) => r.cls === 'ready' || r.cls === 'tight').length;
+  const current = paid.filter(hasCurrentUsage).length;
   const lastReadings = paid.filter((r) => r.lastReading).length;
-  const unread = paid.filter((r) => r.cls === 'unread' && !r.lastReading).length;
   const parts: string[] = [];
   if (paid.length === 0) parts.push('No accounts connected');
-  else parts.push(`${usable} of ${paid.length} ${paid.length === 1 ? 'account' : 'accounts'} usable`);
+  else {
+    parts.push(`${current} of ${paid.length} ${paid.length === 1 ? 'account' : 'accounts'} with current usage`);
+    if (current < paid.length) parts.push(`${paid.length - current} usage unconfirmed`);
+  }
   if (lastReadings > 0) parts.push(`${lastReadings} last ${lastReadings === 1 ? 'reading' : 'readings'}`);
-  if (unread > 0) parts.push(`${unread} not read yet`);
   if (local.some((r) => r.cls === 'ready')) parts.push('local models ready');
   else if (local.length > 0) parts.push('local models not ready');
   return parts.join(' · ');

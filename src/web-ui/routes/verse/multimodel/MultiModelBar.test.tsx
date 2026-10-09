@@ -81,7 +81,7 @@ describe('MultiModelBar', () => {
   it('names the seat for this message in one line, with the local badge', async () => {
     stubFetch();
     renderBar('what does this regex match?');
-    expect(await screen.findByText('Qwen3 Coder (local) — quick explanation — free and private on this Mac.')).toBeInTheDocument();
+    expect(await screen.findByText('Qwen3 Coder (local) — quick explanation — no provider token charge on this Mac.')).toBeInTheDocument();
     expect(screen.getByText(/On this Mac · private · 66k ctx · 43 tok\/s · age unavailable/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Warm up' })).toBeInTheDocument();
     // Override: every other eligible seat is offered, with its note.
@@ -110,15 +110,15 @@ describe('MultiModelBar', () => {
 
   const HARD: PromptClassification = { kind: 'plan', task: 'plan', difficulty: 'high', size: 'small', estTokens: 7, label: 'architecture planning', signals: [], decidedBy: 'jev', confidence: 0.93, needsFrontier: 0.9 };
 
-  it('a changed Auto label sends once on its final seat without pinning or a second Send', async () => {
-    stubFetch();
+  it('a changed edit label uses actual tool capability and sends once without a second Send', async () => {
+    stubFetch({...CONTEXT,local:CONTEXT.local.map(badge=>({...badge,supportsTools:false}))});
     const flow = stubFlow();
     seedVerseSession('vs_1', session({ id: 'vs_1', seatId: LOCAL_SEAT.id, engine: 'local', model: 'qwen3-coder', turnCount: 0 }), []);
     let interceptor: SendInterceptor | null = null;
     render(<MultiModelBar sessionId="vs_1" seats={[CLAUDE_SEAT, LOCAL_SEAT]} text="what does this regex match?" running={false}
       registerInterceptor={(fn) => { interceptor = fn; }} onConsumeDraft={vi.fn()} />);
     await screen.findByText(/^Staying on Qwen3 Coder \(local\)/);
-    label = HARD;
+    label = {...HARD,kind:'refactor'};
     let route: string | undefined;
     await act(async () => { route = await interceptor!('what does this regex match?'); });
     expect(route).toBe('handled');
@@ -161,7 +161,7 @@ describe('MultiModelBar', () => {
     stubFetch(); // label endpoint fails; no second send and no provider fallback.
     const flow = stubFlow(LOCAL_SEAT);
     const { intercept } = renderBar('what does this regex match?');
-    await screen.findByText(/free and private on this Mac/);
+    await screen.findByText(/no provider token charge on this Mac/);
     await act(async () => { expect(await intercept('what does this regex match?')).toBe('handled'); });
     expect(flow.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ seatId: LOCAL_SEAT.id, model: 'qwen3-coder' }));
     expect(flow.send).toHaveBeenCalledExactlyOnceWith('vs_auto', 'what does this regex match?');
@@ -172,7 +172,7 @@ describe('MultiModelBar', () => {
     const flow = stubFlow(LOCAL_SEAT);
     saveAutoPref('vs_1', 'cheap-first');
     const { intercept } = renderBar('what does this regex match?');
-    await screen.findByText(/local drafts first/);
+    await screen.findByText(/local resource with admitted capacity/);
     await act(async () => { expect(await intercept('what does this regex match?')).toBe('handled'); });
     expect(flow.create).toHaveBeenCalledTimes(1);
     expect(flow.send).toHaveBeenCalledTimes(1);
@@ -223,7 +223,7 @@ describe('MultiModelBar', () => {
     let interceptor: SendInterceptor | null = null;
     render(<MultiModelBar sessionId="vs_1" seats={[CLAUDE_SEAT, LOCAL_SEAT]} text="what does this regex match?" running={false}
       registerInterceptor={(fn) => { interceptor = fn; }} onConsumeDraft={consume} />);
-    await screen.findByText(/free and private on this Mac/);
+    await screen.findByText(/no provider token charge on this Mac/);
     await act(async () => { expect(await interceptor!('what does this regex match?')).toBe('held'); });
     expect(flow.send).toHaveBeenCalledTimes(1);
     expect(flow.open).not.toHaveBeenCalled();
@@ -232,10 +232,10 @@ describe('MultiModelBar', () => {
   });
 
   it('a label that says "stay" is the safe direction: said, then sent here', async () => {
-    stubFetch();
+    stubFetch({...CONTEXT,local:CONTEXT.local.map(badge=>({...badge,supportsTools:false}))});
     const { intercept } = renderBar('what does this regex match?');
-    await screen.findByText(/free and private on this Mac/);
-    label = HARD;
+    await screen.findByText(/no provider token charge on this Mac/);
+    label = {...HARD,kind:'refactor'};
     let route: string | undefined;
     await act(async () => { route = await intercept('what does this regex match?'); });
     expect(route).toBe('send-here');
@@ -246,7 +246,7 @@ describe('MultiModelBar', () => {
     stubFetch();
     const user = userEvent.setup();
     const { intercept } = renderBar('refactor the concurrency model across @a.ts and @b.ts', 3);
-    await screen.findByText(/^Staying on Claude Max — hard refactor needs the strongest model/);
+    await screen.findByText(/^Staying on Claude Max — hard refactor, mid-conversation — moving would re-send the whole context/);
     await expect(intercept('refactor the concurrency model across @a.ts and @b.ts')).resolves.toBe('send-here');
     await user.selectOptions(screen.getByRole('combobox', { name: 'Send this message to' }), LOCAL_SEAT.id);
     await waitFor(() => expect(screen.getByText(/you picked it for this message/)).toBeInTheDocument());
@@ -254,6 +254,21 @@ describe('MultiModelBar', () => {
 });
 
 describe('toAdvisorSeats', () => {
+  it('keeps the configured first runnable model across provider/family labels without minting included capacity', () => {
+    const models=[{id:'configured-default',label:'default',contextWindow:100000},
+      {id:'swe-2',label:'family variant',contextWindow:100000}];
+    for(const engine of ['devin','claude','codex','grok'] as const){
+      const projected=toAdvisorSeats([{...CLAUDE_SEAT,id:'same-account',engine,models}])[0]!;
+      expect(projected.model).toBe('configured-default');
+      expect(projected.cheaper).toBeUndefined();
+      expect(projected.capacity.free).toBe(false);
+      const reordered=toAdvisorSeats([{...CLAUDE_SEAT,id:'same-account',engine,models:[models[1]!,models[0]!]}])[0]!;
+      expect(reordered.model).toBe('swe-2');
+      expect(reordered.capacity.free).toBe(false);
+      expect(reordered.capacity.costBasis).toBe('subscription');
+    }
+  });
+
   it('drops unavailable and model-less seats; "private" only when the server said loopback', () => {
     const noModel = { ...LOCAL_SEAT, id: 'local:none', models: [{ id: 'x', label: 'x', contextWindow: null, unavailableReason: 'too old' }] };
     const down = { ...CLAUDE_SEAT, id: 'down', health: { ...CLAUDE_SEAT.health, state: 'unavailable' as const } };

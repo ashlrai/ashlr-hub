@@ -1,9 +1,9 @@
 /** Trusted local registration bridge. No executor, scheduler, key creation or provider calls. */
 import { execFileSync } from 'node:child_process';
-import { closeSync, constants, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
-import { canonical, digest, executable, inspectPrivateDirectory, pinSeed, MAX_ARTIFACT_BYTES, MAX_ARTIFACT_ENTRIES } from '../universe/artifacts.js';
+import { canonical, digest, executable, evaluationExecutableDigest, inspectPrivateDirectory, pinSeed, MAX_ARTIFACT_BYTES, MAX_ARTIFACT_ENTRIES } from '../universe/artifacts.js';
 import { assertComparatorUnchanged, initUniverse, initUniverseWithCampaignDeliveryOrigin, manifestRecord, universePath, validateUniverseManifest } from '../universe/store.js';
 import { PREPARATION_PROCESS_SCORE_BUILTIN, resolveBuiltinEvaluator } from '../universe/builtin-evaluator-registry.js';
 import { PREPARATION_TYPECHECK_TARGET } from '../universe/preparation-typecheck-project.js';
@@ -197,7 +197,8 @@ function capture(input: ResourceEngineeringPreparationOptions, successor?: Succe
     }
     if (!protectedFiles.length || protectedFiles.some(file => recipe.generation.files.includes(file)) ||
       recipe.generation.contextFiles.some(file => !entries.has(file))) fail('INVALID_INPUT', 'Fixed evaluator must be tracked and outside mutable paths');
-    evaluatorPins = { executable: command[0], executableDigest: digest(readFileSync(command[0]!)),
+    // Reuse fresh bounded hashing; never retain an executable identity between captures.
+    evaluatorPins = { executable: command[0], executableDigest: evaluationExecutableDigest(command[0]!),
       files: [...new Set(protectedFiles)].sort().map(file => ({ path: file, digest: digest(git(seed.repo, ['cat-file', 'blob', entries.get(file)!])) })) };
   }
   const runtimeCheck = checkResourceGenerationRuntime({ resourceRuntime: options.resourceRuntime, expectedRuntimeDigest: runtimeDigest });

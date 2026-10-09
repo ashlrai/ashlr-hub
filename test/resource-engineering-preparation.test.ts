@@ -1,13 +1,19 @@
 /** Actual pinned registration, without starting a worker or evaluator. */
 import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { canonical } from '../src/core/universe/artifacts.js';
+import { canonical, digest } from '../src/core/universe/artifacts.js';
+import * as artifacts from '../src/core/universe/artifacts.js';
+import { manifestRecord, universePath } from '../src/core/universe/store.js';
 import { checkResourceEngineeringPreparation, prepareResourceEngineeringBundle, type ResourceEngineeringRecipe } from '../src/core/resources/engineering-preparation.js';
 import * as commissioning from '../src/core/resources/console-engineering-check.js';
 import * as poolRuntime from '../src/core/resources/pool-runtime.js';
+
+// Preserve real filesystem IO while exposing configurable exports for call-through observations.
+vi.mock('node:fs', async original => ({ ...await original<typeof import('node:fs')>() }));
 
 const roots: string[] = [];
 afterEach(() => {
@@ -47,6 +53,27 @@ function fixture() {
     delivery: { branch: 'codex/prepared', allowInitialRepair: true }, execution: { maxDurationMs: 30_000, constitutionVersion: 'fixture-v1', policyEpoch: 1 },
     supervision: { maxDurationMs: 60_000, pollIntervalMs: 1000, maxAttemptsPerEnrollment: 2 } };
   return { base, ledger, observationsPath, options: { recipe, workspace, resourceRuntime, projectsFile, output: join(base, 'bundle') } };
+}
+function inertEvaluator(f: ReturnType<typeof fixture>) {
+  const path = join(f.base, 'never-executed-evaluator'), bytes = Buffer.alloc(600_013, 0x61);
+  writeFileSync(path, bytes, { mode: 0o700 });
+  fs.utimesSync(path, 1_700_000_000, 1_700_000_000);
+  f.options.recipe.evaluation = { command: [path, 'evaluate.mjs'], timeoutMs: 1000 };
+  const selected = fs.lstatSync(path, { bigint: true });
+  return { path, bytes, selected };
+}
+function observeEvaluatorReads(evaluator: ReturnType<typeof inertEvaluator>, afterFirstRead?: () => void) {
+  const original = fs.readSync, buffers: number[] = []; let starts = 0, acted = false;
+  vi.spyOn(fs, 'readSync').mockImplementation(((...args: [number, NodeJS.ArrayBufferView, number, number, number | null]) => {
+    const count = Reflect.apply(original, fs, args), opened = fs.fstatSync(args[0], { bigint: true });
+    if (opened.dev === evaluator.selected.dev && opened.ino === evaluator.selected.ino) {
+      buffers.push(args[1].byteLength);
+      if (args[4] === 0 && count > 0) starts++;
+      if (!acted && count > 0 && afterFirstRead) { acted = true; afterFirstRead(); }
+    }
+    return count;
+  }) as typeof fs.readSync);
+  return { buffers, starts: () => starts, acted: () => acted };
 }
 describe('evaluated engineering preparation bridge', () => {
   it('refuses a raw built-in evaluator recipe before output creation or worker dispatch', () => {
@@ -103,4 +130,48 @@ describe('evaluated engineering preparation bridge', () => {
     expect(() => checkResourceEngineeringPreparation(f.options)).toThrow(/artifact bounds/);
     expect(existsSync(f.options.output)).toBe(false); expect(existsSync(f.ledger)).toBe(false);
   });
+  it('streams each preparation capture and preserves legacy plan and persisted executable digests', () => {
+    const f = fixture(), evaluator = inertEvaluator(f), legacyDigest = digest(evaluator.bytes);
+    const reads = observeEvaluatorReads(evaluator), wholeFile = vi.spyOn(fs, 'readFileSync');
+    const plan = checkResourceEngineeringPreparation(f.options);
+    expect(reads.starts()).toBe(2); expect(reads.buffers.length).toBeGreaterThan(0);
+    expect(Math.max(...reads.buffers)).toBeLessThanOrEqual(256 * 1024);
+    expect(wholeFile.mock.calls.some(call => call[0] === evaluator.path)).toBe(false);
+    // The old whole-byte algorithm yields the same pin, without rebuilding the
+    // private pins object in this test. This substitution is never production proof.
+    const identity = vi.spyOn(artifacts, 'evaluationExecutableDigest').mockImplementation(path => {
+      expect(path).toBe(evaluator.path); return legacyDigest;
+    });
+    expect(checkResourceEngineeringPreparation(f.options).planDigest).toBe(plan.planDigest);
+    expect(identity).toHaveBeenCalledTimes(2); identity.mockRestore();
+    const prepared = prepareResourceEngineeringBundle({ ...f.options, expectedPlanDigest: plan.planDigest });
+    expect(manifestRecord(universePath(prepared.paths.universeRoot, prepared.ids.universeId)).evaluationExecutableDigest).toBe(legacyDigest);
+    expect(prepared.planDigest).toBe(plan.planDigest); expect(existsSync(f.ledger)).toBe(false);
+    expect(wholeFile.mock.calls.some(call => call[0] === evaluator.path)).toBe(false);
+  });
+  it('reads changed executable bytes afresh despite retained inode, length and restored mtime', () => {
+    const f = fixture(), evaluator = inertEvaluator(f), reads = observeEvaluatorReads(evaluator);
+    const before = fs.statSync(evaluator.path), first = checkResourceEngineeringPreparation(f.options);
+    expect(reads.starts()).toBe(2);
+    writeFileSync(evaluator.path, Buffer.alloc(evaluator.bytes.length, 0x62));
+    fs.utimesSync(evaluator.path, before.atime, before.mtime);
+    const changed = fs.lstatSync(evaluator.path, { bigint: true });
+    expect(changed.ino).toBe(evaluator.selected.ino); expect(changed.size).toBe(evaluator.selected.size);
+    expect(changed.mtimeNs).toBe(evaluator.selected.mtimeNs);
+    const second = checkResourceEngineeringPreparation(f.options);
+    expect(second.planDigest).not.toBe(first.planDigest); expect(reads.starts()).toBe(4);
+    expect(existsSync(f.options.output)).toBe(false); expect(existsSync(f.ledger)).toBe(false);
+  });
+  it('rejects executable mutation during a preparation capture without publishing or dispatching', () => {
+    const f = fixture(), evaluator = inertEvaluator(f), before = fs.statSync(evaluator.path);
+    const dispatch = vi.spyOn(poolRuntime, 'runResourceTask').mockImplementation(() => { throw new Error('Unexpected dispatch'); });
+    const reads = observeEvaluatorReads(evaluator, () => {
+      writeFileSync(evaluator.path, Buffer.alloc(evaluator.bytes.length, 0x62));
+      fs.utimesSync(evaluator.path, before.atime, before.mtime);
+    });
+    expect(() => checkResourceEngineeringPreparation(f.options)).toThrow(/executable unavailable or changed/);
+    expect(reads.acted()).toBe(true); expect(existsSync(f.options.output)).toBe(false);
+    expect(existsSync(f.ledger)).toBe(false); expect(dispatch).not.toHaveBeenCalled();
+  });
+
 });

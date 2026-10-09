@@ -503,8 +503,9 @@ describe('lanes, presence and the router seam', () => {
     await hooks.beforeTick(hookCtx);
     const first = hooks.route(item(), CFG);
     const second = hooks.route(item(), CFG);
-    expect(first.backend).toBe('grok-cli');
-    expect(first.seatDecision?.seatId).toBe('grok');
+    expect(first.backend).toBe('llama-server');
+    expect(first.seatDecision?.seatId).toBe('local');
+    expect(first.hold).toBeNull();
     expect(second).toEqual(first);
     expect(legacy).toHaveBeenCalledTimes(1);
     expect(h.shadowed).toBe(1);
@@ -614,6 +615,9 @@ describe('seatAllows', () => {
   });
 
   it('admits the cached concrete default model for a manager without a model override', async () => {
+    // Isolate concrete native-model admission from independent seat ranking.
+    policy!.spend.seats.grok.roles = ['judge'];
+    policy!.spend.seats.local.roles = ['judge'];
     const hooks = createLiveTickHooks({ deps: { ...h.deps,
       legacyRoute: () => ({ backend: 'claude', tier: 'frontier', reason: 'native default' }),
     } });
@@ -693,9 +697,10 @@ describe('afterDispatch / afterLanding', () => {
     const hooks = createLiveTickHooks({ deps: h.deps });
     hooks.effectiveConfig(CFG);
     await hooks.beforeTick(hookCtx);
-    hooks.route(item(), CFG);
-    await hooks.afterDispatch(outcome());
-    expect(h.journal.at(-1)).toMatchObject({ type: 'dispatch', repo: REPO, title: 'Fix the parser', source: 'todo', seatId: 'grok', proposalId: 'p-1', seatDecision: { seatId: 'grok' } });
+    const route = hooks.route(item(), CFG);
+    expect(route).toMatchObject({ backend: 'llama-server', hold: null, seatDecision: { seatId: 'local' } });
+    await hooks.afterDispatch(outcome({ backend: route.backend, model: route.model ?? null, seatId: route.seatDecision!.seatId, lane: route.lane }));
+    expect(h.journal.at(-1)).toMatchObject({ type: 'dispatch', backend: route.backend, repo: REPO, title: 'Fix the parser', source: 'todo', seatId: 'local', proposalId: 'p-1', seatDecision: { seatId: 'local' } });
   });
 
   it('records a held item in the tick state (the parked Gantt)', async () => {
@@ -1392,7 +1397,9 @@ describe('fresh Grok preference and actual admitted dispatch capacity', () => {
 
 describe('reset-aware selected batch — real routing seam with injected advice', () => {
   function batchHarness(advice: NonNullable<LiveHooksDeps['resourceAdvice']>, extra: Partial<LiveHooksDeps> = {}) {
-    policy = {...policy!,spend:{...policy!.spend,meteredUsdPerDay:1}};
+    // Advice cases compare two subscription producers. Keep the local account
+    // as a judge so its independent free headroom cannot absorb that test.
+    policy = {...policy!,spend:{...policy!.spend,meteredUsdPerDay:1,seats:{...policy!.spend.seats,local:{...policy!.spend.seats.local,roles:['judge']}}}};
     const views = [grokSeat(), { ...claudeSeat(), tier: 'fast' as const }];
     const recordScheduling = vi.fn<NonNullable<LiveHooksDeps['recordScheduling']>>(async () => undefined);
     const hooks = createLiveTickHooks({ deps: { ...h.deps,
@@ -1473,12 +1480,13 @@ describe('reset-aware selected batch — real routing seam with injected advice'
       liveLeaderConfig:cfg=>changed && kind==='config' ? {...cfg,foundry:{...cfg.foundry,allowedBackends:['builtin']}} : cfg,
       killActive:()=>changed && kind==='stop',
     });
+    if(kind==='capacity') policy!.spend.seats.local.roles=['producer'];
     hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);await hooks.prepareDispatchPlan!([item()],CFG);
     expect(advice).not.toHaveBeenCalled();
     if(kind==='capacity'){
       // Paid provider rows became spent; an admitted local producer remains
       // useful and must not be globally parked by advisory freshness checks.
-      expect(hooks.route(item(),CFG)).toMatchObject({backend:'builtin',hold:null,seatDecision:{seatId:'local'}});
+      expect(hooks.route(item(),CFG)).toMatchObject({backend:'llama-server',hold:null,seatDecision:{seatId:'local'}});
       expect(hooks.seatAllows('claude',{maxPercent:90}).allowed).toBe(false);
       expect(hooks.seatAllows('grok-cli',{maxPercent:90}).allowed).toBe(false);
     }else expect(hooks.route(item(),CFG).hold).not.toBeNull();
@@ -1527,6 +1535,36 @@ describe('reset-aware selected batch — real routing seam with injected advice'
     hooks.effectiveConfig(CFG);await hooks.beforeTick(hookCtx);await hooks.prepareDispatchPlan!([item()],CFG);
     expect(hooks.route(item(),CFG).backend).toBe('grok-cli');
     if(when==='advice')expect(recordScheduling.mock.calls[0]?.[0].accounts.find(v=>v.seatId==='claude')?.forecast).toBeNull();
+  });
+  it('forecasts and admits the configured exact model, then refuses a live pin change without substituting it', async () => {
+    const cfg = { ...CFG, foundry: { ...CFG.foundry, models: { claude: 'selected-model' } } } as AshlrConfig;
+    let liveCfg = cfg;
+    const { hooks, recordScheduling } = batchHarness(async () => null, {
+      capacitySnapshot: () => ({ v: 1, publishedAt: NOW_ISO, seats: [claudeSeat()] }),
+      legacyRoute: () => ({ backend: 'claude', tier: 'frontier', model: 'older-inferred-model', reason: 'legacy fixture' }),
+      liveLeaderConfig: () => liveCfg,
+      workHistory: async () => [{ id: 'completed', engine: 'claude', model: 'selected-model', seatId: null,
+        taskKind: 'todo', completed: true, durationMs: 10000, tokens: 1000 }],
+    });
+    // Select the intended Claude producer through the actual grant, rather than
+    // relying on inferred tier rank over the otherwise fully idle local lane.
+    policy = { ...policy!, spend: { ...policy!.spend, seats: {
+      claude: policy!.spend.seats.claude!,
+      local: { ...policy!.spend.seats.local!, roles: ['judge'] },
+    } } };
+    const work = item();
+    hooks.effectiveConfig(cfg);
+    await hooks.beforeTick({ ...hookCtx, cfg });
+    await hooks.prepareDispatchPlan!([work], cfg);
+    const forecast = recordScheduling.mock.calls[0]?.[0].accounts.find(row => row.seatId === 'claude')?.forecast;
+    expect(forecast?.cohort).toMatchObject({ engine: 'claude', model: 'selected-model' });
+    const route = hooks.route(work, cfg);
+    expect(route).toMatchObject({ backend: 'claude', model: 'selected-model', hold: null });
+    const admission = { maxPercent: 90, itemId: work.id, model: route.model!, seatId: 'claude' };
+    expect(hooks.seatAllows('claude', admission).allowed).toBe(true);
+    liveCfg = { ...cfg, foundry: { ...cfg.foundry, models: { claude: 'replacement-model' } } } as AshlrConfig;
+    expect(hooks.seatAllows('claude', admission).allowed).toBe(false);
+    expect(route.model).toBe('selected-model');
   });
   it('checks current Stop/authority again after asynchronous display-cache publication',async()=>{
     let stopped=false;

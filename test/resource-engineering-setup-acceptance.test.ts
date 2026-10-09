@@ -6,7 +6,7 @@ import { createServer, request as httpRequest } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { readUniverseCampaign, campaignUniverse } from '../src/core/universe/campaign-store.js';
@@ -23,12 +23,84 @@ import { resourceEngineeringPreparationRegistrationRoot } from '../src/core/reso
 import { checkResourceEngineeringPredecessor } from '../src/core/resources/engineering-predecessor-check.js';
 
 const cleanups: Array<() => Promise<void>> = [];
+// Opt-in elapsed diagnostics only. Buffer until fixture cleanup settles so
+// observation cannot manufacture output liveness during a stalled case.
+const acceptanceTiming = process.env.ASHLR_ACCEPTANCE_PHASE_TIMING === '1';
+type TimingPhase = 'fixture' | 'git.init-add-commit' | 'git.other' | 'cli.setup.check' | 'cli.setup.prepare-or-replay' | 'cli.predecessor' | 'console.bootstrap' | 'console.close' | 'console.read' | 'delivery.wait' | 'proof.direct' | 'proof.changed-plan-or-deadline' | 'proof.missing-generation' | 'proof.restored' | 'cleanup.fixture';
+type TimingStats = { calls: number; threw: number; durationMs: number; minMs: number; maxMs: number };
+const acceptancePhases = new Map<TimingPhase, TimingStats>();
+let acceptanceCase = 0;
+let acceptanceIncomplete = false;
+function timingClock(): number | null {
+  if (!acceptanceTiming) return null;
+  try {
+    const value = performance.now();
+    if (Number.isFinite(value)) return value;
+    acceptanceIncomplete = true; return null;
+  }
+  catch { acceptanceIncomplete = true; return null; }
+}
+function observeTiming(phase: TimingPhase, started: number | null, threw: boolean): void {
+  if (started === null) return;
+  try {
+    const ended = timingClock(); const durationMs = ended === null ? null : ended - started;
+    if (durationMs === null || !Number.isFinite(durationMs) || durationMs < 0) { acceptanceIncomplete = true; return; }
+    const prior = acceptancePhases.get(phase);
+    const stats = { calls: (prior?.calls ?? 0) + 1, threw: (prior?.threw ?? 0) + Number(threw),
+      durationMs: (prior?.durationMs ?? 0) + durationMs, minMs: Math.min(prior?.minMs ?? durationMs, durationMs),
+      maxMs: Math.max(prior?.maxMs ?? durationMs, durationMs) };
+    if (![stats.calls, stats.threw].every(count => Number.isSafeInteger(count) && count >= 0) ||
+      ![stats.durationMs, stats.minMs, stats.maxMs].every(value => Number.isFinite(value) && value >= 0)) {
+      acceptanceIncomplete = true; return;
+    }
+    acceptancePhases.set(phase, stats);
+  } catch { acceptanceIncomplete = true; }
+}
+function gitTimingPhase(args: readonly string[]): TimingPhase {
+  // These fixture commands use only leading -c/value pairs before the verb.
+  // Inspect the option spelling, never its value; keep the actual argv intact.
+  let index = 0;
+  while (args[index] === '-c' && index + 1 < args.length) index += 2;
+  return ['init', 'add', 'commit'].includes(args[index] ?? '') ? 'git.init-add-commit' : 'git.other';
+}
+function timedSync<T>(phase: TimingPhase, work: () => T): T {
+  if (!acceptanceTiming) return work();
+  const started = timingClock(); let threw = true;
+  try { const value = work(); threw = false; return value; }
+  finally { observeTiming(phase, started, threw); }
+}
+function timedAsync<T>(phase: TimingPhase, work: () => Promise<T>): Promise<T> {
+  if (!acceptanceTiming) return work();
+  const started = timingClock();
+  return (async () => {
+    let threw = true;
+    try { const value = await work(); threw = false; return value; }
+    finally { observeTiming(phase, started, threw); }
+  })();
+}
+beforeEach(() => {
+  if (!acceptanceTiming) return;
+  acceptanceCase++; acceptancePhases.clear(); acceptanceIncomplete = false;
+});
+function emitAcceptanceTiming(): void {
+  if (!acceptanceTiming) return;
+  try {
+    console.log('ACCEPTANCE_TIMINGS ' + JSON.stringify({ schemaVersion: 1, module: 'setup', caseIndex: acceptanceCase,
+      scope: 'elapsed-inclusive', incomplete: acceptanceIncomplete,
+      phases: [...acceptancePhases].map(([phase, stats]) => ({ phase, ...stats })) }));
+  } catch { /* Diagnostics cannot replace an original result or cleanup error. */ }
+}
+
 const point = (phase: string, details?: Record<string, number>) => { if (process.env.ASHLR_ENGINEERING_SETUP_PHASE_TIMING === '1') console.log('SETUP_PHASE ' + JSON.stringify({ phase, monotonicMs: performance.now(), ...details })); };
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => {
+  try { await timedAsync('cleanup.fixture', async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); }); }
+  finally { emitAcceptanceTiming(); }
+});
 const save = (file: string, value: unknown) => writeFileSync(file, canonical(value) + '\n', { mode: 0o600 });
 function git(repo: string, ...args: string[]): string {
-  return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-C', repo, ...args], {
-    encoding: 'utf8', timeout: 10_000, env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' } }).trim();
+  return timedSync(gitTimingPhase(args), () =>
+    execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-C', repo, ...args], {
+    encoding: 'utf8', timeout: 10_000, env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' } }).trim());
 }
 function tree(file: string): unknown {
   const stat = lstatSync(file, { bigint: true });
@@ -118,20 +190,22 @@ async function fixture(registrationScope?: string) {
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 async function setupCli(f: Fixture, extra: string[]) {
-  const { stdout, stderr } = await promisify(execFile)(process.execPath, ['--import', 'tsx', 'src/cli/index.ts',
+  const { stdout, stderr } = await timedAsync(extra.includes('--check') ? 'cli.setup.check' : 'cli.setup.prepare-or-replay', () =>
+    promisify(execFile)(process.execPath, ['--import', 'tsx', 'src/cli/index.ts',
     'resources', 'pool', 'engineering', 'setup', '--recipe', f.files.recipe, '--policy', f.files.policy, '--output', f.output,
     '--resource-runtime', f.files.runtime, '--workspace', f.repo, '--projects', f.files.projects, '--json', ...extra],
-  { timeout: 90_000, maxBuffer: 256 * 1024, env: childEnv() });
+  { timeout: 90_000, maxBuffer: 256 * 1024, env: childEnv() }));
   expect(stderr).toBe(''); return JSON.parse(stdout) as SetupReport;
 }
 async function predecessorCli(f: Fixture, expectedPlanDigest: string, expectedDeadlineAt: string) {
-  const { stdout, stderr } = await promisify(execFile)(process.execPath, ['--import', 'tsx', 'src/cli/index.ts',
+  const { stdout, stderr } = await timedAsync('cli.predecessor', () =>
+    promisify(execFile)(process.execPath, ['--import', 'tsx', 'src/cli/index.ts',
     'resources', 'pool', 'engineering', 'predecessor', 'check', '--recipe', f.files.recipe, '--policy', f.files.policy,
     '--output', f.output, '--resource-runtime', f.files.runtime, '--workspace', f.repo, '--projects', f.files.projects,
     '--expected-plan-digest', expectedPlanDigest, '--expected-deadline-at', expectedDeadlineAt, '--json'],
   // Offline proof took ~98s in the measured two-enrollment fixture. This
   // child limit does not extend the original console execution deadline.
-  { timeout: 180_000, maxBuffer: 256 * 1024, env: childEnv() });
+  { timeout: 180_000, maxBuffer: 256 * 1024, env: childEnv() }));
   expect(stderr).toBe(''); return JSON.parse(stdout) as ReturnType<typeof checkResourceEngineeringPredecessor>;
 }
 async function until(check: (deadlineMonotonicMs: number) => Promise<boolean>, timeoutMs: number) {
@@ -156,6 +230,7 @@ async function consoleCli(consoleArguments: string[], recovery: { count: number;
   try { startup = JSON.parse(stdout.split('\n')[0]!); } catch { throw Error('Console CLI did not emit valid startup metadata'); }
   if (!startup.url || !Number.isInteger(startup.port) || typeof startup.readToken !== 'string') throw Error('Console CLI startup unavailable');
   async function read<T>(path: string, deadlineMonotonicMs = recovery.deadlineMonotonicMs): Promise<T> {
+    return timedAsync('console.read', async () => {
     const startedAt = performance.now();
     try {
       const response = await fetch(`${startup.url}${path}`, { headers: { 'x-ashlr-token': startup.readToken } });
@@ -203,8 +278,9 @@ async function consoleCli(consoleArguments: string[], recovery: { count: number;
       throw Error('Console read failed: ' + JSON.stringify({ elapsedMs, causeCode, exited, exitCode, exitSignal, outputLimit,
         stdoutBytes: Buffer.byteLength(stdout), stderrBytes: Buffer.byteLength(stderr), stderrSummary: summary, recoveryCount: recovery.count, recoveryFailure }));
     }
+    });
   }
-  return { read, close: async () => { if (!exited) child.kill('SIGTERM'); await until(async () => exited, 20_000); expect(await exit).toBe(0); expect(stderr).toBe(''); } };
+  return { read, close: () => timedAsync('console.close', async () => { if (!exited) child.kill('SIGTERM'); await until(async () => exited, 20_000); expect(await exit).toBe(0); expect(stderr).toBe(''); }) };
 }
 function delivered(f: Fixture, id: string) {
   const catalog = JSON.parse(readFileSync(join(f.output, id, 'engineering.json'), 'utf8')) as ResourceConsoleEngineeringCatalog;
@@ -222,7 +298,7 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
   for (const registrationScope of [undefined, 'standing-window'] as const) {
   it(`${registrationScope === undefined ? '' : 'scoped registration: '}checks without effects, registers a coherent seed, executes emitted arguments and restarts without replay`, async () => {
     const recovery = { count: 0, deadlineMonotonicMs: performance.now() + 360_000 };
-    const f = await fixture(registrationScope); const before = tree(f.base); const homeBefore = tree(homedir());
+    const f = await timedAsync('fixture', () => fixture(registrationScope)); const before = tree(f.base); const homeBefore = tree(homedir());
     point('check.start'); const plan = await setupCli(f, ['--check']); point('check.end');
     expect(plan).toMatchObject({ status: 'planned', output: f.output, projectId: 'default', seedRevision: f.revision, initialEnrollmentDigest: null,
       executionStarted: false, providerContacted: false });
@@ -249,12 +325,12 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
     const setupBeforeStart = tree(f.output); expect((await setupCli(f, ['--expected-plan-digest', plan.planDigest])).disposition).toBe('replayed');
     expect(tree(f.output)).toEqual(setupBeforeStart);
     const firstStartAt = Date.now();
-    point('first-start.start'); const first = await consoleCli(argv, recovery); point('first-start.end');
+    point('first-start.start'); const first = await timedAsync('console.bootstrap', () => consoleCli(argv, recovery)); point('first-start.end');
     const initial = await first.read<ResourceConsoleEngineeringSupervisionSnapshot>('/api/resources/engineering-supervision');
     expect(initial.entries).toHaveLength(1); expect(initial.entries[0]).toMatchObject({ enrollmentId: f.recipe.id, enrollmentDigest: prepared.initialEnrollmentDigest });
     const originalDeadline = initial.deadlineAt;
     let state = initial;
-    await until(async deadline => { state = await first.read('/api/resources/engineering-supervision', deadline); return state.entries.length === 2 && state.entries.every(row => row.state === 'completed'); }, 300_000);
+    await timedAsync('delivery.wait', () => until(async deadline => { state = await first.read('/api/resources/engineering-supervision', deadline); return state.entries.length === 2 && state.entries.every(row => row.state === 'completed'); }, 300_000));
     point('both-delivered');
     const sampleStartedAt = Date.now();
     const successors = await first.read<ResourceEngineeringSuccessorCoordinatorSnapshot>('/api/resources/engineering-successors');
@@ -300,7 +376,7 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
     expect(ledger.attempts.every(row => row.inputTokens !== null && row.outputTokens !== null)).toBe(true);
     expect(ledger.attempts.reduce((sum, row) => sum + row.inputTokens! + row.outputTokens!, 0)).toBe(150);
     const after = tree(f.output); const restartStartedAt = Date.now();
-    point('restart.start'); const restarted = await consoleCli(argv, recovery); point('restart.end');
+    point('restart.start'); const restarted = await timedAsync('console.bootstrap', () => consoleCli(argv, recovery)); point('restart.end');
     const again = await restarted.read<ResourceConsoleEngineeringSupervisionSnapshot>('/api/resources/engineering-supervision');
     expect(again.deadlineAt).toBe(originalDeadline); expect(again.entries).toEqual(state.entries);
     const restartSampleStartedAt = Date.now();
@@ -330,7 +406,7 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
       workspace: f.repo, projectsFile: f.files.projects }, expectedPlanDigest: plan.planDigest, expectedDeadlineAt: originalDeadline };
     const beforePredecessorCheck = tree(f.base); const homeBeforePredecessorCheck = tree(homedir());
     point('predecessor-direct.start');
-    const predecessor = checkResourceEngineeringPredecessor(predecessorInput);
+    const predecessor = timedSync('proof.direct', () => checkResourceEngineeringPredecessor(predecessorInput));
     point('predecessor-direct.end');
     expect(predecessor).toMatchObject({ status: 'verified', reasons: [], executionAuthorized: false, effectsExecuted: false,
       continuation: 'eligible', tip: { enrollmentId: successorId,
@@ -345,7 +421,7 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
       { expectedPlanDigest: plan.planDigest === '0'.repeat(64) ? '1'.repeat(64) : '0'.repeat(64) },
       { expectedDeadlineAt: new Date(Date.parse(originalDeadline) + 1).toISOString() },
     ]) {
-      const held = checkResourceEngineeringPredecessor({ ...predecessorInput, ...changed });
+      const held = timedSync('proof.changed-plan-or-deadline', () => checkResourceEngineeringPredecessor({ ...predecessorInput, ...changed }));
       expect(held).toMatchObject({ status: 'held', tip: null, executionAuthorized: false, effectsExecuted: false, continuation: null });
       expect(held.reasons.length).toBeGreaterThan(0);
     }
@@ -362,7 +438,7 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
       save(ledgerFile, { ...retainedLedger, attempts: retainedLedger.attempts.filter((row: { id: string }) => row.id !== generationReceipt.id) });
       const missingReceiptBefore = tree(f.base);
       point('predecessor-missing-generation.start');
-      const missingReceipt = checkResourceEngineeringPredecessor(predecessorInput);
+      const missingReceipt = timedSync('proof.missing-generation', () => checkResourceEngineeringPredecessor(predecessorInput));
       point('predecessor-missing-generation.end');
       expect(missingReceipt).toMatchObject({ status: 'held', tip: null, continuation: null, executionAuthorized: false, effectsExecuted: false });
       expect(missingReceipt.reasons.length).toBeGreaterThan(0);
@@ -371,7 +447,7 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
     expect(readFileSync(ledgerFile)).toEqual(retainedLedgerBytes);
     const restoredBefore = tree(f.base);
     point('predecessor-restored.start');
-    expect(checkResourceEngineeringPredecessor(predecessorInput)).toMatchObject({ status: 'verified', evidenceDigest: predecessor.evidenceDigest,
+    expect(timedSync('proof.restored', () => checkResourceEngineeringPredecessor(predecessorInput))).toMatchObject({ status: 'verified', evidenceDigest: predecessor.evidenceDigest,
       tip: predecessor.tip, executionAuthorized: false, effectsExecuted: false });
     point('predecessor-restored.end');
     expect(tree(f.base)).toEqual(restoredBefore); expect(tree(homedir())).toEqual(homeBeforePredecessorCheck);

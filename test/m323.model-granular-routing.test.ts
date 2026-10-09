@@ -149,14 +149,14 @@ vi.mock('../src/core/inbox/store.js', () => {
 // ---------------------------------------------------------------------------
 
 import type { AshlrConfig, WorkItem, WorkSource } from '../src/core/types.js';
-import { routeTask } from '../src/core/run/router.js';
+import { routeTask, modelForSelectedEngine } from '../src/core/run/router.js';
 import {
   buildProducerScores,
   selectCostAwareModel,
   LEARNED_ROUTING_MIN_SAMPLES,
 } from '../src/core/run/learned-router.js';
 import { computeModelRoi } from '../src/core/fleet/quality-metrics.js';
-import { KNOWN_MODELS } from '../src/core/run/model-catalog.js';
+import { KNOWN_MODELS, DEFAULT_CLAUDE_MODEL_ID } from '../src/core/run/model-catalog.js';
 
 // ---------------------------------------------------------------------------
 // Fixture builders
@@ -679,6 +679,27 @@ describe('M323 selectCostAwareModel', () => {
 
 describe('M323 routeTask integration', () => {
   const flagOn = { modelGranularRouting: { enabled: true } };
+
+  it('keeps exact-engine defaults when opt-in learning has only uncredited raw history', () => {
+    fixture = SONNET_BAD_OPUS_GOOD;
+    const work = makeItem({ source: 'issue', effort: 3 });
+    const selected = modelForSelectedEngine(work, 'claude', cfgWith(flagOn));
+    expect(selected.engine).toBe('claude');
+    expect(selected.model).toBe(DEFAULT_CLAUDE_MODEL_ID);
+    expect(selected.reason).not.toContain('M323 qualified');
+    const explicit = modelForSelectedEngine(work, 'claude', cfgWith({ ...flagOn,
+      models: { claude: 'operator-selected-model' } }));
+    expect(explicit.model).toBe('operator-selected-model');
+    expect(explicit.reason).toContain('Explicit configured');
+  });
+
+  it('keeps the exact-engine fallback stable across cold and thin unqualified history', () => {
+    const work = makeItem({ source: 'issue' });
+    const cold = modelForSelectedEngine(work, 'claude', cfgWith(flagOn));
+    fixture = THIN;
+    expect(modelForSelectedEngine(work, 'claude', cfgWith(flagOn))).toEqual(cold);
+    expect(cold.model).toBe(DEFAULT_CLAUDE_MODEL_ID);
+  });
 
   it('does not steer into an uncredited raw v1 alternative', () => {
     fixture = SONNET_BAD_OPUS_GOOD;

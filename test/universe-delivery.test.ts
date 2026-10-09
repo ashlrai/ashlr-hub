@@ -17,7 +17,67 @@ import { handoffUniverseIntegration } from '../src/core/universe/integration-han
 import * as fixedEvaluator from '../src/core/universe/fixed-evaluator.js';
 
 const roots: string[] = [];
+// Opt-in elapsed diagnostics only. Buffer until fixture cleanup settles so
+// observation cannot manufacture output liveness during a stalled case.
+const acceptanceTiming = process.env.ASHLR_ACCEPTANCE_PHASE_TIMING === '1';
+type TimingPhase = 'fixture' | 'git.init-add-commit' | 'git.other' | 'source-cli' | 'cleanup.fixture';
+type TimingStats = { calls: number; threw: number; durationMs: number; minMs: number; maxMs: number };
+const acceptancePhases = new Map<TimingPhase, TimingStats>();
+let acceptanceCase = 0;
+let acceptanceIncomplete = false;
+function timingClock(): number | null {
+  if (!acceptanceTiming) return null;
+  try {
+    const value = performance.now();
+    if (Number.isFinite(value)) return value;
+    acceptanceIncomplete = true; return null;
+  }
+  catch { acceptanceIncomplete = true; return null; }
+}
+function observeTiming(phase: TimingPhase, started: number | null, threw: boolean): void {
+  if (started === null) return;
+  try {
+    const ended = timingClock(); const durationMs = ended === null ? null : ended - started;
+    if (durationMs === null || !Number.isFinite(durationMs) || durationMs < 0) { acceptanceIncomplete = true; return; }
+    const prior = acceptancePhases.get(phase);
+    const stats = { calls: (prior?.calls ?? 0) + 1, threw: (prior?.threw ?? 0) + Number(threw),
+      durationMs: (prior?.durationMs ?? 0) + durationMs, minMs: Math.min(prior?.minMs ?? durationMs, durationMs),
+      maxMs: Math.max(prior?.maxMs ?? durationMs, durationMs) };
+    if (![stats.calls, stats.threw].every(count => Number.isSafeInteger(count) && count >= 0) ||
+      ![stats.durationMs, stats.minMs, stats.maxMs].every(value => Number.isFinite(value) && value >= 0)) {
+      acceptanceIncomplete = true; return;
+    }
+    acceptancePhases.set(phase, stats);
+  } catch { acceptanceIncomplete = true; }
+}
+function gitTimingPhase(args: readonly string[]): TimingPhase {
+  // These fixture commands use only leading -c/value pairs before the verb.
+  // Inspect the option spelling, never its value; keep the actual argv intact.
+  let index = 0;
+  while (args[index] === '-c' && index + 1 < args.length) index += 2;
+  return ['init', 'add', 'commit'].includes(args[index] ?? '') ? 'git.init-add-commit' : 'git.other';
+}
+function timedSync<T>(phase: TimingPhase, work: () => T): T {
+  if (!acceptanceTiming) return work();
+  const started = timingClock(); let threw = true;
+  try { const value = work(); threw = false; return value; }
+  finally { observeTiming(phase, started, threw); }
+}
+beforeEach(() => {
+  if (!acceptanceTiming) return;
+  acceptanceCase++; acceptancePhases.clear(); acceptanceIncomplete = false;
+});
+function emitAcceptanceTiming(): void {
+  if (!acceptanceTiming) return;
+  try {
+    console.log('ACCEPTANCE_TIMINGS ' + JSON.stringify({ schemaVersion: 1, module: 'universe-delivery', caseIndex: acceptanceCase,
+      scope: 'elapsed-inclusive', incomplete: acceptanceIncomplete,
+      phases: [...acceptancePhases].map(([phase, stats]) => ({ phase, ...stats })) }));
+  } catch { /* Diagnostics cannot replace an original result or cleanup error. */ }
+}
+
 afterEach(() => {
+  try { timedSync('cleanup.fixture', () => {
   function writable(path: string): void {
     const stat = lstatSync(path);
     if (!stat.isDirectory() || stat.isSymbolicLink()) return;
@@ -25,8 +85,10 @@ afterEach(() => {
     for (const name of readdirSync(path)) writable(join(path, name));
   }
   for (const root of roots.splice(0)) { writable(root); rmSync(root, { recursive: true, force: true }); }
+  }); } finally { emitAcceptanceTiming(); }
 });
 function fixture(evaluationScript = 'console.log(JSON.stringify({passed:true,score:1}))\n', neverEvaluates = false) {
+  return timedSync('fixture', () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'universe-delivery-')));
   roots.push(root);
   // Branch-only preparation still pins and freshly hashes an executable, but never runs it.
@@ -34,8 +96,9 @@ function fixture(evaluationScript = 'console.log(JSON.stringify({passed:true,sco
   if (evaluator !== process.execPath) writeFileSync(evaluator, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
   const repo = join(root, 'repo');
   mkdirSync(repo, { mode: 0o700 });
-  const git = (args: string[]): string => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', repo, ...args],
-    { encoding: 'utf8', env: { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', LC_ALL: 'C' } }).trim();
+  const git = (args: string[]): string => timedSync(gitTimingPhase(args), () =>
+    execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', repo, ...args],
+    { encoding: 'utf8', env: { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', LC_ALL: 'C' } }).trim());
   writeFileSync(join(repo, 'value.txt'), 'seed\n');
   writeFileSync(join(repo, 'removed.txt'), 'remove me\n');
   writeFileSync(join(repo, 'eval.mjs'), evaluationScript);
@@ -77,6 +140,7 @@ function fixture(evaluationScript = 'console.log(JSON.stringify({passed:true,sco
     return trial;
   }
   return { root, repo, git, manifest, directory, accept };
+  });
 }
 
 describe.runIf(process.platform === 'darwin')('Universe combined fixed evaluation', () => {
@@ -117,11 +181,11 @@ console.log(JSON.stringify({passed:a+b<=3,score:a+b,metrics:{a,b}}));\n`);
     expect(await evaluateUniverseIntegration(f.request, { root: f.root })).toEqual(result);
     const requestPath = join(f.root, 'evaluation.json');
     writeFileSync(requestPath, JSON.stringify(f.request), { mode: 0o600 });
-    const replay = execFileSync(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', 'universe', 'integration',
+    const replay = timedSync('source-cli', () => execFileSync(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', 'universe', 'integration',
       'evaluate', '--manifest', requestPath, '--root', f.root, '--json'], {
       cwd: process.cwd(), encoding: 'utf8', timeout: 20_000,
       env: { PATH: process.env.PATH, HOME: f.root, NO_COLOR: '1' },
-    });
+    }));
     expect(JSON.parse(replay)).toEqual(result);
     expect(readFileSync(join(result.artifactPath!, '..', 'evaluator', 'invocations'), 'utf8')).toBe('evaluated\n');
     expect(f.git(['show-ref'])).toBe(refs); expect(readFileSync(join(f.repo, '.git', 'index'))).toEqual(index);
@@ -242,9 +306,9 @@ console.log(JSON.stringify({passed:a+b<=3,score:a+b,metrics:{a,b}}));\n`);
     writeFileSync(deliveryPath, JSON.stringify(f.delivery), { mode: 0o600 });
     writeFileSync(handoffPath, JSON.stringify(f.handoff), { mode: 0o600 });
     const beforeCli = inventory(f.root);
-    const cli = (command: string, path: string): unknown => JSON.parse(execFileSync(process.execPath,
+    const cli = (command: string, path: string): unknown => timedSync('source-cli', () => JSON.parse(execFileSync(process.execPath,
       ['--import', 'tsx', 'src/cli/index.ts', 'universe', 'integration', command, '--manifest', path, '--root', f.root, '--json'],
-      { cwd: process.cwd(), encoding: 'utf8', timeout: 30_000, env: { PATH: process.env.PATH, HOME: f.root, NO_COLOR: '1' } }));
+      { cwd: process.cwd(), encoding: 'utf8', timeout: 30_000, env: { PATH: process.env.PATH, HOME: f.root, NO_COLOR: '1' } })));
     expect(cli('inspect-delivery', deliveryPath)).toEqual(f.evidence);
     expect(cli('handoff', handoffPath)).toEqual(result);
     expect(inventory(f.root)).toEqual(beforeCli);
@@ -337,9 +401,9 @@ console.log(JSON.stringify({passed:a+b<=3,score:a+b,metrics:{a,b}}));\n`);
     expect(f.git(['show', `${receipt.commit}:b.txt`])).toBe('2');
     expect(deliveryGit(f.repo).treeDigest(receipt.tree)).toBe(f.result.artifactDigest);
     const path = join(f.root, 'delivery.json'); writeFileSync(path, JSON.stringify(f.delivery), { mode: 0o600 });
-    const output = execFileSync(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', 'universe', 'integration',
+    const output = timedSync('source-cli', () => execFileSync(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', 'universe', 'integration',
       'deliver', '--manifest', path, '--root', f.root, '--json'], { cwd: process.cwd(), encoding: 'utf8', timeout: 30_000,
-      env: { PATH: process.env.PATH, HOME: f.root, NO_COLOR: '1' } });
+      env: { PATH: process.env.PATH, HOME: f.root, NO_COLOR: '1' } }));
     expect(JSON.parse(output)).toEqual(receipt);
     expect(readFileSync(join(f.result.artifactPath!, '..', 'evaluator', 'invocations'), 'utf8')).toBe('evaluated\n');
     expect(readFileSync(join(f.repo, '.git', 'index'))).toEqual(index);

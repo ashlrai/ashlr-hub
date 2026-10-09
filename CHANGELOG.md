@@ -9,7 +9,31 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.29.3] — Unreleased
+## [3.29.4] — Unreleased
+
+### Changed
+
+- Rank eligible shared resources by current headroom and independent funding,
+  without inferred provider or model-family quality tiers. Explicit selections,
+  account authority and spending rules still apply.
+- Resolve worker models for the selected backend. Preserve configured pins and
+  authenticated learned choices without rerouting a task to another provider.
+- Add opt-in acceptance phase timings after test cleanup to diagnose preparation,
+  proof, delivery and request costs without changing test deadlines or outcomes.
+- Hash evaluator executables with fresh, bounded streaming reads instead of a
+  whole-file buffer, preserving complete-byte and file-identity verification.
+
+### Fixed
+
+- Bind local coding capacity to a tool-capable runtime instead of the planning-only
+  builtin loop. Use another eligible resource when local execution is unavailable.
+- Synchronize routing explanations with provider-neutral selection.
+- Label resource summaries as current or unconfirmed usage, separately from
+  connection, Chat/Fleet readiness and available allowance.
+- Round credit hover text with the existing two-significant-figure formatter,
+  preserving exact stored balances for accounting and admission.
+
+## [3.29.3] — 2026-10-09
 
 ### Added
 

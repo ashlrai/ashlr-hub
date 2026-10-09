@@ -211,7 +211,7 @@ and evaluator isolation profile. Do not infer one path's confinement from anothe
 |------|---------------|
 | `spec.ts` | `EndStateSpec` CRUD: northStar + endState prose. |
 | `leader.ts` | The Leader (3.10): `leaderTick` applies class-B actions past their veto window, grades due moves and starts a run only when one is due (06:30 slot, or 10 fleet merges / a revert / a seat reset / a high-severity insight; at most 3 runs a day). Each run writes a memo with class A/B/C actions, each with a recorded inverse for `ashlr leader veto`. Reached by `ashlr leader tick`, `ashlr vision review` (an alias), `ashlr comms ask-vision` and the nightly oversight plist. |
-| `leader-seat.ts` | Routes a Leader run to a seat the router admits (grok and local models; Claude only for the weekly deep run inside the reserve; never Codex; no cloud fallback). Without a standing grant: free local models only, and the memo is a dry run. |
+| `leader-seat.ts` | Routes a Leader run through the shared seat router. Supported account-bound Claude, Codex, Devin, Grok and local adapters are eligible when context, funding and role authority qualify; provider names do not rank quality. Without a standing grant, only local candidates are eligible. Model options share their real account allowance. |
 | `context.ts` | `gatherStrategicContext`: per-repo health/commits/tests for enrolled repos (fleet mirror clones skipped outside the autonomous lane), outcome ledger, fleet counts. |
 | `strategist.ts` | Legacy `runStrategist` (frontier model → strategic briefing). No CLI path runs it since 3.10; its briefing readers (`previewBriefingAdoption` and friends) still serve `vision preview/shadow/approve/reconcile`. |
 | `playbook.ts` | Strategic playbook builder. |

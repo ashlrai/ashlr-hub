@@ -55,8 +55,10 @@ import {
   catalogFor,
   costOf,
   pickModel,
+  DEFAULT_LOCAL_MODEL_TAG,
+  DEFAULT_CODEX_MODEL_ID,
 } from '../src/core/run/model-catalog.js';
-import { routeTask } from '../src/core/run/router.js';
+import { routeTask, modelForSelectedEngine } from '../src/core/run/router.js';
 import { routeBackend } from '../src/core/fleet/router.js';
 import { withinLimit } from '../src/core/fleet/quota.js';
 import { subscriptionAllows } from '../src/core/fleet/subscription-usage.js';
@@ -549,6 +551,40 @@ describe('M128 routeBackend — model threading', () => {
     if (result.backend === 'claude') {
       expect(result.model).toBe('sonnet');
     }
+  });
+
+  it.each([1, 3, 5])('preserves a configured exact-engine model at effort %s', (effort) => {
+    const cfg = withFoundry({ allowedBackends: ['claude', 'builtin'],
+      models: { claude: '  operator-exact-model  ' } });
+    const result = routeBackend(makeItem({ source: 'issue', effort, score: 2 }), cfg);
+    expect(result.backend).toBe('claude');
+    expect(result.model).toBe('operator-exact-model');
+    expect(result.reason).toContain('Explicit configured model');
+  });
+
+  it('uses the selected local default even when static trivial selection prefers an older small model', () => {
+    const result = routeBackend(makeItem({ source: 'dep', effort: 1, score: 2 }),
+      withFoundry({ allowedBackends: ['local-coder' as never, 'builtin'] }));
+    expect(result.backend).toBe('local-coder');
+    expect(result.model).toBe(DEFAULT_LOCAL_MODEL_TAG);
+  });
+
+  it('resolves the actual selected backend even when the whole-task router prefers another engine', () => {
+    const cfg = withFoundry({ allowedBackends: ['claude', 'codex', 'builtin'] });
+    const work = makeItem({ id: 'item-2', source: 'issue', effort: 5, score: 9 });
+    expect(routeTask(work, cfg, ALL_ENGINES_CTX).engine).toBe('claude');
+    const selected = routeBackend(work, cfg);
+    expect(selected.backend).toBe('codex');
+    expect(selected.model).toBe(DEFAULT_CODEX_MODEL_ID);
+  });
+
+  it('does not let an explicit model pin bypass the existing quota metadata refusal', () => {
+    vi.mocked(withinLimit).mockReturnValue(false);
+    const selected = modelForSelectedEngine(makeItem({ source: 'issue' }), 'claude',
+      withFoundry({ models: { claude: 'operator-model' }, allowedBackends: ['claude', 'builtin'] }));
+    expect(selected.engine).toBe('claude');
+    expect(selected.model).toBeNull();
+    expect(selected.reason).toContain('unavailable');
   });
 });
 

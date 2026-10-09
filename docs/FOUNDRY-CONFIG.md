@@ -104,24 +104,25 @@ the engine's own default is used.
 }
 ```
 
-Claude 5 generation rollout. **Absent ⇒ enabled** — both fields default `true`.
+Legacy optional Claude catalog rollout. **Absent ⇒ enabled** — both fields default `true`.
 
-- `enabled: false` — full rollback: `claude:sonnet-5` / `claude:fable-5` are
-  excluded from routing and every model default reverts to the pre-M320 values
-  (byte-identical routing, verified by the m128/m164/m155 parity suites).
-- `fable: false` — keep Sonnet 5 as the routing workhorse but revert the
-  judge + strategist defaults to `claude-opus-4-8`.
-- With the rollout on: Sonnet 5 (`claude-sonnet-5`, frontier-class coding at
-  $3/$15 per MTok) is the default claude pick for hard/medium work; Fable 5
-  (`claude-fable-5`, Mythos-class, $10/$50) is the default judge/strategist,
-  with an automatic per-call fallback to Opus 4.8 when a Fable call fails, is
-  refused, or returns empty.
-- Claude 5 dispatches always use the FULL API id (`--model claude-sonnet-5`);
-  legacy entries keep their short tags.
-- **Auto-merge note:** if `autoMerge.enabled` is on, add
-  `{ "engine": "claude", "model": "claude-sonnet-5" }` to `mergeAuthority` —
-  otherwise Sonnet 5 proposals verify + judge but never auto-merge (an
-  effective-config warning surfaces this).
+- `enabled: false` excludes the optional Sonnet/Fable catalog entries at callers
+  using `claude5ExcludeIds`. It does not reset every native model default.
+- `fable: false` excludes current and historical Fable entries at those callers.
+  The legacy strategist default uses current native Opus instead.
+- `defaultStrategistModel` resolves to current native Fable (`claude-fable-5-1`)
+  when enabled, otherwise current native Opus (`claude-opus-5-5`). An explicit
+  `foundry.strategistModel` takes precedence. The legacy Fable strategist wrapper
+  falls back once to current Opus if its primary returns no result.
+- The shared Leader and Manager paths use their account-bound role adapters and
+  routing evidence; this legacy flag does not confine their provider choice.
+- Fleet dispatch preserves configured or captured models for the selected
+  engine, then uses its concrete default. It does not infer a cheaper model from
+  a company name or low task difficulty. Historical catalog aliases retain their
+  existing meaning; they are not remapped to newer model IDs.
+- **Auto-merge note:** a selected model must appear in the effective
+  `mergeAuthority` when auto-merge is enabled. A routing selection alone does
+  not enable proposal merging.
 
 ---
 

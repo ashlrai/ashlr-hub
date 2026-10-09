@@ -130,7 +130,9 @@ describe('resolveLeaderSeat', () => {
   it('permits granted Claude for ordinary memos, check-ins and replies while retaining reserves', async () => {
     for(const mode of ['full','checkin'] as const){
       const r=await resolveLeaderSeat(deps({candidates:[CLAUDE,GROK],snapshot:[claudeAt(10,10),GROK_OK]}),{deep:false,mode,purpose:'reply',promptChars:1000});
-      expect(r.ok && r.choice.seatId).toBe('claude');
+      expect(r.ok && r.choice.seatId).toBe('grok');
+      const alone=await resolveLeaderSeat(deps({candidates:[CLAUDE],snapshot:[claudeAt(10,10)]}),{deep:false,mode,purpose:'reply',promptChars:1000});
+      expect(alone.ok && alone.choice.seatId).toBe('claude');
     }
     for(const capacity of [claudeAt(75,10),claudeAt(10,65)]){
       const r=await resolveLeaderSeat(deps({candidates:[CLAUDE,GROK],snapshot:[capacity,GROK_OK]}),{deep:false,promptChars:1000});
@@ -175,6 +177,17 @@ describe('resolveLeaderSeat', () => {
     expect(r.ok && r.choice).toMatchObject({seatId:'claude',model:'claude-opus-5-5'});
     const allUnavailable={...multi,seat:{...multi.seat,models:multi.seat.models.map(model=>({...model,unavailableReason:'unsupported pinned binary'}))}};
     expect((await resolveLeaderSeat(deps({candidates:[allUnavailable],snapshot:[claudeAt(10,10)]}),{deep:false,promptChars:1000})).ok).toBe(false);
+  });
+
+  it('preserves the configured runnable model order when family labels lack quality evidence', async () => {
+    const candidate={...LOCAL,seat:{...LOCAL.seat,models:[{id:'other-local',label:'configured first',contextWindow:200000},
+      {id:'qwen3.8:27b-ctx64k',label:'legacy elite family',contextWindow:200000}]}};
+    const calls:string[]=[];
+    const result=await resolveLeaderSeat(deps({candidates:[candidate],standing:null,calls}),{deep:true,promptChars:1000});
+    expect(result.ok && result.choice.model).toBe('other-local');
+    if(result.ok)await result.complete('s','u');
+    expect(calls).toEqual(['local http://127.0.0.1:11434 other-local']);
+    expect(result.decision?.candidates).toEqual([candidate.seat.id]);
   });
 
   it('when the budget cannot be clamped to the grant, paid seats are dropped', async () => {

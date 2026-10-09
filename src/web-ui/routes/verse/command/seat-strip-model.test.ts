@@ -65,7 +65,7 @@ describe('seatStrip', () => {
     expect(grok!.autonomy).toEqual({ kind: 'eligible', word: 'Eligible', why: '69% of the weekly window is free for autonomy.' });
     expect(grok!.spoken).toContain('Grok: 99% left');
     expect(grok!.spoken).toContain('Autonomy: Eligible');
-    expect(headline).toBe('1 of 1 account usable');
+    expect(headline).toBe('1 of 1 account with current usage');
   });
 
   it('keeps the provider\'s own reset words, led once by "resets"', () => {

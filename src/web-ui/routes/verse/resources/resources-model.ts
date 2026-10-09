@@ -18,7 +18,7 @@ import { CLOUD_BALANCE_URL, type CloudOverviewResponse } from '../../../../core/
 import { formatMetric, formatMetricUsd } from '../../../components/charts/format-metric.js';
 import { costBasisOf, seatTier, tierRank, type CostBasis, type ResourceTier } from '../../../../core/routing/tiers.js';
 import type { ServingRuntimeSnapshot, VerseSeat } from '../../../data/api-types.js';
-import { accountStatus, accountStatusRank, type AccountStatusKind, type CapacityRow } from '../usage/capacity-strip-model.js';
+import { accountStatus, accountStatusRank, hasCurrentUsage, type AccountStatusKind, type CapacityRow } from '../usage/capacity-strip-model.js';
 import { modelNameInText, type LocalModelRow } from '../usage/local-model.js';
 import { formatContextWindow } from '../verse-model.js';
 
@@ -51,7 +51,6 @@ export interface ResourcesSummary {
 const ALERT_KINDS: ReadonlySet<AccountStatusKind> = new Set(['spent', 'signed-out', 'unavailable']);
 
 const COUNT_WORDS: ReadonlyArray<[AccountStatusKind, string]> = [
-  ['usable', 'usable'],
   ['low', 'running low'],
   ['spent', 'spent'],
   ['signed-out', 'signed out'],
@@ -60,19 +59,20 @@ const COUNT_WORDS: ReadonlyArray<[AccountStatusKind, string]> = [
 
 /** The paid accounts, reduced to one tone and one sentence. Local seats have no quota to run out of. */
 export function summarizeResources(rows: readonly CapacityRow[], opts: { healthRead: boolean; now?: number }): ResourcesSummary {
-  const kinds = rows
-    .filter((r) => r.kind === 'subscription')
-    .map((r) => accountStatus(r, { healthRead: opts.healthRead, ...(opts.now !== undefined ? { now: opts.now } : {}) }).kind);
+  const paid = rows.filter((r) => r.kind === 'subscription');
+  const current = paid.filter(hasCurrentUsage).length;
+  const kinds = paid.map((r) => accountStatus(r, { healthRead: opts.healthRead, ...(opts.now !== undefined ? { now: opts.now } : {}) }).kind);
   const counts = new Map<AccountStatusKind, number>();
   for (const k of kinds) counts.set(k, (counts.get(k) ?? 0) + 1);
-  const spoken = COUNT_WORDS.filter(([k]) => counts.has(k))
-    .map(([k, word]) => `${counts.get(k)} ${word}`)
-    .join(' · ');
+  const parts = paid.length === 0 ? ['no accounts connected'] : [`${current} with current usage`];
+  if (current < paid.length) parts.push(`${paid.length - current} usage unconfirmed`);
+  parts.push(...COUNT_WORDS.filter(([k]) => counts.has(k)).map(([k, word]) => `${counts.get(k)} ${word}`));
+  const spoken = parts.join(' · ');
   let tone: ResourcesTone = 'unknown';
   if (kinds.some((k) => ALERT_KINDS.has(k))) tone = 'alert';
   else if (kinds.includes('low')) tone = 'tight';
   else if (kinds.includes('usable')) tone = 'ok';
-  return { tone, spoken: spoken || (kinds.length === 0 ? 'no accounts connected' : 'not read yet') };
+  return { tone, spoken };
 }
 
 export const TONE_WORD: Readonly<Record<ResourcesTone, string>> = {
