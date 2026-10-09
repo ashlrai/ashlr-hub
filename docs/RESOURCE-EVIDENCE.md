@@ -33,6 +33,41 @@ The private cache binds readings to the account, selected native profile, and a 
 
 Dollar references are not invoices, purchased-credit prices, or attributed task costs. Subscription percentages are not token counts. Different accounts remain independent, including accounts from the same provider. No account-count truncation is introduced by these views.
 
+## Grok Build and Grok Bot
+
+Grok Build's native account reading, Grok Bot's included allowance and xAI API
+credits are separate resources. Build reports its own billing window and reset;
+Phantom does not copy that observation into a Bot profile or API wallet.
+
+[Grok Bot's included usage](https://cursor.com/help/grok-bot/plans) has a weekly
+meter on the linked Cursor account. On-demand usage is a separate paid pool;
+its monthly spending limit is not a hard stop during an active run. A linked
+SuperGrok plan grants Bot access without stacking another allowance on top of
+an existing eligible Cursor plan.
+
+Current proactive profiles record the intended Bot account and responsibilities,
+not a verified remaining allowance or reset. Phantom has not qualified a native
+Bot quota reader or autonomous Bot dispatch. Unknown Bot usage stays unknown;
+saving a profile never enables spending. See [proactive profiles](VERSE.md#proactive-agent-profiles).
+
+## Local hardware and task speed
+
+Expand the local resource to inspect host CPU, RAM, runtime-reported model
+residency and recorded task speed. These measurements have different meanings:
+
+- **Host CPU** is busy time across all cores over the displayed sampling interval.
+- **Host RAM** is total and OS free memory. Free memory is not macOS memory
+  pressure or a safe model-allocation limit; model residency is reported separately.
+- **Task speed** is recorded output tokens divided by end-to-end turn time,
+  bound to the selected resource, model, context and endpoint. It includes tool
+  and harness time; it is not decoder speed. Failed or cancelled turns do not
+  become successful speed observations. Warm measurements retain their warm scope.
+
+Missing measurements remain unknown, and visible ages retain the original
+observation time. The router uses reported allowance, context, serving capacity
+and recorded fleet latency. Sidebar CPU, RAM and exact-model task-speed readings
+are currently descriptive; they do not yet drive model selection or concurrency.
+
 ## Credit details
 
 The visible resource bar and the open **Credit balances** disclosure share one recorded-balance query cache. The bar shows API promotion records separately from subscription meters; the disclosure shows each pool in detail. The authorized GET is `/api/verse/resources/credit-pools`; it accepts no query parameters, provider command, file path, or caller-selected identity. A cold request returns `warming` while the existing bounded worker reads private evidence. Stale and unavailable readings retain their qualifiers. The HTTP fast path uses existing in-memory collector status and identity snapshots.

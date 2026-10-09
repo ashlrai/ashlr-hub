@@ -111,6 +111,10 @@ with isolated filesystem tools; installation and live account acceptance are
 separate. Aggressive reset-time reserve shrinking remains held until its
 subscription-only execution boundary is verified. Codex, Grok and Devin have
 no verified no-spillover boundary here. Purchased credits are excluded.
+Grok Bot has an independent weekly allowance; it never inherits Grok Build's
+usage or reset. Local CPU, RAM and recorded task speed are visible in Resources;
+they are descriptive measurements, not yet host-load-aware routing inputs.
+See [resource evidence](docs/RESOURCE-EVIDENCE.md).
 See [reset controls](docs/RESET-AWARE-SCHEDULING.md),
 [desktop power](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#automatic-awake-during-local-work) and
 [Growth measurements](docs/VERSE.md#adoption-fixed-public-project-metadata).
