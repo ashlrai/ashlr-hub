@@ -1,0 +1,14 @@
+.panel { margin: var(--space-3) 0; padding: var(--space-3); border-left: 2px solid var(--border-subtle); background: var(--bg-canvas); font-size: var(--text-sm-size); }
+.header { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); }
+.header h4, .panel h5 { margin: var(--space-2) 0; font-size: var(--text-sm-size); }
+.note, .times { color: var(--text-secondary); font-size: var(--text-xs-size); line-height: 1.5; }
+.list { list-style: none; padding: 0; }
+.evidence { padding: var(--space-2) 0; border-top: 1px solid var(--border-subtle); }
+.line { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.line > span { color: var(--text-secondary); font-size: var(--text-xs-size); }
+.panel summary { cursor: pointer; width: fit-content; }
+.panel pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-xs-size); max-height: 18rem; overflow: auto; }
+.panel dl > div { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: var(--space-2); }
+.panel dd { margin: 0; overflow-wrap: anywhere; }
+.panel dt { color: var(--text-secondary); }
+.panel ul { overflow-wrap: anywhere; }

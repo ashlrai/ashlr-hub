@@ -7,6 +7,7 @@ import { outcomesQuery, writeOutcome } from './outcomes-queries.js';
 import type { OutcomeScope, OutcomeStatus, OutcomeView } from './outcomes-types.js';
 import { ENGINE_LABEL, isVerseEngine } from '../verse-model.js';
 import styles from './outcomes.module.css';
+import { TaskContextToggle } from './TaskContextToggle.js';
 
 const LABEL: Record<OutcomeStatus, string> = {
   'waiting-plan': 'Waiting for a plan', queued: 'Queued', running: 'Running',
@@ -134,6 +135,7 @@ export function OutcomesPanel({ actions }: { actions: SurfaceActions }) {
           {task.controllerRunId && task.controllerRunId !== task.runId ? <small>Controller run {task.controllerRunId}</small> : null}
           {task.proposalId ? <small>Proposal {task.proposalId}</small> : null}
           {task.mergeIdentity ? <small>Verified merge {task.mergeIdentity}</small> : null}
+          {'id' in task && typeof task.id === 'string' ? <TaskContextToggle outcomeId={outcome.id} taskId={task.id} title={task.title} /> : null}
         </li>)}</ul> : null}
         <div className={styles.actions}>
           {!outcome.manager ? <Button size="sm" variant="primary" disabled={disabled || outcome.status === 'paused'}
