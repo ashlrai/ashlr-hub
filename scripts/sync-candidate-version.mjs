@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /** Synchronize local candidate metadata; never publish or rewrite release history. */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -40,6 +40,8 @@ function ownCargoVersion(text, version, lock) {
 }
 
 export function syncCandidateVersion(root, version, { check = false } = {}) {
+  // Only read-only checks may derive the expected value; writing always requires an explicit version.
+  if (check && version === undefined) version = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')).version;
   if (typeof version !== 'string' || version.length > 64 || !canonicalVersion.test(version)) {
     throw new Error('Expected a canonical release version X.Y.Z (no tag prefix, leading zeroes or prerelease)');
   }
@@ -81,12 +83,15 @@ export function syncCandidateVersion(root, version, { check = false } = {}) {
 }
 
 const script = fileURLToPath(import.meta.url);
-if (process.argv[1] && resolve(process.argv[1]) === script) {
+let invokedDirectly = false;
+try { invokedDirectly = Boolean(process.argv[1] && realpathSync(resolve(process.argv[1])) === realpathSync(script)); }
+catch { /* Library import from a virtual entrypoint is not a CLI invocation. */ }
+if (invokedDirectly) {
   try {
     const args = process.argv.slice(2);
     const check = args[0] === '--check';
-    if (args.length !== (check ? 2 : 1)) throw new Error('Usage: node scripts/sync-candidate-version.mjs [--check] X.Y.Z');
-    const result = syncCandidateVersion(resolve(dirname(script), '..'), args.at(-1), { check });
+    if (check ? args.length < 1 || args.length > 2 : args.length !== 1) throw new Error('Usage: node scripts/sync-candidate-version.mjs X.Y.Z | --check [X.Y.Z]');
+    const result = syncCandidateVersion(resolve(dirname(script), '..'), check ? args[1] : args[0], { check });
     console.log(JSON.stringify(result));
     if (check && !result.matches) process.exitCode = 1;
   } catch (error) {

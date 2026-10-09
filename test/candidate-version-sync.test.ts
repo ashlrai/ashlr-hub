@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { syncCandidateVersion } from '../scripts/sync-candidate-version.mjs';
@@ -37,6 +38,24 @@ function fixture() {
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 describe('candidate version synchronization', () => {
+  it('derives only read-only checks from the root and reports CLI drift without editing', () => {
+    const root = fixture();
+    mkdirSync(join(root, 'scripts'));
+    copyFileSync(new URL('../scripts/sync-candidate-version.mjs', import.meta.url), join(root, 'scripts/sync-candidate-version.mjs'));
+    expect(syncCandidateVersion(root, undefined, { check: true }).matches).toBe(true);
+    const desktop = json(root, 'desktop/package.json'); desktop.version = '3.26.0';
+    writeFileSync(join(root, 'desktop/package.json'), `${JSON.stringify(desktop, null, 2)}\n`);
+    const before = paths.map((path) => read(root, path));
+    const check = spawnSync(process.execPath, [join(root, 'scripts/sync-candidate-version.mjs'), '--check'], { encoding: 'utf8' });
+    expect(check.status).toBe(1);
+    expect(JSON.parse(check.stdout)).toMatchObject({ version: '3.27.0', check: true, matches: false, changed: ['desktop/package.json'] });
+    const missing = spawnSync(process.execPath, [join(root, 'scripts/sync-candidate-version.mjs')], { encoding: 'utf8' });
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain('Usage:');
+    expect(() => syncCandidateVersion(root, undefined)).toThrow(/canonical release version/);
+    expect(paths.map((path) => read(root, path))).toEqual(before);
+  });
+
   it('checks without edits, synchronizes only candidate identities, then checks idempotently', () => {
     const root = fixture();
     const before = paths.map((path) => read(root, path));
