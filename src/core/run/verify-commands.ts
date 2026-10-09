@@ -19,6 +19,8 @@
  *     to { ok:false } with the error captured in `output`.
  */
 
+import type { Duplex } from 'node:stream';
+import type { NativeMetadataLaunchDescriptor } from './native-metadata-launch.js';
 import { spawn, spawnSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import type { SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
@@ -118,6 +120,7 @@ export interface VerifyProcessGroupLifecycle {
   prepare(): {
     spawned(pgid: number): void;
     settled(receipt: 'not-started' | 'group-exit-confirmed'): void;
+    launcher?: NativeMetadataLaunchDescriptor;
   };
 }
 
@@ -130,6 +133,20 @@ function lifecycleShape(value: unknown, keys: string[]): boolean {
 export function isVerifyProcessGroupLifecycle(value: unknown): value is VerifyProcessGroupLifecycle {
   try { return lifecycleShape(value, ['prepare']); }
   catch { return false; }
+}
+
+function nativeLaunchLifecycleShape(value: unknown): boolean {
+  try {
+    if (!value || typeof value !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
+      Reflect.ownKeys(value).length !== 3 || ['spawned', 'settled'].some(key => typeof Object.getOwnPropertyDescriptor(value, key)?.value !== 'function')) return false;
+    const launch = Object.getOwnPropertyDescriptor(value, 'launcher')?.value as NativeMetadataLaunchDescriptor | undefined;
+    return !!launch && Object.getPrototypeOf(launch) === Object.prototype && Reflect.ownKeys(launch).length === 4 &&
+      ['nodeExecutable', 'scriptPath', 'ticketPath'].every(key => {
+        const path: unknown = Object.getOwnPropertyDescriptor(launch, key)?.value;
+        return typeof path === 'string' && isAbsolute(path) && resolve(path) === path;
+      }) && typeof Object.getOwnPropertyDescriptor(launch, 'ticketDigest')?.value === 'string' &&
+      /^[a-f0-9]{64}$/.test(Object.getOwnPropertyDescriptor(launch, 'ticketDigest')!.value);
+  } catch { return false; }
 }
 
 export interface VerifySubprocessOptions {
@@ -849,6 +866,7 @@ export async function runVerifySubprocessAsync(
   if (argv.length === 0 || argv.some((arg) => typeof arg !== 'string')) {
     return emptyResult({ error: 'invalid argv: expected a non-empty string array' });
   }
+  argv = [...argv];
   if (opts.input !== undefined && (typeof opts.input !== 'string'
     || Buffer.byteLength(opts.input, 'utf8') > ASYNC_STDIN_MAX_BYTES)) {
     return emptyResult({ error: 'invalid stdin: expected a UTF-8 string of at most 1 MiB' });
@@ -938,7 +956,7 @@ export async function runVerifySubprocessAsync(
     if (opts.processGroupLifecycle) {
       try {
         const prepared = opts.processGroupLifecycle.prepare();
-        if (!lifecycleShape(prepared, ['spawned', 'settled'])) {
+        if (!lifecycleShape(prepared, ['spawned', 'settled']) && !nativeLaunchLifecycleShape(prepared)) {
           synchronous(prepared); throw new Error(lifecycleError);
         }
         lifecycle = prepared;
@@ -950,10 +968,11 @@ export async function runVerifySubprocessAsync(
 
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawnImpl(argv[0]!, argv.slice(1), {
+      const launch = lifecycle?.launcher;
+      child = spawnImpl(launch ? launch.nodeExecutable : argv[0]!, launch ? [launch.scriptPath, launch.ticketPath] : argv.slice(1), {
         cwd: opts.cwd,
         env: opts.env,
-        stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+        stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe', ...(launch ? ['pipe' as const] : [])],
         shell: platform === 'win32' && opts.windowsShell === true,
         windowsHide: true,
         ...(ownsProcessGroup ? { detached: true } : {}),
@@ -969,6 +988,28 @@ export async function runVerifySubprocessAsync(
       ? child.pid
       : null;
     let ownedPgid = originalPgid;
+    const launchControl = lifecycle?.launcher ? child.stdio[3] as Duplex | null : null;
+    let launchNotice = '';
+    let launchGoDelivered = false;
+    const launchControlError = () => { if (launchGoDelivered) return; lifecycleFailed = true; requestTermination('cancelled'); };
+    const launchControlData = (bytes: Buffer) => {
+      if (settled || terminationRequested || lifecycleRegistered) return;
+      launchNotice += bytes.toString('utf8');
+      if (launchNotice.length > 65 || !/^[a-f0-9]*\n?$/.test(launchNotice)) { launchControlError(); return; }
+      if (!launchNotice.endsWith('\n')) return;
+      try {
+        const launch = lifecycle!.launcher!;
+        if (originalPgid === null || launchNotice !== `${launch.ticketDigest}\n` || opts.signal?.aborted) throw new Error();
+        synchronous(lifecycle!.spawned(originalPgid)); lifecycleRegistered = true;
+        const packet = JSON.stringify({ ticketDigest: launch.ticketDigest, pid: originalPgid, argv }) + '\n';
+        if (Buffer.byteLength(packet) > 1024 * 1024) throw new Error();
+        launchControl!.end(packet, () => { launchGoDelivered = true; if (!settled && !terminationRequested) deliverInput(); });
+      } catch { launchControlError(); }
+    };
+    if (lifecycle?.launcher) {
+      if (!launchControl || typeof launchControl.on !== 'function' || typeof launchControl.end !== 'function') launchControlError();
+      else { launchControl.on('data', launchControlData); launchControl.on('error', launchControlError); }
+    }
 
     function captured(): Pick<VerifySubprocessResult, 'stdout' | 'stderr' | 'outputTruncated'> {
       return {
@@ -989,6 +1030,10 @@ export async function runVerifySubprocessAsync(
     }
 
     function releaseProcessResources(): void {
+      launchControl?.removeListener('data', launchControlData);
+      launchControl?.removeListener('error', launchControlError);
+      launchControl?.on('error', () => { /* possible close-time EPIPE after settlement */ });
+      launchControl?.destroy();
       // Preserve the error listener until close: destroying a pending write can
       // queue EPIPE after settlement. The close listener removes it afterward.
       child.stdin?.destroy();
@@ -1317,7 +1362,7 @@ export async function runVerifySubprocessAsync(
         }
       }
     }
-    if (lifecycle) {
+    if (lifecycle && !lifecycle.launcher) {
       child.once('spawn', () => {
         if (settled) return;
         try {
@@ -1329,7 +1374,7 @@ export async function runVerifySubprocessAsync(
         }
         deliverInput();
       });
-    } else deliverInput();
+    } else if (!lifecycle?.launcher) deliverInput();
 
     opts.signal?.addEventListener('abort', onAbort, { once: true });
     if (opts.signal?.aborted) onAbort();

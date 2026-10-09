@@ -139,31 +139,31 @@ export const RESOURCE_COLLECTOR_RECOVERY_REASONS = [
 ] as const;
 export interface ResourceCollectorRecoveryDiagnosis {
   reasonCode: typeof RESOURCE_COLLECTOR_RECOVERY_REASONS[number];
-  markerVersion: 1 | 2 | 3 | 4 | null;
+  markerVersion: 1 | 2 | 3 | 4 | 5 | null;
 }
 /** Sampled local marker facts only; no ownership, process or recovery assessment. */
 export interface ResourceCollectorInspection {
   scope: 'local-record-inspection';
   sampledAt: string;
   state: 'absent' | 'pending' | 'unavailable';
-  markerVersion: 1 | 2 | 3 | 4 | null;
+  markerVersion: 1 | 2 | 3 | 4 | 5 | null;
   reasonCode: 'no-pending-record' | 'legacy-owner-evidence-missing' | 'recovery-not-evaluated' | 'pending-evidence-unavailable';
   recoveryAttempted: false;
 }
 /** Versions supported by each diagnosis; prevents contradictory recovery advice. */
 export const RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS = {
   'legacy-owner-evidence-missing': [1],
-  'boot-identity-unavailable': [2, 3, 4],
-  'machine-identity-mismatch': [2, 3, 4],
+  'boot-identity-unavailable': [2, 3, 4, 5],
+  'machine-identity-mismatch': [2, 3, 4, 5],
   'same-boot-owner-evidence-missing': [2],
-  'owner-not-confirmed-absent': [3, 4],
-  'activity-evidence-unavailable': [3, 4],
+  'owner-not-confirmed-absent': [3, 4, 5],
+  'activity-evidence-unavailable': [3, 4, 5],
   'legacy-active-work-unverifiable': [3],
-  'command-registration-incomplete': [4],
-  'process-group-not-confirmed-absent': [4],
+  'command-registration-incomplete': [4, 5],
+  'process-group-not-confirmed-absent': [4, 5],
   // A wait budget may expire after parsing but before a more specific refusal.
-  'pending-evidence-unavailable': [null, 2, 3, 4],
-  'recovery-confirmation-failed': [2, 3, 4],
+  'pending-evidence-unavailable': [null, 2, 3, 4, 5],
+  'recovery-confirmation-failed': [2, 3, 4, 5],
 } satisfies Record<ResourceCollectorRecoveryDiagnosis['reasonCode'], readonly ResourceCollectorRecoveryDiagnosis['markerVersion'][]>;
 
 export interface ResourceConsoleSnapshot extends ResourceConsoleEvidence {

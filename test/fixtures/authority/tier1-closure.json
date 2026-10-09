@@ -650,6 +650,7 @@
     "src/core/run/model-call-authority.ts",
     "src/core/run/model-catalog.ts",
     "src/core/run/model-profile.ts",
+    "src/core/run/native-metadata-launch.ts",
     "src/core/run/ollama-identity.ts",
     "src/core/run/orchestrator.ts",
     "src/core/run/outcome-admission.ts",

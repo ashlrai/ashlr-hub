@@ -637,7 +637,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       // Only explicit quota collection creates this private control root. No
       // provider is contacted before configuration, ownership and bind succeed.
       try {
-        quotaLease = await acquireResourceQuotaRefreshLease(root, { signal, trackNativeActivity: true,
+        quotaLease = await acquireResourceQuotaRefreshLease(root, { signal, trackNativeActivity: true, trackNativeLaunchHandoff: true,
           scope: connectionsConfig ? 'native-connection-metadata' : 'codex-native-metadata' });
       } catch (error) {
         // Only a typed, cleanly released acquisition refusal may degrade into

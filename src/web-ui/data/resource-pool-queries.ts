@@ -33,7 +33,7 @@ export function validResourceCollectorInspection(value: unknown): value is NonNu
     value.scope !== 'local-record-inspection' || !timestamp(value.sampledAt) || value.recoveryAttempted !== false) return false;
   return value.state === 'absent' && value.markerVersion === null && value.reasonCode === 'no-pending-record' ||
     value.state === 'pending' && (value.markerVersion === 1 && value.reasonCode === 'legacy-owner-evidence-missing' ||
-      [2, 3, 4].some(version => version === value.markerVersion) && value.reasonCode === 'recovery-not-evaluated') ||
+      [2, 3, 4, 5].some(version => version === value.markerVersion) && value.reasonCode === 'recovery-not-evaluated') ||
     value.state === 'unavailable' && value.markerVersion === null && value.reasonCode === 'pending-evidence-unavailable';
 }
 function validMetadataCollector(value: unknown): boolean {
@@ -44,7 +44,7 @@ function validMetadataCollector(value: unknown): boolean {
     if (value.state !== 'blocked' || value.reasonCode === 'collector-owned' || !record(recovery) ||
       !exact(recovery, ['reasonCode', 'markerVersion']) || typeof recovery.reasonCode !== 'string' ||
       !RESOURCE_COLLECTOR_RECOVERY_REASONS.some((reason) => reason === recovery.reasonCode) ||
-      recovery.markerVersion !== null && ![1, 2, 3, 4].includes(recovery.markerVersion as number)) return false;
+      recovery.markerVersion !== null && ![1, 2, 3, 4, 5].includes(recovery.markerVersion as number)) return false;
     const reason = recovery.reasonCode as keyof typeof RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS;
     if (!RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS[reason].some((version) => version === recovery.markerVersion)) return false;
   }

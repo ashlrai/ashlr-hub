@@ -2131,6 +2131,28 @@ Read-only group-absence checks never restore signaling authority over an exited
 or recycled process. A budget expiring before native contact settles its local
 reservation without inventing a provider sample.
 
+In the Node CLI on macOS with Node's `execve`, normal collectors now create v5
+markers and schema-3 activity records. A fixed private metadata launcher publishes
+its own PID, process-start identity and process group before executing the native
+command. The collector verifies that registration before sending a one-use go
+packet over a separate control pipe. Provider stdin, argv and environment are not
+persisted in the ticket. Exec replaces the launcher in the same PID/group; it does
+not create a second unregistered command leader.
+
+If the collector exits before its callback, the surviving launcher can still
+publish registration. A closed control pipe without go records no-start evidence
+and exits. Later same-boot recovery requires the exact ticket/helper/marker/owner
+bindings and kernel-confirmed group absence; a no-start receipt alone is not
+absence proof. Recovery records the ticket and registration digests, then rechecks
+them before removing the matching pending marker. A live/recycled group, malformed
+or changed evidence, denied OS observation, or launcher death before publication
+retains the fence. These new records do not retroactively repair unknown v1–v4
+reservations. The existing different-boot recovery remains available after work
+has drained; sleep/wake still does not qualify. Unsupported runtimes keep the
+existing lifecycle. The compiled Bun desktop sidecar is not a Node interpreter
+and retains that legacy lifecycle; this source qualification does not establish
+desktop recovery acceptance. No background service or provider session is added.
+
 For a normal helper close, the runner can observe a briefly lingering group for
 up to one second, within the original execution deadline. These are signal-zero
 checks only; no termination signal is sent after the leader exits. Fixed

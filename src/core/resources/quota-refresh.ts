@@ -9,7 +9,7 @@ import { validateResourceBindings, type ResourceBinding } from './worker.js';
 import { probeCodexResourceAccount, sanitizeCodexProbeCleanupDiagnostics, type CodexProbeCleanupDiagnostics,
   type CodexResourceProbeOptions, type CodexResourceProbeResult } from './codex-account-probe.js';
 import { acquireResourceQuotaRefreshLease, type ResourceQuotaRefreshLease } from './quota-refresh-lease.js';
-import { createNativeMetadataCoordinator, type NativeMetadataCoordinator } from './metadata-coordinator.js';
+import { createNativeMetadataCoordinator, withNativeMetadataAdmission, type NativeMetadataCoordinator } from './metadata-coordinator.js';
 import { resourceQuotaBuckets, expandResourceQuotaDenials } from './quota-scope.js';
 
 export const RESOURCE_QUOTA_REFRESH_INTERVAL_MS = 30_000;
@@ -293,7 +293,9 @@ function createRefresher(options: ReturnType<typeof checkedOptions>, once: boole
         try {
           const result = await probe({ pool, bindings, workerId: row.config.workerId, cwd,
             bucketIds: row.config.bucketIds, expectedAccountHint: row.config.accountHint, timeoutMs: PROBE_TIMEOUT_MS,
-            signal: controller.signal, ...(processGroupLifecycle ? { processGroupLifecycle } : {}) });
+            signal: controller.signal, ...(processGroupLifecycle ? { processGroupLifecycle: withNativeMetadataAdmission(processGroupLifecycle, () => {
+              if (!owns() || controller.signal.aborted) throw new Error('Metadata quota admission changed');
+            }) } : {}) });
           const status = object(result) ? Object.getOwnPropertyDescriptor(result, 'status') : undefined;
           if (!status || !('value' in status) || typeof status.value !== 'string' ||
             !['observed', 'failed', 'timed-out', 'cancelled', 'uncertain'].includes(status.value)) {
@@ -483,7 +485,7 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
     const available = remaining();
     if (available < 1 || controller.signal.aborted) throw new Error();
     lease = await acquireResourceQuotaRefreshLease(checked.cwd, {
-      waitMs: Math.min(capacityWaitMs, available), signal: controller.signal, trackNativeActivity: true,
+      waitMs: Math.min(capacityWaitMs, available), signal: controller.signal, trackNativeActivity: true, trackNativeLaunchHandoff: true,
     });
     if (remaining() < 1 || controller.signal.aborted) result = { observations, unavailableWorkerIds: unavailable };
     else {

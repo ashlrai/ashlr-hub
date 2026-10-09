@@ -165,7 +165,7 @@ describe('passive collector record inspection boundary', () => {
     return resourceConsoleSnapshotQuery(snapshot.pool.id).fetch();
   }
   it.each([undefined, base,
-    ...[2, 3, 4].map(markerVersion => ({ ...base, markerVersion, reasonCode: 'recovery-not-evaluated' })),
+    ...[2, 3, 4, 5].map(markerVersion => ({ ...base, markerVersion, reasonCode: 'recovery-not-evaluated' })),
     { ...base, state: 'absent', markerVersion: null, reasonCode: 'no-pending-record' },
     { ...base, state: 'unavailable', markerVersion: null, reasonCode: 'pending-evidence-unavailable' },
   ])('accepts only passive consistent records and legacy absence %#', async value => {
@@ -174,7 +174,7 @@ describe('passive collector record inspection boundary', () => {
   it.each([null, {}, { ...base, scope: 'collector-running' }, { ...base, recoveryAttempted: true },
     { ...base, sampledAt: '2026-02-30T12:00:00.000Z' }, { ...base, sampledAt: 'PRIVATE' },
     { ...base, state: 'running' }, { ...base, markerVersion: '1' }, { ...base, markerVersion: 5 },
-    { ...base, markerVersion: null }, { ...base, markerVersion: 4 }, { ...base, reasonCode: 'recovery-not-evaluated' },
+    { ...base, markerVersion: null }, { ...base, markerVersion: 4 }, { ...base, markerVersion: 6, reasonCode: 'recovery-not-evaluated' }, { ...base, reasonCode: 'recovery-not-evaluated' },
     { ...base, state: 'absent' }, { ...base, state: 'unavailable' }, { ...base, ownerToken: 'PRIVATE' },
     { ...base, reasonCode: 'PRIVATE_REASON' },
   ])('rejects malformed or contradictory records with a fixed redacted error %#', async value => {
@@ -193,6 +193,12 @@ describe('configured metadata collector lifecycle', () => {
     const { snapshot } = resourceFixture(); read.mockResolvedValue({ ...snapshot, metadataCollector: value });
     return resourceConsoleSnapshotQuery(snapshot.pool.id).fetch();
   }
+  it('accepts new launch-handoff diagnosis without exposing ticket data or starting recovery', async () => {
+    const value = { state: 'blocked', reasonCode: 'reconciliation-required', sampledAt: NOW,
+      recovery: { reasonCode: 'command-registration-incomplete', markerVersion: 5 } };
+    await expect(lifecycle(value)).resolves.toMatchObject({ metadataCollector: value }); expect(write).not.toHaveBeenCalled();
+    await expect(lifecycle({ ...value, recovery: { ...value.recovery, markerVersion: 6 } })).rejects.toThrow('selected pool');
+  });
   it.each(RESOURCE_COLLECTOR_RECOVERY_REASONS)('accepts fixed recovery diagnosis %s without mutation', async (reasonCode) => {
     const value = { state: 'blocked', reasonCode: 'reconciliation-required', sampledAt: NOW,
       recovery: { reasonCode, markerVersion: RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS[reasonCode][0] } };

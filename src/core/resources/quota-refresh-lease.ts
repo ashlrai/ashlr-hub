@@ -1,7 +1,7 @@
 /** Shared foreground quota ownership; a pending fence survives uncertain cleanup. */
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, unlinkSync, writeFileSync, type BigIntStats } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, join, parse, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -12,6 +12,9 @@ import { fsyncDirectory } from '../util/durability.js';
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readResourceJson } from './pool-runtime.js';
 import { readNativeBootIdentity, type NativeBootIdentity } from './native-boot-identity.js';
+import { createNativeMetadataLaunch, confirmNativeMetadataLaunch, inspectNativeMetadataLaunch,
+  nativeMetadataLaunchSupported, retireNativeMetadataLaunch, type NativeMetadataLaunchBinding,
+  type NativeMetadataLaunchDescriptor } from '../run/native-metadata-launch.js';
 import type { ResourceCollectorInspection, ResourceCollectorRecoveryDiagnosis } from './console-types.js';
 
 export type ResourceQuotaRefreshLeaseErrorCode = 'collector-owned' | 'reconciliation-required' |
@@ -38,11 +41,12 @@ const MAX_ACTIVITY_BYTES = 1024;
 type MarkerBase = { scope: 'codex-native-metadata' | 'native-connection-metadata'; state: 'pending'; startedAt: string };
 type PendingMarker = MarkerBase & ({ schemaVersion: 1 } |
   { schemaVersion: 2; bootIdentity: NativeBootIdentity; ownerToken: string } |
-  { schemaVersion: 3 | 4; bootIdentity: NativeBootIdentity; ownerToken: string; ownerPid: number });
-type ActivityReservation = { id: string; phase: 'ready' | 'preparing' | 'registered'; pgid: number | null };
+  { schemaVersion: 3 | 4 | 5; bootIdentity: NativeBootIdentity; ownerToken: string; ownerPid: number });
+type ActivityReservation = { id: string; phase: 'ready' | 'preparing' | 'registered'; pgid: number | null; launchId?: string | null };
 type ActivityRecord = {
   ownerToken: string; markerDigest: string; pending: { dev: string; ino: string }; sequence: number;
-} & ({ schemaVersion: 1; reservations: string[] } | { schemaVersion: 2; reservations: ActivityReservation[] });
+} & ({ schemaVersion: 1; reservations: string[] } | { schemaVersion: 2; reservations: ActivityReservation[] } |
+  { schemaVersion: 3; ownerIdentity: NativeMetadataLaunchBinding['owner']; reservations: ActivityReservation[] });
 
 function exact(value: unknown, keys: string[]): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value) &&
@@ -61,10 +65,10 @@ function currentBoot(): NativeBootIdentity | null {
 function validMarker(value: unknown): value is PendingMarker {
   if (!value || typeof value !== 'object') return false;
   const version = (value as { schemaVersion?: unknown }).schemaVersion;
-  if (!exact(value, version === 1 ? ['schemaVersion', 'scope', 'state', 'startedAt'] : version === 3 || version === 4 ?
+  if (!exact(value, version === 1 ? ['schemaVersion', 'scope', 'state', 'startedAt'] : version === 3 || version === 4 || version === 5 ?
     ['schemaVersion', 'scope', 'state', 'startedAt', 'bootIdentity', 'ownerToken', 'ownerPid'] :
     ['schemaVersion', 'scope', 'state', 'startedAt', 'bootIdentity', 'ownerToken']) ||
-    (version !== 1 && version !== 2 && version !== 3 && version !== 4) ||
+    (version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5) ||
     typeof value.scope !== 'string' || !['codex-native-metadata', 'native-connection-metadata'].includes(value.scope) ||
     value.state !== 'pending' || typeof value.startedAt !== 'string' || !Number.isFinite(Date.parse(value.startedAt)) ||
     new Date(value.startedAt).toISOString() !== value.startedAt) return false;
@@ -135,16 +139,24 @@ function readActivity(path: string): { record: ActivityRecord; stat: BigIntStats
   if (!privateActivityStat(before)) throw new Error();
   const value: unknown = readResourceJson(path, MAX_ACTIVITY_BYTES);
   const after = lstatSync(path, { bigint: true });
-  if (!sameActivity(before, after) || !exact(value, ['schemaVersion', 'ownerToken', 'markerDigest', 'pending', 'sequence', 'reservations']) ||
-      (value.schemaVersion !== 1 && value.schemaVersion !== 2) || typeof value.ownerToken !== 'string' || !UUID.test(value.ownerToken) ||
+  if (!sameActivity(before, after) || !exact(value, (value as { schemaVersion?: unknown })?.schemaVersion === 3
+      ? ['schemaVersion', 'ownerToken', 'markerDigest', 'pending', 'sequence', 'reservations', 'ownerIdentity']
+      : ['schemaVersion', 'ownerToken', 'markerDigest', 'pending', 'sequence', 'reservations']) ||
+      (value.schemaVersion !== 1 && value.schemaVersion !== 2 && value.schemaVersion !== 3) || typeof value.ownerToken !== 'string' || !UUID.test(value.ownerToken) ||
       typeof value.markerDigest !== 'string' || !/^[a-f0-9]{64}$/.test(value.markerDigest) ||
       !exact(value.pending, ['dev', 'ino']) || ![value.pending.dev, value.pending.ino].every((item) => typeof item === 'string' && /^\d+$/.test(item)) ||
       !Number.isSafeInteger(value.sequence) || Number(value.sequence) < 0 || !Array.isArray(value.reservations) || value.reservations.length > 2 ||
       value.reservations.some((item) => value.schemaVersion === 1
         ? typeof item !== 'string' || !UUID.test(item)
-        : !exact(item, ['id', 'phase', 'pgid']) || typeof item.id !== 'string' || !UUID.test(item.id) ||
+        : !exact(item, value.schemaVersion === 3 ? ['id', 'phase', 'pgid', 'launchId'] : ['id', 'phase', 'pgid']) || typeof item.id !== 'string' || !UUID.test(item.id) ||
           typeof item.phase !== 'string' || !['ready', 'preparing', 'registered'].includes(item.phase) ||
+          (value.schemaVersion === 3 && item.launchId !== null && item.launchId !== item.id) ||
           (item.phase === 'registered' ? !Number.isSafeInteger(item.pgid) || Number(item.pgid) <= 0 : item.pgid !== null)) ||
+      value.schemaVersion === 3 && (!exact(value.ownerIdentity, ['token', 'pid', 'startRef', 'startRefSource', 'dev', 'ino']) ||
+        value.ownerIdentity.token !== value.ownerToken || !Number.isSafeInteger(value.ownerIdentity.pid) || Number(value.ownerIdentity.pid) < 1 ||
+        typeof value.ownerIdentity.startRef !== 'string' || !/^[a-f0-9]{64}$/.test(value.ownerIdentity.startRef) ||
+        value.ownerIdentity.startRefSource !== 'self-clock-epoch-second' ||
+        ![value.ownerIdentity.dev, value.ownerIdentity.ino].every(v => typeof v === 'string' && /^\d+$/.test(v))) ||
       new Set(value.reservations.map((item) => value.schemaVersion === 1 ? item : (item as ActivityReservation).id)).size !== value.reservations.length) throw new Error();
   return { record: value as unknown as ActivityRecord, stat: after, recordDigest: digest(canonical(value)) };
 }
@@ -153,7 +165,8 @@ function ownerAbsent(pid: number): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
 }
 function activityMatches(activity: ActivityRecord, previous: ReturnType<typeof readPendingMarker>): boolean {
-  return (previous.marker.schemaVersion === 3 && activity.schemaVersion === 1 || previous.marker.schemaVersion === 4 && activity.schemaVersion === 2) &&
+  return (previous.marker.schemaVersion === 3 && activity.schemaVersion === 1 || previous.marker.schemaVersion === 4 && activity.schemaVersion === 2 ||
+    previous.marker.schemaVersion === 5 && activity.schemaVersion === 3 && activity.ownerIdentity.pid === previous.marker.ownerPid) &&
     activity.ownerToken === previous.marker.ownerToken &&
     activity.markerDigest === previous.recordDigest && activity.pending.dev === previous.stat.dev.toString() &&
     activity.pending.ino === previous.stat.ino.toString();
@@ -171,13 +184,34 @@ function reservationRecoveryBlocker(
   }
   return null;
 }
-function activityRecoveryBlocker(activity: ActivityRecord): ResourceCollectorRecoveryDiagnosis['reasonCode'] | null {
+function launchBinding(activity: Extract<ActivityRecord, { schemaVersion: 3 }>, previous: ReturnType<typeof readPendingMarker>): NativeMetadataLaunchBinding {
+  if (previous.marker.schemaVersion !== 5) throw new Error();
+  return { owner: activity.ownerIdentity, pending: { dev: previous.stat.dev.toString(), ino: previous.stat.ino.toString(),
+    bytesDigest: createHash('sha256').update(JSON.stringify(previous.marker) + '\n').digest('hex') }, bootIdentity: previous.marker.bootIdentity };
+}
+function activityRecoveryBlocker(activity: ActivityRecord, root?: string, previous?: ReturnType<typeof readPendingMarker>, launches?: Map<string, string>): ResourceCollectorRecoveryDiagnosis['reasonCode'] | null {
   if (activity.schemaVersion === 1) return activity.reservations.length === 0 ? null : 'legacy-active-work-unverifiable';
+  if (activity.schemaVersion === 3) {
+    if (!root || !previous) return 'activity-evidence-unavailable';
+    const entries: ActivityReservation[] = [];
+    for (const entry of activity.reservations) {
+      if (entry.launchId === null) { entries.push(entry); continue; }
+      try {
+        const child = inspectNativeMetadataLaunch(root, entry.launchId!, launchBinding(activity, previous));
+        if (entry.phase === 'ready' || entry.phase === 'registered' && child.pgid !== entry.pgid) throw new Error();
+        const proof = JSON.stringify({ id: entry.id, ticketDigest: child.ticketDigest, registrationDigest: child.registrationDigest });
+        if (launches?.has(entry.id) && launches.get(entry.id) !== proof) throw new Error();
+        launches?.set(entry.id, proof);
+        entries.push({ id: entry.id, phase: 'registered', pgid: child.pgid });
+      } catch { return 'command-registration-incomplete'; }
+    }
+    return reservationRecoveryBlocker(entries);
+  }
   return reservationRecoveryBlocker(activity.reservations);
 }
 
 export interface ResourceNativeProcessGroupLifecycle {
-  prepare(): { spawned(pgid: number): void; settled(receipt: 'not-started' | 'group-exit-confirmed'): void };
+  prepare(): { spawned(pgid: number): void; settled(receipt: 'not-started' | 'group-exit-confirmed'): void; launcher?: NativeMetadataLaunchDescriptor };
 }
 export interface ResourceNativeActivity {
   settle(): void;
@@ -278,7 +312,7 @@ export function inspectResourceQuotaRefreshOwner(root: string): ResourceQuotaRef
       !Number.isSafeInteger(lock.pid) || Number(lock.pid) < 1 || typeof lock.token !== 'string' ||
       !/^[a-f0-9-]{36}$/.test(lock.token) || typeof lock.startRef !== 'string' || lock.startRefVerified !== true ||
       typeof lock.startRefSource !== 'string' || marker.schemaVersion !== 1 && marker.ownerToken !== lock.token ||
-      (marker.schemaVersion === 3 || marker.schemaVersion === 4) && marker.ownerPid !== lock.pid) throw new Error();
+      (marker.schemaVersion === 3 || marker.schemaVersion === 4 || marker.schemaVersion === 5) && marker.ownerPid !== lock.pid) throw new Error();
     process.kill(Number(lock.pid), 0);
     const recordedStart = canonicalStartEpochSecond(lock.startRef, lock.startRefSource);
     const observedStart = observedOwnerStart(Number(lock.pid),
@@ -329,6 +363,8 @@ export async function acquireResourceQuotaRefreshLease(root: string,
     signal?: AbortSignal;
     scope?: 'codex-native-metadata' | 'native-connection-metadata';
     trackNativeActivity?: boolean;
+    /** Supported host-owned exec-in-place metadata launch tickets; legacy records stay unchanged. */
+    trackNativeLaunchHandoff?: boolean;
     /**
      * Only when `waitMs` is 0 (no deadline): how long the lock attempt may
      * wait, SYNCHRONOUSLY, for a contended lock (default 500 ms). A server
@@ -346,6 +382,9 @@ export async function acquireResourceQuotaRefreshLease(root: string,
   const signal = options.signal;
   const scope = options.scope ?? 'codex-native-metadata';
   if (options.trackNativeActivity !== undefined && typeof options.trackNativeActivity !== 'boolean') throw new Error('Invalid native activity tracking');
+  if (options.trackNativeLaunchHandoff !== undefined && typeof options.trackNativeLaunchHandoff !== 'boolean' ||
+      options.trackNativeLaunchHandoff && !options.trackNativeActivity) throw new Error('Invalid native launch handoff');
+  const launchHandoff = options.trackNativeLaunchHandoff === true && nativeMetadataLaunchSupported();
   if (!['codex-native-metadata', 'native-connection-metadata'].includes(scope)) throw new Error('Invalid collector scope');
   if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 60_000) {
     throw new Error('Invalid resource quota collector wait budget');
@@ -407,15 +446,16 @@ export async function acquireResourceQuotaRefreshLease(root: string,
       if (previous.marker.bootIdentity.machineDigest !== boot.machineDigest) { recovery.reasonCode = 'machine-identity-mismatch'; throw new Error(); }
       const sameBoot = previous.marker.bootIdentity.bootId === boot.bootId;
       let priorActivity: ReturnType<typeof readActivity> | undefined;
+      const priorLaunches = new Map<string, string>();
       if (sameBoot) {
-        if (previous.marker.schemaVersion !== 3 && previous.marker.schemaVersion !== 4) {
+        if (previous.marker.schemaVersion !== 3 && previous.marker.schemaVersion !== 4 && previous.marker.schemaVersion !== 5) {
           recovery.reasonCode = 'same-boot-owner-evidence-missing'; throw new Error();
         }
         if (!ownerAbsent(previous.marker.ownerPid)) { recovery.reasonCode = 'owner-not-confirmed-absent'; throw new Error(); }
         recovery.reasonCode = 'activity-evidence-unavailable';
         priorActivity = readActivity(activityPath);
         if (!activityMatches(priorActivity.record, previous)) throw new Error();
-        const blocker = activityRecoveryBlocker(priorActivity.record);
+        const blocker = activityRecoveryBlocker(priorActivity.record, root, previous, priorLaunches);
         if (blocker) { recovery.reasonCode = blocker; throw new Error(); }
       }
       recovery.reasonCode = 'recovery-confirmation-failed';
@@ -427,10 +467,11 @@ export async function acquireResourceQuotaRefreshLease(root: string,
       // Preserve authorization BEFORE unlink; neither case claims a provider
       // observation or a successful result from an abandoned metadata call.
       const receipt = JSON.stringify({ schemaVersion: 1, state: 'authorized-before-unlink',
-        reason: sameBoot ? priorActivity?.record.schemaVersion === 2 && priorActivity.record.reservations.some((item) => item.phase === 'registered')
+        reason: sameBoot ? priorActivity && priorActivity.record.schemaVersion !== 1 && priorActivity.record.reservations.some((item) => item.phase === 'registered' || !!item.launchId)
           ? 'same-boot-verified-groups-absent-dead-owner' : 'same-boot-verified-idle-dead-owner' : 'same-machine-different-boot',
         markerDigest: previous.recordDigest, pending: { dev: previous.stat.dev.toString(), ino: previous.stat.ino.toString() },
         marker: previous.marker, bootIdentity: boot, authorizedAt: new Date().toISOString(),
+        ...(priorLaunches.size ? { launches: [...priorLaunches.values()].map(value => JSON.parse(value) as unknown) } : {}),
         ...(priorActivity ? { activity: { dev: priorActivity.stat.dev.toString(), ino: priorActivity.stat.ino.toString(),
           recordDigest: priorActivity.recordDigest, record: priorActivity.record } } : {}) }) + '\n';
       if (Buffer.byteLength(receipt, 'utf8') > MAX_RECOVERY_BYTES) throw new Error();
@@ -453,8 +494,8 @@ export async function acquireResourceQuotaRefreshLease(root: string,
       if (priorActivity) {
         const confirmedActivity = readActivity(activityPath);
         if (!sameActivity(priorActivity.stat, confirmedActivity.stat) || priorActivity.recordDigest !== confirmedActivity.recordDigest ||
-          (previous.marker.schemaVersion !== 3 && previous.marker.schemaVersion !== 4) || !ownerAbsent(previous.marker.ownerPid) ||
-          activityRecoveryBlocker(confirmedActivity.record) !== null) throw new Error();
+          (previous.marker.schemaVersion !== 3 && previous.marker.schemaVersion !== 4 && previous.marker.schemaVersion !== 5) || !ownerAbsent(previous.marker.ownerPid) ||
+          activityRecoveryBlocker(confirmedActivity.record, root, current, priorLaunches) !== null) throw new Error();
       }
       assertActive();
       unlinkSync(pendingPath); fsyncDirectory(root);
@@ -520,7 +561,7 @@ export async function acquireResourceQuotaRefreshLease(root: string,
       const bootIdentity = currentBoot();
       const marker: PendingMarker = bootIdentity
         ? options.trackNativeActivity
-          ? { schemaVersion: 4, scope, state: 'pending', startedAt: new Date().toISOString(), bootIdentity, ownerToken: lock!.token, ownerPid: process.pid }
+          ? { schemaVersion: launchHandoff ? 5 : 4, scope, state: 'pending', startedAt: new Date().toISOString(), bootIdentity, ownerToken: lock!.token, ownerPid: process.pid }
           : { schemaVersion: 2, scope, state: 'pending', startedAt: new Date().toISOString(), bootIdentity, ownerToken: lock!.token }
         : { schemaVersion: 1, scope, state: 'pending', startedAt: new Date().toISOString() };
       const record = JSON.stringify(marker);
@@ -528,15 +569,15 @@ export async function acquireResourceQuotaRefreshLease(root: string,
       writeFileSync(fd, record + '\n'); fsyncSync(fd); fsyncDirectory(root); assertOwnership();
       const stat = fstatSync(fd, { bigint: true }); pending = { dev: stat.dev, ino: stat.ino, record };
       assertOwnership();
-      if (marker.schemaVersion === 4) writeActivity({ schemaVersion: 2, ownerToken: lock!.token,
+      if (marker.schemaVersion === 4 || marker.schemaVersion === 5) writeActivity({ schemaVersion: marker.schemaVersion === 5 ? 3 : 2, ownerToken: lock!.token,
         markerDigest: digest(canonical(marker)), pending: { dev: stat.dev.toString(), ino: stat.ino.toString() },
-        sequence: 0, reservations: [] });
+        sequence: 0, reservations: [], ...(marker.schemaVersion === 5 ? { ownerIdentity: { ...inspectResourceQuotaRefreshOwner(root).lock } } : {}) } as ActivityRecord);
     } catch { if (options.trackNativeActivity) poisoned = true; throw new ResourceQuotaRefreshLeaseError('cleanup-unconfirmed', 'Resource quota collector pending marker unavailable'); }
     finally { if (fd !== undefined) closeSync(fd); }
   }
   function writeReservations(next: ActivityReservation[]): void {
     if (activity) {
-      if (activity.record.schemaVersion !== 2 || !Number.isSafeInteger(activity.record.sequence + 1)) throw new Error();
+      if ((activity.record.schemaVersion !== 2 && activity.record.schemaVersion !== 3) || !Number.isSafeInteger(activity.record.sequence + 1)) throw new Error();
       writeActivity({ ...activity.record, sequence: activity.record.sequence + 1, reservations: next });
     }
   }
@@ -546,7 +587,7 @@ export async function acquireResourceQuotaRefreshLease(root: string,
       assertOwnership();
       if (!options.trackNativeActivity || !pending || reservations.size >= 2) throw new Error();
       id = randomUUID();
-      const reservation: ActivityReservation = { id, phase: 'ready', pgid: null };
+      const reservation: ActivityReservation = { id, phase: 'ready', pgid: null, ...(launchHandoff ? { launchId: null } : {}) };
       writeReservations([...reservations.values(), reservation]);
       reservations.set(id, reservation);
     } catch { poisoned = true; throw new ResourceQuotaRefreshLeaseError('cleanup-unconfirmed', 'Native activity reservation unavailable'); }
@@ -558,18 +599,33 @@ export async function acquireResourceQuotaRefreshLease(root: string,
       reservations.set(id, next);
     }
     const processGroupLifecycle: ResourceNativeProcessGroupLifecycle = Object.freeze({ prepare() {
-      try { transition('ready', { id, phase: 'preparing', pgid: null }); }
+      let launcher: NativeMetadataLaunchDescriptor | undefined;
+      let binding: NativeMetadataLaunchBinding | undefined;
+      try {
+        transition('ready', { id, phase: 'preparing', pgid: null, ...(launchHandoff ? { launchId: id } : {}) });
+        if (launchHandoff) {
+          const previous = readPendingMarker(pendingPath);
+          if (!activity || activity.record.schemaVersion !== 3) throw new Error();
+          binding = launchBinding(activity.record, previous);
+          launcher = createNativeMetadataLaunch(root, id, binding);
+        }
+      }
       catch { poisoned = true; throw new ResourceQuotaRefreshLeaseError('cleanup-unconfirmed', 'Native process preparation unavailable'); }
       let registered = false; let completed = false;
-      return Object.freeze({ spawned(pgid: number): void {
+      return Object.freeze({ ...(launcher ? { launcher } : {}), spawned(pgid: number): void {
         try {
           if (completed || registered || !Number.isSafeInteger(pgid) || pgid < 1) throw new Error();
-          transition('preparing', { id, phase: 'registered', pgid }); registered = true;
+          if (binding) confirmNativeMetadataLaunch(root, id, binding, pgid);
+          transition('preparing', { id, phase: 'registered', pgid, ...(launchHandoff ? { launchId: id } : {}) }); registered = true;
         } catch { poisoned = true; throw new ResourceQuotaRefreshLeaseError('cleanup-unconfirmed', 'Native process registration unavailable'); }
       }, settled(receipt: 'not-started' | 'group-exit-confirmed'): void {
         try {
           if (completed || receipt !== (registered ? 'group-exit-confirmed' : 'not-started')) throw new Error();
-          transition(registered ? 'registered' : 'preparing', { id, phase: 'ready', pgid: null }); completed = true;
+          if (launcher) {
+            if (registered && binding) inspectNativeMetadataLaunch(root, id, binding);
+            retireNativeMetadataLaunch(root, id);
+          }
+          transition(registered ? 'registered' : 'preparing', { id, phase: 'ready', pgid: null, ...(launchHandoff ? { launchId: null } : {}) }); completed = true;
         } catch { poisoned = true; throw new ResourceQuotaRefreshLeaseError('cleanup-unconfirmed', 'Native process settlement unavailable'); }
       } });
     } });
@@ -595,8 +651,8 @@ export async function acquireResourceQuotaRefreshLease(root: string,
    * This re-runs the IDENTICAL kernel check at a later moment and releases the
    * reservation only on ESRCH. A present group, a recycled group, or any
    * non-ESRCH errno all keep the reservation and the durable fence exactly as
-   * they were. `preparing` stays unrecoverable for the same reason the dead
-   * owner's path refuses it: no PGID was ever published, so absence is
+   * they were. Legacy `preparing`, or a new ticket without independently
+   * published child identity, remains unrecoverable: group absence is
    * unprovable. Nothing is signalled and no process is started here.
    */
   function reclaimNativeActivity(): ResourceNativeActivityReclamation {
@@ -605,9 +661,12 @@ export async function acquireResourceQuotaRefreshLease(root: string,
     catch { return { state: 'blocked', reasonCode: 'activity-evidence-unavailable' }; }
     if (reservations.size === 0) return { state: 'idle' };
     const outstanding = [...reservations.values()];
-    const blocker = reservationRecoveryBlocker(outstanding);
+    const blocker = activity?.record.schemaVersion === 3
+      ? activityRecoveryBlocker(activity.record, root, readPendingMarker(pendingPath))
+      : reservationRecoveryBlocker(outstanding);
     if (blocker) return { state: 'blocked', reasonCode: blocker };
     try {
+      for (const entry of outstanding) if (entry.launchId) retireNativeMetadataLaunch(root, entry.launchId);
       writeReservations([]);
       reservations.clear();
     } catch {

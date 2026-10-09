@@ -14,7 +14,7 @@ import type { ResourcePool } from '../src/core/resources/pool-policy.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
 
 
-// macOS-only: the durable native-activity fence (schema-v4 marker) needs readNativeBootIdentity(), which is darwin-only. Other hosts skip
+// macOS-only: the durable native-activity fence needs readNativeBootIdentity(), which is darwin-only. Other hosts skip
 // these cleanly instead of failing (src/core/cloud/improvement-backlog.ts).
 const NOT_MACOS = process.platform !== 'darwin';
 let root: string;
@@ -90,7 +90,7 @@ describe.skipIf(process.platform === 'win32')('native quota lifecycle integratio
     expect(existsSync(join(options.cwd, '.resource-quota-refresh-pending.json'))).toBe(false);
     expect(existsSync(join(options.cwd, '.resource-quota-refresh.lock'))).toBe(false);
     const activity = JSON.parse(readFileSync(join(options.cwd, '.resource-quota-refresh-activity.json'), 'utf8'));
-    expect(activity).toMatchObject({ schemaVersion: 2, sequence: 10, reservations: [] });
+    expect(activity).toMatchObject({ schemaVersion: 3, sequence: 10, reservations: [] });
     expect(readFileSync(join(options.cwd, 'pool-state.json'))).toEqual(state);
     expect(readResourceQuotaScopeAccess(options.cwd, options.pool, options.bindings).exclusions)
       .toEqual([{ capacityKey: 'personal', quotaScope: 'codex-general-v1' }]);
@@ -111,7 +111,8 @@ describe.skipIf(process.platform === 'win32')('native quota lifecycle integratio
     expect(existsSync(join(options.cwd, '.resource-quota-refresh.lock'))).toBe(false);
     const activity = JSON.parse(readFileSync(join(options.cwd, '.resource-quota-refresh-activity.json'), 'utf8'));
     expect(activity.sequence).toBe(3);
-    expect(activity.reservations).toEqual([{ id: expect.any(String), phase: 'registered', pgid: expect.any(Number) }]);
+    expect(activity.reservations).toEqual([{ id: expect.any(String), phase: 'registered', pgid: expect.any(Number), launchId: expect.any(String) }]);
+    expect(activity.reservations[0].launchId).toBe(activity.reservations[0].id);
     const requests = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line).method);
     expect(requests.filter(method => method === 'initialize')).toHaveLength(1);
     expect(JSON.stringify(error)).not.toMatch(/fixture@example|inert-home|ownerToken|requests.jsonl/);

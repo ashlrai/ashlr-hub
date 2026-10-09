@@ -1518,7 +1518,7 @@ export async function startVerseAccountCollector(
     try {
       acquired = await acquireResourceQuotaRefreshLease(config.ledgerRoot, {
         ...(options.signal ? { signal: options.signal } : {}),
-        trackNativeActivity: true,
+        trackNativeActivity: true, trackNativeLaunchHandoff: true,
         scope: config.connections ? 'native-connection-metadata' : 'codex-native-metadata',
         // A retry runs in a live server: one immediate attempt, never the
         // 500 ms synchronous wait a contended lock otherwise gets (it froze
