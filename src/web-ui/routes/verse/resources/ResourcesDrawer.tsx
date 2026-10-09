@@ -55,7 +55,7 @@ import { COST_BASIS_RANK, costBasisOf, engineTier, TIER_BLURBS, TIER_LABELS, typ
 import { refreshAccountReading, refreshSeats } from '../useSeatsRefresh.js';
 import { budgetQuery } from '../budget/budget-queries.js';
 import { devinQuery } from '../devin/devin-queries.js';
-import { verseLocalModelsQuery } from '../usage/usage-queries.js';
+import { verseAccountsQuery, verseLocalModelsQuery } from '../usage/usage-queries.js';
 import { setVerseSection, type VerseSectionId } from '../verse-ui-store.js';
 import { CloudCredits } from './CloudCredits.js';
 import { CreditPools } from './CreditPools.js';
@@ -69,6 +69,7 @@ import { costBases, groupByTier, mergedFacts, readinessStatusRank, seatFacts, ty
 import { closeResources, setResourcesBar, setResourcesPinned, useResourcesUi } from './resources-store.js';
 import styles from './ResourcesDrawer.module.css';
 import { refreshDevinConsumption } from '../devin/devin-queries.js';
+import { collectionNotice } from './collection-notice.js';
 const ResetSpendingControl = lazy(() => import('../budget/ResetSpendingControl.js').then(module => ({ default: module.ResetSpendingControl })));
 
 export const RESOURCES_EMPTY_TEXT =
@@ -133,6 +134,11 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
   const refetchLocal = useRefresh(verseLocalModelsQuery);
   const refetchRuntime = useRefresh(servingRuntimeQuery);
   const refetchCloud = useRefresh(cloudCreditsQuery);
+  const accountsRead = useQuery(verseAccountsQuery);
+  const refetchAccounts = useRefetch(verseAccountsQuery);
+  const refreshAccounts = useRefresh(verseAccountsQuery);
+  usePollWhileVisible(refetchAccounts, ACCOUNT_CLOCK_MS);
+  const collectionStatus = collectionNotice(accountsRead);
   // 3.14: "ready for chat?" / "ready for the fleet?" per resource. An older
   // server has no route; every card then simply omits the two lines.
   const readinessRead = useQuery(resourceReadinessQuery);
@@ -308,6 +314,7 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
     refetchLocal();
     refetchRuntime();
     refetchCloud();
+    refreshAccounts();
     refreshReadiness();
     setTick(Date.now());
   };
@@ -363,6 +370,7 @@ export function ResourcesDrawer({ mode, compact = false, now: fixedNow }: Resour
         {data.refreshing ? <p className={styles.subtle} role="status">Updating readings…</p> : null}
         {data.readFailed ? <p className={styles.subtle} role="status">Refresh unavailable{data.rosterUnavailable ? '.' : ' · showing last readings.'}</p> : null}
         {readinessNotice ? <p className={styles.subtle} role="status">{readinessNotice}</p> : null}
+        {collectionStatus ? <p className={styles.subtle} role="status">{collectionStatus}</p> : null}
         {data.loading ? (
           <p className={styles.subtle} aria-busy="true">Reading accounts…</p>
         ) : !data.rosterUnavailable && paid.length === 0 && devinRows.length === 0 ? (
