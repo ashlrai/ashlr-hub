@@ -1,4 +1,4 @@
-import { devinCliBindingCurrent, peekDevinCliExecutionBinding } from '../devin/cli-admission.js';
+import { devinCliBindingCurrent, peekDevinCliExecutionBinding, peekDevinCliIdentityBinding } from '../devin/cli-admission.js';
 import { resetSpendingParkDelay } from './reset-spending-park-delay.js';
 /**
  * loop.ts — The M24 daemon operator.
@@ -159,6 +159,8 @@ import type { AutonomousBestOfNPlan } from '../run/best-of-n-policy.js';
 import type { DispatchOutcome } from '../fleet/fleet-types.js';
 import type { DaemonCapabilityKind } from '../authority/types.js';
 // Pure (routing + local-only policy only): which fleet lane a backend is.
+import { supportsRoleExecution } from '../run/role-invocation.js';
+import { grantEngineOfLane } from '../fleet/fleet-types.js';
 import { fleetLaneOf, routingRequestFor } from '../fleet/dispatch-router.js';
 import { routeSeat } from '../routing/router.js';
 import { engineOfSeatId } from '../routing/policy.js';
@@ -4818,19 +4820,24 @@ export async function tick(
   const managerRouteCurrent = (route: OutcomeManagerRoute, executionRepo: string): boolean => {
     const policy = standingTick ? currentStandingPolicy() : null;
     const registry = readEnrollmentRegistry();
-    const spec = resolveEngineSpec(route.engine, routingCfg);
-    if (!policy || stopRequested() || !stillOwnsTick() || registry.state !== 'ready' || !registry.repos.includes(executionRepo) ||
-        spec?.kind !== 'cli-agent' || engineTierOf(route.engine as EngineId, routingCfg) !== 'frontier' ||
-        !routingCfg.foundry?.allowedBackends?.includes(route.engine as EngineId)) return false;
     const lane = fleetLaneOf(route.engine as EngineId, routingCfg);
+    const configured = routingCfg.foundry?.allowedBackends?.includes(route.engine as EngineId) ||
+      lane === 'local' && localFleetEnabled(routingCfg) ||
+      lane === 'devin-cli' && routingCfg.devin?.enabled === true && routingCfg.devin.fleet === true;
+    if (!policy || stopRequested() || !stillOwnsTick() || registry.state !== 'ready' || !registry.repos.includes(executionRepo) ||
+        !supportsRoleExecution(route.engine, routingCfg) || lane === null || !configured) return false;
     const seat = standingSeatFor(policy.spend, route.seatId);
     const seatEngine = engineOfSeatId(route.seatId);
     const matches = lane === 'codex' && seatEngine === 'codex' || lane === 'claude-cli' && seatEngine === 'claude' ||
-      lane === 'grok-cli' && seatEngine === 'grok';
+      lane === 'grok-cli' && seatEngine === 'grok' || lane === 'local' && seatEngine === 'local' ||
+      lane === 'devin-cli' && route.seatId === 'devin';
     const identity = repoIdentityOfPath(executionRepo);
-    if (!matches || !seat?.enabled || !seat.roles.includes('producer') ||
-        !policy.engines.includes(lane === 'claude-cli' ? 'claude-cli' : lane === 'grok-cli' ? 'grok-cli' : 'codex') ||
+    if (!matches || !seat?.enabled || !seat.roles.includes('producer') || !policy.engines.includes(grantEngineOfLane(lane)) ||
         identity === null || !policy.repos.some(repo => repo.nameWithOwner.toLowerCase() === identity.toLowerCase())) return false;
+    // Historical settlement needs identity continuity, not a new pricing ticket.
+    // Contact still uses the separate fresh Devin seal and selectedTaskAdmission.
+    if (lane === 'devin-cli') return peekDevinCliIdentityBinding(route.model) !== null;
+    if (lane === 'local') return true; // Exact route/run and current local-only lane remain independently checked.
     // Current prepared roster/profile metadata only. This neither spends a fresh
     // allowance ticket nor proves the historical provider billing principal.
     const provider = lane === 'claude-cli' ? 'claude' : lane === 'grok-cli' ? 'grok' : 'codex';
@@ -6650,8 +6657,7 @@ export async function tick(
         routeAllowed: (route, executionRepo) => {
           if (!standingTick || !managerSelectedRoute || outcomeDigest(route) !== outcomeDigest(managerSelectedRoute) ||
               !outcomeAdmission.stillAuthorized() || !outcomeAdmission.executionRepoAllowed(item.repo, executionRepo) ||
-              engineTierOf(route.engine as EngineId, routingCfg) !== 'frontier' ||
-              resolveEngineSpec(route.engine, routingCfg)?.kind !== 'cli-agent' || !withinLimit(route.engine as EngineId, routingCfg)) return false;
+              !supportsRoleExecution(route.engine, routingCfg) || !withinLimit(route.engine as EngineId, routingCfg)) return false;
           try { return hooks.seatAllows(route.engine as EngineId, { maxPercent: resolveSubscriptionMaxPercent(routingCfg),
             itemId: item.id, model: route.model, seatId: route.seatId }).allowed === true; } catch { return false; }
         },
@@ -7187,23 +7193,25 @@ export async function tick(
         const lane = fleetLaneOf(backend, routingCfg);
         const seatId = standingRoute?.seatDecision?.seatId;
         if (typeof seatId !== 'string' || seatId.length === 0) return undefined;
-        if (lane === 'grok-cli') return seatId;
+        if (lane === 'grok-cli' && engineOfSeatId(seatId) === 'grok') return seatId;
+        if (managerCandidate && lane === 'local' && engineOfSeatId(seatId) === 'local') return seatId;
+        if (managerCandidate && lane === 'devin-cli' && seatId === 'devin') return seatId;
         if (lane === 'claude-cli' && engineOfSeatId(seatId) === 'claude') return seatId;
         return lane === 'codex' && engineOfSeatId(seatId) === 'codex' ? seatId : undefined;
       })();
       if (managerCandidate) {
         const spec = resolveEngineSpec(backend!, routingCfg);
-        selectedModel = selectedModel?.trim() || configuredModelForBackend(backend!, routingCfg) || spec?.defaultModel || null;
-        // A manager has one exact native frontier producer, never a mixed-route BON/swarm fallback.
-        if (!managerOutcomeDispatch || !standingTick || backendTier !== 'frontier' || spec?.kind !== 'cli-agent' ||
+        selectedModel = selectedModel?.trim() || configuredModelForBackend(backend!, routingCfg) || spec?.defaultModel || spec?.api?.defaultModel || null;
+        // A manager has one exact qualified account/model route; quality tier is not a provider permission.
+        if (!managerOutcomeDispatch || !standingTick || backendTier === null || !supportsRoleExecution(backend!, routingCfg) ||
             !standingSeatId || !selectedModel) {
           return { item, spentUsd: 0, dispatched: false, dispatch: dispatchTrace(item, {
             backend, tier: backendTier, model: selectedModel, assignedBy: 'manager-route',
-            reason: 'No grant-authorized native frontier account/model is available for this manager stage.',
+            reason: 'No grant-authorized tool-capable account/model is available for this manager stage.',
             dispatched: false, runId: attemptId, trajectoryId: `run:${attemptId}`, skipReason: 'manager-route-unavailable',
           }) };
         }
-        managerSelectedRoute = { engine: backend!, seatId: standingSeatId, model: selectedModel, tier: 'frontier' };
+        managerSelectedRoute = { engine: backend!, seatId: standingSeatId, model: selectedModel, tier: backendTier };
         managerOutcomeDispatch.bindRoute(managerSelectedRoute);
       }
       // Every new provider contact keeps the same task scope and rechecks current allowance policy.

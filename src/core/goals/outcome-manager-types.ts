@@ -11,7 +11,7 @@ export interface OutcomeManagerRoute {
   engine: string;
   seatId: string;
   model: string;
-  tier: 'frontier';
+  tier: 'local' | 'mid' | 'frontier';
 }
 export interface OutcomeManagerBasis {
   scopeRevision: number;
@@ -60,7 +60,7 @@ const routeToken = (value: unknown): value is string => typeof value === 'string
 export function validOutcomeManagerRoute(route: OutcomeManagerRoute): boolean {
   return !!route && exact(route, ['engine', 'seatId', 'model', 'tier']) &&
     routeToken(route.engine) &&
-    routeToken(route.seatId) && routeToken(route.model) && route.tier === 'frontier';
+    routeToken(route.seatId) && routeToken(route.model) && ['local', 'mid', 'frontier'].includes(route.tier);
 }
 export function managerGeneration(outcomeId: string, stageId: string): OutcomeManagerStage['generationId'] {
   return `outcome:v1:${outcomeDigest(['manager-stage', outcomeId, stageId])}`;

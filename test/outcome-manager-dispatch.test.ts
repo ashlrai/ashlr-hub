@@ -13,12 +13,14 @@ import { OutcomeManagerDispatch, outcomeManagerWorkItems, readOutcomeManagerWork
 import { OutcomeManagerCoordinator, type OutcomeManagerAdmission } from '../src/core/goals/outcome-manager.js';
 import { OutcomeCoordinator } from '../src/core/goals/outcome-coordinator.js';
 import { OutcomeStore } from '../src/core/goals/outcome-store.js';
+import type { OutcomeManagerRoute } from '../src/core/goals/outcome-manager-types.js';
 import type { RunState } from '../src/core/types.js';
 
 const roots: string[] = [];
 afterEach(() => { vi.restoreAllMocks(); mocks.directory.mockReset(); mocks.run.mockReset(); mocks.proposal.mockReset(); mocks.enrollment.mockReset();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
-function fixture(interactive = false) {
+function fixture(interactive = false, selected: Partial<OutcomeManagerRoute> = {}) {
+  const route: OutcomeManagerRoute = { engine: 'codex', seatId: 'selected-native-seat', model: 'actual-frontier-model', tier: 'frontier', ...selected };
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'outcome-manager-dispatch-'))); roots.push(root);
   const repo = join(root, 'repo'); mkdirSync(repo);
   const home = join(root, '.ashlr'); const directory = join(home, 'outcomes');
@@ -30,8 +32,8 @@ function fixture(interactive = false) {
   const manager = new OutcomeManagerCoordinator(store); let sequence = 0; let authorized = true;
   const command = () => ({ commandId: `command-${++sequence}`, expectedRevision: store.read().state?.revision ?? 0 });
   const admission: OutcomeManagerAdmission = { stillAuthorized: () => authorized, executionRepoAllowed: (a, b) => a === b,
-    routeAllowed: route => route.seatId === 'selected-native-seat' && route.tier === 'frontier',
-    routeCurrent: route => route.seatId === 'selected-native-seat' && route.tier === 'frontier',
+    routeAllowed: actual => actual.engine === route.engine && actual.model === route.model && actual.seatId === route.seatId && actual.tier === route.tier,
+    routeCurrent: actual => actual.engine === route.engine && actual.model === route.model && actual.seatId === route.seatId && actual.tier === route.tier,
     sessionAllowed: id => id === 'chat-1', messageExists: () => true, planAllowed: () => true };
   expect(work.start(command(), 'outcome', { desiredOutcome: 'Ship a useful verified improvement', targetRepos: [repo],
     acceptance: ['Actual protected merge and regression verification'] }).ok).toBe(true);
@@ -40,11 +42,10 @@ function fixture(interactive = false) {
   const state = () => store.read().state!;
   const item = outcomeManagerWorkItems([state()], '2026-10-07T00:00:00Z')[0]!;
   const context = readOutcomeManagerWorkItemContext(item)!; expect(context).not.toBeNull();
-  const route = { engine: 'codex', seatId: 'selected-native-seat', model: 'actual-frontier-model', tier: 'frontier' as const };
   const planText = `<phantom-manager-result>${JSON.stringify({ kind: 'plan', title: 'Useful plan', nodes: [{ key: 'build', title: 'Build improvement',
     objective: 'Implement useful behavior', deliverable: 'Verified proposal', riskClass: 'low', targetRepo: 'target-1', dependsOn: [],
     acceptance: ['Meaningful tests pass'] }] })}</phantom-manager-result>`;
-  let run = { id: 'run-parent', engine: route.engine, engineModel: `${route.engine}:${route.model}`, engineTier: 'frontier',
+  let run = { id: 'run-parent', engine: route.engine, engineModel: `${route.engine}:${route.model}`, engineTier: route.tier,
     trajectoryId: 'run:run-parent', status: 'done', result: planText, proposalOutcome: { kind: 'empty-diff' } } as RunState;
   mocks.run.mockImplementation(id => id === run.id ? run : null);
   const onResult = vi.fn();
@@ -62,6 +63,25 @@ describe('actual tool-capable manager host bridge', () => {
     const prompt = f.dispatch().prompt(); expect(prompt).toContain('Use native tools');
     expect(prompt).toContain(f.state().scope.acceptance[0]); expect(prompt).toContain('normal captured proposals');
     expect(f.state().manager!.stages).toEqual([]);
+  });
+  it.each([
+    { engine: 'llama-server', seatId: 'local', model: 'qualified-local-model', tier: 'local' as const },
+    { engine: 'devin-cli', seatId: 'devin', model: 'qualified-swe-model', tier: 'mid' as const },
+    { engine: 'claude', seatId: 'claude-a', model: 'qualified-mid-model', tier: 'mid' as const },
+  ])('settles an admitted $engine/$tier Manager without promoting its quality tier', async selected => {
+    const f = fixture(true, selected); const d = f.dispatch(); expect(d.begin()).toBe(true);
+    expect(await d.finishWithRetry()).toBe(true);
+    expect(f.state().manager!.stages[0]).toMatchObject({ route: selected, state: 'succeeded', resultKind: 'plan-applied' });
+    expect(f.work.project().complete).toBe(false);
+    expect(readOutcomeManagerResult({ outcomeId: 'outcome', stageId: f.state().manager!.stages[0]!.id, sessionId: 'chat-1' }))
+      .toMatchObject({ engine: selected.engine, model: selected.model, seatId: selected.seatId });
+    expect(f.item.tags).not.toContain('frontier');
+  });
+  it('rejects a different finite tier even when the engine, account and model match', async () => {
+    const f = fixture(true, { tier: 'mid' }); const d = f.dispatch(); expect(d.begin()).toBe(true);
+    f.setRun({ ...f.run(), engineTier: 'frontier' });
+    expect(await d.finishWithRetry()).toBe(true);
+    expect(f.state().manager!.stages[0]!.state).toBe('failed'); expect(f.state().graphDigest).toBeNull();
   });
   it('records only one parent and refuses replayed or wrong-seat launches', () => {
     const f = fixture(); const first = f.dispatch(); expect(first.begin()).toBe(true);

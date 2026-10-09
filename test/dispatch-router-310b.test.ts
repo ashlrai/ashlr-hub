@@ -634,21 +634,47 @@ describe('shared outcome manager routing', () => {
     expect(route.model).toBe(resolveEngineSpec(route.backend)?.defaultModel);
     expect(route.model).toEqual(expect.any(String));
   });
-  it('uses an eligible frontier account instead of a non-frontier first candidate', () => {
+  it('keeps an eligible cheaper native Manager instead of requiring frontier tier', () => {
     const route = routeWorkItem(manager(), LEGACY_LOCAL, ctx([grok(), claude(10, 10), local()], {
       tierOf: engine => String(engine) === 'grok-cli' ? 'frontier' : 'mid',
     }));
     expect(route.hold).toBeNull();
-    expect(route.backend).toBe('grok-cli');
-    expect(route.tier).toBe('frontier');
-    expect(route.seatDecision?.seatId).toBe('grok');
-    expect(route.seatDecision?.exclusions.find(row => row.seatId === 'claude')?.reasons.join(' ')).toContain('frontier manager');
+    expect(route.backend).toBe('claude'); expect(route.tier).toBe('mid');
+    expect(route.seatDecision?.seatId).toBe('claude');
+    expect(route.seatDecision?.exclusions.some(row => row.reasons.some(reason => reason.includes('frontier manager')))).toBe(false);
   });
-  it('holds manager planning when only non-frontier execution is available', () => {
+  it('admits qualified non-frontier execution using the same grant and fit checks', () => {
     const route = routeWorkItem(manager(), LEGACY_LOCAL, ctx([grok(), local()], { tierOf: () => 'mid' }));
-    expect(route.hold?.kind).toBe('park');
-    expect(route.seatDecision?.seatId).toBeNull();
-    expect(route.seatDecision?.exclusions.some(row => row.reasons.some(reason => reason.includes('frontier manager')))).toBe(true);
+    expect(route.hold).toBeNull(); expect(route.backend).toBe('grok-cli'); expect(route.tier).toBe('mid');
+    expect(route.model).toEqual(expect.any(String));
+  });
+  it('admits the selected tool-capable local Manager with its actual configured model and tier', () => {
+    const cfg = { foundry: { models: { 'llama-server': 'selected-local-model' } } } as unknown as AshlrConfig;
+    const route = routeWorkItem({ ...manager(), tags: [...manager().tags, 'context:20000'] }, LEGACY_LOCAL, ctx([local()], { cfg, tierOf: () => 'local' }));
+    expect(route.hold).toBeNull(); expect(route.backend).toBe('llama-server');
+    expect(route.model).toBe('selected-local-model'); expect(route.tier).toBe('local');
+    expect(route.seatDecision?.seatId).toBe(FLEET_LOCAL_SEAT_ID);
+  });
+  it('keeps local Manager admission behind producer grants and measured context fit', () => {
+    const base = policy();
+    const noProducer = { ...base, spend: { ...base.spend, seats: { ...base.spend.seats, local: seat('local', ['judge']) } } };
+    expect(routeWorkItem(manager(), LEGACY_LOCAL, ctx([local()], { policy: noProducer })).hold).not.toBeNull();
+    expect(routeWorkItem({ ...manager(), tags: [...manager().tags, 'context:150000'] }, LEGACY_LOCAL, ctx([local()])).hold?.kind).toBe('split');
+  });
+  it('uses an admitted Devin CLI overflow Manager and keeps its actual middle tier', () => {
+    const base = policy();
+    const p = { ...base, engines: [...base.engines, 'devin' as const], spend: { ...base.spend,
+      seats: { ...base.spend.seats, devin: seat('devin', ['producer']) } } };
+    const context = ctx([], { policy: p, tierOf: () => 'mid',
+      lanes: { ...lanes(), 'devin-cli': { lane: 'devin-cli', slots: 1, capReason: null } },
+      laneEngines: { ...ctx([]).laneEngines, 'devin-cli': 'devin-cli' as EngineId } });
+    const route = routeWorkItem(manager(), LEGACY_LOCAL, context);
+    expect(route.hold).toBeNull(); expect(route.backend).toBe('devin-cli'); expect(route.tier).toBe('mid');
+    expect(route.seatDecision?.seatId).toBe('devin'); expect(route.model).toEqual(expect.any(String));
+    const wrong = routeWorkItem(manager(), LEGACY_LOCAL, { ...context,
+      laneEngines: { ...context.laneEngines, 'devin-cli': 'codex' as EngineId } });
+    expect(wrong.hold).not.toBeNull(); expect(wrong.seatDecision?.exclusions).toContainEqual(expect.objectContaining({ seatId: 'devin',
+      reasons: ['This execution has no qualified tool-capable Manager adapter.'] }));
   });
   it('preserves normal worker routing to cheaper models', () => {
     const route = routeWorkItem(item({ tags: ['difficulty:high'] }), LEGACY_LOCAL, ctx([grok(), local()], { tierOf: () => 'mid' }));

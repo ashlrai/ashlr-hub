@@ -35,6 +35,7 @@
  * Honesty: `null` = unknown. Every exclusion carries a specific sentence, and
  * a hold always says why and (when a date is known) until when.
  */
+import { supportsRoleExecution } from '../run/role-invocation.js';
 import { isOutcomeManagerWorkItem } from '../goals/outcome-manager-types.js';
 import { resolveDaemonCountPreferences, countForInventory } from '../daemon/count-preferences.js';
 import { leaderPreferencesReady, resolveLeaderPreferences, type ResolvedLeaderPreferences } from '../vision/leader-preferences.js';
@@ -603,13 +604,15 @@ export function executionForSeat(item: WorkItem, legacy: LegacyRoute, seat: Seat
   if (lane === null) return null;
   const installed = ctx.laneEngines[lane];
   if (installed === null) return null;
-  const backend = fleetLaneOf(legacy.backend, ctx.cfg) === lane ? legacy.backend : installed;
+  const keepLegacy = fleetLaneOf(legacy.backend, ctx.cfg) === lane &&
+    (!isOutcomeManagerWorkItem(item) || supportsRoleExecution(legacy.backend, ctx.cfg ?? {} as AshlrConfig));
+  const backend = keepLegacy ? legacy.backend : installed;
   const candidateModel = (backend === legacy.backend ? legacy.model ?? undefined : configuredModel(ctx.cfg, backend))
     ?? (lane === 'grok-cli' && routingRequestFor(item).difficulty === 'low' ? grokFastModel() : undefined);
   // Cache the manager's concrete model before exact-route admission. Filling
   // a default later in the daemon would change the route it was admitted for.
   const model = isOutcomeManagerWorkItem(item)
-    ? candidateModel?.trim() || configuredModel(ctx.cfg, backend)?.trim() || resolveEngineSpec(backend, ctx.cfg)?.defaultModel
+    ? candidateModel?.trim() || configuredModel(ctx.cfg, backend)?.trim() || resolveEngineSpec(backend, ctx.cfg)?.defaultModel || resolveEngineSpec(backend, ctx.cfg)?.api?.defaultModel
     : candidateModel;
   return { backend, reason: 'Exact candidate execution for observed task fit.', tier: backend === legacy.backend ? legacyTier(legacy, ctx) : ctx.tierOf(backend) ?? 'local',
     ...(model ? { model } : {}) };
@@ -689,8 +692,8 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
       const execution = executionForSeat(item, legacy, seat, ctx);
       if (!execution) continue;
       const candidateEngine = execution.backend;
-      if (isOutcomeManagerWorkItem(item) && execution.tier !== 'frontier') {
-        add({ kind: 'lane', text: 'Planning and reviewing an outcome needs a frontier manager; this execution is not frontier.' });
+      if (isOutcomeManagerWorkItem(item) && !supportsRoleExecution(candidateEngine, ctx.cfg ?? {} as AshlrConfig)) {
+        add({ kind: 'lane', text: 'This execution has no qualified tool-capable Manager adapter.' });
         extra.push({ seatId, reasons, nextEligibleAt: null, details });
         continue;
       }
@@ -715,8 +718,12 @@ export function routeWorkItem(item: WorkItem, legacy: LegacyRoute, ctx: Dispatch
 
   // 3.15: the Devin CLI lane takes what no seat-router seat could — see
   // devinCliOverflow. It never displaces a seat the router chose.
-  if (chosenSeat === null && !isOutcomeManagerWorkItem(item)) {
-    const devin = devinCliOverflow(request, repo, kind, ctx);
+  if (chosenSeat === null) {
+    let devin = devinCliOverflow(request, repo, kind, ctx);
+    if ('engine' in devin && isOutcomeManagerWorkItem(item) &&
+        (fleetLaneOf(devin.engine, ctx.cfg) !== DEVIN_CLI_LANE || !supportsRoleExecution(devin.engine, ctx.cfg ?? {} as AshlrConfig))) {
+      devin = { exclusion: { seatId: DEVIN_SEAT_ID, reasons: ['This execution has no qualified tool-capable Manager adapter.'], nextEligibleAt: null } };
+    }
     if ('engine' in devin) {
       const exclusionsSoFar = [...decision.exclusions, ...extra].sort((a, b) => (a.seatId < b.seatId ? -1 : a.seatId > b.seatId ? 1 : 0));
       const why = `Routed autonomous ${request.difficulty}-difficulty ${request.task} work to the Devin CLI (${devin.model}, free): `
