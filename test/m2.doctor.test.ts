@@ -44,7 +44,7 @@ function makePhantomStatus(overrides: Partial<PhantomStatus> = {}): PhantomStatu
       },
       modes: {
         metadataStatus: true,
-        childEnvInjectionAvailable: installed && initialized,
+        childEnvInjectionAvailable: false,
         mcpServerAvailable: installed,
         mutationRequiresHumanApproval: installed,
       },
@@ -517,7 +517,7 @@ describe('runDoctor — phantom not installed', () => {
 // Phantom not initialized → warn
 // ---------------------------------------------------------------------------
 
-describe('runDoctor — phantom installed but not initialized', () => {
+describe('runDoctor — phantom installed but project not configured', () => {
   beforeEach(() => {
     _phantomStatus = makePhantomStatus({
       installed: true,
@@ -534,6 +534,28 @@ describe('runDoctor — phantom installed but not initialized', () => {
     expect(phantomChecks.length).toBeGreaterThan(0);
     const hasProblem = phantomChecks.some(c => c.status === 'warn' || c.status === 'fail');
     expect(hasProblem).toBe(true);
+  });
+});
+
+describe('runDoctor — Secrets metadata observation boundaries', () => {
+  it('does not recommend initialization when metadata is unsupported or failed', async () => {
+    _phantomStatus = makePhantomStatus({
+      version: '0.7.9', initialized: false, secretNames: [], error: 'unsupported_status_contract',
+    });
+    const report = await runDoctor(makeConfig(tmpHome));
+    expect(report.checks.find(c => c.id === 'phantom')).toMatchObject({
+      status: 'warn', detail: 'phantom v0.7.9 installed, project metadata status unverified',
+    });
+    expect(report.checks.find(c => c.id === 'phantom')?.fix).not.toBe('phantom init');
+  });
+
+  it('reports configured metadata without claiming vault or injection readiness', async () => {
+    _phantomStatus = makePhantomStatus({ version: '0.7.9', initialized: true, secretNames: ['TEST_NAME'] });
+    const report = await runDoctor(makeConfig(tmpHome));
+    expect(report.checks.find(c => c.id === 'phantom')).toMatchObject({
+      status: 'pass',
+      detail: 'phantom v0.7.9 installed, project configured (1 secret name; vault readiness unverified)',
+    });
   });
 });
 

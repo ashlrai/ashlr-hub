@@ -455,7 +455,7 @@ function checkIndex(): DoctorCheck {
   }
 }
 
-/** phantom installed + initialized */
+/** Values-free Secrets project metadata; configuration is not vault readiness. */
 function checkPhantom(): DoctorCheck {
   try {
     const status = getPhantomStatus();
@@ -469,12 +469,23 @@ function checkPhantom(): DoctorCheck {
       );
     }
     const ver = status.version ? ` v${status.version}` : '';
+    if (status.error) {
+      return check(
+        'phantom',
+        'Phantom Secrets CLI (phantom)',
+        'warn',
+        `phantom${ver} installed, project metadata status unverified`,
+        status.error === 'status-config-unavailable'
+          ? 'Inspect existing project configuration and file access'
+          : 'Use a compatible Phantom Secrets CLI: https://github.com/ashlrai/phantom-secrets/blob/main/docs/hub-status-contract.md',
+      );
+    }
     if (!status.initialized) {
       return check(
         'phantom',
         'Phantom Secrets CLI (phantom)',
         'warn',
-        `phantom${ver} installed but vault not initialized`,
+        `phantom${ver} installed but project not configured`,
         'phantom init',
       );
     }
@@ -483,7 +494,7 @@ function checkPhantom(): DoctorCheck {
       'phantom',
       'Phantom Secrets CLI (phantom)',
       'pass',
-      `phantom${ver} installed, vault initialized (${count} secret${count !== 1 ? 's' : ''})`,
+      `phantom${ver} installed, project configured (${count} secret name${count !== 1 ? 's' : ''}; vault readiness unverified)`,
     );
   } catch (err) {
     return check(
