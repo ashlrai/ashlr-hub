@@ -4,7 +4,7 @@
  * Tests:
  *  1. Each new tool (ashlr_north_star, ashlr_self_heal, ashlr_racing,
  *     ashlr_comms) is registered with safety:'read'.
- *  2. Contract count: total native tools is now 23.
+ *  2. Contract count: total native tools is now 28.
  *  3. Each tool returns structured data when its module resolves (mock).
  *  4. Each tool returns a graceful "unavailable" stub when its module throws.
  *  5. ashlr_comms never leaks bot token / handle in output (secret-scrub).
@@ -167,8 +167,8 @@ function resultJson(r: { content: { type: 'text'; text: string }[] }): unknown {
 // ---------------------------------------------------------------------------
 
 describe('M169 native tool registration', () => {
-  it('total native tool count is now 23', () => {
-    expect(nativeToolDefs()).toHaveLength(23);
+  it('total native tool count is now 28', () => {
+    expect(nativeToolDefs()).toHaveLength(28);
   });
 
   const newTools = ['ashlr_north_star', 'ashlr_self_heal', 'ashlr_racing', 'ashlr_comms'];
