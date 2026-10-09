@@ -124,8 +124,13 @@ const sorted = (keys: readonly string[]): string[] => [...keys].sort();
 
 describe('standing grant — shared verifier / custody-helper contract', () => {
   it('names every key at every level exactly (the sample grant is the full shape)', () => {
-    const grant = sampleGrant();
+    const legacy = sampleGrant();
+    expect(sorted(Object.keys(legacy))).toEqual(sorted(STANDING_GRANT_KEYS.grant.filter(
+      key => !(STANDING_GRANT_OPTIONAL_KEYS.grant as readonly string[]).includes(key),
+    )));
+    const grant: StandingGrantV1 = { ...legacy, websitePublication: { profile: 'phantom-public-web', profileDigest: 'c'.repeat(64), mode: 'automatic' } };
     expect(sorted(Object.keys(grant))).toEqual(sorted(STANDING_GRANT_KEYS.grant));
+    expect(sorted(Object.keys(grant.websitePublication!))).toEqual(sorted(STANDING_GRANT_KEYS.websitePublication));
     for (const repo of grant.repos) expect(sorted(Object.keys(repo))).toEqual(sorted(STANDING_GRANT_KEYS.repo));
     expect(sorted(Object.keys(grant.merge))).toEqual(sorted(STANDING_GRANT_KEYS.merge.filter((key) => !(STANDING_GRANT_OPTIONAL_KEYS.merge as readonly string[]).includes(key))));
     expect(STANDING_GRANT_OPTIONAL_KEYS.merge).toEqual(['volumePolicy']);

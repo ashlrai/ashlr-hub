@@ -74,7 +74,7 @@ function makeRateLimits(
 }
 
 // V3.10: subscriptionAllows now applies the operator budget (~/.ashlr/budget.json),
-// whose default keeps Codex OFF for autonomy. These M80 cases test the WINDOW
+// whose balanced default keeps a reserve for interactive work. These M80 cases test the WINDOW
 // logic, so each runs under a fresh HOME whose budget switches Codex on with
 // no reserve — leaving maxPercent as the only gate, exactly as in M80.
 let testHome: string;
@@ -258,9 +258,14 @@ describe('subscriptionAllows — claude (no local signal)', () => {
 });
 
 describe('subscriptionAllows — codex budget policy (V3.10)', () => {
-  it('Codex is OFF for autonomy by default: a known, under-cap reading is still refused', () => {
+  it('the balanced default admits a known under-cap Codex reading, but an explicit disable blocks', () => {
     fs.rmSync(path.join(testHome, '.ashlr', 'budget.json'));
     mockRateLimitsReturn = makeRateLimits(10);
+    expect(subscriptionAllows('codex').allowed).toBe(true);
+    fs.writeFileSync(path.join(testHome, '.ashlr', 'budget.json'), JSON.stringify({
+      mode: 'balanced', seats: { codex: { seatId: 'codex', enabled: false, reservePercent: 40 } },
+      updatedAt: '2026-09-24T00:00:00.000Z',
+    }), { mode: 0o600 });
     const result = subscriptionAllows('codex');
     expect(result.allowed).toBe(false);
     expect(result.reason).toContain('switched off');

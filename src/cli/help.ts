@@ -345,7 +345,12 @@ export function agentDocsText(): string {
   lines.push('Elite fleet-state read tools (M169): ashlr_north_star (north-star metric,');
   lines.push('7d window), ashlr_self_heal (self-heal queue summary), ashlr_racing');
   lines.push('(model-racing distillation stats), ashlr_comms (comms channel status).');
-  lines.push('There is NO approve/apply tool by design.');
+  lines.push('Website tools: ashlr_website_status reads publication mode, phase and holds;');
+  lines.push('ashlr_website_publish requests the exact normally merged website revision with');
+  lines.push('profile=phantom-public-web and expectedMerge=<40-hex SHA>. The commissioned host');
+  lines.push('checks signed scope, source, build and live aliases before publishing. A request');
+  lines.push('is not a deployment receipt; inspect status and production evidence. These tools');
+  lines.push('do not create credentials or commission publishing. Inbox approval stays human-only.');
   lines.push('');
   return lines.join('\n');
 }
