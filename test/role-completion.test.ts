@@ -18,6 +18,8 @@ import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { roleAccountEpoch } from '../src/core/run/role-account.js';
 import { resolveNativeSeatLaunch } from '../src/core/resources/native-profile.js';
 import * as codexMetadata from '../src/core/resources/codex-account-probe.js';
+import * as capacityStore from '../src/core/routing/budget-store.js';
+import { defaultLeaderTransports } from '../src/core/vision/leader-seat.js';
 
 const host=vi.hoisted(()=>({policy:null as EffectivePolicy|null}));
 vi.mock('../src/core/authority/effective-config.js',async importOriginal=>({
@@ -99,6 +101,43 @@ let prompt='';process.stdin.setEncoding('utf8');process.stdin.on('data',x=>promp
   return {cfg,profile,accountHint};
 }
 describe.runIf(process.platform === 'darwin' && typeof process.execve === 'function')('actual owned native role dispatcher',()=>{
+  it('refuses an already cancelled native call before metadata or process contact',async()=>{
+    const f=fixture();const controller=new AbortController();controller.abort();
+    const probe=vi.spyOn(codexMetadata,'probeCodexResourceAccount');
+    const spawn=vi.spyOn(engineRuntime,'spawnEngine');
+    const complete=nativeRoleCompletion({cfg:f.cfg,role:'leader',seatId:'codex-a',engine:'codex',model:'gpt-fixture',accountHint:f.accountHint,timeoutMs:5000,admitted:()=>true,signal:controller.signal});
+    await expect(complete('SYSTEM','USER')).rejects.toThrow(/authority unavailable/);
+    expect(probe).not.toHaveBeenCalled();expect(spawn).not.toHaveBeenCalled();expect(countLiveExecutionLeases()).toBe(0);
+  });
+  it('passes caller cancellation through the production Leader transport to an actual owned native child',async()=>{
+    const f=fixture();const controller=new AbortController();
+    vi.spyOn(capacityStore,'readCapacitySnapshot').mockReturnValue({publishedAt:new Date().toISOString(),seats:[{seatId:'codex-a',accountHint:f.accountHint}]} as ReturnType<typeof capacityStore.readCapacitySnapshot>);
+    const started=Promise.withResolvers<void>();
+    const original=engineRuntime.spawnEngine;
+    let scratch:string|undefined,lease:ExecutionLease|undefined,owned:AutonomousSpawn|undefined,childSignal:AbortSignal|undefined;
+    const prepare=autonomousRuntime.prepareAutonomousSpawn;
+    vi.spyOn(autonomousRuntime,'prepareAutonomousSpawn').mockImplementation((...args)=>{owned=prepare(...args);return owned;});
+    const register=leaseRuntime.registerExecutionLease;
+    vi.spyOn(leaseRuntime,'registerExecutionLease').mockImplementation((...args)=>{const r=register(...args);if(r.ok)lease=r.lease;return r;});
+    vi.spyOn(engineRuntime,'spawnEngine').mockImplementation(async(command,cfg,options)=>{
+      scratch=command.cwd;childSignal=options?.signal;
+      return original(command,cfg,{...options,onSpawn:()=>{options?.onSpawn?.();started.resolve();}});
+    });
+    const complete=defaultLeaderTransports(f.cfg).native!('codex-a','codex','gpt-fixture',()=>true,{timeoutMs:5000});
+    const running=complete('SYSTEM','STALL',controller.signal);
+    // The child readiness hook is causal: no arbitrary 2-second sleep or inference.
+    await started.promise;controller.abort();
+    try {
+      await expect(running).rejects.toThrow();
+      expect(childSignal?.aborted).toBe(true);
+      expect(countLiveExecutionLeases()).toBe(1);
+      expect(scratch && existsSync(scratch)).toBe(true);
+    } finally {
+      // Cancellation reaches the real process, while unproven group cleanup
+      // remains unknown. This inert fixture alone may use test-owned cleanup.
+      lease?.release();if(owned)autonomousRuntime.finishAutonomousSpawn(owned,{output:''});if(scratch)rmSync(scratch,{recursive:true,force:true});
+    }
+  });
   it('executes pinned selected account/model in private copied state, records reported tokens and releases its lease',async()=>{
     const f=fixture();const metrics:RoleCompletionMetrics[]=[];
     const launch=resolveNativeSeatLaunch({accountsRoot:f.cfg.verse!.accountsRoot!,provider:'codex',seatId:'codex-a'});

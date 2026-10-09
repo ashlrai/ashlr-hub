@@ -10,11 +10,11 @@
  *   answerLeaderQuestion(questionId, text, { channel }) → { message, reply }
  *   approveLeaderAction(actionId, { channel })       → the approval outcome
  *
- * ONE BRAIN. Replies are a no-tools conversational call through the Leader's
- * own seat routing (leader-seat.ts: grok first, then local; routed over the
- * budget policy clamped to the grant; never Claude — conversation is not the
- * weekly deep run — and never a cloud fallback). No seat, a failed call or
- * today's reply cap ⇒ an honest "I can't think right now: <reason>" reply,
+ * ONE BRAIN. Replies use the Leader's provider-neutral account/model routing,
+ * with current capacity and the standing grant. Conversation calls are
+ * uncapped; explicit memo/check-in cadence preferences keep their own scope.
+ * No seat or a failed call ⇒ an honest
+ * "I can't think right now: <reason>" reply,
  * never silence. The legacy dialogue brains (comms/elon-dialogue.ts,
  * comms/director.ts) delegate here or are retired.
  *
@@ -141,9 +141,7 @@ export const THREAD_LIMITS = Object.freeze({
   /** …and at most this many per drain. */
   outboundMax: 20,
   deliveryAttempts: 3,
-  /** Model calls the conversation may make per local day (replies + extractions). */
-  modelCallsPerDay: 60,
-  /** A reply that takes longer than this is abandoned (honestly). */
+  /** A reply that takes longer than this is cancelled (honestly). */
   replyTimeoutMs: 120_000,
   /** Evidence snapshot reuse window. */
   evidenceTtlMs: 10 * 60_000,
@@ -785,12 +783,16 @@ async function currentEvidence(d: LeaderThreadDeps, rd: LeaderRunDeps): Promise<
   return evidence;
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+function withTimeout<T>(p: Promise<T>, ms: number, what: string, cancel: () => void): Promise<T> {
   let timer: NodeJS.Timeout | null = null;
   return Promise.race([
     p,
     new Promise<T>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${what} did not answer within ${Math.round(ms / 1000)} s`)), ms);
+      timer = setTimeout(() => {
+        // Settle the honest timeout before cancellation rejects the native call.
+        reject(new Error(`${what} did not answer within ${Math.round(ms / 1000)} s`));
+        cancel();
+      }, ms);
       timer.unref?.();
     }),
   ]).finally(() => { if (timer) clearTimeout(timer); });
@@ -803,15 +805,10 @@ type Mind =
 /**
  * The Leader's seat for conversation: the memo run's own routing
  * (resolveLeaderSeat → routeSeat over the budget clamped to the grant),
- * `deep: false` and `purpose: 'reply'` so Claude is never a candidate — not
- * even with `foundry.leader.claudeFallback` on (that opt-in is for memo runs
- * only) — plus the daily call cap.
+ * Replies use the same provider-neutral eligibility as other Leader calls.
+ * Conversation attempts are counted separately from memo/check-in cadence.
  */
-async function resolveMind(d: LeaderThreadDeps, rd: LeaderRunDeps, promptChars: number): Promise<Mind> {
-  const calls = readIndex().modelCalls[localDay(d.now())] ?? 0;
-  if (calls >= THREAD_LIMITS.modelCallsPerDay) {
-    return { ok: false, reason: `I've used today's ${THREAD_LIMITS.modelCallsPerDay} conversation calls; the cap resets at midnight` };
-  }
+async function resolveMind(rd: LeaderRunDeps, promptChars: number): Promise<Mind> {
   let seat: LeaderSeatResolution;
   try {
     const { resolveLeaderSeat } = await import('./leader-seat.js');
@@ -830,17 +827,18 @@ function countModelCall(d: LeaderThreadDeps): void {
       const day = localDay(nowMs);
       index.modelCalls[day] = (index.modelCalls[day] ?? 0) + 1;
     });
-  } catch { /* the cap is best-effort; the seat router still gates spend */ }
+  } catch { /* Counting is diagnostic; the seat router still gates capacity and spend. */ }
 }
 
 async function callMind(d: LeaderThreadDeps, mind: Extract<Mind, { ok: true }>, system: string, user: string): Promise<{ ok: true; raw: string } | { ok: false; reason: string }> {
   countModelCall(d);
+  const controller = new AbortController();
   try {
-    const raw = await withTimeout(mind.complete(system, user), d.replyTimeoutMs, `the ${mind.engine} seat`);
+    const raw = await withTimeout(mind.complete(system, user, controller.signal), d.replyTimeoutMs, `the ${mind.engine} seat`, () => controller.abort());
     return { ok: true, raw };
   } catch (err) {
     return { ok: false, reason: `the ${mind.engine} seat failed: ${clip(err instanceof Error ? err.message : 'error', 200)}` };
-  }
+  } finally { controller.abort(); }
 }
 
 function cantThink(reason: string): string {
@@ -892,13 +890,13 @@ async function loadMind(d: LeaderThreadDeps, cfg: AshlrConfig | undefined, promp
   } catch (err) {
     return { rd: null, mind: { ok: false, reason: `the Leader's state could not be loaded (${clip(err instanceof Error ? err.message : 'error', 160)})` } };
   }
-  return { rd, mind: await resolveMind(d, rd, promptChars) };
+  return { rd, mind: await resolveMind(rd, promptChars) };
 }
 
 /**
  * 3.15: ONE line in the Leader's voice for a brief (the Telegram line's
  * narrative) — the single takeaway and the next move. Same seat routing and
- * daily call cap as a reply; the facts go in as UNTRUSTED DATA. Null on any
+ * conversation accounting as a reply; the facts go in as UNTRUSTED DATA. Null on any
  * failure or timeout: the brief is complete without it.
  */
 export async function leaderNarrativeLine(facts: string, opts: { cfg?: AshlrConfig; timeoutMs?: number } = {}): Promise<string | null> {

@@ -32,6 +32,7 @@ import {
   appendMasonMessage,
   approveLeaderAction,
   leaderThreadPath,
+  leaderNarrativeLine,
   listThread,
   looksLikeDirective,
   markDelivered,
@@ -87,7 +88,7 @@ interface World {
   replies: string[];
 }
 
-function world(opts: { policy?: () => EffectivePolicy | null; seat?: 'local' | 'none'; replies?: string[] } = {}): World {
+function world(opts: { policy?: () => EffectivePolicy | null; seat?: 'local' | 'none'; replies?: string[]; cfg?: AshlrConfig } = {}): World {
   const policy = opts.policy ?? (() => null);
   const calls: World['calls'] = [];
   const replies = [...(opts.replies ?? [])];
@@ -113,7 +114,7 @@ function world(opts: { policy?: () => EffectivePolicy | null; seat?: 'local' | '
     ollamaBaseUrl: 'http://127.0.0.1:11434',
   };
   const seat: LeaderSeatDeps = {
-    cfg: {} as AshlrConfig,
+    cfg: opts.cfg ?? {} as AshlrConfig,
     now: () => Date.now(),
     candidates: async () => (opts.seat === 'none' ? [] : [local]),
     capacitySnapshot: () => null,
@@ -134,7 +135,7 @@ function world(opts: { policy?: () => EffectivePolicy | null; seat?: 'local' | '
       claude: () => async () => { throw new Error('claude must not be called'); },
     },
   };
-  const deps: LeaderRunDeps = { cfg: {} as AshlrConfig, now: () => Date.now(), sources, seat, apply };
+  const deps: LeaderRunDeps = { cfg: opts.cfg ?? {} as AshlrConfig, now: () => Date.now(), sources, seat, apply };
   setLeaderThreadDepsForTest({ loadRunDeps: async () => deps });
   return { deps, calls, replies };
 }
@@ -323,16 +324,71 @@ describe('replies', () => {
     expect(r!.text).not.toContain('sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789');
   });
 
-  it('caps model calls per local day with an honest reply', async () => {
-    const w = world({ replies: [] });
+  function seedCalls(calls: number, now = new Date()): void {
     const index = { v: 1, updatedAt: new Date().toISOString(), delivery: {}, memosPosted: [], modelCalls: {} as Record<string, number> };
-    const d = new Date();
-    index.modelCalls[`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`] = THREAD_LIMITS.modelCallsPerDay;
+    index.modelCalls[`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`] = calls;
     postLeaderMessage({ channel: 'system', kind: 'update', text: 'seed' });
     writeFileSync(join(leaderRoot(), 'thread-index.json'), JSON.stringify(index), { mode: 0o600 });
+  }
+
+  it.each([undefined, null, 2])('has no hidden conversation ceiling and does not reinterpret memo cadence (%s)', async limit => {
+    const cfg = limit === undefined ? {} as AshlrConfig : { foundry: { leaderPreferences: { maxTotalRunsPerDay: limit } } } as AshlrConfig;
+    const w = world({ replies: [reply('Still available')], cfg });
+    seedCalls(600);
     const { reply: r } = await appendMasonMessage('hello', { channel: 'cli' });
-    expect(r!.text).toMatch(/today's 60 conversation calls/);
-    expect(w.calls).toHaveLength(0);
+    expect(r!.text).toBe('Still available');
+    expect(w.calls).toHaveLength(1);
+    expect(Object.values(JSON.parse(readFileSync(join(leaderRoot(), 'thread-index.json'), 'utf8')).modelCalls)).toEqual([601]);
+    expect(w.deps.cfg).toEqual(cfg);
+  });
+
+  it('aborts the selected call on its reply deadline and cannot append a late answer', async () => {
+    const w = world();
+    let signal: AbortSignal | undefined;
+    let finish!: (text: string) => void;
+    const started = Promise.withResolvers<void>();
+    w.deps.seat.transports.local = () => (_system, _user, current) => {
+      signal = current; started.resolve();
+      return new Promise(resolve => { finish = resolve; });
+    };
+    setLeaderThreadDepsForTest({ loadRunDeps: async () => w.deps, replyTimeoutMs: 20 });
+    const answering = appendMasonMessage('hello', { channel: 'cli' });
+    await started.promise;
+    const { reply: r } = await answering;
+    expect(r!.text).toMatch(/did not answer within/);
+    expect(signal?.aborted).toBe(true);
+    finish(reply('Late completion'));
+    await Promise.resolve();
+    expect(listThread().filter(m => m.replyTo === r!.replyTo).map(m => m.text)).toEqual([r!.text]);
+  });
+
+  it('uses the narrative deadline to cancel its own call without affecting the next reply', async () => {
+    const w = world();
+    const signals: AbortSignal[] = [];
+    w.deps.seat.transports.local = () => (_system, _user, signal) => {
+      expect(signal?.aborted).toBe(false);signals.push(signal!);
+      if (signals.length > 1) return Promise.resolve(reply('Next reply works'));
+      return new Promise((_resolve, reject) => signal!.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
+    };
+    setLeaderThreadDepsForTest({ loadRunDeps: async () => w.deps, replyTimeoutMs: 200 });
+    expect(await leaderNarrativeLine('public fixture facts', { timeoutMs: 20 })).toBeNull();
+    expect(signals[0]!.aborted).toBe(true);
+    expect((await appendMasonMessage('hello', { channel: 'cli' })).reply!.text).toBe('Next reply works');
+    expect(signals).toHaveLength(2);expect(signals[1]).not.toBe(signals[0]);
+  });
+
+  it('cancels an extraction independently, then replies with a fresh invocation signal', async () => {
+    const w = world();
+    const signals: AbortSignal[] = [];
+    w.deps.seat.transports.local = () => (_system, _user, signal) => {
+      expect(signal?.aborted).toBe(false);signals.push(signal!);
+      if (signals.length > 1) return Promise.resolve(reply('Guidance acknowledged'));
+      return new Promise((_resolve, reject) => signal!.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }));
+    };
+    setLeaderThreadDepsForTest({ loadRunDeps: async () => w.deps, replyTimeoutMs: 20 });
+    const result = await appendMasonMessage('From now on, prioritize useful engineering outcomes', { channel: 'cli' });
+    expect(result.reply!.text).toBe('Guidance acknowledged');expect(result.directive).toBeUndefined();
+    expect(signals).toHaveLength(2);expect(signals[0]!.aborted).toBe(true);expect(signals[1]).not.toBe(signals[0]);
   });
 });
 

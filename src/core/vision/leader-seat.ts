@@ -25,7 +25,7 @@ import type { VerseSeat } from '../verse/types.js';
 import type { LeaderRunMode, LeaderSeatAttempt } from './leader-types.js';
 import { leaderCallBudget, type LeaderCallBudget } from './leader-seat-plan.js';
 
-export type LeaderComplete = (system: string, user: string) => Promise<string>;
+export type LeaderComplete = (system: string, user: string, signal?: AbortSignal) => Promise<string>;
 export type LeaderSeatEngine = 'claude' | 'codex' | 'grok' | 'devin' | 'local';
 
 export interface LeaderSeatChoice {
@@ -92,8 +92,8 @@ export interface LeaderSeatDeps {
   recordDecision(req: RoutingRequest, decision: SeatDecision): void;
   transports: LeaderTransports;
   /**
-   * The judges' restricted-Claude credential hook. Absent / null ⇒ Claude is
-   * not a Leader candidate (the weekly deep run falls to grok or local): a
+   * The legacy judges' restricted-Claude credential hook. Without a native
+   * dispatcher, absent / null excludes the legacy Claude candidate: a
    * Claude call whose credential path cannot be vouched for would otherwise
    * run on whatever login the launcher finds.
    */
@@ -607,13 +607,13 @@ export function defaultLeaderTransports(cfg: AshlrConfig): LeaderTransports {
       const { llamaLeaderTransport } = await import('./local-leader-transport.js');
       return llamaLeaderTransport(binding, cfg, opts)(system, user);
     },
-    native: (seatId,engine,model,admitted,opts) => async(system,user) => {
+    native: (seatId,engine,model,admitted,opts) => async(system,user,signal) => {
       const {nativeRoleCompletion}=await import('../run/role-completion.js');
       const {readCapacitySnapshot}=await import('../routing/budget-store.js');
       const accountHint=readCapacitySnapshot()?.seats.find(row=>row.seatId === seatId)?.accountHint ?? undefined;
       const sameAccount=()=>admitted() && (engine === 'devin' || accountHint !== undefined &&
         readCapacitySnapshot()?.seats.find(row=>row.seatId === seatId)?.accountHint === accountHint);
-      return nativeRoleCompletion({cfg,role:'leader',seatId,engine,model,accountHint,admitted:sameAccount,timeoutMs:opts.timeoutMs ?? LEADER_CLI_TIMEOUT_MS},
+      return nativeRoleCompletion({cfg,role:'leader',seatId,engine,model,accountHint,admitted:sameAccount,timeoutMs:opts.timeoutMs ?? LEADER_CLI_TIMEOUT_MS,...(signal ? {signal} : {})},
         (metrics:RoleCompletionMetrics)=>{
           void import('../fleet/agent-action-ledger.js').then(({recordAgentAction})=>recordAgentAction({schemaVersion:1,ts:new Date().toISOString(),
             actor:'agent',kind:'reflection',outcome:metrics.outcome === 'completed' ? 'ok' : metrics.outcome,action:'role:completion',

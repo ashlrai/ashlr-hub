@@ -102,7 +102,7 @@ its reserve floor (0–100%) and an optional session ceiling (1–100%). No sess
 ceiling removes that signed ceiling. All-in alone does not erase these fields.
 Review the complete preview before Touch ID approval; new edits disable approval
 until their preview succeeds. Untouched account fields and ordinary renewals
-preserve the existing scope. Devin permits the producer role only. Role
+preserve the existing scope. Native Devin supports Leader and producer roles. Role
 permission does not establish provider support; Apps & Accounts and Resources
 show the separate budget preferences and actual readiness.
 
