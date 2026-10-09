@@ -1321,8 +1321,10 @@ and input, output, cache-read and cache-write token deltas from the same bound
 successful turn, with two significant figures. These details retain their own
 completion time even when a newer warm-up supplies the speed reading. Duration
 includes tools and other turn overhead; it is not time to first token. Missing
-recorded fields remain unknown, and stored zero counts do not prove that every
-provider originally reported that category. Older servers may omit these details.
+recorded fields remain unknown. A zero is shown only when the selected CLI usage
+source explicitly reported that category. Historical events without token-field
+evidence do not supply an exact turn speed or token breakdown; their accumulated
+usage totals remain unchanged. Older servers may omit these details.
 Opening Resources reads observations without warming a model or starting inference. Missing or conflicting measurements
 remain unavailable rather than being borrowed from another model.
 

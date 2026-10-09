@@ -278,9 +278,9 @@ describe('lastLocalThroughput — end-to-end tok/s of the newest local turn', ()
   } as VerseSession);
 
   const events: VerseEvent[] = [
-    { seq: 1, at: '2026-09-24T09:10:00.000Z', type: 'usage', turnId: 't1', usage: { outputTokens: 100 } as never },
+    { seq: 1, at: '2026-09-24T09:10:00.000Z', type: 'usage', turnId: 't1', reportedTokenFields: { inputTokens: false, outputTokens: true, cacheReadTokens: false, cacheCreationTokens: false }, usage: { outputTokens: 100 } as never },
     { seq: 2, at: '2026-09-24T09:10:10.000Z', type: 'turn-done', turnId: 't1', ok: true, nativeSessionId: null, durationMs: 10_000 },
-    { seq: 3, at: '2026-09-24T09:20:00.000Z', type: 'usage', turnId: 't2', usage: { outputTokens: 850 } as never },
+    { seq: 3, at: '2026-09-24T09:20:00.000Z', type: 'usage', turnId: 't2', reportedTokenFields: { inputTokens: false, outputTokens: true, cacheReadTokens: false, cacheCreationTokens: false }, usage: { outputTokens: 850 } as never },
     { seq: 4, at: '2026-09-24T09:21:40.000Z', type: 'turn-done', turnId: 't2', ok: true, nativeSessionId: null, durationMs: 100_000 },
     { seq: 5, at: '2026-09-24T09:25:00.000Z', type: 'turn-done', turnId: 't3', ok: false, nativeSessionId: null, durationMs: 5_000 },
   ];
@@ -780,8 +780,9 @@ describe('completed local throughput source validity', () => {
   it('retains raw measured precision and original time, and refuses cancelled/nonfinite readings', async () => {
     const { completedLocalTurnThroughput } = await import('../src/core/verse/local-throughput.js');
     const at = '2026-09-24T09:10:10.000Z';
-    const usage: VerseEvent = { seq: 1, at, type: 'usage', turnId: 't', usage: { outputTokens: 100, contextWindow: 65_536 } as never };
+    const usage: VerseEvent = { seq: 1, at, type: 'usage', turnId: 't', reportedTokenFields: { inputTokens: false, outputTokens: true, cacheReadTokens: false, cacheCreationTokens: false }, usage: { outputTokens: 100, contextWindow: 65_536 } as never };
     const done: VerseEvent = { seq: 2, at, type: 'turn-done', turnId: 't', ok: true, nativeSessionId: null, durationMs: 3_000 };
+    expect(completedLocalTurnThroughput([{ ...usage, reportedTokenFields: undefined }, done])).toBeNull();
     expect(completedLocalTurnThroughput([usage, { ...usage, seq: 2 }, { ...done, seq: 3 }])?.tokPerSec).toBe(200 / 3);
     expect(completedLocalTurnThroughput([usage, done])).toEqual({
       tokPerSec: 100 / 3, at, contextWindow: 65_536, durationMs: 3_000,

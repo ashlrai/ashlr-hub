@@ -538,6 +538,14 @@ export function verseSessionRoots(
   return out;
 }
 
+/** Diagnostic evidence for token deltas; absent evidence is unknown, not measured zero. */
+export interface VerseReportedTokenFields {
+  inputTokens: boolean;
+  outputTokens: boolean;
+  cacheReadTokens: boolean;
+  cacheCreationTokens: boolean;
+}
+
 export interface VerseUsage {
   inputTokens: number;
   outputTokens: number;
@@ -722,7 +730,7 @@ export type VerseEvent =
   }
   | { seq: number; at: string; type: 'tool-use'; turnId: string; toolUseId: string; name: string; input: unknown }
   | { seq: number; at: string; type: 'tool-result'; turnId: string; toolUseId: string; output: string; isError: boolean }
-  | { seq: number; at: string; type: 'usage'; turnId: string; usage: VerseUsage }
+  | { seq: number; at: string; type: 'usage'; turnId: string; usage: VerseUsage; reportedTokenFields?: VerseReportedTokenFields }
   | { seq: number; at: string; type: 'turn-done'; turnId: string; ok: boolean; nativeSessionId: string | null; durationMs: number }
   /**
    * `code` (V3.10 ADDITIVE, optional) is a stable machine key for errors the UI

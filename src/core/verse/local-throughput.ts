@@ -1,5 +1,5 @@
 /** Pure local speed evidence. Configuration identity is never proof of runtime readiness. */
-import type { VerseEvent } from './types.js';
+import type { VerseEvent, VerseReportedTokenFields } from './types.js';
 
 export interface LocalSpeedBinding { seatId: string; model: string; endpoint: string; contextWindow: number }
 export interface LocalTurnThroughput {
@@ -12,6 +12,15 @@ function sumRecorded(previous: number | null | undefined, value: unknown): numbe
   if (previous === null || typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) return null;
   const sum = (previous ?? 0) + value;
   return Number.isSafeInteger(sum) ? sum : null;
+}
+
+/** Legacy normalized zeros have no provenance; never infer evidence from them. */
+function evidencedToken(event: Extract<VerseEvent, { type: 'usage' }>, key: keyof VerseReportedTokenFields): unknown {
+  try {
+    const fields = Object.getOwnPropertyDescriptor(event, 'reportedTokenFields')?.value as unknown;
+    if (typeof fields !== 'object' || fields === null || Object.getOwnPropertyDescriptor(fields, key)?.value !== true) return null;
+    return Object.getOwnPropertyDescriptor(event.usage, key)?.value as unknown;
+  } catch { return null; }
 }
 
 interface LocalSpeedSeat { id: string; engine: string; contextWindow?: number | null; models: readonly { id: string; contextWindow?: number | null }[] }
@@ -42,17 +51,17 @@ export function completedLocalTurnThroughput(events: readonly VerseEvent[]): Loc
   for (const event of events) {
     if (event.type === 'cancelled') cancelled.add(event.turnId);
     if (event.type === 'usage') {
-      const output = event.usage?.outputTokens;
-      if (!Number.isFinite(output) || output < 0) { unknownUsage.add(event.turnId); continue; }
+      const output = evidencedToken(event, 'outputTokens');
+      if (typeof output !== 'number' || !Number.isSafeInteger(output) || output < 0) { unknownUsage.add(event.turnId); continue; }
       const previous = usage.get(event.turnId);
       const window = event.usage.contextWindow;
       const contextWindow = Number.isSafeInteger(window) && Number(window) > 0 ? window : null;
       // Persisted usage events are deltas (session-engine.applyUsage), including tool calls.
       usage.set(event.turnId, { output: (previous?.output ?? 0) + output,
         recordedOutput: sumRecorded(previous?.recordedOutput, output),
-        input: sumRecorded(previous?.input, event.usage.inputTokens),
-        cacheRead: sumRecorded(previous?.cacheRead, event.usage.cacheReadTokens),
-        cacheCreation: sumRecorded(previous?.cacheCreation, event.usage.cacheCreationTokens),
+        input: sumRecorded(previous?.input, evidencedToken(event, 'inputTokens')),
+        cacheRead: sumRecorded(previous?.cacheRead, evidencedToken(event, 'cacheReadTokens')),
+        cacheCreation: sumRecorded(previous?.cacheCreation, evidencedToken(event, 'cacheCreationTokens')),
         contextWindow: previous && previous.contextWindow !== contextWindow ? null : contextWindow });
     }
   }
@@ -61,7 +70,7 @@ export function completedLocalTurnThroughput(events: readonly VerseEvent[]): Loc
     if (event.type !== 'turn-done' || !event.ok || cancelled.has(event.turnId) || unknownUsage.has(event.turnId) || !Number.isFinite(event.durationMs) ||
         event.durationMs <= 0 || !Number.isFinite(Date.parse(event.at))) continue;
     const reported = usage.get(event.turnId);
-    if (!reported || reported.output <= 0) continue;
+    if (!reported || reported.recordedOutput === null || reported.output <= 0) continue;
     const tokPerSec = reported.output / (event.durationMs / 1000);
     if (Number.isFinite(tokPerSec) && tokPerSec > 0) return { tokPerSec, at: event.at, contextWindow: reported.contextWindow,
       durationMs: event.durationMs, inputTokens: reported.input, outputTokens: reported.recordedOutput,

@@ -414,6 +414,66 @@ function withModelUsage(modelUsage: unknown, lines: unknown[] = CLAUDE_TURN): un
 }
 
 describe('claude adapter — parser', () => {
+  it('distinguishes absent categories from explicitly reported zeros in result totals', () => {
+    for (const raw of [{ output_tokens: 10 }, { input_tokens: 0, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }]) {
+      const events = feed(adapterFor('local').createParser('t'), [{ type: 'result', subtype: 'success', usage: raw }]);
+      const usage = events.find(event => event.type === 'usage');
+      expect(usage).toMatchObject({ usage: { inputTokens: 0, outputTokens: 10, cacheReadTokens: 0, cacheCreationTokens: 0 },
+        reportedTokenFields: { inputTokens: 'input_tokens' in raw, outputTokens: true,
+          cacheReadTokens: 'cache_read_input_tokens' in raw, cacheCreationTokens: 'cache_creation_input_tokens' in raw } });
+    }
+  });
+
+  it('merges evidence within a call without fabricating missing cache fields or double-counting', () => {
+    const events = feed(adapterFor('local').createParser('t'), [
+      { type: 'message_start', message: { id: 'm', usage: { input_tokens: 12 } } },
+      { type: 'message_delta', usage: { output_tokens: 10 } },
+      { type: 'assistant', message: { id: 'm', usage: { input_tokens: 12, output_tokens: 10 }, content: [] } },
+    ]);
+    expect(events.find(event => event.type === 'usage')).toMatchObject({ usage: { inputTokens: 12, outputTokens: 10 },
+      reportedTokenFields: { inputTokens: true, outputTokens: true, cacheReadTokens: false, cacheCreationTokens: false } });
+  });
+
+  it.each([undefined, { input_tokens: 3 }])('marks incomplete call aggregates unknown, including wholly unreported calls (%j)', second => {
+    const events = feed(adapterFor('local').createParser('t'), [
+      { type: 'message_start', message: { id: 'a', usage: { input_tokens: 12, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } },
+      { type: 'message_start', message: { id: 'b', usage: second } },
+    ]);
+    expect(events.find(event => event.type === 'usage')).toMatchObject({ usage: { outputTokens: 10 },
+      reportedTokenFields: { inputTokens: second !== undefined, outputTokens: false, cacheReadTokens: false, cacheCreationTokens: false } });
+  });
+
+  it('does not turn fractional selected call counts into exact evidence when their sum is an integer', () => {
+    const events = feed(adapterFor('local').createParser('t'), ['a', 'b'].flatMap(id => [
+      { type: 'message_start', message: { id, usage: { input_tokens: 1, output_tokens: 1 } } },
+      { type: 'assistant', message: { id, content: [], usage: { input_tokens: 1.5, output_tokens: 1.5 } } },
+    ]));
+    expect(events.find(event => event.type === 'usage')).toMatchObject({ usage: { inputTokens: 3, outputTokens: 3 },
+      reportedTokenFields: { inputTokens: false, outputTokens: false, cacheReadTokens: false, cacheCreationTokens: false } });
+  });
+
+  it('retains partial result precedence and the Grok all-zero result fallback with their selected evidence', () => {
+    const call = { type: 'message_start', message: { id: 'a', usage: { input_tokens: 12, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } };
+    const partial = feed(adapterFor('local').createParser('t'), [call, { type: 'result', subtype: 'success', usage: { output_tokens: 7 } }]);
+    expect(partial.find(event => event.type === 'usage')).toMatchObject({ usage: { inputTokens: 0, outputTokens: 7 },
+      reportedTokenFields: { inputTokens: false, outputTokens: true, cacheReadTokens: false, cacheCreationTokens: false } });
+    const zero = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+    const fallback = feed(adapterFor('grok').createParser('t'), [call, { type: 'result', subtype: 'success', usage: zero }]);
+    expect(fallback.find(event => event.type === 'usage')).toMatchObject({ usage: { inputTokens: 12, outputTokens: 10 },
+      reportedTokenFields: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true } });
+    const compact = feed(adapterFor('local').createParser('t'), [{ type: 'system', subtype: 'compact_boundary', compact_metadata: { post_tokens: 4 } }]);
+    expect(compact.find(event => event.type === 'usage')).toMatchObject({ usage: { contextTokens: 4 },
+      reportedTokenFields: { inputTokens: false, outputTokens: false, cacheReadTokens: false, cacheCreationTokens: false } });
+    const explicitZero = feed(adapterFor('local').createParser('t'), [{ type: 'result', subtype: 'success', usage: zero }]);
+    expect(explicitZero.find(event => event.type === 'usage')).toMatchObject({
+      reportedTokenFields: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true } });
+  });
+
+  it.each([-1, 0.5, Number.MAX_SAFE_INTEGER + 1, '10', null])('does not claim exact evidence for invalid source counters (%j)', invalid => {
+    const events = feed(adapterFor('local').createParser('t'), [{ type: 'result', subtype: 'success', usage: { input_tokens: invalid, output_tokens: 10 } }]);
+    expect(events.find(event => event.type === 'usage')).toMatchObject({ reportedTokenFields: { inputTokens: false, outputTokens: true } });
+  });
+
   it('normalizes a tool-using turn: deltas, deduped messages, tool use/result, usage, session id', () => {
     const a = adapterFor('claude');
     const parser = a.createParser('t1');
@@ -608,6 +668,7 @@ describe('claude adapter — compaction', () => {
       {
         type: 'usage',
         turnId: 't-compact',
+        reportedTokenFields: { inputTokens: true, outputTokens: true, cacheReadTokens: true, cacheCreationTokens: true },
         // No call followed the compaction, so the CLI's post-compaction size is
         // the live occupancy — not a stale pre-compaction call.
         usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, contextTokens: 1750, contextWindow: 65536 },

@@ -134,6 +134,7 @@ import {
   type VerseSession,
   type VerseTurnLaunch,
   type VerseUsage,
+  type VerseReportedTokenFields,
   type VerseWindowSource,
 } from './types.js';
 import { appendVerseLog, type VerseLogLevel } from './verse-log.js';
@@ -851,6 +852,22 @@ function nonNegativeInt(value: unknown): number | null {
 /** A counter delta from an adapter; anything non-numeric counts as zero rather than poisoning a total. */
 function tokenDelta(value: unknown): number {
   return nonNegativeInt(value) ?? 0;
+}
+
+/** Read scalar data only: malformed diagnostic objects must not interrupt a turn. */
+function reportedTokenFields(event: VerseParsedEvent, usage: Partial<VerseUsage>): VerseReportedTokenFields | undefined {
+  const ownValue = (object: unknown, key: string): unknown => {
+    if (typeof object !== 'object' || object === null) return undefined;
+    try { return Object.getOwnPropertyDescriptor(object, key)?.value; } catch { return undefined; }
+  };
+  const fields = ownValue(event, 'reportedTokenFields');
+  if (fields === undefined) return undefined;
+  const reported = (key: keyof VerseReportedTokenFields): boolean => {
+    const value = ownValue(usage, key);
+    return ownValue(fields, key) === true && typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+  };
+  return { inputTokens: reported('inputTokens'), outputTokens: reported('outputTokens'),
+    cacheReadTokens: reported('cacheReadTokens'), cacheCreationTokens: reported('cacheCreationTokens') };
 }
 
 function isContextMode(value: unknown): value is VerseContextMode {
@@ -1783,6 +1800,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       case 'usage': {
         const reported = isObject(event.usage) ? event.usage : ({} as Partial<VerseUsage>);
         applyRuntimeWindow(session, option, reported.contextWindow);
+        const evidence = reportedTokenFields(event, reported);
         const previous = session.usage;
         const reading = nonNegativeInt(reported.contextTokens);
         const next: VerseUsage = {
@@ -1800,6 +1818,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         return {
           type: 'usage',
           turnId: typeof event.turnId === 'string' ? event.turnId : fallbackTurnId,
+          ...(evidence ? { reportedTokenFields: evidence } : {}),
           usage: {
             inputTokens: tokenDelta(reported.inputTokens),
             outputTokens: tokenDelta(reported.outputTokens),
