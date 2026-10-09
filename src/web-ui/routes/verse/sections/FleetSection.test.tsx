@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { FleetSection } from './FleetSection.js';
-import { evictAll } from '../../../data/cache.js';
+import { FleetSection, FLEET_POLL_MS } from './FleetSection.js';
+import { evictAll, getQuerySnapshot, queryGateStats, runQuery } from '../../../data/cache.js';
+import { SURFACE_KEYS } from '../command/surface-data.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
 import { DARK_SINCE, SEAT_DECISION_FIXTURE, fleetLive } from '../command/fixtures.test-support.js';
@@ -297,5 +298,66 @@ describe('FleetSection — 375 px', () => {
     await waitFor(() => expect(within(repos).getAllByRole('listitem')).toHaveLength(4));
     expect(screen.getByRole('figure', { name: 'Live fleet' })).toHaveTextContent(/last 6 h/);
     for (const cell of container.querySelectorAll('[data-span]')) expect((cell as HTMLElement).style.gridColumn).toBe('span 12');
+  });
+});
+
+
+describe('FleetSection — automatic live polling', () => {
+  afterEach(() => { vi.useRealTimers(); evictAll(); });
+
+  it('keeps a slow live read eligible to replace a retained producing snapshot', async () => {
+    await import('../fleet/OutcomesPanel.js');
+    const previous = fleetLive('live');
+    previous.runs = previous.runs.filter(run => run.id === 'r1');
+    const terminal = { ...previous, generatedAt: new Date().toISOString(), runs: previous.runs.map(run => ({
+      ...run, endedAt: new Date().toISOString(), outcome: 'failed' as const,
+    })) };
+    const { fetchMock, posted } = stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/fleet/live': previous } });
+    const originalFetch = vi.mocked(globalThis.fetch).getMockImplementation()!;
+    let finish!: (response: Response) => void;
+    let liveCalls = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/verse/fleet/live' && init?.method !== 'POST') {
+        liveCalls += 1;
+        if (liveCalls > 1) return new Promise<Response>(resolve => { finish = resolve; });
+      }
+      return originalFetch(input, init);
+    });
+    vi.useFakeTimers();
+    const { unmount } = render(<FleetSection />);
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      const steer = screen.getByRole('region', { name: 'Steer the fleet' });
+      expect(steer).toHaveTextContent('Working now (1)');
+      await act(async () => { await vi.advanceTimersByTimeAsync(3 * FLEET_POLL_MS); });
+      expect(liveCalls).toBe(2);
+      expect(getQuerySnapshot(SURFACE_KEYS.fleetLive).status).toBe('refreshing');
+      expect(steer).toHaveTextContent('Working now (1)');
+      await act(async () => { finish(new Response(JSON.stringify(terminal), { headers: { 'Content-Type': 'application/json' } })); });
+      expect(getQuerySnapshot(SURFACE_KEYS.fleetLive).status).toBe('success');
+      expect(steer).toHaveTextContent('Working now (0)');
+      expect(steer).toHaveTextContent('No run is in flight.');
+      expect(posted).toEqual([]);
+    } finally { unmount(); }
+  });
+
+  it('does not accumulate live reads while the shared metadata gate is occupied', async () => {
+    await import('../fleet/OutcomesPanel.js');
+    const releases: (() => void)[] = [];
+    const blockers = Array.from({ length: 4 }, (_, index) => runQuery(`fleet-live-blocker-${index}`, () => new Promise<void>(resolve => { releases.push(resolve); })));
+    const { fetchMock, posted } = stubSurfaceFetch({ kind: 'live' });
+    vi.useFakeTimers();
+    const { unmount } = render(<FleetSection />);
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(3 * FLEET_POLL_MS); });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(queryGateStats().active).toBe(4);
+      await act(async () => { releases.forEach(release => release()); await Promise.all(blockers); });
+      const liveCalls = fetchMock.mock.calls.filter(([input, init]) => String(input) === '/api/verse/fleet/live' && init?.method !== 'POST');
+      expect(liveCalls).toHaveLength(1);
+      expect(screen.getByRole('region', { name: 'Steer the fleet' })).toHaveTextContent('Working now (2)');
+      expect(getQuerySnapshot(SURFACE_KEYS.fleetLive).status).toBe('success');
+      expect(posted).toEqual([]);
+    } finally { unmount(); }
   });
 });
