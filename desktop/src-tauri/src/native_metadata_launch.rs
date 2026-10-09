@@ -17,6 +17,16 @@ use std::{
 
 pub const FLAG: &str = "--_phantom-native-metadata-launch";
 pub const TICKET_ENV: &str = "PHANTOM_NATIVE_METADATA_TICKET";
+pub const SELF_CHECK_FLAG: &str = "--_phantom-desktop-metadata-self-check";
+const PREFLIGHT_FLAG: &str = "--_phantom-desktop-metadata-preflight";
+const PHYSICAL_APP: &str = "/Applications/Phantom.app";
+const PHYSICAL_HOST: &str = "/Applications/Phantom.app/Contents/MacOS/ashlr-desktop";
+const PHYSICAL_SIDECAR: &str = "/Applications/Phantom.app/Contents/MacOS/ashlr";
+const SIGNER: &str = "0EA409C87A3CDE7B6E26015581E575D831698B23";
+const PREFLIGHT_PASS: &[u8] =
+    b"{\"schemaVersion\":1,\"scope\":\"desktop-metadata-preflight\",\"state\":\"pass\"}\n";
+const PREFLIGHT_HELD: &[u8] =
+    b"{\"schemaVersion\":1,\"scope\":\"desktop-metadata-preflight\",\"state\":\"held\"}\n";
 const LIMIT: usize = 4096;
 type Result<T> = std::result::Result<T, ()>;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -656,8 +666,129 @@ fn run() -> Result<()> {
     }
     result
 }
+#[cfg(test)]
+thread_local! { static ACCEPTANCE_CHILD: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) }; }
+// Metadata acceptance only. Drain capped stdout while the child lives so even
+// malformed output cannot turn a pipe into a deadline-extending wait.
+fn bounded_acceptance_command(bin: &Path, args: &[&str], budget: Duration) -> Result<Vec<u8>> {
+    use std::os::unix::io::AsRawFd;
+    let mut child = Command::new(bin)
+        .args(args)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| ())?;
+    // Test-only direct spawn witness; no callback or diagnostic port exists in
+    // production, and cancellation tests need not wait for child script output.
+    #[cfg(test)]
+    ACCEPTANCE_CHILD.with(|id| id.set(Some(child.id())));
+    let outcome = (|| {
+        let mut pipe = child.stdout.take().ok_or(())?;
+        let fd = pipe.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        need(
+            flags >= 0 && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == 0,
+        )?;
+        let deadline = Instant::now() + budget;
+        let mut output = Vec::new();
+        loop {
+            let mut buffer = [0u8; 129];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        output.extend_from_slice(&buffer[..n]);
+                        need(output.len() <= 128)?;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => return Err(()),
+                }
+            }
+            if let Some(status) = child.try_wait().map_err(|_| ())? {
+                need(status.success())?;
+                // The terminal child may have written its last bytes between
+                // the earlier nonblocking read and try_wait. Do not wait for
+                // arbitrary descendants to close inherited stdout.
+                loop {
+                    match pipe.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            output.extend_from_slice(&buffer[..n]);
+                            need(output.len() <= 128)?;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => return Err(()),
+                    }
+                }
+                return Ok(output);
+            }
+            need(Instant::now() < deadline)?;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    })();
+    if outcome.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    outcome
+}
+fn physical_executable(path: &Path) -> Result<Stamp> {
+    let m = fs::symlink_metadata(path).map_err(|_| ())?;
+    need(
+        m.is_file()
+            && m.nlink() == 1
+            && m.mode() & 0o111 != 0
+            && m.mode() & 0o022 == 0
+            && [0, unsafe { libc::getuid() }].contains(&m.uid())
+            && fs::canonicalize(path).map_err(|_| ())? == path,
+    )?;
+    Ok(stamp(&m))
+}
+fn signed_pair_self_check() -> Result<()> {
+    let own = std::env::current_exe().map_err(|_| ())?;
+    need(own == Path::new(PHYSICAL_HOST))?;
+    let host = physical_executable(&own)?;
+    let sidecar = physical_executable(Path::new(PHYSICAL_SIDECAR))?;
+    // Verify the whole physical app before executing its paired sidecar. The
+    // sidecar repeats its own default proof with this actual native parent.
+    let requirement =
+        format!("-R=identifier \"ai.ashlr.desktop\" and certificate leaf = H\"{SIGNER}\"");
+    bounded_acceptance_command(
+        Path::new("/usr/bin/codesign"),
+        &["--verify", "--deep", "--strict", &requirement, PHYSICAL_APP],
+        Duration::from_secs(5),
+    )?;
+    need(
+        physical_executable(&own)? == host
+            && physical_executable(Path::new(PHYSICAL_SIDECAR))? == sidecar,
+    )?;
+    let result = bounded_acceptance_command(
+        Path::new(PHYSICAL_SIDECAR),
+        &[PREFLIGHT_FLAG],
+        Duration::from_secs(12),
+    )?;
+    need(
+        result == PREFLIGHT_PASS
+            && physical_executable(&own)? == host
+            && physical_executable(Path::new(PHYSICAL_SIDECAR))? == sidecar,
+    )
+}
 /// Some status means this closed entry was selected; callers must exit before GUI init.
 pub fn dispatch(args: &[String]) -> Option<i32> {
+    if args.iter().skip(1).any(|v| v == SELF_CHECK_FLAG) {
+        let pass =
+            args.len() == 2 && args[1] == SELF_CHECK_FLAG && signed_pair_self_check().is_ok();
+        let _ = std::io::stdout().write_all(if pass { PREFLIGHT_PASS } else { PREFLIGHT_HELD });
+        return Some(if pass { 0 } else { 126 });
+    }
     if !args.iter().skip(1).any(|v| v == FLAG) {
         return None;
     }
@@ -669,6 +800,77 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn self_check_is_closed_and_requires_the_actual_installed_image() {
+        assert_eq!(dispatch(&["fixture".into()]), None);
+        assert_eq!(
+            dispatch(&["fixture".into(), SELF_CHECK_FLAG.into(), "extra".into()]),
+            Some(126)
+        );
+        assert_eq!(
+            dispatch(&["fixture".into(), "--help".into(), SELF_CHECK_FLAG.into()]),
+            Some(126)
+        );
+        assert!(signed_pair_self_check().is_err()); // Never contacts a live installed app from this test image.
+    }
+    fn preflight_fixture(body: &str) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "phantom-preflight-fixture-{}-{}-{}",
+            std::process::id(),
+            {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("inert-sidecar");
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        (root, path)
+    }
+    #[test]
+    fn preflight_transport_passes_only_the_closed_flag_and_sterile_environment() {
+        let body = format!("test \"$#\" = 1 && test \"$1\" = '{PREFLIGHT_FLAG}' && test -z \"${{HOME+x}}\" && test -z \"${{PHANTOM_NATIVE_METADATA_TICKET+x}}\" || exit 1\nprintf '%s\\n' '{{\"schemaVersion\":1,\"scope\":\"desktop-metadata-preflight\",\"state\":\"pass\"}}'");
+        let (root, path) = preflight_fixture(&body);
+        assert_eq!(
+            bounded_acceptance_command(&path, &[PREFLIGHT_FLAG], Duration::from_secs(1)).unwrap(),
+            PREFLIGHT_PASS
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn preflight_transport_refuses_failed_or_oversized_output_and_reaps_its_child() {
+        for body in [
+            "printf 'not-a-result'; exit 1",
+            "i=0; while test $i -lt 1000; do printf x; i=$((i+1)); done; exec /bin/sleep 10",
+        ] {
+            let (root, path) = preflight_fixture(body);
+            assert!(
+                bounded_acceptance_command(&path, &[PREFLIGHT_FLAG], Duration::from_secs(1))
+                    .is_err()
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+        let (root, path) = preflight_fixture("exec /bin/sleep 10");
+        ACCEPTANCE_CHILD.with(|id| id.set(None));
+        assert!(
+            bounded_acceptance_command(&path, &[PREFLIGHT_FLAG], Duration::from_millis(100))
+                .is_err()
+        );
+        let pid = ACCEPTANCE_CHILD.with(|id| id.get()).unwrap() as i32;
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     fn ticket() -> String {
         format!(
             r#"{{"schemaVersion":2,"scope":"desktop-native-metadata-launch","id":"11111111-1111-4111-8111-111111111111","owner":{{"token":"22222222-2222-4222-8222-222222222222","pid":1,"startRef":"{}","startRefSource":"self-clock-epoch-second","dev":"1","ino":"2"}},"pending":{{"dev":"1","ino":"3","bytesDigest":"{}"}},"bootIdentity":{{"bootId":"33333333-3333-4333-8333-333333333333","machineDigest":"{}"}},"root":{{"dev":"1","ino":"4"}},"host":{{"path":"/Applications/Phantom.app/Contents/MacOS/ashlr-desktop","sha256":"{}","stamp":{{"dev":"1","ino":"5","size":"1","mtimeNs":"1","ctimeNs":"1","mode":"33261","uid":"0","nlink":"1"}}}},"parent":{{"pid":1,"startRef":"{}","executable":"/Applications/Phantom.app/Contents/MacOS/ashlr-desktop"}}}}"#,

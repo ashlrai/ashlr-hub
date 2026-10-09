@@ -63,6 +63,8 @@ const buildIdentityPath = join(repoRoot, 'dist', 'build-identity.json');
  * (test/scorecard-history-sea-310.test.ts pins them together).
  */
 export const SCORECARD_HISTORY_HELPER_FLAG = '--_scorecard-history-helper';
+// Closed metadata-only installed-host acceptance, before ordinary CLI boot.
+export const DESKTOP_METADATA_PREFLIGHT_FLAG = '--_phantom-desktop-metadata-preflight';
 
 // Closed source inventory for the native read-only structural diagnostic.
 // Pinned against the runtime reader by the build/safety tests.
@@ -122,7 +124,29 @@ Reflect.set(
 ${desktopPairIdentityJson === undefined ? '' : `Reflect.set(globalThis, Symbol.for('phantom.desktop-pair-build.v1'), ${javascriptStringLiteral(desktopPairIdentityJson)});`}
 ${verifySafetySourcesJson === undefined ? '' : `Reflect.set(globalThis, Symbol.for('ashlr.verify-safety-sources.v1'), ${javascriptStringLiteral(verifySafetySourcesJson)});`}
 ${claudeToolWorkerSourceJson === undefined ? '' : `Reflect.set(globalThis, Symbol.for('ashlr.claude-tool-worker-source.v1'), ${javascriptStringLiteral(claudeToolWorkerSourceJson)});`}
-await import('../dist/cli/index.js');
+// Any occurrence selects the closed route; extra operands cannot fall through.
+if (process.argv.slice(2).includes(${JSON.stringify(DESKTOP_METADATA_PREFLIGHT_FLAG)})) {
+  const held = '{"schemaVersion":1,"scope":"desktop-metadata-preflight","state":"held"}\\n';
+  if (process.argv.length !== 3 || process.argv[2] !== ${JSON.stringify(DESKTOP_METADATA_PREFLIGHT_FLAG)}) {
+    process.stdout.write(held); process.exit(126);
+  } else {
+    void (async () => {
+      const controller = new AbortController(); let timer; let pass = false;
+      try {
+        pass = await Promise.race([
+          import('../dist/core/run/desktop-metadata-launch-trust.js').then(({ qualifyDesktopMetadataLaunch }) =>
+            qualifyDesktopMetadataLaunch(controller.signal)).then(backend => backend?.kind === 'signed-desktop'),
+          new Promise(resolve => { timer = setTimeout(() => { controller.abort(); resolve(false); }, 10_000); }),
+        ]);
+      } catch { /* Metadata-only refusal. Never expose records or raw errors. */ }
+      finally { clearTimeout(timer); controller.abort(); }
+      process.stdout.write(pass ? '{"schemaVersion":1,"scope":"desktop-metadata-preflight","state":"pass"}\\n' : held);
+      process.exit(pass ? 0 : 126);
+    })();
+  }
+} else {
+  await import('../dist/cli/index.js');
+}
 }
 `;
 }

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   createSeaCompileArgs,
   createSeaWorkerShim,
@@ -11,10 +11,65 @@ import {
   createSeaEngineeringReadWorkerShim,
   createSeaFleetHistoryWorkerShim,
   createSeaOutcomesWorkerShim,
-  createSeaShim, collectVerifySafetySources, collectClaudeToolWorkerSource, VERIFY_SAFETY_SOURCE_KEYS,
+  createSeaShim, DESKTOP_METADATA_PREFLIGHT_FLAG, collectVerifySafetySources, collectClaudeToolWorkerSource, VERIFY_SAFETY_SOURCE_KEYS,
 } from '../scripts/build-sea.mjs';
 import { embeddedSafetySourceReader, VERIFY_SAFETY_SOURCE_KEYS as runtimeKeys } from '../src/cli/verify-safety-sources.js';
 import { embeddedClaudeToolWorkerDigest } from '../src/core/sandbox/claude-broker-tool-invocation.js';
+
+describe('closed signed desktop metadata preflight', () => {
+  function run(operands: string[], qualify: (signal: AbortSignal) => Promise<unknown>) {
+    const writes: string[] = [];
+    let done!: (code: number) => void;
+    const exited = new Promise<number>(resolve => { done = resolve; });
+    let timeout!: () => void;
+    const clearTimeout = vi.fn();
+    const pair = JSON.stringify({ schemaVersion: 1, revision: 'a'.repeat(40), tree: 'b'.repeat(40), version: '3.29.6' });
+    const context = { process: { argv: ['ashlr', 'compiled', ...operands], env: {}, execPath: '/Applications/Phantom.app/Contents/MacOS/ashlr',
+      stdout: { write: (value: string) => writes.push(value) }, exit: (code: number) => done(code) },
+    Symbol, dirname, AbortController, qualify, booted: false, clearTimeout,
+    setTimeout: (callback: () => void, delay: number) => { expect(delay).toBe(10_000); timeout = callback; return 1; } };
+    const source = createSeaShim({ pkgVersion: '3.29.6', buildIdentityJson: '{}', desktopPairIdentityJson: pair });
+    runInNewContext(source.replace("import { dirname } from 'node:path';", '')
+      .replace("await import('../scripts/scorecard-history-worker.mjs');", "throw Error('unexpected worker');")
+      .replace("import('../dist/core/run/desktop-metadata-launch-trust.js')", 'Promise.resolve({ qualifyDesktopMetadataLaunch: qualify })')
+      .replace("await import('../dist/cli/index.js');", 'booted = true;'), context);
+    return { writes, exited, context, clearTimeout, timeout: () => timeout(), pair };
+  }
+  it('calls only the actual metadata qualifier after embedded identity, exits with fixed scalar output and never boots CLI', async () => {
+    let signal!: AbortSignal;
+    const qualify = vi.fn(async (value: AbortSignal) => { signal = value; return { kind: 'signed-desktop' }; });
+    const f = run([DESKTOP_METADATA_PREFLIGHT_FLAG], qualify);
+    expect(await f.exited).toBe(0);
+    expect(qualify).toHaveBeenCalledTimes(1); expect(signal.aborted).toBe(true);
+    expect(f.writes).toEqual(['{"schemaVersion":1,"scope":"desktop-metadata-preflight","state":"pass"}\n']);
+    expect(f.context.booted).toBe(false); expect(f.clearTimeout).toHaveBeenCalledWith(1);
+    expect(runInNewContext("globalThis[Symbol.for('phantom.desktop-pair-build.v1')]", f.context)).toBe(f.pair);
+  });
+  it('refuses extra operands wherever the flag occurs before qualifier or ordinary CLI contact', async () => {
+    for (const operands of [[DESKTOP_METADATA_PREFLIGHT_FLAG, 'extra'], ['--help', DESKTOP_METADATA_PREFLIGHT_FLAG]]) {
+      const qualify = vi.fn(async () => { throw Error('must not contact'); }), f = run(operands, qualify);
+      expect(await f.exited).toBe(126); expect(qualify).not.toHaveBeenCalled(); expect(f.context.booted).toBe(false);
+      expect(f.writes).toEqual(['{"schemaVersion":1,"scope":"desktop-metadata-preflight","state":"held"}\n']);
+    }
+  });
+  it('keeps unavailable or rejected metadata held without exporting diagnostic records or falling through', async () => {
+    for (const qualify of [async () => null, async () => undefined, async () => { throw Error('private synthetic diagnostic'); }]) {
+      const f = run([DESKTOP_METADATA_PREFLIGHT_FLAG], qualify);
+      expect(await f.exited).toBe(126); expect(f.writes).toEqual(['{"schemaVersion":1,"scope":"desktop-metadata-preflight","state":"held"}\n']);
+      expect(f.context.booted).toBe(false);
+    }
+  });
+  it('aborts the bounded metadata-only inspection and handles a late proof rejection without CLI boot', async () => {
+    let started!: () => void, reject!: (error: Error) => void, signal!: AbortSignal;
+    const seen = new Promise<void>(resolve => { started = resolve; });
+    const f = run([DESKTOP_METADATA_PREFLIGHT_FLAG], async value => {
+      signal = value; started(); return await new Promise((_, refuse) => { reject = refuse; });
+    });
+    await seen; f.timeout(); expect(await f.exited).toBe(126); expect(signal.aborted).toBe(true);
+    reject(Error('late synthetic proof refusal')); await Promise.resolve();
+    expect(f.context.booted).toBe(false); expect(f.writes).toHaveLength(1); expect(f.clearTimeout).toHaveBeenCalledWith(1);
+  });
+});
 
 describe('signed desktop source tuple', () => {
   it('embeds the independent tree identity before boot without changing existing BuildIdentity', () => {

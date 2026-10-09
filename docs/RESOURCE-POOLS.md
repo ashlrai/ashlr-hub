@@ -2722,3 +2722,7 @@ signed app. The desktop release must also qualify the actual signed host and
 sidecar pair with harmless commands before claiming this extension is available.
 No provider balance, account, grant or spending permission follows from launcher
 qualification. Legacy pending records remain held under their original rules.
+
+### Installed desktop metadata self-check
+
+After installing the qualified signed app, run `/Applications/Phantom.app/Contents/MacOS/ashlr-desktop --_phantom-desktop-metadata-self-check`. This closed entry verifies the physical signed app, launches only its paired sidecar, and checks the sidecar’s actual native parent and embedded source identity before ordinary CLI boot. It returns a scalar `pass` or `held`. It does not acquire a collector lease, touch an old quota fence, contact providers, read credentials or authorize spending. A staged or unsigned fixture cannot establish this installed-host result. Existing signature verification and help/version checks remain narrower evidence.
