@@ -16,6 +16,12 @@ use std::{
 };
 
 pub const FLAG: &str = "--_phantom-native-metadata-launch";
+// Test-process fork windows must not inherit another fixture's held flock.
+// Readers keep broker fixtures concurrent; only pre_exec spawn crosses the
+// exclusive window, ending when exec closes its inherited CLOEXEC descriptors.
+#[cfg(test)]
+pub(crate) static TEST_FORK_LEASE_BARRIER: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 pub const TICKET_ENV: &str = "PHANTOM_NATIVE_METADATA_TICKET";
 pub const SELF_CHECK_FLAG: &str = "--_phantom-desktop-metadata-self-check";
 const PREFLIGHT_FLAG: &str = "--_phantom-desktop-metadata-preflight";
@@ -611,6 +617,24 @@ fn run() -> Result<()> {
         &PathBuf::from(format!("{}.registered", path.display())),
         &registered,
     )?;
+    #[cfg(test)]
+    if std::env::var("PHANTOM_INERT_OWNER_DEATH_BEFORE_NOTICE").as_deref() == Ok("1") {
+        // Only this compiled inert route pauses after the real durable write.
+        // A bootstrap witness cannot stand in for registration or ready proof.
+        write(
+            &root.join(format!(".inert-registered-before-notice-{pid}")),
+            b"registered",
+        )?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while unsafe { libc::getppid() } == t.parent.pid {
+            need(Instant::now() < deadline)?;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        write(
+            &root.join(format!(".inert-owner-dead-before-notice-{pid}")),
+            b"owner-dead",
+        )?;
+    }
     let result = (|| {
         control
             .write_all(format!("{digest}\n").as_bytes())
@@ -1009,7 +1033,10 @@ mod tests {
                 Ok(())
             });
         }
-        let spawned = command.spawn().unwrap();
+        let spawned = {
+            let _fork = TEST_FORK_LEASE_BARRIER.write().unwrap();
+            command.spawn().unwrap()
+        };
         drop(child);
         parent
             .set_read_timeout(Some(Duration::from_secs(3)))
@@ -1094,7 +1121,11 @@ mod tests {
                 Ok(())
             });
         }
-        assert!(!command.spawn().unwrap().wait().unwrap().success());
+        let mut spawned = {
+            let _fork = TEST_FORK_LEASE_BARRIER.write().unwrap();
+            command.spawn().unwrap()
+        };
+        assert!(!spawned.wait().unwrap().success());
         assert_eq!(fs::read(&control).unwrap(), b"unchanged");
         assert!(!root
             .join(format!(".resource-quota-launch-{}.json.registered", t.id))
@@ -1224,14 +1255,23 @@ mod tests {
     fn inert_owner_entry() {
         if let Ok(handoff) = std::env::var("PHANTOM_INERT_HANDOFF") {
             let (root, t, _) = fixture();
-            let (child, _control) = child(&root, &t);
+            let (mut child, control) = child(&root, &t);
+            let child_start = process_start(child.id() as i32).unwrap();
             write(
                 Path::new(&handoff),
-                &serde_json::to_vec(&serde_json::json!({"root":root,"child":child.id()})).unwrap(),
+                &serde_json::to_vec(
+                    &serde_json::json!({"root":root,"child":child.id(),"childStart":child_start}),
+                )
+                .unwrap(),
             )
             .unwrap();
             let mut line = String::new();
             std::io::stdin().read_line(&mut line).unwrap();
+            // Bootstrap failure closes this owner's stdin. Reap its own Child;
+            // unlike a numeric PID lookup, an unreaped child cannot be recycled.
+            drop(control);
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
     #[test]
@@ -1253,14 +1293,64 @@ mod tests {
             "{}::inert_owner_entry",
             module_path!().split_once("::").unwrap().1
         );
-        let mut owner = Command::new(std::env::current_exe().unwrap())
+        // Failure cleanup is separate from the acceptance witness: only a
+        // pre-cleanup ESRCH observation below can prove normal group settlement.
+        struct OwnedProcesses {
+            owner: std::process::Child,
+            handoff: PathBuf,
+            child: Option<(i32, String)>,
+        }
+        impl Drop for OwnedProcesses {
+            fn drop(&mut self) {
+                // Give an owner still preparing the fixture its EOF cleanup
+                // path even if no handoff/registration was observed yet.
+                drop(self.owner.stdin.take());
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while matches!(self.owner.try_wait(), Ok(None)) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let _ = self.owner.kill();
+                let _ = self.owner.wait();
+                if self.child.is_none() {
+                    if let Ok((bytes, _)) = read(&self.handoff, LIMIT, true) {
+                        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                            if let (Some(pid), Some(start)) =
+                                (value["child"].as_i64(), value["childStart"].as_str())
+                            {
+                                if let Ok(pid) = i32::try_from(pid) {
+                                    self.child = Some((pid, start.to_owned()));
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some((pid, start)) = &self.child {
+                    // Presence alone is not ownership. Unknown/recycled
+                    // leaders remain unsignalled, never inferred absent.
+                    if *pid > 1
+                        && process_start(*pid).as_ref() == Ok(start)
+                        && unsafe { libc::getpgid(*pid) } == *pid
+                        && unsafe { libc::kill(-*pid, 0) } == 0
+                    {
+                        unsafe { libc::kill(-*pid, libc::SIGKILL) };
+                    }
+                }
+            }
+        }
+        let owner = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &selected, "--nocapture"])
             .env("PHANTOM_INERT_HANDOFF", &handoff)
+            .env("PHANTOM_INERT_OWNER_DEATH_BEFORE_NOTICE", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
+        let mut processes = OwnedProcesses {
+            owner,
+            handoff: handoff.clone(),
+            child: None,
+        };
         let deadline = Instant::now() + Duration::from_secs(3);
         while !handoff.exists() {
             assert!(Instant::now() < deadline);
@@ -1270,17 +1360,33 @@ mod tests {
             serde_json::from_slice(&fs::read(&handoff).unwrap()).unwrap();
         let root = PathBuf::from(handoff_value["root"].as_str().unwrap());
         let pid = handoff_value["child"].as_i64().unwrap() as i32;
-        while !root.join(format!(".inert-child-entered-{pid}")).exists() {
+        processes.child = Some((
+            pid,
+            handoff_value["childStart"].as_str().unwrap().to_owned(),
+        ));
+        let reg = root
+            .join(".resource-quota-launch-11111111-1111-4111-8111-111111111111.json.registered");
+        // Fixture image verification precedes the causal owner-death phase.
+        // Wait for actual durable registration, never the pre-dispatch marker.
+        let registration_deadline = Instant::now() + Duration::from_secs(3);
+        while !root
+            .join(format!(".inert-registered-before-notice-{pid}"))
+            .exists()
+        {
             assert!(
-                Instant::now() < deadline,
-                "native child bootstrap not observed"
+                Instant::now() < registration_deadline,
+                "durable registration not observed before owner death"
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-        owner.kill().unwrap();
-        owner.wait().unwrap();
-        let reg = root
-            .join(".resource-quota-launch-11111111-1111-4111-8111-111111111111.json.registered");
+        assert!(reg.exists());
+        assert!(!root
+            .join(format!(".inert-owner-dead-before-notice-{pid}"))
+            .exists());
+        // The owner never reads ready or publishes a go packet.
+        processes.owner.kill().unwrap();
+        processes.owner.wait().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
         let stopped = root
             .join(".resource-quota-launch-11111111-1111-4111-8111-111111111111.json.not-started");
         while !stopped.exists() {
@@ -1296,6 +1402,9 @@ mod tests {
             serde_json::from_slice(&read(&reg, LIMIT, true).unwrap().0).unwrap();
         assert_eq!(value["pid"], pid);
         assert_eq!(value["pgid"], pid);
+        assert!(root
+            .join(format!(".inert-owner-dead-before-notice-{pid}"))
+            .exists());
         loop {
             let result = unsafe { libc::kill(-pid, 0) };
             let error = std::io::Error::last_os_error().raw_os_error();
