@@ -102,15 +102,18 @@ export async function readWebsitePublicBuildEnv(api: (endpoint: string) => Promi
     if (value.length > 4096 || /[\r\n]/.test(value) || value.includes('\0')) throw new Error('Website public client configuration value is invalid');
     values[key] = value;
   }
+  if (values['NEXT_PUBLIC_POSTHOG_KEY'] && !/^phc_[A-Za-z0-9_-]+$/.test(values['NEXT_PUBLIC_POSTHOG_KEY'])) throw new Error('Website public analytics key is invalid');
+  if (values['NEXT_PUBLIC_POSTHOG_HOST'] && !/^https:\/\/(?:us|eu)\.i\.posthog\.com\/?$/.test(values['NEXT_PUBLIC_POSTHOG_HOST'])) throw new Error('Website public analytics host is invalid');
   const url = values['NEXT_PUBLIC_SUPABASE_URL']; const token = values['NEXT_PUBLIC_SUPABASE_ANON_KEY'];
+  // The public website can precede separately commissioned Secrets Cloud.
+  // Preserve a wholly absent service configuration, without inventing keys.
+  if (!url && !token) return values;
   const ref = url?.match(/^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/)?.[1];
-  if (!ref || !token || !/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) throw new Error('Configure the existing website production Supabase public URL and anon key before commissioning');
+  if (!ref || !token || !/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) throw new Error('Complete the existing website production Supabase public URL and anon key before commissioning');
   let claims: Record<string, unknown>;
   try { claims = object(JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8'))); }
   catch { throw new Error('Website public Supabase anon key is invalid'); }
   if (claims['role'] !== 'anon' || claims['ref'] !== ref) throw new Error('Website Supabase key is not the matching public anon key');
-  if (values['NEXT_PUBLIC_POSTHOG_KEY'] && !/^phc_[A-Za-z0-9_-]+$/.test(values['NEXT_PUBLIC_POSTHOG_KEY'])) throw new Error('Website public analytics key is invalid');
-  if (values['NEXT_PUBLIC_POSTHOG_HOST'] && !/^https:\/\/(?:us|eu)\.i\.posthog\.com\/?$/.test(values['NEXT_PUBLIC_POSTHOG_HOST'])) throw new Error('Website public analytics host is invalid');
   return values;
 }
 

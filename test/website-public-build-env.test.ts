@@ -21,9 +21,9 @@ describe('credential-free website public configuration', () => {
       NEXT_PUBLIC_SUPABASE_URL: 'https://publicproject.supabase.co', NEXT_PUBLIC_SUPABASE_ANON_KEY: f.token });
     expect(f.api.mock.calls.map(([path]) => path.split('/').at(-1))).toEqual(['env?decrypt=false', 'url', 'anon']);
   });
-  it('holds unknown production settings without fetching unrelated credentials', async () => {
+  it('preserves wholly absent separately commissioned Cloud settings without guessing values', async () => {
     const api = vi.fn(async () => ({ envs: [] }));
-    await expect(readWebsitePublicBuildEnv(api)).rejects.toThrow('before commissioning');
+    expect(await readWebsitePublicBuildEnv(api)).toEqual({ NEXT_PUBLIC_PHANTOM_SITE_URL: 'https://phm.dev' });
     expect(api).toHaveBeenCalledOnce();
   });
   it.each([['service_role', 'publicproject'], ['anon', 'otherproject']])('rejects %s / %s key claims', async (role, ref) => {

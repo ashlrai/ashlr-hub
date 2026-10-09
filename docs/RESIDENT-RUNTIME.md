@@ -353,9 +353,12 @@ identity or build qualification hold publication; there is no Mac-output fallbac
 Preparation preserves only the existing production Supabase public URL and
 matching public anon key, plus configured public PostHog settings. It reads
 metadata first and retrieves only those fixed public variables individually;
-server credentials stay in Vercel. Missing, ambiguous or privileged client
-configuration blocks commissioning rather than producing an app with broken
-sign-in. Changes to these public settings require renewed build qualification.
+server credentials stay in Vercel. Partial, ambiguous or privileged client
+configuration blocks commissioning. If the separately commissioned Secrets
+Cloud service has no configuration yet, preparation preserves that absence
+without creating credentials or claiming that hosted sign-in is available.
+The real source build still must pass. Changes to configured public settings
+require renewed build qualification.
 Commissioning uses the existing custody signing prompt and preserves global Stop.
 This is not a general website-deployment permission or npm/desktop publication scope.
 
