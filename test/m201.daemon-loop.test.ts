@@ -482,6 +482,7 @@ import {
   type DispatchProductionEvent,
 } from '../src/core/fleet/dispatch-production-ledger.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
+import * as localStoreLock from '../src/core/fleet/local-store-lock.js';
 import { listAttemptRecords } from '../src/core/autonomy/attempt-records.js';
 import { readDispatchManifestEvents } from '../src/core/fleet/dispatch-manifest.js';
 import {
@@ -693,6 +694,29 @@ afterAll(() => {
 // ---------------------------------------------------------------------------
 // Helpers.
 // ---------------------------------------------------------------------------
+
+/** Skip retry pacing only for a deliberately blocked fixture path, using the
+ * real acquisition/refusal code. Dedicated local-store-lock suites retain real
+ * contention/retry budgets; every other path keeps its original arguments. */
+async function withImmediateFixtureLockRefusal<T>(path: string, run: () => Promise<T>): Promise<T> {
+  const realAcquire = localStoreLock.acquireLocalStoreLock;
+  const blockedResults: Array<ReturnType<typeof realAcquire>> = [];
+  const spy = vi.spyOn(localStoreLock, 'acquireLocalStoreLock').mockImplementation((candidate, waitMs, options) => {
+    if (candidate !== path) return realAcquire(candidate, waitMs, options);
+    const result = realAcquire(candidate, 0, options);
+    blockedResults.push(result);
+    return result;
+  });
+  try {
+    const value = await run();
+    expect(blockedResults.length).toBeGreaterThan(0);
+    expect(blockedResults.every((result) => result === null)).toBe(true);
+    expect(fs.lstatSync(path).isDirectory()).toBe(true);
+    return value;
+  } finally {
+    spy.mockRestore();
+  }
+}
 
 /** Today's date in YYYY-MM-DD. */
 function today(): string {
@@ -6798,10 +6822,10 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       };
     });
 
-    const result = await tick({
+    const result = await withImmediateFixtureLockRefusal(productionFailurePath, () => tick({
       ...cfgBuiltin({ perTickItems: 1, parallel: 1 }),
       foundry: { allowedBackends: ['local-coder'] },
-    } as AshlrConfig, { dryRun: false });
+    } as AshlrConfig, { dryRun: false }));
 
     expect(result.reason).toBe('state-persistence-failed');
     expect(readGeneratedRepairLifecycle(repair)).toMatchObject({
@@ -6870,7 +6894,8 @@ describe('M201 — Group A: backlog build + top-K selection', () => {
       foundry: { allowedBackends: ['local-coder'] },
     } as AshlrConfig;
 
-    const crashed = await tick(config, { dryRun: false });
+    const crashed = await withImmediateFixtureLockRefusal(productionFailurePath, () =>
+      tick(config, { dryRun: false }));
 
     expect(crashed.reason).toBe('state-persistence-failed');
     expect(pendingCount()).toBe(1);
