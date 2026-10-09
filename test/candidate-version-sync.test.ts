@@ -36,8 +36,8 @@ function fixture() {
   writeFileSync(join(root, 'desktop/src-tauri/Cargo.lock'), '# Locked dependencies\nversion = 4\n\n[[package]]\nname = "unrelated"\nversion = "3.27.0"\nchecksum = "preserve-me"\n\n[[package]]\nname = "ashlr-desktop"\nversion = "3.27.0"\ndependencies = ["unrelated"]\n');
   writeFileSync(join(root, 'CHANGELOG.md'), '## [3.27.0] — historical published release\n');
   writeFileSync(join(root, '.github/workflows/release.yml'), '# frozen 3.3.2\n');
-  writeFileSync(join(root, 'desktop/README.md'), 'The source candidate is 3.27.0; publication and installation are pending qualification and public byte verification.\n\nThe published 3.27.0 release is historical.\n');
-  for (const path of ['README.md', 'docs/QUICKSTART.md']) writeFileSync(join(root, path), 'The source candidate is 3.27.0; preparing it does not publish or install it.\n\nThe published 3.27.0 release is historical.\n');
+  writeFileSync(join(root, 'desktop/README.md'), 'This source tree targets version 3.27.0; check canonical release availability and exact matching assets before installation.\n\nThe published 3.27.0 release is historical.\n');
+  for (const path of ['README.md', 'docs/QUICKSTART.md']) writeFileSync(join(root, path), 'This source tree targets version 3.27.0; check canonical release availability and exact matching assets before installation.\n\nThe published 3.27.0 release is historical.\n');
   return root;
 }
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -85,10 +85,10 @@ describe('candidate version synchronization', () => {
     expect(read(root, 'desktop/src-tauri/Cargo.lock')).toContain('name = "ashlr-desktop"\nversion = "3.28.0"');
     expect(read(root, 'CHANGELOG.md')).toBe(before[6]);
     expect(read(root, '.github/workflows/release.yml')).toBe(before[7]);
-    expect(read(root, 'desktop/README.md')).toContain('The source candidate is 3.28.0;');
+    expect(read(root, 'desktop/README.md')).toContain('This source tree targets version 3.28.0;');
     expect(read(root, 'desktop/README.md')).toContain('The published 3.27.0 release is historical.');
     for (const path of ['README.md', 'docs/QUICKSTART.md']) {
-      expect(read(root, path)).toContain('The source candidate is 3.28.0;');
+      expect(read(root, path)).toContain('This source tree targets version 3.28.0;');
       expect(read(root, path)).toContain('The published 3.27.0 release is historical.');
     }
     const synced = paths.map((path) => read(root, path));

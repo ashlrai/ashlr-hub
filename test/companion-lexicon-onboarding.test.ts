@@ -12,7 +12,7 @@ function fixture(binary = 'lexicon-mcp') {
   const bin = join(root, 'bin');
   mkdirSync(bin);
   // Discovery must never execute this artifact, even on --write.
-  writeFileSync(join(bin, binary), '#!/bin/sh\ntouch "' + join(root, 'executed') + '"\nexit 91\n', { mode: 0o755 });
+  writeFileSync(join(bin, binary), '#!/usr/bin/env node\nrequire("node:fs").writeFileSync(' + JSON.stringify(join(root, 'executed')) + ', "executed");\nprocess.exit(91);\n', { mode: 0o755 });
   vi.stubEnv('PATH', bin);
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});

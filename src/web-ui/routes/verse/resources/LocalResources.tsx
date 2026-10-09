@@ -3,8 +3,8 @@
  * drawer (unit 3.11 C6): the local seat's readiness (the shared capacity
  * projection's word), the serving runtime (llama-server / Ollama: state,
  * loaded model, per-agent context, slots) with Start / Stop when THIS server
- * supervises it, and the installed models with the context each one really
- * runs at.
+ * supervises it, and the installed catalog's reported context. Catalog
+ * entries are not bindings to the serving runtime's active model/allocation.
  *
  * Reads are the owners' own QueryDefs — `/api/verse/local-models`
  * (usage-queries, with its burst retry) and `/api/verse/runtime`
@@ -39,7 +39,7 @@ import styles from './ResourcesDrawer.module.css';
 const STOP_BODY =
   'Every local agent turn in flight is answered by this process. Stopping it ends those turns — nothing in flight is rolled back, and no local seat can take a new turn until it is running again.';
 
-const RUNTIME_LABEL: Readonly<Record<string, string>> = { ollama: 'Ollama', lmstudio: 'LM Studio' };
+const RUNTIME_LABEL: Readonly<Record<string, string>> = { ollama: 'Ollama catalog', lmstudio: 'LM Studio catalog' };
 
 export interface LocalResourcesProps {
   status: AccountStatus | null;
@@ -175,24 +175,28 @@ export function LocalResources({ status, onOpenUsage, now: fixedNow, readinessRe
           {view?.reachable ? 'No models installed.' : 'Start Ollama or llama-server to use local models.'}
         </p>
       ) : (
-        <ul className={styles.models} aria-label="Local models">
-          {shown.map((m) => {
-            const context = modelContextText(m);
-            return (
-              <li key={`${m.runtime ?? 'local'}:${m.name}`} className={styles.model} data-resident={m.resident || undefined}>
-                <span className={styles.modelName} title={m.name}>
-                  {m.displayName}
-                  {m.nameDetail ? <span className={styles.modelDetail}> {m.nameDetail}</span> : null}
-                </span>
-                <span className={styles.modelFacts}>
-                  {m.runtime && RUNTIME_LABEL[m.runtime] ? <span className={styles.modelRuntime}>{RUNTIME_LABEL[m.runtime]}</span> : null}
-                  {m.resident ? <span className={styles.pill} data-tone="success">Loaded</span> : null}
-                  {context !== null ? <span title={m.contextTruncated ? 'Configured below the model’s native window' : undefined}>{context}</span> : null}
-                </span>
-              </li>
-            );
-          })}
-        </ul>
+        <>
+          <p className={styles.runtimeHead}><span className={styles.runtimeName}>Installed model catalog</span></p>
+          <p className={styles.subtle}>Reported model settings. The active runtime may use a different context window.</p>
+          <ul className={styles.models} aria-label="Local models">
+            {shown.map((m) => {
+              const context = modelContextText(m);
+              return (
+                <li key={`${m.runtime ?? 'local'}:${m.name}`} className={styles.model} data-resident={m.resident || undefined}>
+                  <span className={styles.modelName} title={m.name}>
+                    {m.displayName}
+                    {m.nameDetail ? <span className={styles.modelDetail}> {m.nameDetail}</span> : null}
+                  </span>
+                  <span className={styles.modelFacts}>
+                    {m.runtime && RUNTIME_LABEL[m.runtime] ? <span className={styles.modelRuntime}>{RUNTIME_LABEL[m.runtime]}</span> : null}
+                    {m.resident ? <span className={styles.pill} data-tone="success">Loaded</span> : null}
+                    {context !== null ? <span title={m.contextTruncated ? 'Reported context is below the model’s native maximum; serving allocation may differ.' : undefined}>{context}</span> : null}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </>
       )}
       {more > 0 ? (
         <button type="button" className={styles.linkButton} onClick={onOpenUsage}>

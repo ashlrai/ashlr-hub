@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { evictAll, refetchQuery } from '../../../data/cache.js';
 import { installFetch, json } from '../context/context-fixtures.test-support.js';
@@ -10,6 +10,42 @@ const NOW = Date.parse('2026-10-09T12:00:00Z');
 beforeEach(() => evictAll());
 afterEach(() => { evictAll(); vi.unstubAllGlobals(); });
 describe('local resource metrics wiring', () => {
+  it('keeps catalog context and provenance separate from the serving allocation, even when names match', async () => {
+    const catalog = { sampledAt: new Date(NOW).toISOString(),
+      ollama: { reachable: true, models: [
+        { id: 'qwen3.8:27b-ctx64k', state: 'available', contextLength: 65_536, nativeContextLength: 262_144 },
+        { id: 'qwen3.8:27b-q8_0', state: 'available', contextLength: 262_144, nativeContextLength: 262_144 },
+      ] },
+      lmStudio: { reachable: true, models: [{ id: 'qwen/27b', state: 'available', contextLength: 32_768 }] },
+      llamaServer: { reachable: true, status: 'ok', models: ['qwen3.8:27b-ctx64k'], modelCount: 1, slots: 4, reason: null },
+    };
+    const before = structuredClone(catalog);
+    const { calls } = installFetch(call => {
+      if (call.path === '/api/verse/local-models') return json(catalog);
+      if (call.path === '/api/verse/runtime') return json({ kind: 'llama-server', state: 'running',
+        endpoint: '127.0.0.1:8080', model: 'qwen3.8:27b-ctx64k', slotsTotal: 4, slotsBusy: 0, contextTokens: 65_536,
+        startedAt: null, parallel: { capable: true, refusal: null, slots: 4 }, reason: null, supervised: false,
+        sampledAt: new Date(NOW).toISOString() });
+      return json({ error: 'unavailable' }, 404);
+    });
+    render(<ul><LocalResources status={null} now={NOW} onOpenUsage={() => {}} /></ul>);
+    expect(await screen.findByText('Installed model catalog')).toBeInTheDocument();
+    expect(screen.getByText('Reported model settings. The active runtime may use a different context window.')).toBeInTheDocument();
+    const models = within(screen.getByRole('list', { name: 'Local models' }));
+    const alias = within(models.getByTitle('qwen3.8:27b-ctx64k').closest('li')!);
+    expect(alias.getByText('Ollama catalog')).toBeInTheDocument();
+    expect(alias.getByText('64k of 256k context')).toBeInTheDocument();
+    expect(alias.queryByText('Loaded')).not.toBeInTheDocument();
+    const regular = within(models.getByTitle('qwen3.8:27b-q8_0').closest('li')!);
+    expect(regular.getByText('Ollama catalog')).toBeInTheDocument();
+    expect(regular.getByText('256k context')).toBeInTheDocument();
+    expect(models.getByText('LM Studio catalog')).toBeInTheDocument();
+    expect(models.getAllByRole('listitem')).toHaveLength(3);
+    expect(screen.getByText(/64k context per agent · 0 of 4 slots busy$/)).toBeInTheDocument();
+    expect(catalog).toEqual(before);
+    expect(calls.every(call => call.method === 'GET')).toBe(true);
+    expect(calls.some(call => /warm|generate|chat\/completions/.test(call.path))).toBe(false);
+  });
   it('observes the current clock for independently arriving metadata and subsequent query updates', async () => {
     let clock = NOW;
     vi.spyOn(Date, 'now').mockImplementation(() => clock);

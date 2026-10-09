@@ -148,6 +148,33 @@ describe('explicit project/client companion consumption', () => {
     const f = fixture(); vi.stubEnv('PATH', 'bin:.');
     expect(() => discoverCompanionProjectMcp(f.scope)).toThrow('No installed');
   });
+  it('deduplicates executable aliases and shares physical binding with onboarding', async () => {
+    const f = fixture(); const aliases = join(f.project, 'aliases'); mkdirSync(aliases);
+    const alias = join(aliases, 'lexicon-mcp'); symlinkSync(f.command, alias);
+    vi.stubEnv('PATH', [aliases, join(f.project, 'bin')].join(process.platform === 'win32' ? ';' : ':'));
+    expect(discoverCompanionProjectMcp(f.scope).servers[0]!.command).toBe(realpathSync(f.command));
+    rmSync(f.config); vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(await cmdMcp(['ecosystem', '--only', 'lexicon', ...f.args, '--write'])).toBe(0);
+    expect(JSON.parse(readFileSync(f.config, 'utf8')).mcpServers.lexicon.command).toBe(realpathSync(f.command));
+    expect(discoverCompanionProjectMcp(f.scope).servers).toHaveLength(1);
+    expect(existsSync(f.receipt)).toBe(false);
+  });
+  it('refuses distinct installed Lexicon candidates instead of selecting PATH order', async () => {
+    const f = fixture(); const other = join(f.project, 'other-bin'); mkdirSync(other);
+    writeFileSync(join(other, 'lexicon-mcp'), readFileSync(f.command), { mode: 0o755 });
+    vi.stubEnv('PATH', [join(f.project, 'bin'), other].join(process.platform === 'win32' ? ';' : ':'));
+    expect(() => discoverCompanionProjectMcp(f.scope)).toThrow('Ambiguous');
+    rmSync(f.config); vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(await cmdMcp(['ecosystem', '--only', 'lexicon', ...f.args, '--write'])).toBe(0);
+    expect(existsSync(f.config)).toBe(false); expect(existsSync(f.receipt)).toBe(false);
+  });
+  it.each(['#!/usr/bin/env node\n// npx forbidden-downloader\n', '#!/bin/sh\nexit 0\n'])('refuses bootstrap and unknown script Lexicon launchers before execution', async source => {
+    const f = fixture(); writeFileSync(f.command, source, { mode: 0o755 });
+    expect(() => discoverCompanionProjectMcp(f.scope)).toThrow('Unsupported');
+    rmSync(f.config); vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(await cmdMcp(['ecosystem', '--only', 'lexicon', ...f.args, '--write'])).toBe(0);
+    expect(existsSync(f.config)).toBe(false); expect(existsSync(f.receipt)).toBe(false);
+  });
   it('rejects client-directory aliasing and permits a regular worktree Git marker', () => {
     const f = fixture(); rmSync(join(f.project, '.git'), { recursive: true }); writeFileSync(join(f.project, '.git'), 'gitdir: deliberately-not-read');
     expect(discoverCompanionProjectMcp(f.scope).servers).toHaveLength(1);

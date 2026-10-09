@@ -1,7 +1,8 @@
-import { accessSync, constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import type { McpRegistry, McpServerSpec } from '../types.js';
 import { lexiconServerSpec, pathWithinProject } from './lexicon-mcp.js';
+import { companionExecutableCandidates, companionExecutableKind } from '../companion-inventory.js';
 
 export interface CompanionProjectScope { project: string; client: string; config: string }
 interface ScopedRuntime { cwd: string; env: Record<string, string> }
@@ -40,14 +41,15 @@ function boundedPath(project: string, candidate: string): string {
 }
 
 function installedLexicon(): { command: string; launch: 'cli' | 'stdio' } {
+  const directories = (process.env['PATH'] ?? '').split(delimiter).filter(isAbsolute);
   for (const binary of ['lexicon-mcp', 'lexicon']) {
-    for (const directory of (process.env['PATH'] ?? '').split(delimiter).filter(isAbsolute)) {
-      const command = resolve(directory, binary);
-      try {
-        accessSync(command, constants.X_OK);
-        if (statSync(command).isFile()) return { command, launch: binary === 'lexicon' ? 'cli' : 'stdio' };
-      } catch { /* continue installed executable discovery; never execute */ }
-    }
+    const candidates = companionExecutableCandidates(binary, directories);
+    if (candidates.length === 0) continue;
+    if (candidates.length > 1) throw new Error('Ambiguous installed Lexicon executables; select one physical candidate through PATH');
+    const command = candidates[0]!;
+    const kind = companionExecutableKind(command);
+    if (kind !== 'native' && kind !== 'script') throw new Error('Unsupported Lexicon launcher; select an installed native or Node executable');
+    return { command, launch: binary === 'lexicon' ? 'cli' : 'stdio' };
   }
   throw new Error('No installed Lexicon executable found; scoped discovery does not install or download it');
 }

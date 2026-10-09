@@ -120,6 +120,75 @@ describe('⌘K autonomy switch', () => {
 });
 
 describe('⌘K Approve grant…', () => {
+  it('shows pending approval and an inline refusal, then permits a deliberate retry after settlement', async () => {
+    setMutationToken(TOKEN);
+    const now = Date.now();
+    const { posted, fetchMock } = stubSurfaceFetch({ kind: 'dark', now, post: () => json(authorityStatus('live', now)) });
+    const original = fetchMock.getMockImplementation() as typeof fetch;
+    let finish!: (response: Response) => void;
+    const pending = new Promise<Response>(resolve => { finish = resolve; });
+    fetchMock.mockImplementation(async (input, init) => {
+      const result = original(input, init);
+      return init?.method === 'POST' && posted.length === 1 ? pending : result;
+    });
+    render(<CommandSection />);
+    await ready();
+    run('autonomy.grant');
+    const sheet = await screen.findByRole('dialog', { name: 'Approve a standing grant' });
+    const approve = within(sheet).getByRole('button', { name: 'Approve with Touch ID' });
+    await waitFor(() => expect(approve).toBeEnabled());
+    fireEvent.click(approve);
+    expect(await within(sheet).findByRole('status')).toHaveTextContent('Waiting for the result. Complete any Mac authentication prompt; signing has a three-minute timeout. Closing this dialog does not cancel approval.');
+    expect(approve).toBeDisabled();
+    fireEvent.click(approve);
+    expect(posted).toEqual([{ url: '/api/verse/authority', body: { action: 'grant', draftDigest: grantDraft(now).digest } }]);
+    expect(within(sheet).getByRole('button', { name: 'Close dialog' })).toBeEnabled();
+    await act(async () => { finish(json({ code: 'not-signed', error: 'Mac approval timed out.' }, 409)); });
+    expect(await within(sheet).findByRole('alert')).toHaveTextContent('Mac approval timed out.');
+    expect(within(sheet).queryByText(/Waiting for the result/)).toBeNull();
+    expect(approve).toBeEnabled();
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Dismiss' }));
+    expect(within(sheet).queryByRole('alert')).toBeNull();
+    fireEvent.click(approve);
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Approve a standing grant' })).toBeNull());
+    expect(posted.map(entry => entry.body)).toEqual([
+      { action: 'grant', draftDigest: grantDraft(now).digest },
+      { action: 'grant', draftDigest: grantDraft(now).digest },
+    ]);
+  });
+
+  it('closes the pending view without cancelling or replaying the approval request', async () => {
+    setMutationToken(TOKEN);
+    const { posted, fetchMock } = stubSurfaceFetch({ kind: 'dark' });
+    const original = fetchMock.getMockImplementation() as typeof fetch;
+    let finish!: (response: Response) => void;
+    let signingRequest: RequestInit | undefined;
+    const pending = new Promise<Response>(resolve => { finish = resolve; });
+    fetchMock.mockImplementation(async (input, init) => {
+      const result = original(input, init);
+      if (init?.method !== 'POST') return result;
+      signingRequest = init;
+      return pending;
+    });
+    render(<CommandSection />);
+    await ready();
+    run('autonomy.grant');
+    const sheet = await screen.findByRole('dialog', { name: 'Approve a standing grant' });
+    const approve = within(sheet).getByRole('button', { name: 'Approve with Touch ID' });
+    await waitFor(() => expect(approve).toBeEnabled());
+    fireEvent.click(approve);
+    await within(sheet).findByRole('status');
+    fireEvent.click(within(sheet).getByRole('button', { name: 'Close dialog' }));
+    expect(screen.queryByRole('dialog', { name: 'Approve a standing grant' })).toBeNull();
+    expect(signingRequest?.signal?.aborted).not.toBe(true);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.body.action).toBe('grant');
+    expect(screen.queryByText(/approval cancelled/i)).toBeNull();
+    await act(async () => { finish(json(authorityStatus('live', Date.now()))); });
+    expect(posted).toHaveLength(1);
+    expect(screen.queryByRole('dialog', { name: 'Approve a standing grant' })).toBeNull();
+  });
+
   it('opens the sheet when there is no grant', async () => {
     setMutationToken(TOKEN);
     const { posted } = stubSurfaceFetch({ kind: 'dark' });
@@ -331,7 +400,7 @@ describe('grant approval requires the current preview', () => {
     vi.stubGlobal('fetch', fetchMock);
     const approve = vi.fn();
     const guardedAction: SurfaceActions['act'] = (fn, _reason, options) => { void fn().then((result) => options?.onDone?.(result)); };
-    render(<GrantSheet open intent="grant" then={null} busy={false} why="Review the account policy" onApprove={approve} onClose={() => undefined} act={guardedAction} startEditing />);
+    const view = render(<GrantSheet open intent="grant" then={null} busy={false} why="Review the account policy" onApprove={approve} onClose={() => undefined} act={guardedAction} startEditing />);
     const edited = (reserve: number, digest: string): EditableGrantDraft => {
       const next = structuredClone(source);
       next.digest = digest.repeat(64);
@@ -339,7 +408,7 @@ describe('grant approval requires the current preview', () => {
       next.diff = [{ field: 'seat-reserve', label: 'claude-a: reserve', before: '40%', after: `${reserve}%`, direction: 'wider' }];
       return next;
     };
-    return { approve, pending, fetchMock, initial, edited, refresh: (next: EditableGrantDraft) => { source = next; invalidate(SURFACE_KEYS.authorityDraft); } };
+    return { approve, pending, fetchMock, initial, edited, setBusy: (busy: boolean) => view.rerender(<GrantSheet open intent="grant" then={null} busy={busy} why="Review the account policy" onApprove={approve} onClose={() => undefined} act={guardedAction} startEditing />), refresh: (next: EditableGrantDraft) => { source = next; invalidate(SURFACE_KEYS.authorityDraft); } };
   }
   it('keeps an untouched draft approvable, but a late preview cannot acknowledge newer choices', async () => {
     const h = setup();
@@ -351,6 +420,12 @@ describe('grant approval requires the current preview', () => {
     fireEvent.click(approve); expect(h.approve).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Preview the changes' }));
     await waitFor(() => expect(h.pending).toHaveLength(1));
+    h.setBusy(true);
+    expect(screen.getByRole('status')).toHaveTextContent('Preparing the grant preview…');
+    expect(screen.queryByText(/Mac authentication prompt|three-minute timeout/)).toBeNull();
+    expect(h.fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST').map(([url]) => url)).toEqual(['/api/verse/authority/draft']);
+    expect(h.approve).not.toHaveBeenCalled();
+    h.setBusy(false);
     expect(approve).toBeDisabled();
     fireEvent.change(reserve, { target: { value: '25' } });
     await act(async () => h.pending[0]!(json(h.edited(0, 'b'))));

@@ -81,10 +81,31 @@ exit 2 means invalid arguments. Use the per-tool status for first-run decisions.
 
 See [product names](PHANTOM-BRAND.md) and [first-run guidance](QUICKSTART.md#open-verse).
 
-## Verify a local provisioning plan
 
-The following commands are implemented in this unreleased source change. The
-published 3.29.4 package still provides inventory only.
+## Register an already installed MCP server
+
+`phm mcp ecosystem` inspects existing Secrets and Locus MCP executable paths
+and their registration entries. Detection does not execute, download or start
+those servers. It requires a regular executable with a native binary header,
+ignores relative PATH directories and deduplicates symlinks to the same physical
+file. Multiple distinct candidates or unsupported/bootstrap launchers are
+reported separately and skipped. This header check does not verify an artifact's
+signature, its MCP protocol or its account/session readiness.
+
+After selecting one trusted native executable through PATH, use the existing
+`phm mcp ecosystem --write` command to register it. New entries keep the selected
+absolute physical command path, rather than relying on a later PATH lookup.
+Existing complete entries stay configured; incomplete Locus entries use the
+existing identity-environment repair. Unreadable, empty or malformed existing settings are refused before
+writing, so repair the file first. Valid unrelated keys and server entries are
+preserved. Registration alone does not initialize a vault or prove a handshake.
+
+Default registration does not add Lexicon globally. Use the explicit project and
+client setup below for its stdio MCP server. The desktop's native voice service
+has separate configuration and trust requirements; neither service is started
+by companion inventory.
+
+## Verify a local provisioning plan
 
 An operator can review an expanded local artifact file set against an
 independently verified manifest SHA256 before planning installation:
@@ -120,8 +141,8 @@ separate qualification steps.
 
 ## Install verified local files explicitly
 
-This installer is implemented in the unreleased source change. It does not
-download companions or run a package manager. Review an expanded local file set,
+The installer uses supplied local files without downloading companions or running
+a package manager. Review an expanded local file set,
 its independent complete manifest digest, the target root and an existing Python
 runtime before authorizing this filesystem mutation:
 

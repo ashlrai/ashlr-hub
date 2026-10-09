@@ -62,7 +62,8 @@ export interface CompanionInventoryOptions {
   binaries?: Partial<Record<CompanionId, string>>;
 }
 
-function candidatePaths(binary: string, directories: string[], explicit?: string): string[] {
+/** Physical executable discovery only; never launches a candidate. */
+export function companionExecutableCandidates(binary: string, directories: string[], explicit?: string): string[] {
   const paths = explicit !== undefined ? [explicit] : directories.flatMap(directory =>
     process.platform === 'win32' ? [join(directory, `${binary}.exe`), join(directory, `${binary}.cmd`)] : [join(directory, binary)]);
   const unique = new Set<string>();
@@ -77,7 +78,7 @@ function candidatePaths(binary: string, directories: string[], explicit?: string
 }
 
 /** Legacy npm bootstrap launchers install/download even for --version; do not execute them. */
-function executableKind(path: string): 'native' | 'script' | 'bootstrap' | 'unknown' {
+export function companionExecutableKind(path: string): 'native' | 'script' | 'bootstrap' | 'unknown' {
   if (/\.(?:cmd|bat)$/iu.test(path)) return 'bootstrap';
   let descriptor: number | undefined;
   try {
@@ -139,7 +140,7 @@ async function inspect(release: CompanionRelease, paths: string[], root: string,
     info.guidance = `Multiple ${release.binary} executables found; select one absolute path with --${release.id}-bin.`;
     return info;
   }
-  const kind = executableKind(paths[0]!);
+  const kind = companionExecutableKind(paths[0]!);
   // Native-only for Secrets/Locus. The synthetic check is an internal fixture
   // seam and cannot override known bootstrap refusal; CLI callers never pass it.
   const native = kind === 'native' || (kind === 'script' && syntheticNativeCheck?.(paths[0]!) === true);
@@ -194,7 +195,7 @@ export async function inventoryCompanions(options: CompanionInventoryOptions = {
   try {
     const env = probeEnvironment(root);
     const companions = await Promise.all(COMPANION_RELEASES.map(release =>
-      inspect(release, candidatePaths(release.binary, directories, options.binaries?.[release.id]), root, env, syntheticNativeCheck)));
+      inspect(release, companionExecutableCandidates(release.binary, directories, options.binaries?.[release.id]), root, env, syntheticNativeCheck)));
     return { schemaVersion: 1, bundled: false, probe: 'version-help-only', companions };
   } finally {
     rmSync(root, { recursive: true, force: true });

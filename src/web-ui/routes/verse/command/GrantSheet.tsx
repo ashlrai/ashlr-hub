@@ -26,7 +26,7 @@ import { authorityDraftQuery, authorityEliteDraftQuery, type OptionalRead } from
 import { SWITCH_LABEL } from './authority-model.js';
 import { CardNote, MicroLabel } from './Surface.js';
 import type { AutonomySwitch } from '../../../../core/authority/types.js';
-import type { SurfaceActions } from './actions.js';
+import { ActionStatus, type SurfaceActions } from './actions.js';
 import { GrantDiff, GrantScopeEditor, postGrantDraft, type EditableGrantDraft } from './GrantScopeEditor.js';
 import { setVerseResourcesOpen, setVerseSection } from '../verse-ui-store.js';
 import styles from './command.module.css';
@@ -39,6 +39,8 @@ export interface GrantSheetProps {
   /** The switch position the operator asked for (applied after the grant, if it allows it). */
   then: AutonomySwitch | null;
   busy: boolean;
+  /** Existing guarded-action feedback, also visible inside the open dialog. */
+  actionStatus?: Pick<SurfaceActions, 'error' | 'clearError' | 'readOnly'>;
   /** Why the sheet opened, in one sentence ("Autonomous needs a new grant."). */
   why: string;
   onApprove: (draft: AuthorityGrantDraft) => void;
@@ -203,15 +205,15 @@ export function DraftScope({ draft }: { draft: AuthorityGrantDraft }) {
   );
 }
 
-export function GrantSheet({ open, intent, then, busy, why, onApprove, onClose, act, startEditing }: GrantSheetProps) {
+export function GrantSheet({ open, intent, then, busy, actionStatus, why, onApprove, onClose, act, startEditing }: GrantSheetProps) {
   const titleId = useId();
   // Only read the draft while the sheet is open: drafting is cheap on the
   // server, but a draft read while the sheet is closed would be stale by the
   // time anyone approved it.
-  return open ? <GrantSheetBody titleId={titleId} intent={intent} then={then} busy={busy} why={why} onApprove={onApprove} onClose={onClose} {...(act ? { act } : {})} startEditing={startEditing === true} /> : null;
+  return open ? <GrantSheetBody titleId={titleId} intent={intent} then={then} busy={busy} actionStatus={actionStatus} why={why} onApprove={onApprove} onClose={onClose} {...(act ? { act } : {})} startEditing={startEditing === true} /> : null;
 }
 
-function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose, act, startEditing }: Omit<GrantSheetProps, 'open'> & { titleId: string }) {
+function GrantSheetBody({ titleId, intent, then, busy, actionStatus, why, onApprove, onClose, act, startEditing }: Omit<GrantSheetProps, 'open'> & { titleId: string }) {
   const [elite, setElite] = useState(false);
   const eliteHintId = useId();
   const read = useQuery(elite ? authorityEliteDraftQuery : authorityDraftQuery, { freshMs: 0 });
@@ -304,13 +306,15 @@ function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose, 
       description={why}
       footer={
         <div className={styles.sheetFooter}>
-          <p className={styles.sheetFootnote}>
-            Touch ID appears on this Mac. Lowering authority — Off, Stop, Revoke — never needs it.
-            {then ? ` After approval the switch moves to ${SWITCH_LABEL[then]}.` : ''}
+          <p className={styles.sheetFootnote} role={busy || previewing ? 'status' : undefined}>
+            {previewing ? 'Preparing the grant preview…' : busy ? 'Waiting for the result. Complete any Mac authentication prompt; signing has a three-minute timeout. Closing this dialog does not cancel approval.' : <>
+              Touch ID appears on this Mac. Lowering authority — Off, Stop, Revoke — never needs it.
+              {then ? ` After approval the switch moves to ${SWITCH_LABEL[then]}.` : ''}
+            </>}
           </p>
           <span className={styles.sheetButtons}>
             <Button variant="ghost" onClick={onClose}>
-              Cancel
+              {busy ? 'Close dialog' : 'Cancel'}
             </Button>
             <Button variant="primary" icon={<IconLock />} disabled={!draft || !draftMatchesChoice || scopeDirty || previewing} busy={busy} onClick={() => draft && onApprove(draft)}>
               Approve with Touch ID
@@ -319,6 +323,7 @@ function GrantSheetBody({ titleId, intent, then, busy, why, onApprove, onClose, 
         </div>
       }
     >
+      {actionStatus ? <ActionStatus actions={actionStatus} /> : null}
       <label className={styles.eliteToggle}>
         <input type="checkbox" checked={elite || fixedElite} disabled={previewing || busy || fixedElite} onChange={(e) => { setElite(e.target.checked); resetEditor(); }} aria-describedby={eliteHintId} />
         Elite direct

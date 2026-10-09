@@ -4,6 +4,30 @@ import type { OptionalRead } from '../usage/usage-queries.js';
 
 const UNAVAILABLE = 'Usage collection status is unavailable.';
 
+/** Only source-defined reasons become copy; raw diagnostics may contain private data. */
+function reasonNotice(reason: string | null): string | null {
+  switch (reason) {
+    case 'collector-unavailable':
+      return 'Usage collection is unavailable. Readings may be historical.';
+    case 'collector-start-failed':
+      return 'Usage collection could not start. Readings may be historical.';
+    case 'collector-not-running':
+      return 'Usage collection is not running in this app. Readings may be historical.';
+    case 'accounts-pool-unavailable':
+      return 'Account collection setup is unavailable. Readings may be historical.';
+    case 'accounts-collection-not-configured':
+      return 'Usage collection is not configured for these accounts. Readings may be historical.';
+    case 'reconciliation-required':
+      return 'Earlier usage collection needs review before it can restart. Readings may be historical.';
+    case 'cleanup-unconfirmed':
+      return 'Previous usage collection could not be confirmed stopped. Readings may be historical.';
+    case 'cancelled':
+      return 'Usage collection was cancelled. Readings may be historical.';
+    default:
+      return null;
+  }
+}
+
 /** Collection ownership is separate from account sign-in, quota and Fleet authority. */
 export function collectionNotice(read: QueryEntry<OptionalRead>): string | null {
   if (read.error !== undefined || read.status === 'error') {
@@ -30,9 +54,9 @@ export function collectionNotice(read: QueryEntry<OptionalRead>): string | null 
   } else if (mode === 'read-only' && state === 'suspended' && owner === 'none' && reasonCode === 'connection-polling-paused') {
     text = 'Usage collection is paused while idle.';
   } else if (state === 'blocked' || mode === 'read-only' || mode === 'owned' && reasonCode !== null) {
-    text = 'Usage collection is held. Readings may be historical; Chat sign-in and Fleet permission are separate.';
+    text = reasonNotice(reasonCode) ?? 'Usage collection is held. Readings may be historical; Chat sign-in and Fleet permission are separate.';
   } else if (mode === 'unconfigured' || state === 'stopped') {
-    text = 'Native usage collection is unavailable. Last readings may still be shown.';
+    text = reasonNotice(reasonCode) ?? 'Native usage collection is unavailable. Last readings may still be shown.';
   } else if (state === 'suspended') {
     text = 'Usage collection is paused while idle.';
   } else {

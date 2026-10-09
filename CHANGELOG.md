@@ -9,7 +9,29 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.29.4] — Unreleased
+## [3.29.5] — Unreleased
+
+### Added
+
+- Preview affected test modules from immutable Git inputs with an offline,
+  advisory command. The preview does not execute tests or replace release checks.
+
+### Fixed
+
+- Keep Fleet background-refresh indicators in a fixed header position so routine
+  polling does not insert a row and move the page.
+- Show signing progress and errors inside the grant dialog. Distinguish previews
+  from Mac authentication and explain that closing does not cancel approval.
+- Preserve unrelated MCP settings, refuse malformed configuration before writing,
+  and pin discovered companion commands to their physical executable paths.
+- Distinguish installed model context from the runtime serving a task, and explain
+  usage-collection holds without exposing internal identifiers.
+- Clarify that Grok Bot account, allowance and reset evidence is independent of
+  Grok Build. Configuration alone does not prove a supported invocation or balance.
+- Keep version documentation accurate after publication and synchronize source
+  identity across the CLI, desktop app and installation documentation.
+
+## [3.29.4] — 2026-10-09
 
 ### Changed
 

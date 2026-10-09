@@ -25,7 +25,7 @@ function SetupHelp({ provider }: { provider: ProactiveProvider }) {
       : provider === 'meta-muse' ? 'A supported personal-Muse connection has not been verified. Meta Model API funding does not connect your personal Muse.'
         : 'Record your existing agent identity. A supported account connection and result path are needed before Phantom can send work.';
   return <div className={styles.setup}><p>{guidance}</p>{link ? <a href={link.href} target="_blank" rel="noopener noreferrer">{link.label} ↗</a> : null}
-    {provider === 'grok-bot' ? <p>Grok Bot has its own weekly allowance on your Cursor account, separate from Grok Build. Its balance, reset and on-demand billing must be verified separately. <a href="https://cursor.com/help/grok-bot/plans" target="_blank" rel="noopener noreferrer">Bot usage and billing ↗</a></p> : null}
+    {provider === 'grok-bot' ? <p>Grok Bot's weekly allowance is separate from Grok Build's consumer allowance. Verify its billing account, balance, reset and on-demand billing separately. Cursor and SuperGrok eligibility does not identify the account behind this meter. <a href="https://cursor.com/help/grok-bot/plans" target="_blank" rel="noopener noreferrer">Bot usage and billing ↗</a></p> : null}
   </div>;
 }
 type Draft = Required<Pick<ProactiveProfileInput, 'identity' | 'displayName' | 'avatar' | 'responsibility' | 'computer' | 'services' | 'enabled'>> & { fundingKind: 'unknown' | 'subscription' | 'promotional-api'; poolId: string };

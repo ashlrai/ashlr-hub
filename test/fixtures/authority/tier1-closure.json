@@ -219,6 +219,7 @@
     "src/core/comms/director.ts",
     "src/core/comms/events.ts",
     "src/core/comms/requests.ts",
+    "src/core/companion-inventory.ts",
     "src/core/config.ts",
     "src/core/context/task-temporal-context.ts",
     "src/core/daemon/activation-permit.ts",

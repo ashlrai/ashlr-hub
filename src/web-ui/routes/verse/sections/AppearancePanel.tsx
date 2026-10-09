@@ -326,7 +326,7 @@ export function AppearancePanel({ appearance, onChange, onReset }: AppearancePan
             <StatusBadge status="running" />
             <Tag engine="claude">Claude Max</Tag>
             <Tag engine="local" mono>
-              qwen3-coder
+              Local model
             </Tag>
           </div>
           <Meter value={18_420} max={66_000} label="Context" />

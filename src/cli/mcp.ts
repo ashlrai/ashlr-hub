@@ -22,6 +22,7 @@ import type { McpRegistry, McpServerSpec, McpServerHealth } from '../core/types.
 import { locusServerSpec } from '../core/integrations/locus.js';
 import { lexiconServerSpec, pathWithinProject } from '../core/integrations/lexicon-mcp.js';
 import { discoverCompanionProjectMcp } from '../core/integrations/companion-project-mcp.js';
+import { companionExecutableCandidates, companionExecutableKind } from '../core/companion-inventory.js';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers
@@ -636,20 +637,6 @@ export function buildEcosystemMcpEntry(srv: EcosystemMcpEntry): {
   };
 }
 
-/** Resolve a binary's full path from PATH; returns undefined if not found. */
-function resolveInPath(bin: string): string | undefined {
-  // Honour injected PATH (tests) or fall back to process.env.PATH.
-  const pathDirs = (process.env['PATH'] ?? '').split(delimiter).filter(isAbsolute);
-  for (const dir of pathDirs) {
-    const candidate = resolve(dir, bin);
-    try {
-      accessSync(candidate, constants.X_OK);
-      if (statSync(candidate).isFile()) return candidate;
-    } catch { /* not an executable */ }
-  }
-  return undefined;
-}
-
 /** Shape of ~/.ashlr/settings.json for MCP purposes. */
 interface AshlrSettingsShape {
   mcpServers?: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>;
@@ -661,17 +648,36 @@ function ashlrSettingsPath(): string {
   return join(homedir(), '.ashlr', 'settings.json');
 }
 
-/** Load ~/.ashlr/settings.json; returns {} on absence/parse error. */
+function settingsObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+const SETTINGS_REFUSAL = 'Cannot read existing MCP settings safely; repair the file before registration. No settings were changed.';
+
+/** Missing settings permit first setup; unreadable or malformed existing bytes never do. */
 function loadAshlrSettings(settingsPath?: string): AshlrSettingsShape {
   const p = settingsPath ?? ashlrSettingsPath();
-  if (!existsSync(p)) return {};
-  const raw = readFileSync(p, 'utf8').trim();
-  if (!raw) return {};
-  try {
-    return JSON.parse(raw) as AshlrSettingsShape;
-  } catch {
-    return {};
+  try { lstatSync(p); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw new Error(SETTINGS_REFUSAL);
   }
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(p, 'utf8'));
+    if (!settingsObject(parsed)) throw new Error(SETTINGS_REFUSAL);
+    const servers = parsed['mcpServers'];
+    if (servers !== undefined) {
+      if (!settingsObject(servers)) throw new Error(SETTINGS_REFUSAL);
+      for (const entry of Object.values(servers)) {
+        if (!settingsObject(entry)) throw new Error(SETTINGS_REFUSAL);
+        const env = entry['env'];
+        if (env !== undefined && (!settingsObject(env) || Object.values(env).some(value => typeof value !== 'string'))) {
+          throw new Error(SETTINGS_REFUSAL);
+        }
+      }
+    }
+    return parsed as AshlrSettingsShape;
+  } catch { throw new Error(SETTINGS_REFUSAL); }
 }
 
 /**
@@ -690,21 +696,14 @@ export function mergeEcosystemServers(
   let present = false;
   try {
     const metadata = lstatSync(settingsPath);
-    if (!metadata.isFile() || metadata.nlink !== 1) throw new Error('Refusing to replace a non-regular or multiply linked MCP config');
+    if (!metadata.isFile() || metadata.nlink !== 1) throw new Error('Refusing to replace a non-regular or multiply linked MCP config. ' + SETTINGS_REFUSAL);
     present = true;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
   const before = present ? readFileSync(settingsPath, 'utf8') : undefined;
-  // Do not turn a broken or unexpected user config into an empty config on write.
-  let parsed: ConfigFileShape;
-  try { parsed = before?.trim() ? JSON.parse(before) as ConfigFileShape : {}; }
-  catch { throw new ConfigParseError(settingsPath); }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
-      || (parsed.mcpServers !== undefined && (!parsed.mcpServers || typeof parsed.mcpServers !== 'object' || Array.isArray(parsed.mcpServers)))) {
-    throw new Error('MCP config must be an object with an object mcpServers map');
-  }
-  const existing: AshlrSettingsShape = parsed;
+  // Preserve owner validation of every existing server/environment before any write.
+  const existing = loadAshlrSettings(settingsPath);
   const existingServers = existing.mcpServers ?? {};
 
   const added: string[] = [];
@@ -739,6 +738,8 @@ export function mergeEcosystemServers(
   };
 
   if (added.length === 0 && present) return added;
+  // Atomic publication must not expand an existing config's write permissions.
+  if (present) accessSync(settingsPath, constants.W_OK);
 
   const dir = dirname(settingsPath);
   mkdirSync(dir, { recursive: true });
@@ -813,19 +814,31 @@ async function cmdMcpEcosystem(args: string[]): Promise<number> {
   // Detect which ecosystem servers are available in PATH.
   const detected: Array<EcosystemServer & { resolvedBin: string }> = [];
   const missing: EcosystemServer[] = [];
+  const refused: Array<{ server: EcosystemServer; reason: 'ambiguous' | 'unsupported-launcher' }> = [];
+  const directories = (process.env['PATH'] ?? '').split(delimiter).filter(isAbsolute);
 
   for (const srv of ECOSYSTEM_SERVERS.filter(s => !only || s.name === only)) {
-    const resolved = resolveInPath(srv.probe) ?? (srv.name === 'lexicon' ? resolveInPath('lexicon') : undefined);
-    if (resolved) {
-      const cliLaunch = srv.name === 'lexicon' && !resolveInPath(srv.probe);
-      detected.push({ ...srv, command: resolved, args: cliLaunch ? ['mcp'] : srv.args, resolvedBin: resolved });
-    } else {
-      missing.push(srv);
+    let candidates = companionExecutableCandidates(srv.probe, directories);
+    let cliLaunch = false;
+    if (srv.name === 'lexicon' && candidates.length === 0) {
+      candidates = companionExecutableCandidates('lexicon', directories);
+      cliLaunch = true;
+    }
+    if (candidates.length === 0) missing.push(srv);
+    else if (candidates.length > 1) refused.push({ server: srv, reason: 'ambiguous' });
+    else {
+      const kind = companionExecutableKind(candidates[0]!);
+      if (kind !== 'native' && !(srv.name === 'lexicon' && kind === 'script')) {
+        refused.push({ server: srv, reason: 'unsupported-launcher' });
+      } else detected.push({ ...srv, command: candidates[0]!,
+        args: cliLaunch ? ['mcp'] : srv.args, resolvedBin: candidates[0]! });
     }
   }
 
   // Load current settings to check registration state.
-  const currentSettings = loadAshlrSettings(settingsPath);
+  let currentSettings: AshlrSettingsShape;
+  try { currentSettings = loadAshlrSettings(settingsPath); }
+  catch { console.log(red('  ' + SETTINGS_REFUSAL)); return 1; }
   const currentServers = currentSettings.mcpServers ?? {};
 
   // Print detected servers.
@@ -855,6 +868,15 @@ async function cmdMcpEcosystem(args: string[]): Promise<number> {
     console.log(bold('  Not installed (skipped):'));
     for (const srv of missing) {
       console.log('    ' + dim(srv.label) + gray('  — ' + srv.probe + ' not found in PATH'));
+    }
+    console.log('');
+  }
+
+  if (refused.length > 0) {
+    console.log(bold('  Not selected (skipped):'));
+    for (const { server, reason } of refused) {
+      const executable = server.name === 'lexicon' ? 'native or Node' : 'native';
+      console.log('    ' + dim(server.label) + gray(` — ${reason}; choose one installed ${executable} executable through PATH.`));
     }
     console.log('');
   }
@@ -898,8 +920,9 @@ async function cmdMcpEcosystem(args: string[]): Promise<number> {
       })),
       settingsPath,
     );
-  } catch (err) {
-    console.error(red('error: ') + (err instanceof Error ? err.message : String(err)));
+  } catch (error) {
+    console.log(red('  ' + (error instanceof Error && error.message === SETTINGS_REFUSAL
+      ? SETTINGS_REFUSAL : 'MCP registration failed; inspect the settings file before retrying.')));
     return 1;
   }
 
