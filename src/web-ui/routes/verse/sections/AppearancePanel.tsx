@@ -30,6 +30,7 @@ import {
   type UiScale,
 } from '../../../data/appearance-store.js';
 import { ACCENT_PRESETS, isDefaultAppearance, matchingAccentPreset } from '../../../data/appearance-presets.js';
+import { VerseMark } from '../rail-icons.js';
 import { Panel, SettingRow } from './SettingRow.js';
 import styles from './SettingsSection.module.css';
 
@@ -153,33 +154,45 @@ export function AppearancePanel({ appearance, onChange, onReset }: AppearancePan
         labelId={accentLabelId}
         description={
           preset
-            ? `${preset.label} — used for links, focus rings and the one primary action per surface.`
-            : 'Custom hue — used for links, focus rings and the one primary action per surface.'
+            ? `${preset.label} — your ghost, links, focus rings and primary actions follow this accent.`
+            : 'Your ghost, links, focus rings and primary actions follow your custom accent.'
         }
       >
-        <div className={styles.swatches} role="radiogroup" aria-labelledby={accentLabelId}>
-          {ACCENT_PRESETS.map((p) => {
-            const selected = preset?.id === p.id;
-            return (
-              <button
-                key={p.id}
-                type="button"
-                role="radio"
-                aria-checked={selected}
-                aria-label={p.label}
-                tabIndex={selected || (!preset && p.id === ACCENT_PRESETS[0]!.id) ? 0 : -1}
-                className={styles.swatch}
-                style={{ background: accentHex(p.h, p.s, p.l) }}
-                onClick={() => onChange({ accentH: p.h, accentS: p.s, accentL: p.l })}
-              >
-                {selected ? (
-                  <span className={styles.swatchCheck}>
-                    <IconCheck size={12} />
-                  </span>
-                ) : null}
-              </button>
-            );
-          })}
+        <div className={styles.ghostAccent}>
+          <span className={styles.ghostPreview} role="img" aria-label="Phantom ghost preview"><VerseMark size={40} /></span>
+          <div className={styles.swatches} role="radiogroup" aria-labelledby={accentLabelId}>
+            {ACCENT_PRESETS.map((p, index) => {
+              const selected = preset?.id === p.id;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  aria-label={p.label}
+                  tabIndex={selected || (!preset && p.id === ACCENT_PRESETS[0]!.id) ? 0 : -1}
+                  className={styles.swatch}
+                  style={{ background: accentHex(p.h, p.s, p.l) }}
+                  onClick={() => onChange({ accentH: p.h, accentS: p.s, accentL: p.l })}
+                  onKeyDown={(event) => {
+                    const direction = ['ArrowRight', 'ArrowDown'].includes(event.key) ? 1 : ['ArrowLeft', 'ArrowUp'].includes(event.key) ? -1 : 0;
+                    if (!direction && event.key !== 'Home' && event.key !== 'End') return;
+                    event.preventDefault();
+                    const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? ACCENT_PRESETS.length - 1 : (index + direction + ACCENT_PRESETS.length) % ACCENT_PRESETS.length;
+                    const next = ACCENT_PRESETS[nextIndex]!;
+                    onChange({ accentH: next.h, accentS: next.s, accentL: next.l });
+                    event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[nextIndex]?.focus();
+                  }}
+                >
+                  {selected ? (
+                    <span className={styles.swatchCheck}>
+                      <IconCheck size={12} />
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </SettingRow>
 

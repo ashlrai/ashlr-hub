@@ -15,7 +15,7 @@ import { SettingsSection } from './SettingsSection.js';
 import { LIGHT_SURFACE, DARK_SURFACE, accentReadability } from './AppearancePanel.js';
 import { ToastProvider } from '../../../components/primitives/Toast.js';
 import { evictAll } from '../../../data/cache.js';
-import { resetAppearance, getAppearance } from '../../../data/appearance-store.js';
+import { resetAppearance, getAppearance, APPEARANCE_STORAGE_KEY } from '../../../data/appearance-store.js';
 import { ACCENT_PRESETS } from '../../../data/appearance-presets.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { darkScope, lightScope, resolveToken } from '../../../design/token-probe.test-support.js';
@@ -139,6 +139,26 @@ describe('SettingsSection', () => {
 
     expect(root().style.getPropertyValue('--accent-h')).toBe(String(teal.h));
     expect(root().style.getPropertyValue('--accent-s')).toBe(`${teal.s}%`);
+  });
+
+  it('customizes the ghost with saved accent presets by keyboard, without changing theme or motion', async () => {
+    const user = userEvent.setup();
+    renderSettings();
+    expect(screen.getByRole('img', { name: 'Phantom ghost preview' })).toBeInTheDocument();
+    const group = screen.getByRole('radiogroup', { name: 'Accent' });
+    within(group).getByRole('radio', { name: 'Indigo' }).focus();
+    await user.keyboard('{ArrowRight}');
+    expect(within(group).getByRole('radio', { name: 'Blue' })).toHaveFocus();
+    expect(within(group).getByRole('radio', { name: 'Blue' })).toBeChecked();
+    const blue = ACCENT_PRESETS.find((p) => p.id === 'blue')!;
+    expect(root().style.getPropertyValue('--accent-h')).toBe(String(blue.h));
+    expect(JSON.parse(localStorage.getItem(APPEARANCE_STORAGE_KEY)!).accentH).toBe(blue.h);
+    expect(getAppearance().theme).toBe('system');
+    expect(getAppearance().motion).toBe('system');
+    await user.keyboard('{End}');
+    expect(within(group).getByRole('radio', { name: 'Violet' })).toHaveFocus();
+    await user.click(screen.getByRole('button', { name: 'Reset to defaults' }));
+    expect(within(group).getByRole('radio', { name: 'Indigo' })).toBeChecked();
   });
 
   it('switches the display font and the radius scale', async () => {

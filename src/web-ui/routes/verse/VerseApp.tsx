@@ -481,7 +481,7 @@ export function VerseApp() {
         <span className={styles.railDragStrip} data-app-region="drag" aria-hidden="true" />
         <Tooltip label={PRODUCT_NAME} placement="right" disabled={expanded}>
           <span className={styles.mark}>
-            <VerseMark />
+            <VerseMark size={36} />
             <span className="visually-hidden">{PRODUCT_NAME}</span>
           </span>
         </Tooltip>
