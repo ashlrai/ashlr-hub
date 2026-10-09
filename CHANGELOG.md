@@ -9,6 +9,38 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.29.6] — Unreleased
+
+### Added
+
+- Save a compact resource sidebar with one-line account readings. Hover or
+  keyboard focus retains credit balances, resets and connection details;
+  subscription allowances and API credits remain separate.
+- Distinguish reported, estimated, reserved and unknown token totals across run
+  details, usage charts and traces. Keep exact accounting and round display
+  values to two significant figures; routing learns token throughput only from
+  complete reported generation.
+
+### Fixed
+
+- Join overlapping Fleet refresh requests instead of superseding an unfinished
+  read on each polling interval.
+- Publish Node metadata-child process identity before execution so an interrupted
+  collector can recover without guessing whether unregistered work stopped.
+- Use current provider-neutral CLI help and explicit local model tags instead of
+  a stale example model recommendation.
+- Describe notification delivery from the actual delivery method rather than
+  inferring whether the app is unsigned.
+- Record the verified Phantom homepage and separate Secrets route. Website
+  deployment, hosted services and autonomous publisher commissioning remain
+  distinct.
+
+### Changed
+
+- Consolidate current release instructions and retain earlier procedures in a
+  historical archive. Capture buffered CI phase timings after fixture cleanup;
+  all release checks and original test deadlines remain intact.
+
 ## [3.29.5] — 2026-10-09
 
 ### Added
