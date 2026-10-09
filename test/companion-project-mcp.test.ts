@@ -115,11 +115,43 @@ describe('explicit project/client companion consumption', () => {
     const f = fixture();
     const runner = join(f.project, 'gateway.mjs');
     const module = fileURLToPath(new URL('../src/cli/mcp.ts', import.meta.url));
-    writeFileSync(runner, `import { cmdMcp } from ${JSON.stringify(module)};\nprocess.exitCode = await cmdMcp(${JSON.stringify(f.args)});\n`);
+    // Deliberately cold boot for longer than the response deadline: startup must
+    // complete before the SDK starts timing an initialize request.
+    writeFileSync(runner, `import { cmdMcp } from ${JSON.stringify(module)};\nawait new Promise(resolve => setTimeout(resolve, 4500));\nprocess.exitCode = await cmdMcp(${JSON.stringify(f.args)});\n`);
     const transport = new StdioClientTransport({ command: process.execPath,
       args: ['--import', fileURLToPath(new URL('../node_modules/tsx/dist/loader.mjs', import.meta.url)), runner],
       cwd: f.project, env: { HOME: f.project, PATH: join(f.project, 'bin'), ASHLR_NO_HEAL: '1',
         OPENAI_API_KEY: 'synthetic-outer-not-a-credential', LEXICON_TRUST_ALL: '1', NODE_OPTIONS: '' }, stderr: 'pipe' });
+    const start = transport.start.bind(transport);
+    let gatewayPid: number | null = null;
+    transport.start = async () => {
+      // Drain diagnostics before spawn, without printing them. Keep a separate
+      // bounded bootstrap phase; protocol response deadlines below stay 4s.
+      const stream = transport.stderr!;
+      let tail = '';
+      let timer: ReturnType<typeof setTimeout>;
+      let onData: (chunk: Buffer) => void;
+      let onEnd: () => void;
+      const ready = new Promise<void>((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error('Gateway bootstrap readiness timed out')), 20_000);
+        onData = chunk => {
+          tail = (tail + chunk.toString('utf8')).slice(-512);
+          if (tail.includes('[ashlr mcp] gateway ready')) resolve();
+        };
+        onEnd = () => reject(new Error('Gateway exited before bootstrap readiness'));
+        stream.on('data', onData);
+        stream.once('end', onEnd);
+      });
+      // A spawn failure may precede the awaited readiness promise.
+      void ready.catch(() => undefined);
+      try { await start(); gatewayPid = transport.pid; await ready; }
+      finally {
+        clearTimeout(timer!);
+        stream.off('data', onData!);
+        stream.off('end', onEnd!);
+        stream.on('data', () => undefined);
+      }
+    };
     const client = new Client({ name: 'disposable-test', version: '1.0.0' }, { capabilities: {} });
     try {
       await client.connect(transport, { timeout: 4000 });
@@ -129,8 +161,26 @@ describe('explicit project/client companion consumption', () => {
       expect(child.env.OPENAI_API_KEY).toBeUndefined(); expect(child.env.LEXICON_TRUST_ALL).toBeUndefined();
       expect(child.cwd).toBe(f.project); expect(child.env.HOME).toBe(join(f.project, '.phantom', 'lexicon', f.client));
       expect(existsSync(join(f.project, '.phantom'))).toBe(false);
-    } finally { await client.close(); await transport.close(); }
-  }, 15000);
+    } finally {
+      try { await client.close(); }
+      finally { await transport.close(); }
+    }
+    expect(transport.pid).toBeNull();
+    expect(gatewayPid).not.toBeNull();
+    // The SDK clears its PID before teardown finishes. Check the actual process
+    // with signal zero rather than mistaking cleared bookkeeping for exit.
+    const deadline = Date.now() + 2000;
+    let exited = false;
+    while (Date.now() < deadline) {
+      try { process.kill(gatewayPid!, 0); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') { exited = true; break; }
+        throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    expect(exited).toBe(true);
+  }, 35000);
   it('requires an existing Git boundary without creating one or reading parent vocabulary', () => {
     const f = fixture(); rmSync(join(f.project, '.git'), { recursive: true });
     expect(() => discoverCompanionProjectMcp(f.scope)).toThrow('.git marker');
