@@ -59,6 +59,12 @@ public struct GrantStage: Equatable, Sendable {
 }
 
 /// A grant that passed every check, plus the exact bytes that will be signed.
+public struct GrantWebsitePublication: Equatable, Sendable {
+  public let profile: String
+  public let profileDigest: String
+  public let mode: String
+}
+
 public struct ValidatedGrant: Equatable, Sendable {
   public let grantId: String
   public let grantSeq: Int64
@@ -81,6 +87,7 @@ public struct ValidatedGrant: Equatable, Sendable {
   public let engines: [String]
   public let leaderClasses: [String]
   public let vetoMinutes: Int64
+  public let websitePublication: GrantWebsitePublication?
   public let conductorGoals: Bool
   public let stages: [GrantStage]
   /// canonicalizeDaemonActivationValue(payload).
@@ -116,7 +123,7 @@ public enum StandingGrantValidator {
   }
 
   public static func validate(_ value: JSONValue, context: GrantValidationContext) throws -> ValidatedGrant {
-    let top = try exactObject(value, path: "", keys: GrantContract.keysGrant, optional: [])
+    let top = try exactObject(value, path: "", keys: GrantContract.keysGrant, optional: GrantContract.optionalKeysGrant)
 
     let v = try integer(top["v"], path: "v", range: 1...1)
     _ = v
@@ -226,6 +233,14 @@ public enum StandingGrantValidator {
     let leaderClasses = try uniqueEnumList(leader["classes"], path: "leader.classes", allowed: GrantContract.leaderGrantClasses, count: 0...GrantContract.leaderGrantClasses.count)
     let vetoMinutes = try integer(leader["vetoMinutes"], path: "leader.vetoMinutes", range: GrantContract.minVetoMinutes...GrantContract.maxVetoMinutes)
 
+    var websitePublication: GrantWebsitePublication? = nil
+    if let website = top["websitePublication"] {
+      let web = try exactObject(website, path: "websitePublication", keys: GrantContract.keysWebsitePublication, optional: [])
+      websitePublication = GrantWebsitePublication(
+        profile: try oneOf(web["profile"], path: "websitePublication.profile", allowed: ["phantom-public-web"]),
+        profileDigest: try string(web["profileDigest"], path: "websitePublication.profileDigest", pattern: GrantContract.patternSha256Hex),
+        mode: try oneOf(web["mode"], path: "websitePublication.mode", allowed: ["automatic"]))
+    }
     let conductorGoals = try bool(top["conductorGoals"], path: "conductorGoals")
 
     // --- rollout ladder: every stage may only NARROW the grant.
@@ -297,7 +312,7 @@ public enum StandingGrantValidator {
       issuedAtDate: issuedAtDate, expiresAtDate: expiresAtDate, hostBinding: hostBinding,
       authoritySurfaceDigest: surface, repos: repos, maxFiles: maxFiles, maxLines: maxLines, selfRepo: selfRepo, volumePolicy: volumePolicy,
       maxMode: maxMode, meteredUsdPerDay: metered, seats: seats, engines: engines, leaderClasses: leaderClasses,
-      vetoMinutes: vetoMinutes, conductorGoals: conductorGoals, stages: stages, canonical: canonical, digestHex: digest
+      vetoMinutes: vetoMinutes, websitePublication: websitePublication, conductorGoals: conductorGoals, stages: stages, canonical: canonical, digestHex: digest
     )
   }
 

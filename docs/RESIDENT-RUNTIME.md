@@ -326,3 +326,55 @@ line, which is exactly the mismatch the runbook observed.
 3. A resident conductor service. Goals are still advanced by `ashlr loop`
    (foreground). Under a grant with `conductorGoals: true`, that loop now runs
    live.
+
+
+## Automatic public website publication
+
+The host-owned website publisher can keep `phm.dev` current after a normal,
+verified merge in `ashlrai/phantom-secrets`. It has a separate, optional signed
+website scope. An agent can request publication with `ashlr_website_publish`;
+the request contains only the fixed profile and exact merged revision.
+Requests cannot choose credentials, commands, domains or deployment targets.
+
+An operator commissions it once after qualifying the exact private Vercel
+63.1.0 toolchain and an offline Linux x64 builder image:
+
+```sh
+phm website prepare --image sha256:<qualified-image-digest>
+phm website commission --yes
+phm website status
+```
+
+Preparation reads existing native Vercel sign-in and actual project identities,
+settings and every production domain. It performs a real isolated build before
+saving commissioning metadata. No credentials are created, environment secrets
+pulled or provider resources changed by preparation. Missing tools, dependencies,
+identity or build qualification hold publication; there is no Mac-output fallback.
+Commissioning uses the existing custody signing prompt and preserves global Stop.
+This is not a general website-deployment permission or npm/desktop publication scope.
+
+With a valid commissioned grant and resident fleet running, the host notices
+new qualified merges. It builds without credentials or network access, inventories
+every output file, stages production output without moving domains, validates
+`/` and `/secrets`, and promotes that exact deployment. Fresh account, project,
+source, protection, output and complete-alias observations precede provider contact.
+Afterward, every commissioned alias and both public routes must verify before
+the operation is called published.
+
+Use **Website** beside the desktop autonomy controls, or these commands:
+
+```sh
+phm website auto
+phm website pause
+phm website off
+```
+
+Auto/Pause/Off reuse the same valid grant; they do not ask for a signature on
+each deployment. Global Stop, revocation and expired/changed authority continue
+to apply. Local builds share the existing verification admission and Stop/drain
+leases. A sent request with an uncertain provider result is reconciled by reads;
+it is never blindly uploaded or promoted again. Status distinguishes held,
+uncertain and promoted-but-unverified work from a verified public release.
+
+This implementation does not provision its publisher image or sign-in silently.
+Shipping the command alone does not establish commissioning or a live deployment.

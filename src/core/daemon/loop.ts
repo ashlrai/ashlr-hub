@@ -10346,6 +10346,8 @@ async function runDaemonInEnrollmentScope(
           scheduledAgentOsObserver = agentOsObserverSchedule;
         }
         const postTickChildren: Promise<unknown>[] = [];
+        // Single-flight, host-owned publication runs off the daemon tick. Requests cannot install a callback.
+        postTickChildren.push(import('../website/host-release.js').then((publisher) => publisher.scheduleWebsitePublication(shutdown.signal)));
         if (scheduledResolutionObserver?.disposition === 'scheduled' ||
           scheduledResolutionObserver?.disposition === 'overlap-suppressed') {
           postTickChildren.push(scheduledResolutionObserver.completion);

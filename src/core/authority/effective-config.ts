@@ -293,6 +293,7 @@ export function computeEffectivePolicy(input: EffectivePolicyInput): EffectivePo
     engines,
     leader: { classes, vetoMinutes: grant.leader.vetoMinutes },
     conductorGoals: grant.conductorGoals,
+    ...(input.switch === 'autonomous' && grant.websitePublication ? { websitePublication: { ...grant.websitePublication } } : {}),
     computedAt: new Date(input.nowMs).toISOString(),
   };
 }

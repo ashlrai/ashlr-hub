@@ -551,6 +551,8 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'goal "<objective>" --direct',  desc: 'One owner-invoked proposal-only run with bounded --json output; no unattended authority or verification proof.', topic: 'autonomy' },
   { cmd: 'loop',                         desc: 'Dormant non-dry conductor loop: compiled conductor trust roots are empty; use loop --dry-run.', topic: 'autonomy' },
   { cmd: 'conductor-permit request|mint|inspect|stage', desc: 'Dormant signed one-shot goal-conductor permit operator; fail-closed while source trust roots are empty.', topic: 'autonomy' },
+  { cmd: 'website status|auto|pause|off', desc: 'Inspect or pause automatic phm.dev publication; Auto resumes within its existing signed website scope.', topic: 'autonomy' },
+  { cmd: 'website prepare --image <digest>', desc: 'Qualify the fixed website publisher and a real offline Linux x64 production build before one-time commissioning.', topic: 'autonomy' },
   { cmd: 'authority status [--json]',     desc: 'Standing authority: grant state, autonomy switch, Stop, rollout stage, ledger chain and custody (read-only).', topic: 'autonomy' },
   { cmd: 'authority switch <off|propose|autonomous>', desc: 'Lower autonomy instantly; raise it only up to what the signed grant allows (past it needs Touch ID).', topic: 'autonomy' },
   { cmd: 'authority stop|clear-stop',     desc: 'Engage Stop (~/.ashlr/KILL: halts running agents, cancels armed merges) or clear it; stopping never asks, clearing is ledgered first.', topic: 'autonomy' },

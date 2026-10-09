@@ -696,6 +696,11 @@ const loadLocalRuntimeCmd = lazyCmd(
 );
 
 // ─── V3.10 Track B: standing authority, the Leader, fleet mirrors ────────
+const loadWebsiteCmd = lazyCmd(
+  () => import('./website.js'),
+  (m) => m.cmdWebsite as Cmd,
+  'website publication requires the current Phantom host publisher.',
+);
 const loadAuthorityCmd = lazyCmd(
   () => import('./authority.js'),
   (m) => m.runAuthorityCli as Cmd,
@@ -2323,6 +2328,11 @@ async function main(): Promise<void> {
         // launch agent that makes it survive logout and crashes.
         const cmdLocalRuntime = await loadLocalRuntimeCmd();
         process.exitCode = await cmdLocalRuntime(rest);
+        break;
+      }
+
+      case 'website': {
+        process.exitCode = await (await loadWebsiteCmd())(rest);
         break;
       }
 

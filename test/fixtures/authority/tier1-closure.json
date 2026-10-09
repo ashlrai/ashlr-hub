@@ -6,6 +6,7 @@
     "src/cli/desktop-update.ts",
     "src/cli/maintainer-verify.ts",
     "src/cli/release-articles.ts",
+    "src/cli/website.ts",
     "src/core/authority/canonical-json.ts",
     "src/core/authority/capability.ts",
     "src/core/authority/clamp.ts",
@@ -136,7 +137,9 @@
     "src/core/vision/leader-outcomes.ts",
     "src/core/vision/leader-preferences.ts",
     "src/core/vision/leader-seat.ts",
-    "src/core/vision/leader.ts"
+    "src/core/vision/leader.ts",
+    "src/core/website/host-adapter.ts",
+    "src/core/website/host-release.ts"
   ],
   "closure": [
     "scripts/evaluators/preparation-verification-activity.mjs",
@@ -151,6 +154,7 @@
     "src/cli/ui.ts",
     "src/cli/verify-safety-sources.ts",
     "src/cli/verify-safety.ts",
+    "src/cli/website.ts",
     "src/core/authority/canonical-json.ts",
     "src/core/authority/capability.ts",
     "src/core/authority/clamp.ts",
@@ -918,6 +922,8 @@
     "src/core/web/read-projections.ts",
     "src/core/web/run-stream.ts",
     "src/core/web/visibility.ts",
+    "src/core/website/host-adapter.ts",
+    "src/core/website/host-release.ts",
     "src/planning/triviality.ts"
   ]
 }

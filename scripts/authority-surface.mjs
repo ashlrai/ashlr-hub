@@ -71,6 +71,8 @@ import { fileURLToPath } from 'node:url';
  */
 export const AUTHORITY_SURFACE_ROOTS = Object.freeze([
   'dist/core/authority/',
+  'dist/core/website/',
+  'dist/cli/website.js',
   // Signed installation and its trust anchors change the admitted runtime.
   'dist/core/desktop/',
   'dist/cli/desktop-update.js',

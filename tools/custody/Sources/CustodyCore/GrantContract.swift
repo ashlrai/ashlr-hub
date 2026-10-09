@@ -51,7 +51,8 @@ public enum GrantContract {
 
   // --- STANDING_GRANT_KEYS (exact key set per object level) ---------------
   public static let keysEnvelope = ["payload", "signature"]
-  public static let keysGrant = ["v", "grantId", "grantSeq", "keyId", "issuedAt", "expiresAt", "hostBinding", "authoritySurfaceDigest", "repos", "merge", "spend", "engines", "leader", "conductorGoals", "rollout"]
+  public static let keysGrant = ["v", "grantId", "grantSeq", "keyId", "issuedAt", "expiresAt", "hostBinding", "authoritySurfaceDigest", "repos", "merge", "spend", "engines", "leader", "conductorGoals", "rollout", "websitePublication"]
+  public static let keysWebsitePublication = ["profile", "profileDigest", "mode"]
   public static let keysRepo = ["nameWithOwner", "stage", "enforcement", "maxRisk", "maxMergesPerDay"]
   public static let keysMerge = ["maxFiles", "maxLines", "selfRepo", "volumePolicy"]
   public static let keysSpend = ["maxMode", "meteredUsdPerDay", "seats"]
@@ -62,6 +63,7 @@ public enum GrantContract {
   public static let keysStageRepo = ["nameWithOwner", "stage"]
   public static let keysCriteria = ["minMerges", "minPostMergeGreenPct", "maxRevertRatePct", "minHours", "maxSandboxViolations", "reserveBreaches"]
   // STANDING_GRANT_OPTIONAL_KEYS
+  public static let optionalKeysGrant = ["websitePublication"]
   public static let optionalKeysMerge = ["volumePolicy"]
   public static let optionalKeysSeat = ["maxSessionWindowPercent"]
 
