@@ -4,16 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { executeResourceWorker } from '../src/core/resources/worker.js';
+import * as resourceWorker from '../src/core/resources/worker.js';
 import { resourcePoolStatus, runResourceTask, type ResourceTask } from '../src/core/resources/pool-runtime.js';
 import { buildResourcePerformance } from '../src/core/resources/performance.js';
 import type { ResourceObservation, ResourcePool } from '../src/core/resources/pool-policy.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
 
-vi.mock('../src/core/resources/worker.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/core/resources/worker.js')>();
-  return { ...actual, executeResourceWorker: vi.fn() };
-});
 let scratch: string; let root: string; let cwd: string; let clock: number;
 const pool: ResourcePool = { schemaVersion: 1, id: 'pool', workers: [{ id: 'local', provider: 'local', model: 'fixture',
   maxConcurrent: 1, reservePercent: 10, maxTasksPerWindow: 10, taskWindowMs: 60_000, priority: 1 }] };
@@ -32,7 +28,9 @@ beforeEach(() => {
   scratch = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-resource-measurement-')));
   root = join(scratch, 'ledger'); cwd = join(scratch, 'workspace'); mkdirSync(cwd, { mode: 0o700 });
   clock = 100; vi.spyOn(performance, 'now').mockImplementation(() => clock);
-  vi.mocked(executeResourceWorker).mockReset().mockImplementation(async () => {
+  // Install the spy after module initialization: importing the real worker in a
+  // partial mock traverses role-account back to pool-runtime and can retain the real transport.
+  vi.spyOn(resourceWorker, 'executeResourceWorker').mockImplementation(async () => {
     clock += 25.5;
     return { status: 'completed', output: 'private result', inputTokens: 10, outputTokens: 2,
       usageScope: 'local-chat-completion', reason: 'worker-completed' };
@@ -47,14 +45,14 @@ describe.skipIf(process.platform === 'win32')('durable worker execution measurem
     const bytes = readFileSync(join(root, 'pool-state.json'), 'utf8');
     clock = 9000; const second = await run([]);
     expect(second).toMatchObject({ replayed: true, output: null, receipt: first.receipt });
-    expect(executeResourceWorker).toHaveBeenCalledTimes(1);
+    expect(resourceWorker.executeResourceWorker).toHaveBeenCalledTimes(1);
     expect(readFileSync(join(root, 'pool-state.json'), 'utf8')).toBe(bytes);
     expect(bytes).not.toMatch(/private task|private result/);
   });
 
   it('does not place a completed timing measurement on a pending reservation', async () => {
     let release!: () => void;
-    vi.mocked(executeResourceWorker).mockImplementation(async () => {
+    vi.mocked(resourceWorker.executeResourceWorker).mockImplementation(async () => {
       await new Promise<void>((resolve) => { release = resolve; }); clock += 10;
       return { status: 'completed', output: 'result', inputTokens: null, outputTokens: null, reason: 'worker-completed' };
     });
@@ -66,7 +64,7 @@ describe.skipIf(process.platform === 'win32')('durable worker execution measurem
   });
 
   it('does not fabricate duration after a backwards monotonic sample', async () => {
-    vi.mocked(executeResourceWorker).mockImplementation(async () => {
+    vi.mocked(resourceWorker.executeResourceWorker).mockImplementation(async () => {
       clock = 50;
       return { status: 'completed', output: 'result', inputTokens: 0, outputTokens: 0, reason: 'worker-completed' };
     });
@@ -84,11 +82,11 @@ describe.skipIf(process.platform === 'win32')('durable worker execution measurem
     expect(report.workers[0]?.usage.scopes).toEqual([{ scope: null, attempts: 1, reportedAttempts: 1 }]);
     expect(report.workers[0]?.durations[0]).toMatchObject({ status: 'completed', samples: 0, unknownAttempts: 1 });
     expect((await run([])).replayed).toBe(true);
-    expect(executeResourceWorker).toHaveBeenCalledTimes(1); expect(readFileSync(file, 'utf8')).toBe(before);
+    expect(resourceWorker.executeResourceWorker).toHaveBeenCalledTimes(1); expect(readFileSync(file, 'utf8')).toBe(before);
   });
 
   it.each(['failed', 'timed-out', 'cancelled', 'uncertain'] as const)('retains observed timing for %s separately from successful work', async (statusValue) => {
-    vi.mocked(executeResourceWorker).mockImplementation(async () => {
+    vi.mocked(resourceWorker.executeResourceWorker).mockImplementation(async () => {
       clock += 20; return { status: statusValue, output: '', inputTokens: 4, outputTokens: 1,
         usageScope: 'local-chat-completion', reason: 'worker-stopped' };
     });
@@ -108,6 +106,6 @@ describe.skipIf(process.platform === 'win32')('durable worker execution measurem
     if (kind === 'missing-field') delete receipt.execution.scope;
     if (kind === 'unknown-usage-scope') receipt.execution.usageScope = 'estimate';
     writeFileSync(file, JSON.stringify(ledger), { mode: 0o600 });
-    expect(() => status()).toThrow('invalid'); expect(executeResourceWorker).toHaveBeenCalledTimes(1);
+    expect(() => status()).toThrow('invalid'); expect(resourceWorker.executeResourceWorker).toHaveBeenCalledTimes(1);
   });
 });
