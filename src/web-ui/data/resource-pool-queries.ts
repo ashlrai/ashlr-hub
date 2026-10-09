@@ -121,7 +121,7 @@ function validConnections(value: unknown): boolean {
       ![account.observedAt, account.expiresAt].every((time) => time === null || timestamp(time)) ||
       typeof account.reason !== 'string' || !CONNECTION_REASONS.has(account.reason) ||
       account.onDemandEnabled !== null && typeof account.onDemandEnabled !== 'boolean' ||
-      typeof account.executionSupported !== 'boolean' || account.provider === 'grok' && account.executionSupported ||
+      typeof account.executionSupported !== 'boolean' ||
       !Array.isArray(account.windows) || account.windows.length > 64) return false;
     ids.add(account.id);
     const windows = new Set<string>();

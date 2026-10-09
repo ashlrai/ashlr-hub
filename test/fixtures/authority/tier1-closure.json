@@ -920,6 +920,7 @@
     "src/core/vision/leader-thread-types.ts",
     "src/core/vision/leader-types.ts",
     "src/core/vision/leader.ts",
+    "src/core/vision/local-leader-transport.ts",
     "src/core/vision/mission-graph.ts",
     "src/core/vision/mission-observation-capture.ts",
     "src/core/vision/mission-receipt.ts",

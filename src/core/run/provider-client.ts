@@ -948,6 +948,125 @@ function toOpenAIMessages(
  *
  * Uses only global `fetch` — zero new dependencies.
  */
+function isLoopbackEndpoint(value: string): boolean {
+  try {
+    const url = new URL(value), host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash &&
+      (host === 'localhost' || host === '::1' || /^127\.\d+\.\d+\.\d+$/.test(host));
+  } catch { return false; }
+}
+
+/** One bounded text completion; partial output never triggers a second request. */
+async function strictTextStream(options: {
+  url: string; headers: Record<string, string>; body: string; signal?: AbortSignal;
+  timeoutMs: number; maxResponseBytes: number; maxOutputTokens: number;
+  expectedModel: string; onRequestStart?: () => void;
+}): Promise<ChatResult> {
+  throwIfAborted(options.signal);
+  const controller = new AbortController();
+  const unlink = forwardAbort(options.signal, controller);
+  const timer = setTimeout(() => controller.abort(new Error('Local completion deadline elapsed')), options.timeoutMs);
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  const wait = async <T>(promise: Promise<T>): Promise<T> => {
+    throwIfAborted(controller.signal);
+    let rejectAbort: (() => void) | undefined;
+    try {
+      return await Promise.race([promise, new Promise<never>((_, reject) => {
+        rejectAbort = () => reject(abortReason(controller.signal));
+        controller.signal.addEventListener('abort', rejectAbort, { once: true });
+      })]);
+    } finally { if (rejectAbort) controller.signal.removeEventListener('abort', rejectAbort); }
+  };
+  try {
+    throwIfAborted(controller.signal);
+    options.onRequestStart?.();
+    const response = await wait(fetch(options.url, { method: 'POST', headers: options.headers,
+      body: options.body, redirect: 'error', signal: controller.signal }));
+    if (!response.ok) throw new Error(`Local completion HTTP ${response.status}`);
+    if (!response.headers.get('content-type')?.toLowerCase().startsWith('text/event-stream') || !response.body) {
+      throw new Error('Local completion stream unavailable');
+    }
+    reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    let bytes = 0, buffer = '', data: string[] = [], content = '', finished = false, done = false;
+    let tokensIn: number | undefined, tokensOut: number | undefined;
+    const frame = () => {
+      if (!data.length) return;
+      const payload = data.join('\n'); data = [];
+      if (done) throw new Error('Local completion has data after terminal frame');
+      if (payload === '[DONE]') {
+        if (!finished) throw new Error('Local completion terminal result missing');
+        done = true; return;
+      }
+      let value: unknown;
+      try { value = JSON.parse(payload); } catch { throw new Error('Local completion JSON frame invalid'); }
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Local completion frame invalid');
+      const chunk = value as Record<string, unknown>;
+      if (chunk['error'] !== undefined || chunk['model'] !== options.expectedModel || !Array.isArray(chunk['choices'])) {
+        throw new Error('Local completion frame identity invalid');
+      }
+      if (chunk['usage'] !== undefined && chunk['usage'] !== null) {
+        const usage = chunk['usage'];
+        if (typeof usage !== 'object' || Array.isArray(usage)) throw new Error('Local completion usage invalid');
+        const reported = usage as Record<string, unknown>;
+        for (const key of ['prompt_tokens', 'completion_tokens']) {
+          if (reported[key] !== undefined && authoritativeTokenCount(reported[key]) === undefined) throw new Error('Local completion usage invalid');
+        }
+        tokensIn = authoritativeTokenCount(reported['prompt_tokens']) ?? tokensIn;
+        tokensOut = authoritativeTokenCount(reported['completion_tokens']) ?? tokensOut;
+        if (tokensOut !== undefined && tokensOut > options.maxOutputTokens) throw new Error('Local completion output limit exceeded');
+      }
+      if (chunk['choices'].length === 0) {
+        if (!finished || !chunk['usage']) throw new Error('Local completion empty choice');
+        return;
+      }
+      if (finished || chunk['choices'].length !== 1) throw new Error('Local completion choice invalid');
+      const choice = chunk['choices'][0] as Record<string, unknown> | null;
+      if (!choice || typeof choice !== 'object' || choice['index'] !== 0 || !choice['delta'] || typeof choice['delta'] !== 'object' || Array.isArray(choice['delta'])) {
+        throw new Error('Local completion delta invalid');
+      }
+      const delta = choice['delta'] as Record<string, unknown>;
+      if (delta['tool_calls'] !== undefined && delta['tool_calls'] !== null || delta['function_call'] !== undefined ||
+        delta['refusal'] !== undefined && delta['refusal'] !== null ||
+        delta['role'] !== undefined && delta['role'] !== 'assistant' ||
+        delta['content'] !== undefined && delta['content'] !== null && typeof delta['content'] !== 'string') {
+        throw new Error('Local completion is not a text completion');
+      }
+      if (typeof delta['content'] === 'string') content += delta['content'];
+      const finish = choice['finish_reason'];
+      if (finish !== undefined && finish !== null) {
+        if (finish !== 'stop') throw new Error('Local completion was not completed');
+        finished = true;
+      }
+    };
+    const lines = () => {
+      let index: number;
+      while ((index = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, index).replace(/\r$/, ''); buffer = buffer.slice(index + 1);
+        if (line === '') frame();
+        else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+        else if (!line.startsWith(':') && !line.startsWith('event:')) throw new Error('Local completion SSE field invalid');
+      }
+    };
+    while (true) {
+      const part = await wait(reader.read());
+      if (part.done) break;
+      bytes += part.value.byteLength;
+      if (bytes > options.maxResponseBytes) throw new Error('Local completion response exceeds byte limit');
+      buffer += decoder.decode(part.value, { stream: true }); lines();
+    }
+    buffer += decoder.decode(); lines();
+    if (buffer.trim() || data.length || !done || !finished || !content.trim()) throw new Error('Local completion terminal evidence incomplete');
+    throwIfAborted(controller.signal);
+    return { content, usage: { tokensIn: tokensIn ?? 0, tokensOut: tokensOut ?? 0 },
+      usageKnown: tokensIn !== undefined && tokensOut !== undefined };
+  } finally {
+    controller.abort(); clearTimeout(timer); unlink();
+    try { void reader?.cancel().catch(() => {}); } catch { /* Cleanup cannot extend the original deadline. */ }
+    try { reader?.releaseLock(); } catch { /* Already released. */ }
+  }
+}
+
 export function buildOpenAICompatibleClient(
   baseUrl: string,
   apiKey: string,
@@ -956,6 +1075,8 @@ export function buildOpenAICompatibleClient(
   temperature?: number,
   signal?: AbortSignal,
   transport?: {
+    /** Qualified text-only local completion: strict SSE, exact model, no replay. */
+    strictStreaming?: { expectedModel: string };
     redirect?: 'follow' | 'error' | 'manual';
     timeoutMs?: number;
     maxRequestBytes?: number;
@@ -965,7 +1086,8 @@ export function buildOpenAICompatibleClient(
      * `top_p` / top-level `reasoning_effort` for every request — how an
      * adopted harness's local-lane sampling and effort reach the wire
      * (run/harness-dispatch.ts). Absent = the provider's default, byte-identical
-     * request. Only chat() reads them: a transport-bound client never streams.
+     * request. chat() reads these fields; ordinary transport-bound streams
+     * delegate there. Strict text-only local completion is a separate opt-in.
      */
     topP?: number;
     reasoningEffort?: string;
@@ -1165,6 +1287,21 @@ export function buildOpenAICompatibleClient(
     ): Promise<ChatResult> {
       const requestSignal = callSignal ?? signal;
       const maxOutputTokens = hardOutputTokenLimit(limits, transport?.maxOutputTokens);
+      if (transport?.strictStreaming) {
+        if (apiKey || !isLoopbackEndpoint(baseUrl) || transport.redirect !== 'error' || tools?.length ||
+          !maxOutputTokens || !Number.isSafeInteger(transport.timeoutMs) || Number(transport.timeoutMs) <= 0 ||
+          !Number.isSafeInteger(transport.maxRequestBytes) || Number(transport.maxRequestBytes) <= 0 ||
+          !Number.isSafeInteger(transport.maxResponseBytes) || Number(transport.maxResponseBytes) <= 0 ||
+          !transport.strictStreaming.expectedModel || transport.strictStreaming.expectedModel !== model) throw new Error('Strict local completion transport invalid');
+        const body = JSON.stringify({ model, messages: toOpenAIMessages(messages), stream: true,
+          max_tokens: maxOutputTokens, stream_options: { include_usage: true },
+          ...(temperature !== undefined ? { temperature } : {}) });
+        if (Buffer.byteLength(body) > Number(transport.maxRequestBytes)) throw new Error('OpenAI-compat request exceeds byte limit');
+        const result = await strictTextStream({ url: chatUrl, headers: buildHeaders(), body, signal: requestSignal,
+          timeoutMs: Number(transport.timeoutMs), maxResponseBytes: Number(transport.maxResponseBytes), maxOutputTokens,
+          expectedModel: transport.strictStreaming.expectedModel, onRequestStart: transport.onRequestStart });
+        onDelta(result.content); return result;
+      }
       // A transport-bound client is an authority boundary, not a streaming
       // preference. Reuse chat() so redirects, request/response/output caps,
       // timeout, and provider-contact accounting cannot diverge in the path

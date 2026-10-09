@@ -249,16 +249,30 @@ describe('native metadata monitoring', () => {
     const handle = start({ config: value }); await settle();
     expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'unavailable', reason: 'usage-account-changed', windows: [] });
   });
-  it('projects provider-specific evidence without inventing Claude quota or Grok task support', async () => {
+  it('projects available adapters separately from provider-specific quota and task readiness', async () => {
     const handle = start(); await settle(); const snapshot = handle.snapshot();
     expect(snapshot.refreshing).toBe(false);
     expect(snapshot.accounts[0]).toMatchObject({ authentication: 'signed-in', health: 'reachable', windows: quota(), executionSupported: true });
     expect(snapshot.accounts[1]).toMatchObject({ authentication: 'signed-in', health: 'unknown', windows: [], planType: 'max' });
-    expect(snapshot.accounts[2]).toMatchObject({ authentication: 'signed-in', health: 'reachable', executionSupported: false,
+    expect(snapshot.accounts[2]).toMatchObject({ authentication: 'signed-in', health: 'reachable', executionSupported: true,
       planType: 'SuperGrok Heavy', onDemandEnabled: false });
     const serialized = JSON.stringify(snapshot);
     expect(snapshot.accounts[0]?.accountHint).toBe(HINT); expect(snapshot.accounts[2]?.accountHint).toBe(GROK_HINT);
     expect(serialized).not.toContain('/private/inert-fixture');
+  });
+  it('keeps Grok adapter availability through unchecked, expired and failed account evidence', async () => {
+    const handle = start({ config: config(['grok']) });
+    expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'checking', authentication: 'unknown',
+      executionSupported: true, windows: [], onDemandEnabled: null });
+    await settle();
+    const current = handle.snapshot().accounts[0]!;
+    expect(expireConnectionRow(current, Date.parse(EXPIRES))).toMatchObject({ state: 'unavailable', authentication: 'unknown',
+      executionSupported: true, windows: [], observedAt: null, onDemandEnabled: false });
+    probes.grok.mockResolvedValue({ status: 'failed', reason: 'probe-account-unavailable' });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(handle.snapshot().accounts[0]).toMatchObject({ state: 'unavailable', authentication: 'unknown',
+      executionSupported: true, windows: [], onDemandEnabled: null });
+    expect(probes.grok).toHaveBeenCalledTimes(2);
   });
   it('shows explicit Claude signed-out state', async () => {
     probes.claude.mockResolvedValue(claude(false)); const handle = start({ config: config(['claude']) }); await settle();

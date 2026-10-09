@@ -777,7 +777,9 @@ describe('verse accounts — per-provider derivation', () => {
     expect(record.health).toBe('unknown');
     expect(record.authentication).toBe('unknown');
     expect(record.reason).toBe('connection-not-checked');
-    expect(record.executionSupported).toBe(false);
+    expect(record.executionSupported).toBe(true);
+    expect(record.onDemandEnabled).toBeNull();
+    expect(record.observedAt).toBeNull();
     expect(record.windows).toEqual([]);
   });
 });

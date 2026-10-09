@@ -4,7 +4,7 @@ import { resourceTime } from './CapacityBoard.js';
 import { summarizeAccountUsage } from './account-usage-summary.js';
 import styles from './AccountConnections.module.css';
 
-const PROVIDERS = { codex: 'Codex', claude: 'Claude Code', grok: 'Grok' } as const;
+const PROVIDERS = { codex: 'Codex', claude: 'Claude Code', grok: 'Grok Build' } as const;
 
 function timestamp(value: string | null): number {
   return value === null ? NaN : Date.parse(value);
@@ -107,7 +107,7 @@ function AccountRow({ account, sampledAt, historical, ceiling }: {
     : account.state === 'unavailable' ? 'Check unavailable' : !fresh ? 'Evidence expired or missing'
       : account.provider === 'claude' ? 'Fresh sign-in observation' : 'Fresh observation';
   const provider = PROVIDERS[account.provider];
-  const executionIntegrated = account.provider !== 'grok' && account.executionSupported;
+  const executionIntegrated = account.executionSupported;
   const missingAction = missingQuotaAction(account, current);
   const usageSummary = summarizeAccountUsage(account, { sampledAt, ceilingPercent: ceiling, historical });
 
@@ -128,7 +128,7 @@ function AccountRow({ account, sampledAt, historical, ceiling }: {
         : account.state === 'checking' ? 'A metadata check is in progress; no task is being started.'
           : !current ? 'Current sign-in and connection health are not established.'
             : 'Sign-in metadata is not proof of task readiness.'}</p>
-      {account.provider === 'grok' ? <p>Grok metadata does not enable Phantom execution.</p> : null}
+      {account.provider === 'grok' ? <p>Grok Build execution still requires the selected account, current allowance and billing checks.</p> : null}
       {account.onDemandEnabled !== null ? <p className={account.onDemandEnabled ? styles.warning : undefined}>
         {current ? '' : 'Last reported: '}{account.onDemandEnabled ? 'On-demand billing enabled' : 'On-demand billing disabled'}</p> : null}
       </div>
