@@ -1,14 +1,13 @@
 /**
- * goal-planner.ts — M222: expand a milestone-less active Goal into 3-6
- * concrete, independently-shippable milestones via the FRONTIER strategist.
+ * goal-planner.ts — M222: expand a milestone-less active Goal into
+ * concrete milestones sized and ordered for its objective via the FRONTIER strategist.
  *
  * CONTRACT (paramount):
  *  - NEVER throws: all strategist failures leave the goal unchanged.
  *  - PURE SIDE-EFFECT on the goal store only: no swarm, no PR, no approval.
- *  - Grounded in docs/IMPROVEMENT-BACKLOG.md (the ~60-item opportunity menu)
- *    so milestones are real product work, NOT docs/version bumps.
- *  - Each milestone must be concrete enough for the executor to produce a
- *    value≥4 diff (real capability / real fix — specific file/module/behavior).
+ *  - Grounded in docs/IMPROVEMENT-BACKLOG.md as an opportunity menu.
+ *  - Concrete milestones describe intended outcomes, changes and validation;
+ *    useful documentation, maintenance and delivery work can be included.
  *  - Cached per goal id (in-process Map) so the planner runs at most once per
  *    goal per daemon tick; cleared between ticks by the daemon.
  *  - Flag-gated: cfg.foundry?.goalPlanning !== false (default ON). When
@@ -82,7 +81,7 @@ function readBacklog(repoRoot: string): string {
  *   1. Title — detail
  *   - Title: detail
  *   1) Title\nDetail on next line
- * Returns between 3 and 6 items, or [] on parse failure.
+ * Preserves the complete ordered plan, or [] on parse failure.
  */
 function parseMilestones(
   raw: string,
@@ -100,7 +99,8 @@ function parseMilestones(
     const rest = m[1]!.trim();
 
     // Try "Title — detail" or "Title: detail" on the same line
-    const sepRe = /^(.+?)\s*[—–-]{1,2}\s*(.+)$|^(.+?):\s+(.+)$/;
+    // ASCII hyphens inside names (rate-limiter, cli-to-desktop) are not separators.
+    const sepRe = /^(.+?)\s*(?:[—–]{1,2}|[ \t]+-{1,2}[ \t]+)\s*(.+)$|^(.+?):\s+(.+)$/;
     const sep = sepRe.exec(rest);
     if (sep) {
       const title = (sep[1] ?? sep[3] ?? '').trim();
@@ -123,15 +123,11 @@ function parseMilestones(
     if (rest.length > 3) {
       items.push({
         title: rest,
-        detail: `Implement "${rest}" as a focused, independently-shippable diff.`,
+        detail: `Deliver "${rest}" with a focused change and verify its intended outcome.`,
       });
     }
   }
 
-  // Clamp to 3–6
-  if (items.length < 3 || items.length > 6) {
-    return items.slice(0, 6).length >= 3 ? items.slice(0, 6) : [];
-  }
   return items;
 }
 
@@ -141,8 +137,8 @@ function parseMilestones(
 
 /**
  * For an active Goal with zero milestones, call the FRONTIER strategist to
- * decompose its objective into 3-6 concrete, independently-shippable
- * milestones, and persist them back to the goal store.
+ * decompose its objective into concrete, ordered milestones and persist them
+ * back to the goal store.
  *
  * @param goal     The active, milestone-less Goal to expand.
  * @param cfg      AshlrConfig (used to resolve the frontier client).
@@ -187,26 +183,25 @@ export async function expandGoalToMilestones(
     const backlog = readBacklog(repoRoot);
 
     // M231: inject NORTH-STAR grand vision so milestones are aligned to the
-    // 3 pillars (recursive self-improvement, ecosystem product factory, composition
-    // flywheel) and substantive (value≥4, bound to a repo, not docs/version-bumps).
+    // 3 pillars and useful outcomes, using the same provider-neutral context
+    // as other strategy and execution surfaces.
     const northStarSection = northStarDocSummary();
 
     const systemPrompt = [
       'You are an expert engineering strategist for an autonomous coding fleet.',
-      'Your task is to decompose a high-level objective into 3-6 concrete, independently-shippable milestones.',
+      'Decompose the objective into the concrete milestones it needs; choose their number and scope from the work.',
       '',
       northStarSection
         ? `GRAND VISION GROUNDING — orient milestones toward these pillars:\n${northStarSection}`
         : '',
       '',
-      'RULES (non-negotiable):',
-      '1. Each milestone must be a REAL code change: a new capability, a bug fix, a performance improvement, a test harness, or a refactor.',
-      '2. NO documentation-only milestones. NO version-bump-only milestones. NO "update README" milestones.',
-      '3. Each milestone must be scoped to a single focused diff that a junior engineer could ship in 1-4 hours.',
-      '4. Each milestone must be independently shippable — it does not require another milestone to land first.',
-      '5. Be concrete: name the specific module, function, interface, or behavior being changed.',
-      '6. Each milestone must be substantive (value≥4): a real capability, real fix, or real product improvement — NOT docs/linting/version bumps.',
-      '7. Output ONLY a numbered list (1. Title — detail). No prose before or after.',
+      'PLANNING GUIDANCE:',
+      '1. Prioritize useful outcomes; code, documentation, tests, CI, releases and maintenance can all advance the objective.',
+      '2. Describe the specific files, modules, interfaces or behavior being changed and how success will be verified.',
+      '3. Prefer focused, reviewable changes; let task complexity determine their scope and duration.',
+      '4. Parallelize independent work when useful. When milestones depend on one another, order prerequisites first and describe those dependencies in their details.',
+      '5. Judge the plan by the intended outcome and available evidence, rather than a preset task category or score threshold.',
+      'OUTPUT FORMAT: Only a numbered list (1. Title — detail). No prose before or after.',
       '',
       backlog
         ? `OPPORTUNITY MENU (grounded in the repo's known improvement backlog — prefer items from this list when they match the objective):\n${backlog}`
@@ -216,7 +211,7 @@ export async function expandGoalToMilestones(
       .join('\n');
 
     const userPrompt = [
-      `Decompose this objective into 3-6 concrete milestones:`,
+      `Decompose this objective into the concrete milestones it needs:`,
       `"${goal.objective}"`,
       '',
       'Each milestone: one line, format: "N. <Short Title> — <concrete detail: what file/module/behavior changes and how>"',
@@ -226,9 +221,9 @@ export async function expandGoalToMilestones(
     const raw = await client.complete(systemPrompt, userPrompt);
     const parsed = parseMilestones(raw);
 
-    if (parsed.length < 3) {
+    if (parsed.length === 0) {
       // Response was unparseable — leave goal unchanged
-      plannerLog('warn', 'expansion failed: could not parse ≥3 milestones from strategist response', {
+      plannerLog('warn', 'expansion failed: could not parse any milestones from strategist response', {
         goalId: goal.id,
         rawSnippet: raw.slice(0, 200),
         parsedCount: parsed.length,

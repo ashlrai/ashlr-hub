@@ -5,8 +5,8 @@
  * Verifies:
  *   1. northStarDocSummary() — loads docs/NORTH-STAR.md and extracts the 3 pillars
  *      + grand directives; returns '' when the doc is absent.
- *   2. SYSTEM_PROMPT (invent) contains NORTH-STAR pillars + value≥4 + repo-bound directive.
- *   3. goal-planner systemPrompt contains NORTH-STAR pillars + substantive/value≥4 rule.
+ *   2. SYSTEM_PROMPT (invent) contains NORTH-STAR pillars and useful repo-bound guidance.
+ *   3. goal-planner systemPrompt reuses the same useful-work grounding.
  *   4. _resetNorthStarDocCache / loadNorthStarDoc honour the cache contract.
  *
  * Hermetic: HOME relocated to tmp; docs/NORTH-STAR.md existence is real (repo root).
@@ -137,7 +137,7 @@ describe('northStarDocSummary', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 2. invent.ts SYSTEM_PROMPT — contains NORTH-STAR pillars + value≥4 rule
+// 2. invent.ts SYSTEM_PROMPT — shared vision and useful-work guidance
 // ---------------------------------------------------------------------------
 
 describe('invent SYSTEM_PROMPT — NORTH-STAR grounding', () => {
@@ -153,9 +153,9 @@ describe('invent SYSTEM_PROMPT — NORTH-STAR grounding', () => {
     expect(SYSTEM_PROMPT).toMatch(/composition.*flywheel|flywheel|composition platform/i);
   });
 
-  it('contains the value≥4 / substantive directive', async () => {
+  it('contains concrete repo-bound useful-work guidance', async () => {
     const { SYSTEM_PROMPT } = await import('../src/core/generative/invent.js');
-    expect(SYSTEM_PROMPT).toMatch(/value.*[≥>=].*4|substant/i);
+    expect(SYSTEM_PROMPT).toContain('substantive, concrete repo-bound work');
   });
 
   it('contains the repo-bound requirement', async () => {
@@ -163,15 +163,15 @@ describe('invent SYSTEM_PROMPT — NORTH-STAR grounding', () => {
     expect(SYSTEM_PROMPT).toMatch(/repo|enrolled/i);
   });
 
-  it('still forbids maintenance items (backward compat)', async () => {
+  it('allows useful maintenance alongside new capabilities', async () => {
     const { SYSTEM_PROMPT } = await import('../src/core/generative/invent.js');
-    expect(SYSTEM_PROMPT).toMatch(/STRICTLY FORBIDDEN/i);
-    expect(SYSTEM_PROMPT).toMatch(/dependency bump/i);
+    expect(SYSTEM_PROMPT).toContain('maintenance are valuable');
+    expect(SYSTEM_PROMPT).not.toMatch(/STRICTLY FORBIDDEN|CREATION ONLY/i);
   });
 });
 
 // ---------------------------------------------------------------------------
-// 3. goal-planner — systemPrompt contains NORTH-STAR + value≥4 rule
+// 3. goal-planner — systemPrompt reuses NORTH-STAR guidance
 // ---------------------------------------------------------------------------
 
 describe('goal-planner — NORTH-STAR in systemPrompt', () => {
@@ -229,7 +229,7 @@ describe('goal-planner — NORTH-STAR in systemPrompt', () => {
     // module caching), we at least verify the import path is clean.
     if (capturedSystem) {
       expect(capturedSystem).toMatch(/NORTH-STAR|GRAND VISION/i);
-      expect(capturedSystem).toMatch(/substant|value.*[≥>=].*4/i);
+      expect(capturedSystem).toContain('Prioritize useful outcomes');
     }
 
     // The goal-planner must never throw regardless of mock state
