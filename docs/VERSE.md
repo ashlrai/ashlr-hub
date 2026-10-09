@@ -113,6 +113,36 @@ verified, so Phantom does not treat a Dot as an executable seat. Likewise,
 seat and the xAI API engine; a connected CLI account does not establish a Bot
 integration.
 
+### Proactive agent profiles
+
+Saved proactive profiles describe personal Dots, Grok Bots, Muse agents or other
+persistent agents. They keep provider/account/agent identity separate from the
+editable name, avatar, responsibilities, computer and connected-service metadata.
+The profile is **configured**; saving it does not establish a working connection.
+Operation readiness shows what has been qualified, with no fabricated run result.
+Meta Model API remains a separate executable resource.
+
+The enabled field saves an intended planning preference. Current planners do not
+consume these profiles; it does not enable dispatch, change a provider account or
+authorize spending. A funding reference points to the
+same account; it supplies no balance, expiry or eligibility. Keep credentials and
+inbox contents out of profile metadata.
+
+The existing authenticated API serves `GET /api/verse/proactive-agents` and JSON
+`POST` requests to create a profile, update `/<id>` or delete `/<id>/delete`.
+Updates and deletes require the current `expectedVersion`; stale writes return
+409 so another edit cannot be overwritten. Native tools
+`phm_proactive_agents_list`, `phm_proactive_agents_create`,
+`phm_proactive_agents_update` and `phm_proactive_agents_delete` use the same store.
+The list tool pages summaries; the API returns complete saved metadata.
+
+Personal-agent transport still needs separate qualification. Dot plugin events
+require a provisioned authenticated plugin and event subscription; a Grok Bot
+routine requires its existing account-bound webhook and completion evidence.
+A provider accepting a task differs from running it, completing it and verifying
+its useful result. No personal Muse dispatch adapter is established by saving a
+profile. See [Dots beside Phantom](DOTS-COMPANION.md).
+
 - Build contracts: `docs/VERSE-CONTRACT-V1.md` (sessions) and
   `docs/VERSE-CONTRACT-V2.md` (redesign + control plane).
 - Context windows, compaction, modes, handoff and shared memory:
