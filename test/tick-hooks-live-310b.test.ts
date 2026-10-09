@@ -348,7 +348,7 @@ describe('lanes, presence and the router seam', () => {
     expect(reading).toMatchObject({ reachable: null, slots: 1, contextPerSlot: 65_536 });
   });
 
-  it('reserves one local turn and routes the next low-difficulty item to Grok', async () => {
+  it('reserves available local, Grok and Claude turns before holding overflow', async () => {
     presenceNow = { present: true, reason: 'A Verse chat turn is running.', evidenceAt: NOW_ISO };
     const hooks = createLiveTickHooks({ deps: {
       ...h.deps,
@@ -362,7 +362,7 @@ describe('lanes, presence and the router seam', () => {
     const preview = hooks.route(item({ id: 'local-1', effort: 2 }), CFG);
     expect(preview.backend).toBe('llama-server');
     expect(hooks.route(item({ id: 'grok-1', effort: 2 }), CFG).backend).toBe('llama-server');
-    hooks.beginDispatchPlan(['local-1', 'grok-1', 'grok-2', 'parked']);
+    hooks.beginDispatchPlan(['local-1', 'grok-1', 'grok-2', 'claude-1', 'parked']);
     const first = hooks.route(item({ id: 'local-1', effort: 2 }), CFG);
     const second = hooks.route(item({ id: 'grok-1', effort: 2 }), CFG);
     expect(first.backend).toBe('llama-server');
@@ -371,6 +371,11 @@ describe('lanes, presence and the router seam', () => {
     expect(fleetLaneOf(second.backend, CFG)).toBe('grok-cli');
     expect(hooks.route(item({ id: 'local-1', effort: 2 }), CFG)).toEqual(first);
     expect(hooks.route(item({ id: 'grok-2', effort: 2 }), CFG).backend).toBe('grok-cli');
+    const fourth = hooks.route(item({ id: 'claude-1', effort: 2 }), CFG);
+    expect(fourth.backend).toBe('claude');
+    expect(fleetLaneOf(fourth.backend, CFG)).toBe('claude-cli');
+    expect(hooks.route(item({ id: 'claude-1', effort: 2 }), CFG)).toEqual(fourth);
+    // All four eligible turns are reserved: local=1, Grok=2, Claude=1.
     expect(hooks.route(item({ id: 'parked', effort: 2 }), CFG).hold?.kind).toBe('park');
   });
 
@@ -395,10 +400,11 @@ describe('lanes, presence and the router seam', () => {
     const hooks = createLiveTickHooks({ deps: h.deps });
     hooks.effectiveConfig(CFG);
     const result = await hooks.beforeTick(hookCtx);
-    expect(result.laneCaps).toEqual({ local: 2, 'grok-cli': 2, 'claude-cli': 0, codex: 0, 'devin-cli': 0 });
+    expect(result.laneCaps).toEqual({ local: 2, 'grok-cli': 2, 'claude-cli': 1, codex: 0, 'devin-cli': 0 });
     const state = h.ticks.at(-1)!;
     expect(state).toMatchObject({ standing: { grantId: 'g-1', stageId: '2b', switch: 'autonomous' }, ledgerHead: { seq: 41 }, capabilityKind: 'resident-standing' });
-    expect(h.audits.at(-1)).toMatch(/standing tick: lanes local=2 grok-cli=2 claude-cli=0 codex=0/);
+    expect(state.lanes.find((lane) => lane.lane === 'claude-cli')?.slots).toBe(1);
+    expect(h.audits.at(-1)).toMatch(/standing tick: lanes local=2 grok-cli=2 claude-cli=1 codex=0/);
   });
 
   it('clamps the budget over every seat the tick routes across (not only the ones the policy names)', async () => {
@@ -574,15 +580,16 @@ describe('seatAllows', () => {
     expect(h.subscriptionCalls).toEqual(['claude']);
   });
 
-  it('refuses engines that are not fleet lanes and lanes that are closed', async () => {
+  it('refuses unavailable lanes while checking eligible Claude usage despite presence', async () => {
     presenceNow = { present: true, reason: 'here', evidenceAt: NOW_ISO };
     const hooks = createLiveTickHooks({ deps: h.deps });
     hooks.effectiveConfig(CFG);
     await hooks.beforeTick(hookCtx);
     expect(hooks.seatAllows('grok' as EngineId, { maxPercent: 90 }).reason).toMatch(/not a fleet lane/);
     expect(hooks.seatAllows('ashlrcode' as EngineId, { maxPercent: 90 }).allowed).toBe(false);
-    // Presence closes the Claude producer slice.
-    expect(hooks.seatAllows('claude' as EngineId, { maxPercent: 90 }).reason).toMatch(/held for your own session/);
+    // Presence does not close an eligible native seat; its usage gate still runs.
+    expect(hooks.seatAllows('claude' as EngineId, { maxPercent: 90 }).allowed).toBe(true);
+    expect(h.subscriptionCalls).toEqual(['claude']);
     expect(hooks.seatAllows('codex' as EngineId, { maxPercent: 90 }).reason).toBe("The grant's current rollout stage does not include Codex.");
   });
 
