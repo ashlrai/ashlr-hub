@@ -646,7 +646,7 @@ describe('UsageSection — the capacity strip', () => {
     render(<UsageSection />);
     const strip = await screen.findByRole('list', { name: 'Seat capacity' });
     expect(within(strip).getAllByRole('listitem')).toHaveLength(2);
-    expect(screen.getByText('0 of 2 accounts usable · 2 not read yet')).toBeInTheDocument();
+    expect(screen.getByText('0 of 2 accounts with current usage · 2 usage unconfirmed')).toBeInTheDocument();
   });
 
   it('gives every seat a state WORD, not just a tint', async () => {

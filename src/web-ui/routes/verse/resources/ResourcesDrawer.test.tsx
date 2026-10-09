@@ -301,6 +301,20 @@ describe('ResourcesDrawer — usage collection', () => {
 });
 
 describe('ResourcesDrawer — accounts', () => {
+  it('names unconfirmed usage separately from known connection and native Chat/Fleet readiness', async () => {
+    const unknown = { ...CMP, capacity: { ...CMP.capacity!, windows: [], binding: null, usability: 'unknown' as const } };
+    roster = [unknown, LOCAL_SEAT_V2];
+    readiness = READINESS;
+    render(<ResourcesDrawer mode="docked" now={NOW} />);
+    expect(await screen.findByText('0 of 1 account with current usage · 1 usage unconfirmed · local models ready')).toBeInTheDocument();
+    const status = await screen.findByRole('group', { name: 'Cash Margin Partners: readiness' });
+    expect(within(status).getByText('Ready')).toBeInTheDocument();
+    expect(within(status).getByText('Not in this stage')).toBeInTheDocument();
+    expect(within(cardOf('Cash Margin Partners')).getByText('· no usage reading yet')).toBeInTheDocument();
+    expect(calls.every(call => call.method === 'GET')).toBe(true);
+    expect(unknown.capacity.windows).toEqual([]);
+  });
+
   it('discloses current native credit units and qualified dollar value without admitting Fleet spending', async () => {
     const creditAccount = { ...PERSONAL, capacity: { ...PERSONAL.capacity!,
       credits: { hasCredits: true, unlimited: false, balance: '2500.0000', spendControlReached: false },

@@ -28,6 +28,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Bind local coding capacity to a tool-capable runtime instead of the planning-only
   builtin loop. Use another eligible resource when local execution is unavailable.
 - Synchronize routing explanations with provider-neutral selection.
+- Label resource summaries as current or unconfirmed usage, separately from
+  connection, Chat/Fleet readiness and available allowance.
 - Round credit hover text with the existing two-significant-figure formatter,
   preserving exact stored balances for accounting and admission.
 

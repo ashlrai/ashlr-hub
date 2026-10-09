@@ -2,6 +2,12 @@
 
 Phantom keeps each account's subscription windows, native credit units, captured dollar balances, and operator estimates separate. The resource sidebar uses the same live capacity model as the resource drawer. Refreshing a reading does not renew its original observation or expiration.
 
+Summary counts describe accounts **with current usage** and accounts whose usage is
+**unconfirmed**. A fresh reached-limit reading still counts as current evidence;
+it does not imply available allowance. Sign-in, recorded credits and historical
+readings alone do not count as current usage. Chat and Fleet readiness appear
+separately in each account card.
+
 Connect native CLI accounts for subscription work, configure API resources separately,
 or run models on your own hardware. Routing is provider-neutral: an account's
 supported execution path, model capabilities and current evidence determine which
@@ -31,8 +37,8 @@ The private cache binds readings to the account, selected native profile, and a 
 | --- | --- | --- |
 | Current subscription window | Native percentage and reported reset | Existing account, permission, and subscription admission apply |
 | Historical subscription window | Gray dated reading | Display only; does not authorize work |
-| Native Codex credit balance | Exact credit units and a labeled dollar reference when supported | Separate from the subscription; a balance does not authorize autonomous credit spending |
-| Captured Claude cloud gift | Exact last-recorded dollars, cloud scope, and verified expiration if recorded | Historical balance evidence; capture does not activate gift spending |
+| Native Codex credit balance | Rounded recorded credit units and a labeled dollar reference when supported | Separate from the subscription; a balance does not authorize autonomous credit spending |
+| Captured Claude cloud gift | Rounded last-recorded dollars, cloud scope, and verified expiration if recorded | Historical balance evidence; capture does not activate gift spending |
 | Captured purchased usage credits | Separate last-recorded dollars and expiration, if known | Does not acquire subscription reset urgency |
 | Captured Claude API promotion | Separate recorded API dollars and verified date precision | Advisory only; billing, execution binding and signed API authority must be commissioned before spending |
 | Operator cloud estimate | **Cloud estimate**, with its estimate qualifier | Separate from a provider-reported wallet or captured balance |
@@ -148,7 +154,7 @@ The endpoint reads fixed local stores. Opening it does not start a model, provid
 
 ## Claude API promotional grants
 
-The resource bar and expandable credit view can show a private, verified API grant observation separately from Claude's subscription and cloud-session credits. A single promotion shows last-recorded dollars and **Held**; several records show their count without adding possibly overlapping history. On a cold local read, the bar checks every two seconds for at most thirty seconds, then returns to its regular fifteen-second cadence. Hidden surfaces stop polling. Money is stored as exact integer microdollars and displayed with two significant figures; hover over a balance to see the exact recorded amount. Its asynchronous local read does not wait for the subscription worker or request billing credentials. API organization, workspace and credential digests remain private. Windows currently reports this new read unavailable until asynchronous private-file ACL verification is supported.
+The resource bar and expandable credit view can show a private, verified API grant observation separately from Claude's subscription and cloud-session credits. A single promotion shows last-recorded dollars and **Held**; several records show their count without adding possibly overlapping history. On a cold local read, the bar checks every two seconds for at most thirty seconds, then returns to its regular fifteen-second cadence. Hidden surfaces stop polling. Money is stored as exact integer microdollars and displayed with two significant figures, including the recorded amount in hover details. Storage and admission arithmetic retain the exact values. Its asynchronous local read does not wait for the subscription worker or request billing credentials. API organization, workspace and credential digests remain private. Windows currently reports this new read unavailable until asynchronous private-file ACL verification is supported.
 
 A provider-reported UTC expiry date is displayed as a date. When no exact expiry instant is supplied, Phantom conservatively stops new admissions at the **start** of that UTC date. This is Phantom's policy, not a claim about the provider's expiration time. Unknown balances or dates block admission. A future billing cycle never creates a synthetic new grant.
 

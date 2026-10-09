@@ -33,19 +33,43 @@ function summary(seats: Parameters<typeof buildCapacityRows>[0], health: SeatHea
 describe('summarizeResources — the edge handle dot', () => {
   it('is ok when every paid account is usable', () => {
     const s = summary([ok('a', 20), ok('b', 40)], [report('a'), report('b')]);
-    expect(s).toEqual({ tone: 'ok', spoken: '2 usable' });
+    expect(s).toEqual({ tone: 'ok', spoken: '2 with current usage' });
   });
 
   it('is tight when one is running low', () => {
     const s = summary([ok('a', 20), ok('b', 95)], [report('a'), report('b')]);
     expect(s.tone).toBe('tight');
-    expect(s.spoken).toBe('1 usable · 1 running low');
+    expect(s.spoken).toBe('2 with current usage · 1 running low');
   });
 
   it('is alert when something is spent or signed out — and says which', () => {
     const s = summary([ok('a', 20), spent('b'), GROK_SEAT], [report('a'), report('b', { connection: 'exhausted', resetAt: RESET }), report('grok', { engine: 'grok', connection: 'signed-out', fix: { kind: 'reauth' } })]);
     expect(s.tone).toBe('alert');
-    expect(s.spoken).toBe('1 usable · 1 spent · 1 signed out');
+    expect(s.spoken).toBe('2 with current usage · 1 usage unconfirmed · 1 spent · 1 signed out');
+  });
+
+  it('does not turn known sign-ins with unread usage into usable quota', () => {
+    const seats = ['a', 'b'].map(id => nativeSeat(capacity({ windows: [], binding: null, usability: 'unknown' }), { id }));
+    const rows = buildCapacityRows(seats, { health: [report('a'), report('b')], now: NOW });
+    expect(rows.every(row => row.cls === 'unread')).toBe(true);
+    expect(summarizeResources(rows, { healthRead: true, now: NOW })).toEqual({
+      tone: 'ok', spoken: '0 with current usage · 2 usage unconfirmed',
+    });
+    expect(rows.every(row => row.windows.length === 0)).toBe(true);
+  });
+
+  it('keeps failed retained readings and credit-only availability out of current subscription usage', () => {
+    const original = ok('a', 20);
+    const retained = { ...original, health: { ...original.health, state: 'degraded' as const },
+      capacity: { ...original.capacity!, usability: 'unknown' as const } };
+    const credits = nativeSeat(capacity({ windows: [], binding: null, usability: 'unknown',
+      credits: { hasCredits: true, unlimited: false, balance: '2000', spendControlReached: false },
+      creditsExpiresAt: new Date(NOW + 30_000).toISOString() }), { id: 'b', engine: 'codex' });
+    expect(summary([retained, credits, LOCAL_SEAT_V2], [report('a'), report('b')])).toEqual({
+      tone: 'alert', spoken: '0 with current usage · 2 usage unconfirmed · 1 running low · 1 unavailable',
+    });
+    expect(retained.capacity.windows[0]!.usedPercent).toBe(20);
+    expect(credits.capacity!.credits!.balance).toBe('2000');
   });
 
   it('draws nothing (unknown) until something was read, and ignores local seats', () => {
