@@ -656,7 +656,7 @@ describe('Devin sidebar cached refresh lifetime', () => {
 
 describe('recorded Claude API promotion in the resource bar', () => {
   let recorded: CreditPoolsReadV2;
-  const apiRow = (container: HTMLElement) => container.querySelector('[data-resource-id="budget:claude-api-promotions"]')!;
+  const apiRow = (container: HTMLElement) => container.querySelector<HTMLElement>('[data-resource-id="budget:claude-api-promotions"]')!;
   beforeEach(() => {
     localStorage.removeItem(RESOURCES_STORAGE_KEY); reloadResourcesUiForTest(); closeResources();
     vi.spyOn(Date, 'now').mockReturnValue(NOW);
