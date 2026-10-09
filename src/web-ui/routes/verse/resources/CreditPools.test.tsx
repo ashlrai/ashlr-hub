@@ -29,8 +29,8 @@ describe('Credit balance disclosure', () => {
     const { posted } = stubSurfaceFetch({ routes: { [CREDIT_POOLS_PATH]: apiFixture() } });
     render(<CreditPools />); await userEvent.setup().click(screen.getByText('Credit balances'));
     await screen.findByText('Claude API promotion');
-    expect(screen.getByText('$180 last recorded')).toHaveAttribute('title', 'Exact recorded balance: 178.123456 USD');
-    expect(screen.getByText('Recorded API grant: $200')).toBeVisible();
+    expect(screen.getByText('$180 last recorded')).toHaveAttribute('title', 'Recorded balance: $180');
+    expect(screen.getByText('Recorded API grant: $200')).toHaveAttribute('title', 'Recorded grant: 200 USD');
     expect(screen.getByText('Expires 2026-10-24 UTC')).toBeVisible();
     expect(screen.getByText(/at the start of the expiry date/)).toBeVisible();
     expect(screen.getByText(/Automatic use held/)).toBeVisible();
@@ -49,11 +49,12 @@ describe('Credit balance disclosure', () => {
     const getter = vi.fn(); const accessor = Object.defineProperty({ ...value }, 'apiGrants', { get: getter });
     expect(narrowCreditPoolsEnvelope(accessor)).toBeNull(); expect(getter).not.toHaveBeenCalled();
   });
-  it('does no request while closed, labels two separate exact dollar records and original capture dates', async () => {
+  it('does no request while closed, rounds separate recorded dollar readings and keeps original capture dates', async () => {
     const { fetchMock, posted } = stubSurfaceFetch({ routes: { [CREDIT_POOLS_PATH]: fixture() } });
     render(<CreditPools accountNames={new Map([['sample-claude', 'My Claude']])} />);
     expect(fetchMock).not.toHaveBeenCalled(); await userEvent.setup().click(screen.getByText('Credit balances'));
-    await screen.findByText('$12 last recorded'); expect(screen.getByText('$9.8 last recorded')).toBeVisible();
+    expect(await screen.findByText('$12 last recorded')).toHaveAttribute('title', 'Recorded reading: $12 last recorded');
+    expect(screen.getByText('$9.8 last recorded')).toHaveAttribute('title', 'Recorded reading: $9.8 last recorded');
     expect(screen.getByText('Cloud gift')).toBeVisible(); expect(screen.getByText('Purchased usage credits')).toBeVisible();
     expect(screen.getByText('Recorded total: $15')).toBeVisible(); expect(screen.getByText('Recorded grant: $50')).toBeVisible();
     expect(screen.getAllByText('My Claude')).toHaveLength(2); expect(screen.getByText('Expiry unknown')).toBeVisible();

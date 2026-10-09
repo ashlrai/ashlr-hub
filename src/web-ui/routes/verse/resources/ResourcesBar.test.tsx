@@ -815,7 +815,7 @@ describe('recorded Claude API promotion in the resource bar', () => {
     const api = within(apiRow(view.container));
     const button = api.getByRole('button', { name: /Claude API promotion: \$200 last recorded.*held.*Open Resources/ });
     expect(api.getByText('$200 last recorded')).toBeVisible(); expect(api.getByText('Held')).toBeVisible();
-    expect(button).toHaveAttribute('title', 'Exact recorded balance: 200.000000 USD');
+    expect(button).toHaveAttribute('title', 'Recorded balance: $200');
     expect(apiRow(view.container).querySelector('[class*="battery"]')).toBeNull();
     expect(view.container.querySelector('[data-resource-id="account:claude"]')).not.toBeNull();
     fireEvent.focus(button);

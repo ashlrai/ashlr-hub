@@ -28,8 +28,8 @@ function CreditPoolReading({ accountNames }: { accountNames: ReadonlyMap<string,
         const display = creditPoolDisplay(row, now);
         return <li key={`${row.provider}:${row.accountId}:${row.poolId}`}>
           <div className={styles.heading}><strong>{display.title}</strong><span>{accountNames.get(row.accountId) ?? row.accountId}</span></div>
-          <p className={styles.amount} title={row.amount === null ? undefined : `Exact recorded reading: ${row.amount} ${row.unit}`}>{display.amountText}</p>
-          {row.total !== null && row.identityState === 'matched' ? <p className={styles.note} title={`Exact recorded total: ${row.total} USD`}>Recorded {row.kind === 'gifted-cloud' ? 'grant' : 'total'}: ${formatDecimalMetric(row.total)}</p> : null}
+          <p className={styles.amount} title={row.amount === null ? undefined : `Recorded reading: ${display.amountText}`}>{display.amountText}</p>
+          {row.total !== null && row.identityState === 'matched' ? <p className={styles.note} title={`Recorded total: ${formatDecimalMetric(row.total)} USD`}>Recorded {row.kind === 'gifted-cloud' ? 'grant' : 'total'}: ${formatDecimalMetric(row.total)}</p> : null}
           <p className={styles.note}>{display.sourceText}</p>
           <p className={styles.note}>Captured <time dateTime={display.capturedAt} title={display.capturedAt}>{new Date(display.capturedAt).toLocaleString()}</time></p>
           <p className={styles.note}>{display.expiryText}{display.expiresAt ? <> · <time dateTime={display.expiresAt} title={display.expiresAt}>{new Date(display.expiresAt).toLocaleString()}</time></> : null}</p>
@@ -43,8 +43,8 @@ function CreditPoolReading({ accountNames }: { accountNames: ReadonlyMap<string,
         const display = apiGrantDisplay(row);
         return <li key={`api-promotion:${index}`}>
           <div className={styles.heading}><strong>Claude API promotion</strong><span>API credits</span></div>
-          <p className={styles.amount} title={row.remainingUsdMicros === null ? undefined : `Exact recorded balance: ${apiGrantUsdDecimal(row.remainingUsdMicros)} USD`}>{display.amountText}</p>
-          {row.totalUsdMicros !== null ? <p className={styles.note} title={`Exact recorded grant: ${apiGrantUsdDecimal(row.totalUsdMicros)} USD`}>Recorded API grant: ${formatDecimalMetric(apiGrantUsdDecimal(row.totalUsdMicros))}</p> : null}
+          <p className={styles.amount} title={row.remainingUsdMicros === null ? undefined : `Recorded balance: ${display.amountText.replace(' last recorded', '')}`}>{display.amountText}</p>
+          {row.totalUsdMicros !== null ? <p className={styles.note} title={`Recorded grant: ${formatDecimalMetric(apiGrantUsdDecimal(row.totalUsdMicros))} USD`}>Recorded API grant: ${formatDecimalMetric(apiGrantUsdDecimal(row.totalUsdMicros))}</p> : null}
           {row.capturedAt ? <p className={styles.note}>Captured <time dateTime={row.capturedAt} title={row.capturedAt}>{new Date(row.capturedAt).toLocaleString()}</time></p> : null}
           <p className={styles.note}>{display.expiryText}</p>
           {row.admissionCutoff ? <p className={styles.note}>Phantom stops new API work {row.cutoffPolicy === 'expiry-day-start/v1' ? 'at the start of the expiry date (UTC)' : 'at the verified expiry time'}.

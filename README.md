@@ -18,9 +18,9 @@
 
 ## Install
 
-Phantom 3.29.2 is published as `@ashlr/phantom` from `ashlrai/phantom`.
+Phantom 3.29.3 is published as `@ashlr/phantom` from `ashlrai/phantom`.
 Install the canonical package's promoted release.
-The source candidate is 3.29.3; preparing it does not publish or install it.
+The source candidate is 3.29.4; preparing it does not publish or install it.
 
 ```sh
 npm install -g @ashlr/phantom   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
@@ -29,10 +29,10 @@ phm verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 For a reproducible install of the published release verified on 2026-10-09,
-use `npm install -g @ashlr/phantom@3.29.2`. General release discovery is at
+use `npm install -g @ashlr/phantom@3.29.3`. General release discovery is at
 [GitHub releases](https://github.com/ashlrai/phantom/releases/latest).
 
-The [v3.29.2 release](https://github.com/ashlrai/phantom/releases/tag/v3.29.2)
+The [v3.29.3 release](https://github.com/ashlrai/phantom/releases/tag/v3.29.3)
 provides a signed macOS arm64 app archive and paired update manifest; it has no
 DMG. Existing installations use the qualified signed-update flow. Maintainer
 artifact installation requires the original qualified bundle and prior
@@ -83,7 +83,7 @@ console is the Phantom kernel: the CLI, the Universe experiment runtime and
 account-aware resource pools.
 
 Phantom was formerly Ashlr Verse. The current source repository is `ashlrai/phantom`;
-the published 3.29.2 package is `@ashlr/phantom`. `phm` and compatible `ashlr`
+the published 3.29.3 package is `@ashlr/phantom`. `phm` and compatible `ashlr`
 share the same entrypoint. Published 3.25.3 remains `@ashlr/hub`; its existing
 SDK imports, including `@ashlr/hub/universe`, retain their original identity.
 The canonical package provides the same five SDK surfaces under `@ashlr/phantom`.
@@ -288,8 +288,8 @@ separate Node.js install to run.
 
 ### Install
 
-Use the [v3.29.2 release](https://github.com/ashlrai/phantom/releases/tag/v3.29.2)
-for the original signed arm64 app archive and paired update manifest. No 3.29.2
+Use the [v3.29.3 release](https://github.com/ashlrai/phantom/releases/tag/v3.29.3)
+for the original signed arm64 app archive and paired update manifest. No 3.29.3
 DMG was published; use the [desktop installation guide](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install)
 for the qualified update or maintainer artifact path. The app is locally signed,
 not Apple Developer ID notarized, so macOS may require **Open Anyway** on first launch. To build from source on a

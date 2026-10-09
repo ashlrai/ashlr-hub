@@ -33,7 +33,7 @@ import { accountStatus, buildCapacityRows, type AccountStatus, type CapacityRow 
 import { formatUsd, localObservationAge } from './resources-model.js';
 import { cloudCreditsQuery } from './resources-queries.js';
 import { creditPoolsQuery } from './credit-pools-query.js';
-import { apiGrantDisplay, apiGrantUsdDecimal } from './credit-pool-model.js';
+import { apiGrantDisplay } from './credit-pool-model.js';
 import { devinConsumptionEvidence, devinUsageEvidence, formatAcu } from '../devin/devin-model.js';
 import { DEVIN_POLL_MS, devinQuery } from '../devin/devin-queries.js';
 import { closeResources, openResources, useResourcesUi } from './resources-store.js';
@@ -351,8 +351,8 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
     const amount = single ? apiGrantDisplay(single).amountText : `${formatMetric(apiGrants.length)} records`;
     const compactAmount = single?.remainingUsdMicros === null ? 'Unknown'
       : amount.replace(' last recorded', '');
-    const exactTitle = single?.remainingUsdMicros != null
-      ? `Exact recorded balance: ${apiGrantUsdDecimal(single.remainingUsdMicros)} USD` : undefined;
+    const recordedTitle = single?.remainingUsdMicros != null
+      ? `Recorded balance: ${compactAmount}` : undefined;
     entries.push({ key: 'budget:claude-api-promotions', name: 'Claude API promotion', content: (
       <Tooltip placement="right" content={
         <div className={styles.tip}>
@@ -371,7 +371,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
       }>
         <button type="button" className={styles.row} data-level="unknown"
           aria-label={`Claude API promotion: ${amount}. Automatic use held. Open Resources`}
-          title={exactTitle} onClick={() => openResources()}>
+          title={recordedTitle} onClick={() => openResources()}>
           <span className={styles.line}>
             <ProviderLogo engine="claude" size={14} className={styles.logo} />
             {expanded ? <span className={styles.name}>Claude API promotion</span> : null}
