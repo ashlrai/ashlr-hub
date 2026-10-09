@@ -2336,6 +2336,12 @@ fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
 // ── entry point ──────────────────────────────────────────────────────────────
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    if let Some(status) =
+        ashlr_desktop::native_metadata_launch::dispatch(&std::env::args().collect::<Vec<_>>())
+    {
+        std::process::exit(status);
+    }
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())

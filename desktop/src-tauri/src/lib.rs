@@ -9,3 +9,6 @@ pub mod native_updates;
 // The runtime uses this same constructor; its fresh-process test belongs to CI.
 #[cfg(target_os = "macos")]
 pub mod native_update_client;
+
+#[cfg(target_os = "macos")]
+pub mod native_metadata_launch;

@@ -1242,3 +1242,30 @@ describe('verifyTaskStructured', () => {
     }
   });
 });
+
+
+describe('signed metadata preflight under the original deadline', () => {
+  it('does not prepare after pre-abort, timed out proof or fresh cancellation', async () => {
+    const prepared = vi.fn(() => ({ spawned: vi.fn(), settled: vi.fn() }));
+    const preflight = vi.fn(async (_signal: AbortSignal) => await new Promise<void>(() => {}));
+    const options = { cwd: workdir, env: {}, timeoutMs: 15, requireProcessGroupExit: true, processGroupLifecycle: { preflight, prepare: prepared } };
+    const controller = new AbortController(); controller.abort();
+    const cancelled = await runVerifySubprocessAsync([process.execPath, '-e', "throw Error('no contact')"], { ...options, signal: controller.signal });
+    expect(cancelled).toMatchObject({ cancelled: true, processGroupSettlement: 'not-started' }); expect(preflight).not.toHaveBeenCalled();
+    const timed = await runVerifySubprocessAsync([process.execPath, '-e', "throw Error('no contact')"], options);
+    expect(timed).toMatchObject({ timedOut: true, processGroupSettlement: 'not-started' }); expect(prepared).not.toHaveBeenCalled();
+    const fresh = new AbortController(); let entered!: () => void;
+    const gate = new Promise<void>(resolve => { entered = resolve; });
+    const ongoing = runVerifySubprocessAsync([process.execPath, '-e', "throw Error('no contact')"], { ...options, timeoutMs: 5000, signal: fresh.signal,
+      processGroupLifecycle: { preflight: async () => { entered(); await new Promise<void>(() => {}); }, prepare: prepared } });
+    await gate; fresh.abort(); expect(await ongoing).toMatchObject({ cancelled: true, processGroupSettlement: 'not-started' }); expect(prepared).not.toHaveBeenCalled();
+  });
+  it('preserves fresh admission after an awaited proof without adding provider contact on drift', async () => {
+    let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; }); let current = true;
+    const prepared = vi.fn(() => { if (!current) throw new Error('changed admission'); return { spawned: vi.fn(), settled: vi.fn() }; });
+    const ongoing = runVerifySubprocessAsync([process.execPath, '-e', "throw Error('no contact')"], { cwd: workdir, env: {}, timeoutMs: 5000, requireProcessGroupExit: true,
+      processGroupLifecycle: { preflight: async () => await gate, prepare: prepared } });
+    current = false; release(); const result = await ongoing;
+    expect(result.error).toBe('process-group lifecycle publication failed'); expect(result.processGroupSettlement).toBe('unconfirmed'); expect(prepared).toHaveBeenCalledOnce();
+  });
+});

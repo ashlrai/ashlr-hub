@@ -1,6 +1,7 @@
 /** Host-owned, exec-in-place launcher for metadata collection only.
  * Its child publishes identity before exec, independently of the collector's
  * spawn callback. No command, environment, input or provider result is stored. */
+import type { DesktopMetadataBackend, DesktopImage } from './desktop-metadata-launch-trust.js';
 import { constants, fstatSync, lstatSync, openSync, closeSync, readSync, realpathSync, unlinkSync, type BigIntStats } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -70,6 +71,12 @@ export interface NativeMetadataLaunchBinding {
 export interface NativeMetadataLaunchDescriptor {
   nodeExecutable: string; scriptPath: string; ticketPath: string; ticketDigest: string;
 }
+export interface DesktopMetadataLaunchDescriptor { kind: 'signed-desktop'; hostExecutable: string; ticketPath: string; ticketDigest: string }
+export type MetadataLaunchDescriptor = NativeMetadataLaunchDescriptor | DesktopMetadataLaunchDescriptor;
+interface DesktopTicket extends NativeMetadataLaunchBinding {
+  schemaVersion: 2; scope: 'desktop-native-metadata-launch'; id: string; root: { dev: string; ino: string }; host: DesktopImage;
+  parent: { pid: number; startRef: string; executable: string };
+}
 interface Ticket extends NativeMetadataLaunchBinding {
   schemaVersion: 1; scope: 'native-metadata-launch'; id: string;
   root: { dev: string; ino: string }; launcher: { sha256: string; dev: string; ino: string };
@@ -134,20 +141,51 @@ export function createNativeMetadataLaunch(root: string, id: string, binding: Na
   return Object.freeze({ nodeExecutable: realpathSync(process.execPath), scriptPath: p.scriptPath, ticketPath: p.ticketPath, ticketDigest: sha(bytes) });
 }
 
+/** Only an already qualified physical signed pair may prepare a desktop ticket. */
+export function createDesktopMetadataLaunch(root: string, id: string, binding: NativeMetadataLaunchBinding, backend: DesktopMetadataBackend): DesktopMetadataLaunchDescriptor {
+  backend.assertCurrent(); inspectPrivateDirectory(root);
+  if (!isAbsolute(root) || resolve(root) !== root) throw new Error('Native launch unsupported');
+  const p = paths(root, id), st = lstatSync(root, { bigint: true });
+  for (const path of Object.values(p)) { try { lstatSync(path); throw new Error('Native launch already exists'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } }
+  const ticket: DesktopTicket = { schemaVersion: 2, scope: 'desktop-native-metadata-launch', id, ...structuredClone(binding),
+    root: { dev: String(st.dev), ino: String(st.ino) }, host: backend.image(), parent: backend.parent() };
+  const bytes = JSON.stringify(ticket) + '\n'; if (Buffer.byteLength(bytes) > MAX_BYTES) throw new Error();
+  writePrivateFileAtomically(`${p.ticketPath}.${randomUUID()}.tmp`, p.ticketPath, bytes, { anchorPath: root, label: 'Desktop metadata launch ticket' });
+  backend.assertCurrent();
+  return Object.freeze({ kind: 'signed-desktop', hostExecutable: ticket.host.path, ticketPath: p.ticketPath, ticketDigest: sha(bytes) });
+}
+function checkDesktopTicket(ticket: Record<string, unknown>, raw: Buffer): void {
+  if (!exact(ticket, ['schemaVersion', 'scope', 'id', 'owner', 'pending', 'bootIdentity', 'root', 'host', 'parent']) ||
+    ticket.schemaVersion !== 2 || ticket.scope !== 'desktop-native-metadata-launch' || JSON.stringify(ticket) + '\n' !== raw.toString('utf8') ||
+    !exact(ticket.host, ['path', 'sha256', 'stamp']) || ticket.host.path !== '/Applications/Phantom.app/Contents/MacOS/ashlr-desktop' ||
+    typeof ticket.host.sha256 !== 'string' || !HASH.test(ticket.host.sha256) ||
+    !exact(ticket.host.stamp, ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs', 'mode', 'uid', 'nlink']) ||
+    Object.values(ticket.host.stamp).some(v => typeof v !== 'string' || !/^(0|[1-9][0-9]*)$/.test(v)) ||
+    !exact(ticket.parent, ['pid', 'startRef', 'executable']) || !Number.isSafeInteger(ticket.parent.pid) || Number(ticket.parent.pid) < 1 ||
+    ticket.parent.executable !== ticket.host.path || typeof ticket.parent.startRef !== 'string' || !HASH.test(ticket.parent.startRef)) throw new Error('Native desktop ticket invalid');
+  const image = lstatSync(ticket.host.path, { bigint: true });
+  if (!image.isFile() || image.isSymbolicLink() || image.nlink !== 1n || realpathSync(ticket.host.path) !== ticket.host.path ||
+    Object.entries({ dev: image.dev, ino: image.ino, size: image.size, mtimeNs: image.mtimeNs, ctimeNs: image.ctimeNs,
+      mode: image.mode, uid: image.uid, nlink: image.nlink }).some(([key, value]) => String(value) !== (ticket.host as { stamp: Record<string, unknown> }).stamp[key])) throw new Error('Native desktop image changed');
+}
 /** Recovery evidence only. Never contacts a provider, acquires a lease or signals a child. */
 export function inspectNativeMetadataLaunch(root: string, id: string, binding: NativeMetadataLaunchBinding): NativeMetadataChildIdentity & { registrationDigest: string } {
   inspectPrivateDirectory(root);
   const p = paths(root, id), raw = read(p.ticketPath), ticket: unknown = JSON.parse(raw.bytes.toString('utf8'));
-  if (!exact(ticket, ['schemaVersion', 'scope', 'id', 'owner', 'pending', 'bootIdentity', 'root', 'launcher']) ||
-    ticket.schemaVersion !== 1 || ticket.scope !== 'native-metadata-launch' || ticket.id !== id ||
-    JSON.stringify(ticket.owner) !== JSON.stringify(binding.owner) || JSON.stringify(ticket.pending) !== JSON.stringify(binding.pending) ||
-    JSON.stringify(ticket.bootIdentity) !== JSON.stringify(binding.bootIdentity) ||
-    !exact(ticket.root, ['dev', 'ino']) || !exact(ticket.launcher, ['sha256', 'dev', 'ino']) ||
-    ticket.launcher.sha256 !== sha(NATIVE_METADATA_LAUNCH_SOURCE)) throw new Error('Native launch binding changed');
-  const directory = lstatSync(root, { bigint: true }), image = read(p.scriptPath, 65536);
-  if (directory.dev.toString() !== ticket.root.dev || directory.ino.toString() !== ticket.root.ino ||
-    image.stat.dev.toString() !== ticket.launcher.dev || image.stat.ino.toString() !== ticket.launcher.ino ||
-    sha(image.bytes) !== ticket.launcher.sha256) throw new Error('Native launcher changed');
+  if (!ticket || typeof ticket !== 'object' || Array.isArray(ticket)) throw new Error('Native launch binding changed');
+  const value = ticket as Record<string, unknown>;
+  if (value.id !== id || JSON.stringify(value.owner) !== JSON.stringify(binding.owner) || JSON.stringify(value.pending) !== JSON.stringify(binding.pending) ||
+    JSON.stringify(value.bootIdentity) !== JSON.stringify(binding.bootIdentity) || !exact(value.root, ['dev', 'ino'])) throw new Error('Native launch binding changed');
+  const directory = lstatSync(root, { bigint: true });
+  if (String(directory.dev) !== value.root.dev || String(directory.ino) !== value.root.ino) throw new Error('Native launch root changed');
+  if (value.schemaVersion === 2) checkDesktopTicket(value, raw.bytes);
+  else {
+    if (!exact(value, ['schemaVersion', 'scope', 'id', 'owner', 'pending', 'bootIdentity', 'root', 'launcher']) || value.schemaVersion !== 1 ||
+      value.scope !== 'native-metadata-launch' || !exact(value.launcher, ['sha256', 'dev', 'ino']) || value.launcher.sha256 !== sha(NATIVE_METADATA_LAUNCH_SOURCE)) throw new Error('Native launch binding changed');
+    const image = read(p.scriptPath, 65536);
+    if (String(image.stat.dev) !== value.launcher.dev || String(image.stat.ino) !== value.launcher.ino || sha(image.bytes) !== value.launcher.sha256) throw new Error('Native launcher changed');
+  }
   const registered = read(p.registrationPath), identity: unknown = JSON.parse(registered.bytes.toString('utf8'));
   if (!exact(identity, ['schemaVersion', 'scope', 'ticketDigest', 'pid', 'pgid', 'startRef', 'startRefSource']) ||
     identity.schemaVersion !== 1 || identity.scope !== 'native-metadata-child' || identity.ticketDigest !== sha(raw.bytes) ||

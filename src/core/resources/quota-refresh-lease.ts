@@ -1,4 +1,5 @@
 /** Shared foreground quota ownership; a pending fence survives uncertain cleanup. */
+import { qualifyDesktopMetadataLaunch } from '../run/desktop-metadata-launch-trust.js';
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, unlinkSync, writeFileSync, type BigIntStats } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
@@ -13,8 +14,8 @@ import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readResourceJson } from './pool-runtime.js';
 import { readNativeBootIdentity, type NativeBootIdentity } from './native-boot-identity.js';
 import { createNativeMetadataLaunch, confirmNativeMetadataLaunch, inspectNativeMetadataLaunch,
-  nativeMetadataLaunchSupported, retireNativeMetadataLaunch, type NativeMetadataLaunchBinding,
-  type NativeMetadataLaunchDescriptor } from '../run/native-metadata-launch.js';
+  createDesktopMetadataLaunch, nativeMetadataLaunchSupported, retireNativeMetadataLaunch, type NativeMetadataLaunchBinding,
+  type MetadataLaunchDescriptor } from '../run/native-metadata-launch.js';
 import type { ResourceCollectorInspection, ResourceCollectorRecoveryDiagnosis } from './console-types.js';
 
 export type ResourceQuotaRefreshLeaseErrorCode = 'collector-owned' | 'reconciliation-required' |
@@ -211,7 +212,8 @@ function activityRecoveryBlocker(activity: ActivityRecord, root?: string, previo
 }
 
 export interface ResourceNativeProcessGroupLifecycle {
-  prepare(): { spawned(pgid: number): void; settled(receipt: 'not-started' | 'group-exit-confirmed'): void; launcher?: NativeMetadataLaunchDescriptor };
+  preflight?(signal: AbortSignal): Promise<void>;
+  prepare(): { spawned(pgid: number): void; settled(receipt: 'not-started' | 'group-exit-confirmed'): void; launcher?: MetadataLaunchDescriptor };
 }
 export interface ResourceNativeActivity {
   settle(): void;
@@ -384,7 +386,7 @@ export async function acquireResourceQuotaRefreshLease(root: string,
   if (options.trackNativeActivity !== undefined && typeof options.trackNativeActivity !== 'boolean') throw new Error('Invalid native activity tracking');
   if (options.trackNativeLaunchHandoff !== undefined && typeof options.trackNativeLaunchHandoff !== 'boolean' ||
       options.trackNativeLaunchHandoff && !options.trackNativeActivity) throw new Error('Invalid native launch handoff');
-  const launchHandoff = options.trackNativeLaunchHandoff === true && nativeMetadataLaunchSupported();
+  let launchHandoff = options.trackNativeLaunchHandoff === true && nativeMetadataLaunchSupported();
   if (!['codex-native-metadata', 'native-connection-metadata'].includes(scope)) throw new Error('Invalid collector scope');
   if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 60_000) {
     throw new Error('Invalid resource quota collector wait budget');
@@ -399,6 +401,35 @@ export async function acquireResourceQuotaRefreshLease(root: string,
     if (signal?.aborted) throw new ResourceQuotaRefreshLeaseError('cancelled', ACQUISITION_UNAVAILABLE);
     if (deadline !== null && performance.now() >= deadline) throw new ResourceQuotaRefreshLeaseError(failureCode, ACQUISITION_UNAVAILABLE);
   };
+  assertActive();
+  // Desktop proof is metadata-only and precedes the durable lease. Its reads
+  // must still obey this caller's original acquisition budget and cancellation.
+  let desktop: Awaited<ReturnType<typeof qualifyDesktopMetadataLaunch>> = null;
+  if (options.trackNativeLaunchHandoff && !launchHandoff) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+      desktop = await Promise.race([
+        qualifyDesktopMetadataLaunch(controller.signal),
+        new Promise<never>((_, reject) => {
+          controller.signal.addEventListener('abort', () => reject(new ResourceQuotaRefreshLeaseError(
+            signal?.aborted ? 'cancelled' : 'collector-unavailable', ACQUISITION_UNAVAILABLE)), { once: true });
+          if (deadline !== null) timer = setTimeout(abort, Math.max(1, Math.ceil(deadline - performance.now())));
+          if (signal?.aborted) abort();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      controller.abort();
+    }
+  }
+  assertActive();
+  if (options.trackNativeLaunchHandoff && process.platform === 'darwin' && process.versions.bun !== undefined && !desktop)
+    throw new ResourceQuotaRefreshLeaseError('collector-unavailable', 'Signed desktop metadata launch proof unavailable');
+  launchHandoff ||= desktop !== null;
   let lock: LocalStoreLock | null = null;
   const pendingPath = join(root, '.resource-quota-refresh-pending.json');
   const activityPath = join(root, ACTIVITY_FILE);
@@ -598,8 +629,8 @@ export async function acquireResourceQuotaRefreshLease(root: string,
       writeReservations([...reservations.values()].map((item) => item.id === id ? next : item));
       reservations.set(id, next);
     }
-    const processGroupLifecycle: ResourceNativeProcessGroupLifecycle = Object.freeze({ prepare() {
-      let launcher: NativeMetadataLaunchDescriptor | undefined;
+    const processGroupLifecycle: ResourceNativeProcessGroupLifecycle = Object.freeze({ ...(desktop ? { async preflight(signal: AbortSignal) { assertOwnership(); await desktop.preflight(signal); assertOwnership(); } } : {}), prepare() {
+      let launcher: MetadataLaunchDescriptor | undefined;
       let binding: NativeMetadataLaunchBinding | undefined;
       try {
         transition('ready', { id, phase: 'preparing', pgid: null, ...(launchHandoff ? { launchId: id } : {}) });
@@ -607,7 +638,7 @@ export async function acquireResourceQuotaRefreshLease(root: string,
           const previous = readPendingMarker(pendingPath);
           if (!activity || activity.record.schemaVersion !== 3) throw new Error();
           binding = launchBinding(activity.record, previous);
-          launcher = createNativeMetadataLaunch(root, id, binding);
+          launcher = desktop ? createDesktopMetadataLaunch(root, id, binding, desktop) : createNativeMetadataLaunch(root, id, binding);
         }
       }
       catch { poisoned = true; throw new ResourceQuotaRefreshLeaseError('cleanup-unconfirmed', 'Native process preparation unavailable'); }

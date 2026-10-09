@@ -26,6 +26,17 @@ describe('shared native metadata coordinator', () => {
     expect(() => prepared.spawned(123)).toThrow('Changed account'); expect(spawned).not.toHaveBeenCalled();
     prepared.settled('not-started'); expect(settled).toHaveBeenCalledExactlyOnceWith('not-started');
   });
+  it('forwards the original proof signal and refuses account drift before ticket preparation', async () => {
+    const gate = deferred<void>(), signal = new AbortController().signal;
+    let current = true;
+    const preflight = vi.fn(async (received: AbortSignal) => { expect(received).toBe(signal); await gate.promise; });
+    const prepare = vi.fn();
+    const bound = withNativeMetadataAdmission({ preflight, prepare }, () => { if (!current) throw new Error('Changed account'); })!;
+    const pending = bound.preflight!(signal); await flush();
+    expect(preflight).toHaveBeenCalledOnce(); current = false; gate.resolve();
+    await expect(pending).rejects.toThrow('Changed account'); expect(prepare).not.toHaveBeenCalled();
+    await expect(bound.preflight!(signal)).rejects.toThrow('Changed account'); expect(preflight).toHaveBeenCalledOnce();
+  });
   it('preserves legacy lifecycle results and permits only a still-current launcher', () => {
     const legacy = { spawned: vi.fn(), settled: vi.fn() }, assertCurrent = vi.fn();
     expect(withNativeMetadataAdmission(undefined, assertCurrent)).toBeUndefined();

@@ -20,7 +20,7 @@
  */
 
 import type { Duplex } from 'node:stream';
-import type { NativeMetadataLaunchDescriptor } from './native-metadata-launch.js';
+import type { MetadataLaunchDescriptor } from './native-metadata-launch.js';
 import { spawn, spawnSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import type { SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
@@ -116,11 +116,13 @@ export interface VerifyCommandResult {
 }
 
 export interface VerifyProcessGroupLifecycle {
+  /** Optional signed-host content proof, under the existing command deadline. */
+  preflight?(signal: AbortSignal): Promise<void>;
   /** Synchronous durable reservation, before any subprocess can start. */
   prepare(): {
     spawned(pgid: number): void;
     settled(receipt: 'not-started' | 'group-exit-confirmed'): void;
-    launcher?: NativeMetadataLaunchDescriptor;
+    launcher?: MetadataLaunchDescriptor;
   };
 }
 
@@ -131,7 +133,7 @@ function lifecycleShape(value: unknown, keys: string[]): boolean {
 }
 
 export function isVerifyProcessGroupLifecycle(value: unknown): value is VerifyProcessGroupLifecycle {
-  try { return lifecycleShape(value, ['prepare']); }
+  try { return lifecycleShape(value, ['prepare']) || lifecycleShape(value, ['prepare', 'preflight']); }
   catch { return false; }
 }
 
@@ -139,9 +141,13 @@ function nativeLaunchLifecycleShape(value: unknown): boolean {
   try {
     if (!value || typeof value !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
       Reflect.ownKeys(value).length !== 3 || ['spawned', 'settled'].some(key => typeof Object.getOwnPropertyDescriptor(value, key)?.value !== 'function')) return false;
-    const launch = Object.getOwnPropertyDescriptor(value, 'launcher')?.value as NativeMetadataLaunchDescriptor | undefined;
-    return !!launch && Object.getPrototypeOf(launch) === Object.prototype && Reflect.ownKeys(launch).length === 4 &&
-      ['nodeExecutable', 'scriptPath', 'ticketPath'].every(key => {
+    const launch = Object.getOwnPropertyDescriptor(value, 'launcher')?.value as MetadataLaunchDescriptor | undefined;
+    if (!launch || Object.getPrototypeOf(launch) !== Object.prototype || Reflect.ownKeys(launch).length !== 4) return false;
+    const native = Object.getOwnPropertyDescriptor(launch, 'kind')?.value === 'signed-desktop';
+    if (native && Object.getOwnPropertyDescriptor(launch, 'hostExecutable')?.value !== '/Applications/Phantom.app/Contents/MacOS/ashlr-desktop') return false;
+    const paths = native ? ['hostExecutable', 'ticketPath'] : ['nodeExecutable', 'scriptPath', 'ticketPath'];
+    const keys = native ? ['kind', 'hostExecutable', 'ticketPath', 'ticketDigest'] : ['nodeExecutable', 'scriptPath', 'ticketPath', 'ticketDigest'];
+    return keys.every(key => Object.hasOwn(launch, key) && 'value' in Object.getOwnPropertyDescriptor(launch, key)!) && paths.every(key => {
         const path: unknown = Object.getOwnPropertyDescriptor(launch, key)?.value;
         return typeof path === 'string' && isAbsolute(path) && resolve(path) === path;
       }) && typeof Object.getOwnPropertyDescriptor(launch, 'ticketDigest')?.value === 'string' &&
@@ -906,6 +912,30 @@ export async function runVerifySubprocessAsync(
     });
   }
 
+  // Optional proof consumes the original budget. A hung proof cannot prepare
+  // a ticket or extend the provider deadline; no new cleanup fact is inferred.
+  let remainingTimeoutMs = opts.timeoutMs;
+  if (opts.processGroupLifecycle?.preflight) {
+    const started = performance.now(), controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const abort = () => controller.abort(); opts.signal?.addEventListener('abort', abort, { once: true });
+    try {
+      await Promise.race([
+        opts.processGroupLifecycle.preflight(controller.signal),
+        new Promise<never>((_, reject) => {
+          const refuse = () => reject(new Error('Native metadata preflight unavailable'));
+          controller.signal.addEventListener('abort', refuse, { once: true });
+          timer = setTimeout(abort, Math.max(1, opts.timeoutMs));
+          if (opts.signal?.aborted) abort();
+        }),
+      ]);
+      remainingTimeoutMs = opts.timeoutMs - (performance.now() - started);
+      if (opts.signal?.aborted || remainingTimeoutMs <= 0 || controller.signal.aborted) throw new Error();
+    } catch {
+      return emptyResult({ error: 'Native metadata preflight unavailable', cancelled: opts.signal?.aborted === true,
+        timedOut: !opts.signal?.aborted && performance.now() - started >= opts.timeoutMs });
+    } finally { if (timer) clearTimeout(timer); opts.signal?.removeEventListener('abort', abort); controller.abort(); }
+  }
   return await new Promise<VerifySubprocessResult>((resolveDone) => {
     const stdout = createBoundedStreamCapture(opts.maxOutputChars);
     const stderr = createBoundedStreamCapture(opts.maxOutputChars);
@@ -969,9 +999,11 @@ export async function runVerifySubprocessAsync(
     let child: ReturnType<typeof spawn>;
     try {
       const launch = lifecycle?.launcher;
-      child = spawnImpl(launch ? launch.nodeExecutable : argv[0]!, launch ? [launch.scriptPath, launch.ticketPath] : argv.slice(1), {
+      const native = launch && 'kind' in launch ? launch : undefined;
+      const node = launch && !('kind' in launch) ? launch : undefined;
+      child = spawnImpl(native?.hostExecutable ?? node?.nodeExecutable ?? argv[0]!, native ? ['--_phantom-native-metadata-launch'] : node ? [node.scriptPath, node.ticketPath] : argv.slice(1), {
         cwd: opts.cwd,
-        env: opts.env,
+        env: native ? { ...opts.env, PHANTOM_NATIVE_METADATA_TICKET: native.ticketPath } : opts.env,
         stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe', ...(launch ? ['pipe' as const] : [])],
         shell: platform === 'win32' && opts.windowsShell === true,
         windowsHide: true,
@@ -1379,9 +1411,9 @@ export async function runVerifySubprocessAsync(
     opts.signal?.addEventListener('abort', onAbort, { once: true });
     if (opts.signal?.aborted) onAbort();
 
-    executionDeadlineMono = performance.now() + opts.timeoutMs;
-    executionDeadlineWall = Date.now() + opts.timeoutMs;
-    timeoutTimer = setTimeout(() => requestTermination('timeout'), opts.timeoutMs);
+    executionDeadlineMono = performance.now() + remainingTimeoutMs;
+    executionDeadlineWall = Date.now() + remainingTimeoutMs;
+    timeoutTimer = setTimeout(() => requestTermination('timeout'), remainingTimeoutMs);
     timeoutTimer.unref?.();
   });
 }

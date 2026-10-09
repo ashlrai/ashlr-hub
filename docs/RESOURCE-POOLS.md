@@ -2149,9 +2149,9 @@ or changed evidence, denied OS observation, or launcher death before publication
 retains the fence. These new records do not retroactively repair unknown v1–v4
 reservations. The existing different-boot recovery remains available after work
 has drained; sleep/wake still does not qualify. Unsupported runtimes keep the
-existing lifecycle. The compiled Bun desktop sidecar is not a Node interpreter
-and retains that legacy lifecycle; this source qualification does not establish
-desktop recovery acceptance. No background service or provider session is added.
+existing lifecycle. The compiled Bun desktop sidecar is not a Node interpreter.
+Its signed native extension is described below; unqualified desktop pairs remain
+held, and source qualification does not establish desktop recovery acceptance. No background service or provider session is added.
 
 For a normal helper close, the runner can observe a briefly lingering group for
 up to one second, within the original execution deadline. These are signal-zero
@@ -2705,3 +2705,20 @@ cooperative cancellation; polling is bounded at 50 ms, not hard real-time.
 The absolute deadline is also rechecked synchronously under the resource ledger
 lock before new admission, so setup and capacity waiting cannot renew its window.
 Tests use inert HTTP/native fixtures, not live Codex, Claude or Grok accounts.
+
+
+### Signed Mac metadata launch extension
+
+The native metadata launcher adds a separate strict ticket format for the signed
+Mac host. It preserves the Node ticket format, current-account checks and group
+exit proof. Only a physically paired `/Applications/Phantom.app` host and Bun
+sidecar with the commissioned public signer and matching compiled release/source
+identity can use it. Qualification reads public signature/file metadata before
+acquiring the collector lease; each command rechecks the same pair under its
+existing deadline. Unknown or replaced pairs retain the collection hold.
+
+Source and inert compiled fixtures do not establish acceptance of a published
+signed app. The desktop release must also qualify the actual signed host and
+sidecar pair with harmless commands before claiming this extension is available.
+No provider balance, account, grant or spending permission follows from launcher
+qualification. Legacy pending records remain held under their original rules.

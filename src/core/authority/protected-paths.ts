@@ -86,6 +86,11 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   // Authority and daemon
   'src/core/authority/**',
   'src/core/desktop/**',
+  // Native metadata re-entry is Rust; the JS import digest does not cover it.
+  'desktop/src-tauri/src/native_metadata_launch.rs',
+  'desktop/src-tauri/src/main.rs',
+  'desktop/src-tauri/src/lib.rs',
+  'src/core/run/desktop-metadata-launch-trust.ts',
   'src/cli/desktop-update.ts',
   'scripts/desktop-release-policy.mjs',
   'scripts/finalize-desktop-update.mjs',

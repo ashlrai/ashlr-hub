@@ -16,6 +16,21 @@ import {
 import { embeddedSafetySourceReader, VERIFY_SAFETY_SOURCE_KEYS as runtimeKeys } from '../src/cli/verify-safety-sources.js';
 import { embeddedClaudeToolWorkerDigest } from '../src/core/sandbox/claude-broker-tool-invocation.js';
 
+describe('signed desktop source tuple', () => {
+  it('embeds the independent tree identity before boot without changing existing BuildIdentity', () => {
+    const identity = JSON.stringify({ schemaVersion: 1, packageVersion: '3.29.5', revision: 'a'.repeat(40), dirty: false, provenance: 'git' });
+    const pair = JSON.stringify({ schemaVersion: 1, revision: 'a'.repeat(40), tree: 'b'.repeat(40), version: '3.29.5' });
+    const context = { process: { argv: ['node', 'ashlr'], env: {}, execPath: '/owned/ashlr' }, Symbol, booted: false, dirname };
+    const source = createSeaShim({ pkgVersion: '3.29.5', buildIdentityJson: identity, desktopPairIdentityJson: pair });
+    runInNewContext(source.replace("import { dirname } from 'node:path';", '')
+      .replace("await import('../scripts/scorecard-history-worker.mjs');", "throw new Error('unexpected helper');")
+      .replace("await import('../dist/cli/index.js');", "if (globalThis[Symbol.for('phantom.desktop-pair-build.v1')] !== " + JSON.stringify(pair) + ") throw Error('late identity'); booted = true;"), context);
+    expect(context.booted).toBe(true);
+    expect(runInNewContext("globalThis[Symbol.for('ashlr.build-identity.v1')]", context)).toBe(identity);
+    expect(createSeaShim({ pkgVersion: '3.29.5', buildIdentityJson: identity })).not.toContain("Symbol.for('phantom.desktop-pair-build.v1')");
+  });
+});
+
 describe('fixed Claude tool worker native source closure', () => {
   it('embeds only the exact compiled worker bytes with the CLI artifact identity before boot', () => {
     const root = mkdtempSync(join(tmpdir(), 'ashlr-sea-tool-'));

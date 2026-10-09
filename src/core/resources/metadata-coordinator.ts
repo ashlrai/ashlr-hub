@@ -7,7 +7,7 @@ type NativeActivity = { settle(): void; processGroupLifecycle?: VerifyProcessGro
 export function withNativeMetadataAdmission(lifecycle: VerifyProcessGroupLifecycle | undefined,
   assertCurrent: () => void): VerifyProcessGroupLifecycle | undefined {
   if (!lifecycle) return undefined;
-  return Object.freeze({ prepare() {
+  return Object.freeze({ ...(lifecycle.preflight ? { async preflight(signal: AbortSignal) { assertCurrent(); await lifecycle.preflight!(signal); assertCurrent(); } } : {}), prepare() {
     const prepared = lifecycle.prepare();
     const launcher = Object.getOwnPropertyDescriptor(prepared, 'launcher');
     if (!launcher || !('value' in launcher) || !launcher.value) return prepared;
