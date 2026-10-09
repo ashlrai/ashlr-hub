@@ -1,6 +1,6 @@
 # Reset-aware fleet scheduling
 
-Verse helps the fleet select useful work that can finish before a qualified
+Phantom helps the fleet select useful work that can finish before a qualified
 account deadline. Work for me keeps the selected tasks, eligible accounts and
 current routing policies together. Opening resource details only reads recorded evidence;
 it does not start work or call a decision model.
@@ -61,6 +61,12 @@ so. A quota percentage is never converted into a token allowance. These estimate
 cannot promise that all remaining allowance will be consumed or that unused
 allowance cannot carry over.
 
+## API promotions
+
+Claude API promotions are a separate funding lane. A recorded API expiry can support a duration-fit advisory when its balance, date and matching task history are known. It never becomes subscription headroom, a free lane or a percentage quota. The current router and signed subscription grant keep API execution held; recording a balance cannot activate it.
+
+Before automatic API useful work can run, Phantom needs a source-owned fresh billing reader proving promotion-only prepaid funding, matching organization/workspace/credential identity and positive signed API authority. Purchased funding, invoicing, auto-reload, unknown evidence or an expired admission cutoff block spending. A date-only UTC expiry uses the start of that day as the admission cutoff, explicitly distinct from a provider-reported instant. Future grants must be observed; billing cycles do not manufacture balances. See [resource evidence](RESOURCE-EVIDENCE.md#claude-api-promotional-grants) for the reservation and display boundaries.
+
 ## Decisions and execution
 
 The selected-batch planner can reorder comparable eligible choices so work with
@@ -110,11 +116,11 @@ current `rate_limits.extra_usage.is_enabled` is literally false and native accou
 identity matches before and after the report. The optional report, account and
 usage reading must remain fresh at every new contact. This billing report is
 not an execution binding: the actual producer must use the same independently
-verified account and credential profile. Current standing Claude producers
-remain blocked by the existing credential jail. An account-bound native CLI
-broker with an isolated tool executor is the next integration boundary to verify;
-it is not implemented here, and a native profile alone does not remove the guard. The
-source reports this as `execution-unbound` and retains the saved reserve. Missing, malformed, enabled
+verified account and credential profile. Phantom's macOS host-owned native CLI
+adapter uses a broker and isolated tool workers; each launch still needs an
+independently matched account and credential profile. A native profile alone
+does not remove the guard. Without a verified execution match, the source reports
+`execution-unbound` and retains the saved reserve. Missing, malformed, enabled
 or account-swapped data restores the saved reserve. Codex, Grok and Devin have no
 verified no-spillover boundary in this source and remain held for reserve
 shrinking. Grok's on-demand UI setting alone is not billing enforcement.

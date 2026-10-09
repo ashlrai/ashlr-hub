@@ -1,6 +1,7 @@
 import { formatDecimalMetric } from '../../../components/charts/format-metric.js';
 import { usedPercentText } from '../percent-text.js';
 import type { CreditPoolReadView, CreditPoolRowView } from '../../../../core/resources/credit-pool-types.js';
+import type { ClaudeApiGrantView } from '../../../../core/resources/claude-api-grant-types.js';
 
 const MAX_BYTES = 1024 * 1024;
 const ID = /^[a-z0-9][a-z0-9_-]{0,79}$/;
@@ -83,6 +84,21 @@ export interface CreditPoolDisplay {
   expiryText: string;
   expiresAt: string | null;
   scopeText: string;
+}
+
+/** Exact integer conversion; display rounding never alters reserved dollars. */
+export function apiGrantUsdDecimal(micros: string): string {
+  const padded = micros.padStart(7, '0');
+  return `${padded.slice(0, -6)}.${padded.slice(-6)}`;
+}
+
+export function apiGrantDisplay(row: ClaudeApiGrantView): { amountText: string; expiryText: string } {
+  return {
+    amountText: row.remainingUsdMicros === null ? 'API promotional balance unknown'
+      : `$${formatDecimalMetric(apiGrantUsdDecimal(row.remainingUsdMicros))} last recorded`,
+    expiryText: row.expiryDate === null ? 'API credit expiry unknown'
+      : `Expires ${row.expiryDate} UTC`,
+  };
 }
 /** Display only: no dollar conversion, allowance inference, admission or spend-down priority. */
 export function creditPoolDisplay(row: CreditPoolRowView, nowMs: number): CreditPoolDisplay {

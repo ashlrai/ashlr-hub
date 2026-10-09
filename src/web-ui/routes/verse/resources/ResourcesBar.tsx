@@ -31,6 +31,8 @@ import { bindingLeftPercent } from '../usage/binding-left.js';
 import { accountStatus, buildCapacityRows, type AccountStatus, type CapacityRow } from '../usage/capacity-strip-model.js';
 import { formatUsd } from './resources-model.js';
 import { cloudCreditsQuery } from './resources-queries.js';
+import { creditPoolsQuery } from './credit-pools-query.js';
+import { apiGrantDisplay, apiGrantUsdDecimal } from './credit-pool-model.js';
 import { devinConsumptionEvidence, devinUsageEvidence, formatAcu } from '../devin/devin-model.js';
 import { DEVIN_POLL_MS, devinQuery } from '../devin/devin-queries.js';
 import { openResources, useResourcesUi } from './resources-store.js';
@@ -221,8 +223,17 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   const devinRead = useQuery(devinQuery);
   const refreshDevin = useRefetch(devinQuery);
   const resources = useResourcesUi();
+  const creditRead = useQuery(creditPoolsQuery, { enabled: resources.bar, freshMs: 15_000 });
+  const refreshCredits = useRefetch(creditPoolsQuery);
   const devin = devinRead.data?.value ?? null;
   const [coldStartedAt] = useState(() => Date.now());
+  const creditValue = creditRead.error === undefined ? creditRead.data?.value : null;
+  // The first local file read may still be warming. Stop fast polling as soon
+  // as the API view arrives, independently of other native credit pools.
+  const coldCredits = creditValue?.state === 'warming'
+    && !(creditValue.v === 2 && creditValue.apiGrants.state === 'healthy')
+    && Date.now() - coldStartedAt < 30_000;
+  usePollWhileVisible(refreshCredits, coldCredits ? 2_000 : 15_000, { enabled: resources.bar && !resources.open });
   const consumption = devin?.consumption;
   // Catch the server's startup collection promptly, but only for real pending
   // metadata and for the first minute. GET never starts a provider request.
@@ -296,6 +307,46 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
         </Tooltip>
     ),
   }));
+  // Recorded API money is not subscription capacity, a seat, or permission to spend.
+  const apiGrants = creditValue?.v === 2 && creditValue.apiGrants.state === 'healthy'
+    ? creditValue.apiGrants.rows : [];
+  if (apiGrants.length) {
+    const single = apiGrants.length === 1 ? apiGrants[0]! : null;
+    const amount = single ? apiGrantDisplay(single).amountText : `${formatMetric(apiGrants.length)} records`;
+    const compactAmount = single?.remainingUsdMicros === null ? 'Unknown'
+      : amount.replace(' last recorded', '');
+    const exactTitle = single?.remainingUsdMicros != null
+      ? `Exact recorded balance: ${apiGrantUsdDecimal(single.remainingUsdMicros)} USD` : undefined;
+    entries.push({ key: 'budget:claude-api-promotions', name: 'Claude API promotion', content: (
+      <Tooltip placement="right" content={
+        <div className={styles.tip}>
+          <div className={styles.tipHead}><ProviderLogo engine="claude" size={14} /><strong>Claude API promotion</strong></div>
+          {apiGrants.map((grant, index) => {
+            const display = apiGrantDisplay(grant);
+            return <div key={index}>
+              <div className={styles.tipSummary}>{display.amountText}</div>
+              <div className={styles.tipLine}>{display.expiryText}</div>
+              {grant.capturedAt ? <div className={styles.tipLine}>Recorded <time dateTime={grant.capturedAt}>{new Date(grant.capturedAt).toLocaleString()}</time></div> : null}
+            </div>;
+          })}
+          <div className={styles.tipLine}>Automatic use held · billing, account binding and signed API authority need verification.</div>
+          <div className={styles.tipHint}>Click for Resources · ⌘.</div>
+        </div>
+      }>
+        <button type="button" className={styles.row} data-level="unknown"
+          aria-label={`Claude API promotion: ${amount}. Automatic use held. Open Resources`}
+          title={exactTitle} onClick={() => openResources()}>
+          <span className={styles.line}>
+            <ProviderLogo engine="claude" size={14} className={styles.logo} />
+            {expanded ? <span className={styles.name}>Claude API promotion</span> : null}
+          </span>
+          <span className={styles.credits}>
+            <span>{expanded ? amount : compactAmount}</span><span className={styles.creditHold}>Held</span>
+          </span>
+        </button>
+      </Tooltip>
+    ) });
+  }
   if (cloud) entries.push({ key: 'budget:cloud', name: 'Cloud estimate', content: (
         <Tooltip
           content={

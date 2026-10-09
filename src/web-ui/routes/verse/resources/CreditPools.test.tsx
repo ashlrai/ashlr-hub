@@ -16,9 +16,39 @@ function fixture(): CreditPoolsRead {
       source: { kind: 'verified-manual', adapter: 'claude-account-ui' }, identityState: 'matched', evidenceState: 'recorded', expiryState: 'unknown' },
   ] } };
 }
+function apiFixture(): CreditPoolsRead {
+  return { v: 2, state: 'warming', refreshedAt: null, pools: null, apiGrants: { v: 1, state: 'healthy', rows: [{
+    v: 1, state: 'recorded', remainingUsdMicros: '178123456', totalUsdMicros: '200000000', capturedAt: at,
+    expiryDate: '2026-10-24', admissionCutoff: '2026-10-24T00:00:00.000Z', cutoffPolicy: 'expiry-day-start/v1', automaticAdmission: 'held',
+  }] } };
+}
 beforeEach(() => evictAll());
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 describe('Credit balance disclosure', () => {
+  it('shows separate rounded API money while subscription reads are warming, without authorizing spending', async () => {
+    const { posted } = stubSurfaceFetch({ routes: { [CREDIT_POOLS_PATH]: apiFixture() } });
+    render(<CreditPools />); await userEvent.setup().click(screen.getByText('Credit balances'));
+    await screen.findByText('Claude API promotion');
+    expect(screen.getByText('$180 last recorded')).toHaveAttribute('title', 'Exact recorded balance: 178.123456 USD');
+    expect(screen.getByText('Recorded API grant: $200')).toBeVisible();
+    expect(screen.getByText('Expires 2026-10-24 UTC')).toBeVisible();
+    expect(screen.getByText(/at the start of the expiry date/)).toBeVisible();
+    expect(screen.getByText(/Automatic use held/)).toBeVisible();
+    expect(posted).toEqual([]);
+  });
+  it('rejects private API identity and admission claims and preserves unknown balances', () => {
+    const value = apiFixture(); if (value.v !== 2) throw new Error('fixture');
+    expect(narrowCreditPoolsEnvelope(value)).not.toBeNull();
+    const row = value.apiGrants.rows[0]!;
+    for (const changed of [{ ...row, organizationDigest: 'a'.repeat(64) }, { ...row, automaticAdmission: 'ready' },
+      { ...row, remainingUsdMicros: '200000001' }, { ...row, cutoffPolicy: 'expiry-day-start/v1', admissionCutoff: '2026-10-24T23:59:59.000Z' }]) {
+      expect(narrowCreditPoolsEnvelope({ ...value, apiGrants: { ...value.apiGrants, rows: [changed] } })).toBeNull();
+    }
+    expect(narrowCreditPoolsEnvelope({ ...value, apiGrants: { ...value.apiGrants, rows: [{ ...row, remainingUsdMicros: null,
+      expiryDate: null, admissionCutoff: null, cutoffPolicy: null }] } })).not.toBeNull();
+    const getter = vi.fn(); const accessor = Object.defineProperty({ ...value }, 'apiGrants', { get: getter });
+    expect(narrowCreditPoolsEnvelope(accessor)).toBeNull(); expect(getter).not.toHaveBeenCalled();
+  });
   it('does no request while closed, labels two separate exact dollar records and original capture dates', async () => {
     const { fetchMock, posted } = stubSurfaceFetch({ routes: { [CREDIT_POOLS_PATH]: fixture() } });
     render(<CreditPools accountNames={new Map([['sample-claude', 'My Claude']])} />);

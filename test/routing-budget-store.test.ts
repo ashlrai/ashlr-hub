@@ -154,6 +154,22 @@ describe('budget policy file', () => {
 });
 
 describe('capacity snapshot', () => {
+  it('round-trips API credit history without accepting subscription or free capacity', () => {
+    const api = claudeSeat({ seatId: 'claude-api', engine: 'claude-api', windows: [], costBasis: 'credits',
+      claudeApiGrant: { v: 1, state: 'recorded', remainingUsdMicros: '200000000', totalUsdMicros: '200000000',
+        capturedAt: '2026-09-24T11:59:00.000Z', expiryDate: '2026-10-24', admissionCutoff: '2026-10-24T00:00:00.000Z',
+        cutoffPolicy: 'expiry-day-start/v1', automaticAdmission: 'held' } });
+    writeCapacitySnapshot([api]);
+    expect(readCapacitySnapshot()?.seats).toEqual([api]);
+    for (const over of [{ free: true }, { windows: claudeSeat().windows }, { costBasis: 'subscription' },
+      { engine: 'claude' }, { seatId: 'claude' }, { windowless: true },
+      { claudeApiGrant: { ...api.claudeApiGrant, automaticAdmission: 'eligible' } },
+      { claudeApiGrant: { ...api.claudeApiGrant, remainingUsdMicros: '300000000' } }]) {
+      expect(sanitizeSeatCapacity({ ...api, ...over })).toBeNull();
+    }
+    expect(routeSeat({ task: 'code', difficulty: 'high', autonomous: false }, [api],
+      defaultBudgetPolicy(), { nowMs: Date.parse(api.observedAt!) }).seatId).toBeNull();
+  });
   it('writes 0600 and reads back exactly', () => {
     const snap = writeCapacitySnapshot([claudeSeat()], new Date('2026-09-24T12:00:00.000Z'));
     expect(mode(capacitySnapshotPath())).toBe(0o600);

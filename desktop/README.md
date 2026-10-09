@@ -29,7 +29,7 @@ The 3.25.2 archives were published and verified, but its macOS updater client re
 
 ## Canonical release
 
-The source candidate is 3.26.1; publication and installation are pending qualification and public byte verification.
+The source candidate is 3.27.0; publication and installation are pending qualification and public byte verification.
 
 The published 3.26.0 release uses `ashlrai/phantom` and `@ashlr/phantom`.
 Its fixed discovery endpoint is

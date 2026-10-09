@@ -1,4 +1,7 @@
 import { SelectedOutcomeAdmissionRefusal } from './outcome-admission.js';
+// Explicit guarded API entrypoint; getActiveClient never falls back to it.
+export { buildAnthropicMessagesClient } from './anthropic-client.js';
+export type { ClaudeApiExecutionBinding } from './anthropic-client.js';
 /**
  * provider-client.ts — thin chat client over the ACTIVE local provider.
  *

@@ -141,7 +141,8 @@ export function GateFunnelCards({ read }: { read: OptionalRead<FleetLiveSnapshot
 
 function seatLabel(view: BudgetView | null, seatId: string): { label: string; engine: 'claude' | 'codex' | 'grok' | 'local' | null } {
   const info = view?.seatInfo.find((s) => s.seatId === seatId);
-  return { label: info?.label ?? seatId, engine: info?.engine ?? null };
+  // Marker names denote the provider logo only; the seat ID retains its API identity.
+  return { label: info?.label ?? seatId, engine: info?.engine === 'claude-api' ? 'claude' : info?.engine ?? null };
 }
 
 export function DecisionView({ decision, view, now }: { decision: SeatDecision; view: BudgetView | null; now?: number }) {

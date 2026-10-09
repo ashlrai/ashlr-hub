@@ -819,9 +819,11 @@ export function seatBurns(
   const sampled = Date.parse(view.sampledAt);
   const nowMs = Number.isFinite(sampled) ? sampled : Date.now();
   return view.headroom
-    .map((h): SeatBurn => {
+    .map((h): SeatBurn | null => {
       const i = info.get(h.seatId);
       const engine = i?.engine ?? 'local';
+      // API dollars have no subscription percentage or reset burn-down.
+      if (engine === 'claude-api') return null;
       const windowMs = h.bindingWindow ? WINDOW_MS[h.bindingWindow] : null;
       const reasons = seatReasons(h.reasons);
       const resetText =
@@ -851,6 +853,7 @@ export function seatBurns(
         recorded: key !== null && (recorded?.has(key) ?? false),
       };
     })
+    .filter((row): row is SeatBurn => row !== null)
     .sort((a, b) => Number(a.free) - Number(b.free) || a.label.localeCompare(b.label));
 }
 

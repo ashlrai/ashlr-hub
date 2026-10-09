@@ -212,6 +212,7 @@
 # (every test G1 holds by name, safety suite or Tier-1 import; test/authority-codeowners-310b.test.ts regenerates this list)
 /test/activation-readiness-package.test.ts @masonwyatt23
 /test/activation-readiness-windows.test.ts @masonwyatt23
+/test/anthropic-messages-client.test.ts @masonwyatt23
 /test/authority-api-310b.test.ts @masonwyatt23
 /test/authority-capability-310b.test.ts @masonwyatt23
 /test/authority-clamp-310b.test.ts @masonwyatt23
@@ -243,6 +244,7 @@
 /test/autonomy-contracts-310b.test.ts @masonwyatt23
 /test/backpressure-310b.test.ts @masonwyatt23
 /test/build-sea-worker.test.ts @masonwyatt23
+/test/claude-api-grant.test.ts @masonwyatt23
 /test/cloud-budget.test.ts @masonwyatt23
 /test/cloud-intake-313.test.ts @masonwyatt23
 /test/cloud-timeline.test.ts @masonwyatt23

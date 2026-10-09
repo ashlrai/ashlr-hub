@@ -55,6 +55,7 @@ import {
   type ParsedBudgetUpdate,
 } from './policy.js';
 import { boundSeatReasons } from './seat-reasons.js';
+import { narrowClaudeApiGrantReadView } from '../resources/claude-api-grant-types.js';
 import { COST_BASIS_RANK, RESOURCE_TIERS, type CostBasis, type ResourceTier } from './tiers.js';
 import type { BudgetPolicy, BudgetUpdateRequest, RoutingRequest, SeatDecision } from './types.js';
 
@@ -337,6 +338,18 @@ export function sanitizeSeatCapacity(raw: unknown): SeatCapacity | null {
   // usage windows and the fleet never routes to it (router.ts
   // devinFleetVerdict). A snapshot row claiming it is not ours: drop it.
   if (engine === 'devin') return null;
+  // A stored API reading has neither subscription windows nor free capacity.
+  // It remains display-only and cannot mint a provider admission capability.
+  const api = engine === 'claude-api';
+  if (api !== (seatId.toLowerCase() === 'claude-api')) return null;
+  let apiView: SeatCapacity['claudeApiGrant'];
+  if (api) {
+    if (raw['costBasis'] !== 'credits' || raw['windowless'] === true ||
+      !Array.isArray(raw['windows']) || raw['windows'].length !== 0) return null;
+    const view = narrowClaudeApiGrantReadView({ v: 1, state: 'healthy', rows: [raw['claudeApiGrant']] });
+    if (!view) return null;
+    apiView = view.rows[0];
+  }
   if (typeof raw['free'] !== 'boolean' || typeof raw['signedOut'] !== 'boolean') return null;
   // `free` is only believable for a local seat: a paid seat claiming it would
   // bypass every reserve.
@@ -368,6 +381,7 @@ export function sanitizeSeatCapacity(raw: unknown): SeatCapacity | null {
     observedAt,
     spentTodayUsd: spent,
   };
+  if (apiView) out.claudeApiGrant = apiView;
   if (typeof raw['accountHint'] === 'string' && /^[a-f0-9]{64}$/.test(raw['accountHint'])) out.accountHint = raw['accountHint'];
   if (typeof raw['onDemandEnabled'] === 'boolean') out.onDemandEnabled = raw['onDemandEnabled'];
   if (validSubscriptionOnlyBoundary(raw['subscriptionOnlyBoundary']) && raw['subscriptionOnlyBoundary'].accountHint === out.accountHint &&

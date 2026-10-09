@@ -152,6 +152,9 @@ export function fleetLaneOf(engine: string | null | undefined, cfg?: AshlrConfig
  */
 export function laneOfSeat(seat: { engine: BudgetEngine }): FleetEngine | null {
   switch (seat.engine) {
+    case 'claude-api':
+      // API credits cannot borrow the signed native Claude producer lane.
+      return null;
     case 'claude':
       return 'claude-cli';
     case 'codex':

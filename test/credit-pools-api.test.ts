@@ -10,7 +10,8 @@ import type { AshlrConfig } from '../src/core/types.js';
 import type { ResourceAccountIdentitySnapshot } from '../src/core/resources/account-identity-witness.js';
 import type { CreditPoolReadView } from '../src/core/resources/credit-pool-types.js';
 import { startServer } from '../src/core/web/server.js';
-const f = vi.hoisted(() => ({ get: vi.fn(), snapshot: vi.fn(), touch: vi.fn(), invalidated: vi.fn(), revision: vi.fn() }));
+const f = vi.hoisted(() => ({ get: vi.fn(), snapshot: vi.fn(), touch: vi.fn(), invalidated: vi.fn(), revision: vi.fn(), apiGrants: vi.fn() }));
+vi.mock('../src/core/resources/claude-api-grant.js', async original => ({ ...await original<typeof import('../src/core/resources/claude-api-grant.js')>(), readClaudeApiGrantViews: f.apiGrants }));
 vi.mock('../src/core/verse/accounts.js', async original => ({ ...await original<typeof import('../src/core/verse/accounts.js')>(), getVerseAccountCollector: f.get }));
 const NOW = Date.parse('2026-10-01T12:00:00.000Z');
 const root = '/private/fixture-accounts';
@@ -36,12 +37,36 @@ async function request(ctx: VerseApiContext, method = 'GET', query = '', path = 
 async function settle() { for (let i = 0; i < 10; i++) await Promise.resolve(); }
 beforeEach(() => {
   _resetCreditPoolsCacheForTest(); vi.useFakeTimers(); vi.setSystemTime(NOW);
+  f.apiGrants.mockReset().mockResolvedValue({ v: 1, state: 'missing', rows: [] });
   f.get.mockReset(); f.snapshot.mockReset().mockReturnValue([identity()]); f.touch.mockReset(); f.invalidated.mockReset().mockReturnValue([]); f.revision.mockReset().mockReturnValue(0);
   f.get.mockReturnValue({ accountsRoot: root, status: () => ({ mode: 'owned', state: 'running', reasonCode: null }),
     identityWitnessesSnapshot: f.snapshot, invalidatedIdentityAccountIdsSnapshot: f.invalidated, identitySnapshotRevision: f.revision, touch: f.touch });
 });
 afterEach(() => vi.useRealTimers());
 describe('credit display API', () => {
+  it('independently reads API promotions without waiting for subscription worker or exposing private bindings', async () => {
+    const apiGrants = { v: 1, state: 'healthy', rows: [{ v: 1, state: 'recorded', remainingUsdMicros: '200000000',
+      totalUsdMicros: '200000000', capturedAt: new Date(NOW).toISOString(), expiryDate: '2026-10-24',
+      admissionCutoff: '2026-10-24T00:00:00.000Z', cutoffPolicy: 'expiry-day-start/v1', automaticAdmission: 'held' }] };
+    f.apiGrants.mockResolvedValue(apiGrants);
+    const read = vi.fn(() => new Promise(() => {})); const ctx = context(read);
+    expect((await request(ctx)).body).toEqual({ v: 1, state: 'warming', refreshedAt: null, pools: null });
+    await settle();
+    const result = await request(ctx);
+    expect(result.body).toEqual({ v: 2, state: 'warming', refreshedAt: null, pools: null, apiGrants });
+    expect(f.apiGrants).toHaveBeenCalledExactlyOnceWith(root); expect(read).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(result)).not.toContain(root); expect(f.touch).not.toHaveBeenCalled();
+  });
+  it('does not acquire API records on rejected requests and keeps a failed read unknown', async () => {
+    const ctx = context(vi.fn().mockResolvedValue(view));
+    await request(ctx, 'POST'); await request(ctx, 'GET', '?root=x');
+    expect(f.apiGrants).not.toHaveBeenCalled();
+    f.apiGrants.mockRejectedValue(new Error('private-billing-details'));
+    await request(ctx); await settle(); const result = await request(ctx);
+    expect(result.body).toMatchObject({ v: 2, apiGrants: { v: 1, state: 'unavailable', rows: [] } });
+    expect(JSON.stringify(result)).not.toContain('private-billing-details');
+    expect(f.apiGrants).toHaveBeenCalledTimes(1);
+  });
   it('returns before a slow read, coalesces and never exposes private witnesses on wire', async () => {
     let finish!: (v: CreditPoolReadView) => void;
     const read = vi.fn(() => new Promise<CreditPoolReadView>(resolve => { finish = resolve; })); const ctx = context(read);

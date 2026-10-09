@@ -51,9 +51,12 @@ import {
  * hosted session agent: it has no capacity windows, no dispatch lane and is
  * never a judge; its spend is metered in ACUs by devin/budget.ts.
  */
-export type BudgetEngine = 'claude' | 'codex' | 'grok' | 'local' | 'devin';
+export type BudgetEngine = 'claude' | 'claude-api' | 'codex' | 'grok' | 'local' | 'devin';
 
-export const BUDGET_ENGINES: readonly BudgetEngine[] = ['claude', 'codex', 'grok', 'local', 'devin'];
+export const BUDGET_ENGINES: readonly BudgetEngine[] = ['claude', 'claude-api', 'codex', 'grok', 'local', 'devin'];
+
+/** API credits are a separate metered identity, never the native subscription. */
+export const CLAUDE_API_SEAT_ID = 'claude-api';
 
 /**
  * Engines that can have a CAPACITY seat (usage windows, the seat router, the
@@ -122,6 +125,7 @@ export const MODE_DEFAULTS: Readonly<Record<BudgetMode, Readonly<Record<BudgetEn
   Object.freeze({
     'all-in': Object.freeze({
       claude: Object.freeze({ enabled: true, reservePercent: 0 }),
+      'claude-api': Object.freeze({ enabled: false, reservePercent: 0 }),
       codex: Object.freeze({ enabled: false, reservePercent: 0 }),
       grok: Object.freeze({ enabled: true, reservePercent: 0 }),
       local: Object.freeze({ enabled: true, reservePercent: 0 }),
@@ -129,6 +133,7 @@ export const MODE_DEFAULTS: Readonly<Record<BudgetMode, Readonly<Record<BudgetEn
     }),
     balanced: Object.freeze({
       claude: Object.freeze({ enabled: true, reservePercent: 40, maxSessionWindowPercent: 70 }),
+      'claude-api': Object.freeze({ enabled: false, reservePercent: 0 }),
       codex: Object.freeze({ enabled: false, reservePercent: 40, maxSessionWindowPercent: 70 }),
       grok: Object.freeze({ enabled: true, reservePercent: 0 }),
       local: Object.freeze({ enabled: true, reservePercent: 0 }),
@@ -136,6 +141,7 @@ export const MODE_DEFAULTS: Readonly<Record<BudgetMode, Readonly<Record<BudgetEn
     }),
     reserve: Object.freeze({
       claude: Object.freeze({ enabled: true, reservePercent: 85, maxSessionWindowPercent: 50 }),
+      'claude-api': Object.freeze({ enabled: false, reservePercent: 0 }),
       codex: Object.freeze({ enabled: false, reservePercent: 85, maxSessionWindowPercent: 50 }),
       grok: Object.freeze({ enabled: true, reservePercent: 85 }),
       local: Object.freeze({ enabled: true, reservePercent: 0 }),
@@ -168,6 +174,7 @@ export function isBudgetMode(value: unknown): value is BudgetMode {
  */
 export function engineOfSeatId(seatId: string): BudgetEngine {
   const id = seatId.toLowerCase();
+  if (id === CLAUDE_API_SEAT_ID) return 'claude-api';
   if (id === 'local' || id.startsWith('local:')) return 'local';
   if (id.startsWith('codex')) return 'codex';
   if (id.startsWith('grok')) return 'grok';

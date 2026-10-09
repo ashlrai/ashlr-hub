@@ -16,6 +16,7 @@ import {
   grantSwitchCap,
   standingSeatCapacity,
   standingSeatFor,
+  fleetEngineOfSeat,
 } from '../src/core/authority/effective-config.js';
 import type { BudgetPolicy } from '../src/core/routing/types.js';
 import type { AshlrConfig } from '../src/core/types.js';
@@ -40,6 +41,20 @@ function policy(opts: { stage?: number; switch?: 'propose' | 'autonomous'; confi
 const repo = (p: EffectivePolicy, name: string) => p.repos.find((r) => r.nameWithOwner === name)!;
 
 describe('computeEffectivePolicy — min of everything', () => {
+  it('does not let a Claude API spend entry inherit the native Claude signed lane', () => {
+    expect(fleetEngineOfSeat('claude-api')).toBeNull();
+    const apiGrant = editGrant(grant, g => {
+      g.spend.seats['claude-api'] = { ...g.spend.seats.claude!, enabled: true };
+    });
+    const effective = policy({ g: apiGrant });
+    expect(effective.spend.seats['claude-api']?.enabled).toBe(false);
+    const configured: BudgetPolicy = { mode: 'all-in', updatedAt: new Date(NOW).toISOString(), seats: {
+      'claude-api': { seatId: 'claude-api', enabled: true, reservePercent: 0 },
+    } };
+    expect(clampBudgetPolicy(configured, effective).seats['claude-api']?.enabled).toBe(false);
+    expect(standingSeatCapacity([{ seatId: 'claude-api' }], effective)).toEqual([]);
+  });
+
   it('uses only the current stage’s repos, capped by the stage', () => {
     const shadow = policy({ stage: 0 });
     expect(shadow.repos.map((r) => r.nameWithOwner)).toEqual(['ashlrai/fleet-canary', 'ashlrai/ashlrcode']);
