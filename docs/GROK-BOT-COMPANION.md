@@ -9,6 +9,29 @@ it when either subscription product is unavailable. Check the **actual seat's**
 execution identity before a Grok Build turn: an unpinned `grok` command may
 select `XAI_API_KEY` even when a separate subscription profile is configured.
 
+## Allowance, resets, and billing
+
+[Cursor's Grok Bot billing guide](https://cursor.com/help/grok-bot/plans), checked
+2026-10-09, describes included **weekly usage** on the signed-in Cursor account.
+That allowance resets weekly and is separate from Grok Build's native CLI usage.
+Linking SuperGrok or X Premium+ grants Bot access on that same Cursor account;
+it does not add a second meter or stack extra allowance onto a Cursor plan.
+
+**On-demand usage can incur charges.** When included usage runs out, enabled
+on-demand usage continues with billing through Cursor. Its monthly limit is
+not a hard stop for work already running: a Bot can finish beyond that limit.
+With on-demand disabled, the Bot stops when included weekly usage is exhausted.
+Check the Bot's own usage and spending screens before assigning work; do not
+enable on-demand to use up a subscription allowance.
+
+Phantom has no qualified reader for a personal Bot's remaining allowance,
+exact reset time, or confirmation that on-demand is disabled. These remain
+**unknown**, not zero or unlimited. A saved proactive profile, linked
+subscription, or Grok Build quota reading cannot establish Bot funding
+eligibility. Automatic Bot spending and pre-reset scheduling remain held until
+account-bound usage and billing evidence, dispatch, and result handling are
+qualified. The companion workflow below does not commission that integration.
+
 ## Useful setup today
 
 1. In Grok Bot, create one Bot called **Phantom release reviewer**. Give it a
@@ -60,9 +83,10 @@ key in the desktop routine details.
 
 HTTP 200 means Grok Bot **accepted and started** a run. It is not completion,
 review evidence, or a result. Read the Bot's chat and run history for the
-outcome; no documented Bot result-polling API exists. Verse 3.16 does not yet
-send these webhooks or import Bot results, so use the Bot app directly until a
-separate connector is implemented and accepted end to end.
+outcome; the checked documentation does not specify a Bot result-polling API.
+Phantom's proactive profile records configuration; it does not send these
+webhooks or import Bot results. Use the Bot app directly until a separate
+connector is implemented and accepted end to end.
 
 ## Durable learning with evidence
 
@@ -113,6 +137,13 @@ security contract:
   describes Bot approval boundaries.
 - [Grok Bot routines](https://cursor.com/help/grok-bot/routines) documents
   webhook triggers, desktop URL/key access, and the start-only meaning of 200.
+- [Grok Bot plans and billing](https://cursor.com/help/grok-bot/plans) documents
+  the Cursor-account weekly meter, non-stacking grants, and on-demand billing.
+- [Cursor Admin API](https://cursor.com/docs/account/teams/admin-api) documents
+  team administration; it does not establish a personal Bot allowance reader.
 
-No public Grok Bot result or status API is documented in these sources as of
-2026-09-28. Recheck vendor documentation before building a two-way adapter.
+The sources checked on 2026-10-09 do not specify a personal Bot allowance,
+reset, on-demand-state, or result-polling contract for Phantom. This is a limit
+of the verified integration and checked documentation, not proof that no
+provider interface could exist. Recheck vendor documentation before building
+a two-way adapter.
