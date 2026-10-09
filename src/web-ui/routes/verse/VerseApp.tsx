@@ -417,7 +417,7 @@ export function VerseApp() {
   useEffect(() => {
     if (!ui.announceChatMoved) return;
     const chat = commandChord('surface.chat');
-    toast.show(`Chat moved to ${chat ? formatChord(chat, platform) : '⌘5'} — Command, Fleet, Growth and Mind come first now.`);
+    toast.show(`Chat moved to ${chat ? formatChord(chat, platform) : '⌘5'}.`);
     acknowledgeChatMoved();
   }, [ui.announceChatMoved, toast, platform]);
 
