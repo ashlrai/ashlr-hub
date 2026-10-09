@@ -775,6 +775,17 @@ describe('exact npm release provenance', () => {
     expect(verifyNpmReleaseProvenance({ audit: audit(), ...release })).toBe(true);
   });
 
+  it('requires the explicitly bound dispatch event for canonical publishing', () => {
+    const observed = audit();
+    const envelope = observed.verified[0]!.attestationBundles[0]!.bundle.dsseEnvelope;
+    const statement = JSON.parse(Buffer.from(envelope.payload, 'base64').toString());
+    statement.predicate.buildDefinition.internalParameters.github.event_name = 'workflow_dispatch';
+    envelope.payload = Buffer.from(JSON.stringify(statement)).toString('base64');
+    expect(() => verifyNpmReleaseProvenance({audit: observed, ...release})).toThrow();
+    expect(verifyNpmReleaseProvenance({audit: observed, ...release, eventName: 'workflow_dispatch'})).toBe(true);
+    expect(() => verifyNpmReleaseProvenance({audit: observed, ...release, eventName: 'pull_request'})).toThrow();
+  });
+
   it.each([
     ['wrong subject digest', { subject: [{
       name: 'pkg:npm/%40ashlr/hub@3.2.0', digest: { sha512: 'cd'.repeat(64) },

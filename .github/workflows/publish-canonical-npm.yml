@@ -1,0 +1,285 @@
+name: Publish qualified Phantom npm package
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact CI candidate revision
+        required: true
+        type: string
+      ci_run_id:
+        description: Qualified CI run ID
+        required: true
+        type: string
+      ci_run_attempt:
+        description: Qualified CI attempt
+        required: true
+        type: string
+      attestor_run_id:
+        description: Successful current-master attestor run ID
+        required: true
+        type: string
+      attestor_run_attempt:
+        description: Successful attestor attempt
+        required: true
+        type: string
+      attested_artifact_id:
+        description: Immutable complete attested bundle ID
+        required: true
+        type: string
+      version:
+        description: Exact stable package version
+        required: true
+        type: string
+      audit_run_id:
+        description: Successful dependency audit run ID
+        required: true
+        type: string
+      audit_run_attempt:
+        description: Successful dependency audit attempt
+        required: true
+        type: string
+
+permissions: {}
+concurrency:
+  group: phantom-canonical-npm
+  cancel-in-progress: false
+
+jobs:
+  admit:
+    if: github.ref == 'refs/heads/master' && github.repository == 'ashlrai/phantom'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      admission_sha256: ${{ steps.admit.outputs.admission_sha256 }}
+      package_sha256: ${{ steps.admit.outputs.package_sha256 }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      CI_RUN_ID: ${{ inputs.ci_run_id }}
+      CI_RUN_ATTEMPT: ${{ inputs.ci_run_attempt }}
+      ATTESTOR_RUN_ID: ${{ inputs.attestor_run_id }}
+      ATTESTOR_RUN_ATTEMPT: ${{ inputs.attestor_run_attempt }}
+      ATTESTED_ARTIFACT_ID: ${{ inputs.attested_artifact_id }}
+      VERSION: ${{ inputs.version }}
+      AUDIT_RUN_ID: ${{ inputs.audit_run_id }}
+      AUDIT_RUN_ATTEMPT: ${{ inputs.audit_run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.19.0'
+          package-manager-cache: false
+      - name: Resolve original signed closure
+        id: prepare
+        run: node scripts/canonical-npm-publisher.mjs prepare
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.prepare.outputs.artifact_id }}
+          path: ${{ steps.prepare.outputs.directory }}/bundle
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.attestor_run_id }}
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Verify fresh official qualification and signatures
+        id: admit
+        env:
+          DIRECTORY: ${{ steps.prepare.outputs.directory }}
+        run: node scripts/canonical-npm-publisher.mjs admit "$DIRECTORY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload
+        with:
+          name: phantom-npm-admitted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.admit.outputs.directory }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    needs: admit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # One top-level workflow binds npm's publisher identity. No reusable callers.
+    environment: phantom-npm
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      ADMISSION_SHA256: ${{ needs.admit.outputs.admission_sha256 }}
+      PACKAGE_SHA256: ${{ needs.admit.outputs.package_sha256 }}
+      NODE_AUTH_TOKEN: ''
+      NPM_TOKEN: ''
+      NPM_CONFIG_IGNORE_SCRIPTS: 'true'
+      NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/phantom-npmrc
+      NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/phantom-global-npmrc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.19.0'
+          package-manager-cache: false
+      - name: Configure token-free npm and pinned OIDC dist-tag CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > "$NPM_CONFIG_USERCONFIG"
+          : > "$NPM_CONFIG_GLOBALCONFIG"
+          curl --fail --silent --show-error --max-time 30 'https://registry.npmjs.org/npm/-/npm-11.21.0.tgz' > "$RUNNER_TEMP/npm-cli.tgz"
+          node --input-type=module -e 'import fs from "node:fs"; import {createHash} from "node:crypto"; if(createHash("sha512").update(fs.readFileSync(process.env.RUNNER_TEMP+"/npm-cli.tgz")).digest("base64")!=="Zov8KhamNneiLdELtj5YALtNmJW4L4fCLTzjfpzXG2w6MSHcf0UxgdlK5uloCuksWT+7mGUU7wi79cO6RqivPg==")throw Error("npm tool integrity differs");'
+          npm install --global "$RUNNER_TEMP/npm-cli.tgz" --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
+          test "$(npm --version)" = '11.21.0'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.admit.outputs.artifact_id }}
+          path: ${{ runner.temp }}/phantom-npm-admitted
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Rehash immutable admission and original archive
+        id: handoff
+        run: node scripts/canonical-npm-publisher.mjs handoff "$RUNNER_TEMP/phantom-npm-admitted"
+      - name: Publish original archive once or reconcile public presence
+        env:
+          VERSION: ${{ steps.handoff.outputs.version }}
+          FILENAME: ${{ steps.handoff.outputs.filename }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(curl --silent --show-error --max-time 30 --output "$RUNNER_TEMP/npm-before.json" --write-out '%{http_code}' "https://registry.npmjs.org/@ashlr%2Fphantom/$VERSION")"
+          if [[ "$status" == '404' ]]; then
+            # Unknown contact is reconciled below, never replayed.
+            npm publish "$RUNNER_TEMP/phantom-npm-admitted/$FILENAME" --ignore-scripts --provenance --access public --registry=https://registry.npmjs.org --tag "qualified-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" || true
+          elif [[ "$status" != '200' ]]; then
+            echo 'Registry state unknown; no publication attempted.' >&2
+            exit 1
+          fi
+      - name: Verify public metadata and exact registry archive bytes
+        run: node scripts/canonical-npm-publisher.mjs registry "$RUNNER_TEMP/phantom-npm-admitted"
+      - name: Verify publisher provenance without executing candidate code
+        env:
+          VERSION: ${{ steps.handoff.outputs.version }}
+          INTEGRITY: ${{ steps.handoff.outputs.integrity }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/phantom-consumer"
+          cd "$RUNNER_TEMP/phantom-consumer"
+          npm init --yes >/dev/null
+          npm install --ignore-scripts --no-audit --no-fund --save-exact --registry=https://registry.npmjs.org "@ashlr/phantom@$VERSION"
+          test "$(node -p "require('./node_modules/@ashlr/phantom/package.json').version")" = "$VERSION"
+          npm audit signatures --json --include-attestations > "$RUNNER_TEMP/phantom-signatures.json"
+          node "$GITHUB_WORKSPACE/scripts/canonical-npm-publisher.mjs" provenance "$RUNNER_TEMP/phantom-npm-admitted"
+
+  consumer:
+    needs: [admit, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Explicit candidate execution gets a separate ephemeral runner with no OIDC
+    # and no later privileged steps. npm lifecycle hooks also stay disabled.
+    permissions:
+      contents: read
+      actions: read
+    env:
+      ADMISSION_SHA256: ${{ needs.admit.outputs.admission_sha256 }}
+      PACKAGE_SHA256: ${{ needs.admit.outputs.package_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.19.0'
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.admit.outputs.artifact_id }}
+          path: ${{ runner.temp }}/phantom-npm-admitted
+          merge-multiple: true
+          digest-mismatch: error
+      - id: handoff
+        run: node scripts/canonical-npm-publisher.mjs handoff "$RUNNER_TEMP/phantom-npm-admitted"
+      - name: Verify isolated public installed CLI
+        env:
+          VERSION: ${{ steps.handoff.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/phantom-consumer" "$RUNNER_TEMP/phantom-home"
+          : > "$RUNNER_TEMP/phantom-npmrc"
+          cd "$RUNNER_TEMP/phantom-consumer"
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/phantom-home" NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/phantom-npmrc" npm install --ignore-scripts --no-audit --no-fund --save-exact --registry=https://registry.npmjs.org "@ashlr/phantom@$VERSION"
+          test "$(env -i PATH="$PATH" HOME="$RUNNER_TEMP/phantom-home" node node_modules/@ashlr/phantom/bin/ashlr --version)" = "$VERSION"
+
+  promote:
+    needs: [admit, publish, consumer]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: phantom-npm
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      ADMISSION_SHA256: ${{ needs.admit.outputs.admission_sha256 }}
+      PACKAGE_SHA256: ${{ needs.admit.outputs.package_sha256 }}
+      NODE_AUTH_TOKEN: ''
+      NPM_TOKEN: ''
+      NPM_CONFIG_IGNORE_SCRIPTS: 'true'
+      NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/phantom-npmrc
+      NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/phantom-global-npmrc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.19.0'
+          package-manager-cache: false
+      - name: Configure token-free pinned dist-tag CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > "$NPM_CONFIG_USERCONFIG"
+          : > "$NPM_CONFIG_GLOBALCONFIG"
+          curl --fail --silent --show-error --max-time 30 'https://registry.npmjs.org/npm/-/npm-11.21.0.tgz' > "$RUNNER_TEMP/npm-cli.tgz"
+          node --input-type=module -e 'import fs from "node:fs"; import {createHash} from "node:crypto"; if(createHash("sha512").update(fs.readFileSync(process.env.RUNNER_TEMP+"/npm-cli.tgz")).digest("base64")!=="Zov8KhamNneiLdELtj5YALtNmJW4L4fCLTzjfpzXG2w6MSHcf0UxgdlK5uloCuksWT+7mGUU7wi79cO6RqivPg==")throw Error("npm tool integrity differs");'
+          npm install --global "$RUNNER_TEMP/npm-cli.tgz" --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
+          test "$(npm --version)" = '11.21.0'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.admit.outputs.artifact_id }}
+          path: ${{ runner.temp }}/phantom-npm-admitted
+          merge-multiple: true
+          digest-mismatch: error
+      - id: handoff
+        run: node scripts/canonical-npm-publisher.mjs handoff "$RUNNER_TEMP/phantom-npm-admitted"
+      - name: Reconcile public archive before promotion
+        run: node scripts/canonical-npm-publisher.mjs registry "$RUNNER_TEMP/phantom-npm-admitted"
+      - name: Promote accepted package and read back latest
+        env:
+          VERSION: ${{ steps.handoff.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 30 'https://registry.npmjs.org/@ashlr%2Fphantom' > "$RUNNER_TEMP/phantom-packument.json"
+          node scripts/canonical-npm-publisher.mjs latest "$RUNNER_TEMP/phantom-npm-admitted"
+          npm dist-tag add "@ashlr/phantom@$VERSION" latest --registry=https://registry.npmjs.org
+          curl --fail --silent --show-error --max-time 30 'https://registry.npmjs.org/@ashlr%2Fphantom' > "$RUNNER_TEMP/phantom-packument-after.json"
+          node --input-type=module -e 'import fs from "node:fs"; const p=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+"/phantom-packument-after.json")); if(p["dist-tags"].latest!==process.env.VERSION)throw Error("Latest readback differs");'
+          printf 'Accepted @ashlr/phantom@%s from its original qualified archive.\n' "$VERSION" >> "$GITHUB_STEP_SUMMARY"
