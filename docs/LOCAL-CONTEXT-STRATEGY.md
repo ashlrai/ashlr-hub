@@ -23,7 +23,7 @@ with a locally named Qwen3.8 27B Q8_0 artifact on a 128 GB machine. The weights
 occupied about 27 GiB. These are historical observations, not current hardware,
 prompt-size, memory, latency or quality guarantees. Window and cache arithmetic
 are calculations, not measurements. See [the local fleet investigation](LOCAL-FLEET.md)
-and [the dated evaluation artifacts](../src/core/local-eval/baselines/).
+and [the dated evaluation artifacts](https://github.com/ashlrai/phantom/tree/master/src/core/local-eval/baselines).
 
 ## Context is divided at launch
 
