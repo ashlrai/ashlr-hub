@@ -39,6 +39,7 @@ import { listNativeTools, isNativeTool, callNativeTool } from './mcp-native.js';
 import { listFirmResources, listFirmResourceTemplates, readFirmResource } from './mcp-firm-resources.js';
 import { hasSecretLikeArgv, redactedCommand } from './mcp-argv-safety.js';
 import { scrubSecrets } from './util/scrub.js';
+import { getLocusJobEnv, hasLocusJobEnv, withLocusJobChildEnv } from './integrations/locus-job-env.js';
 
 // ---------------------------------------------------------------------------
 // M105: Browser MCP probe + tool-call helpers
@@ -144,13 +145,13 @@ export async function callBrowserTool(
   try { cfgForCall = loadConfig(); } catch { /* non-fatal */ }
   try {
     client = await connectDownstream(spec, timeoutMs, cfgForCall);
-    const result = await Promise.race([
+    const result = await withDeadline(
       client.callTool({ name: toolName, arguments: args }, undefined, { timeout: timeoutMs }),
-      timeout<unknown>(timeoutMs, `callTool(${spec.name}/${toolName})`),
-    ]);
+      timeoutMs, `callTool(${spec.name}/${toolName})`,
+    );
     return { ok: true, detail: `${spec.name}/${toolName} succeeded`, result };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = safeErrorMessage(err);
     return { ok: false, detail: `${spec.name}/${toolName} failed: ${msg}` };
   } finally {
     if (client) {
@@ -202,7 +203,7 @@ const SAFE_CHILD_ENV_KEYS = [
 function safeChildBase(): NodeJS.ProcessEnv {
   const base: NodeJS.ProcessEnv = {};
   for (const k of SAFE_CHILD_ENV_KEYS) {
-    if (process.env[k] !== undefined) base[k] = process.env[k];
+    if (getLocusJobEnv()[k] !== undefined) base[k] = getLocusJobEnv()[k];
   }
   return base;
 }
@@ -228,13 +229,39 @@ export function isSelfGateway(spec: McpServerSpec): boolean {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Reject after `ms` with a timeout error. */
-function timeout<T>(ms: number, label: string): Promise<T> {
-  return new Promise<T>((_resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-    // Don't keep the event loop alive solely for this timer.
-    if (typeof t.unref === 'function') t.unref();
+/** Bound an operation and clear its deadline on either settlement path. */
+async function withDeadline<T>(operation: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function downstreamEnv(spec: McpServerSpec, cfg?: ReturnType<typeof loadConfig>): Record<string, string> {
+  // Validate AFTER the per-server override. A declared HOME/LOCUS scope must
+  // never replace a delegated job's captured identity at the final spawn.
+  const merged = withLocusJobChildEnv({
+    ...(cfg ? withToolEnv(cfg, safeChildBase()) : safeChildBase()),
+    ...(spec.env ?? {}),
+    [GATEWAY_ENV_MARKER]: '1',
   });
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(merged)) {
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
+function refuseSharedJobGateway(): void {
+  if (hasLocusJobEnv()) throw new Error('Shared MCP gateway unavailable inside a delegated Locus job');
 }
 
 function safeErrorMessage(err: unknown): string {
@@ -246,7 +273,7 @@ function safeErrorMessage(err: unknown): string {
  * against a timeout. The caller owns closing the returned client.
  * Throws on failure (caller wraps).
  */
-async function connectDownstream(spec: McpServerSpec, timeoutMs: number, cfg?: ReturnType<typeof loadConfig>): Promise<Client> {
+async function connectDownstream(spec: McpServerSpec, timeoutMs: number, cfg?: ReturnType<typeof loadConfig>, capturedEnv?: Record<string, string>): Promise<Client> {
   if (hasSecretLikeArgv(spec.args)) {
     throw new Error(
       `unsafe MCP argv refused for "${spec.name}": ${redactedCommand(spec.command, spec.args)} ` +
@@ -256,17 +283,9 @@ async function connectDownstream(spec: McpServerSpec, timeoutMs: number, cfg?: R
   const transport = new StdioClientTransport({
     command: spec.command,
     args: spec.args,
-    // Merge spec env with a self-marker so any downstream that happens to be an
-    // ashlr gateway can detect it was launched BY a gateway and refuse to
-    // re-aggregate (belt-and-suspenders against the self-spawn fork bomb).
-    // M10 env-bridge: project unified config into each downstream child, then
-    // let spec.env override (per-server keys win over hub-wide defaults).
-    // The gateway marker is set last so it can never be clobbered by spec.env.
-    env: {
-      ...(cfg ? withToolEnv(cfg, safeChildBase()) : safeChildBase()),
-      ...(spec.env ?? {}),
-      [GATEWAY_ENV_MARKER]: '1',
-    },
+    // Persistent recovery reuses the exact captured startup environment. One-off
+    // job probes validate the final configured override against their snapshot.
+    env: capturedEnv ? { ...capturedEnv } : downstreamEnv(spec, cfg),
     // Surface child stderr to our stderr for debugging; never pollutes stdio JSON-RPC.
     stderr: 'inherit',
   });
@@ -277,20 +296,25 @@ async function connectDownstream(spec: McpServerSpec, timeoutMs: number, cfg?: R
   );
 
   try {
-    // Capture the connect promise and pre-attach a no-op catch so that when the
-    // timeout branch wins the race, the still-pending connect's eventual
-    // rejection has a handler — otherwise it surfaces as an unhandledRejection
-    // (noisy on Node 22, fatal under --unhandled-rejections=throw).
     const connectPromise = client.connect(transport);
-    connectPromise.catch(() => { /* losing-branch rejection swallowed */ });
-    await Promise.race([
-      connectPromise,
-      timeout<void>(timeoutMs, `connect(${spec.name})`),
-    ]);
+    let cancelled = false;
+    // A late connect must not leave an unowned child after its deadline won.
+    void connectPromise.then(() => {
+      if (cancelled) {
+        void client.close().catch(() => {});
+        void transport.close().catch(() => {});
+      }
+    }, () => {});
+    try {
+      await withDeadline(connectPromise, timeoutMs, `connect(${spec.name})`);
+    } catch (err) {
+      cancelled = true;
+      throw err;
+    }
   } catch (err) {
-    // Ensure the child is reaped on a failed/timed-out connect.
-    try { await client.close(); } catch { /* ignore */ }
-    try { await transport.close(); } catch { /* ignore */ }
+    // SDK transport teardown reaps its child; bound awaiting a broken peer.
+    try { await withDeadline(client.close(), timeoutMs, `close(${spec.name})`); } catch { /* ignore */ }
+    try { await withDeadline(transport.close(), timeoutMs, `transport-close(${spec.name})`); } catch { /* ignore */ }
     throw err;
   }
 
@@ -321,10 +345,9 @@ export async function probeServer(
   try {
     client = await connectDownstream(spec, timeoutMs, cfgForProbe);
 
-    const listed = await Promise.race([
-      client.listTools({}, { timeout: timeoutMs }),
-      timeout<{ tools: { name: string }[] }>(timeoutMs, `tools/list(${spec.name})`),
-    ]);
+    const listed = await withDeadline(
+      client.listTools({}, { timeout: timeoutMs }), timeoutMs, `tools/list(${spec.name})`,
+    );
 
     const tools = (listed.tools ?? []).map((t) => t.name);
     return {
@@ -353,251 +376,211 @@ export async function probeServer(
 // startGateway
 // ---------------------------------------------------------------------------
 
-/** A connected downstream and the tools it advertises (downstream names). */
+interface DownstreamTool {
+  name: string;
+  description?: string;
+  inputSchema?: unknown;
+}
+
+/** Keep failed configured servers too; discovery may recover them later. */
 interface Downstream {
   spec: McpServerSpec;
-  client: Client;
-  toolNames: Set<string>;
+  env: Record<string, string>;
+  client: Client | null;
+  tools: DownstreamTool[];
+  generation: number;
+  failures: number;
+  retryAfter: number;
+  inFlight?: Promise<void>;
 }
 
 /**
- * Run the aggregation gateway on stdio.
- *
- * Starts every server in `registry` as a child (skipping any that fail to start
- * within the timeout, with a stderr warning), exposes their tools namespaced as
- * `<server>__<tool>`, and proxies tools/list + tools/call to the owning
- * downstream. Resolves only when the gateway transport closes (stdin EOF).
- *
- * @param registry   The discovered MCP servers to aggregate.
- * @param timeoutMs  Per-downstream startup timeout (default 8s).
+ * Persistent stdio aggregation. Read-only tools/list may reconnect a failed
+ * configured server once after bounded backoff; effectful calls are never
+ * retried. Recovery preserves the captured command, args and child environment.
  */
 export async function startGateway(
   registry: McpRegistry,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
 ): Promise<void> {
-  // M10: load config once for the gateway lifetime so all downstream spawns
-  // inherit the unified config env. Non-fatal if config is unreadable.
+  refuseSharedJobGateway();
   let gatewayCfg: ReturnType<typeof loadConfig> | undefined;
-  try { gatewayCfg = loadConfig(); } catch { /* non-fatal: fall back to process.env */ }
+  try { gatewayCfg = loadConfig(); } catch { /* non-fatal; retain narrow child env */ }
 
-  // ── Self-exclusion: never aggregate ourself (fork-bomb guard) ─────────────
-  // `ashlr mcp install` writes a downstream entry pointing back at this gateway.
-  // Discovering and spawning it would recurse without bound. Filter it out here
-  // (primary defense); the ASHLR_MCP_GATEWAY env marker on spawned children is
-  // the secondary defense for any path that bypasses this.
-  const aggregable = registry.servers.filter((spec) => {
-    if (isSelfGateway(spec)) {
-      process.stderr.write(
-        `[ashlr mcp] skipping self "${spec.name}" (${redactedCommand(spec.command, spec.args)}) — would recurse\n`,
-      );
-      return false;
-    }
-    return true;
+  const downstreams: Downstream[] = registry.servers.filter((spec) => {
+    if (!isSelfGateway(spec)) return true;
+    process.stderr.write(`[ashlr mcp] skipping self "${spec.name}" (${redactedCommand(spec.command, spec.args)}) — would recurse\n`);
+    return false;
+  }).map((original) => {
+    const spec = { ...original, args: [...original.args], env: original.env ? { ...original.env } : undefined };
+    Object.freeze(spec.args);
+    if (spec.env) Object.freeze(spec.env);
+    Object.freeze(spec);
+    return { spec, env: downstreamEnv(spec, gatewayCfg), client: null, tools: [], generation: 0, failures: 0, retryAfter: 0 };
   });
-
-  // ── Connect every downstream in parallel; skip failures ───────────────────
-  const settled = await Promise.allSettled(
-    aggregable.map(async (spec): Promise<Downstream> => {
-      // M20: bounded self-heal — restart a crashed downstream up to maxRestarts
-      // times before falling through to the existing skip-on-failure path.
-      // Opt-out: ASHLR_NO_HEAL env var disables the heal wrapper.
-      const noHeal = process.env['ASHLR_NO_HEAL'] === '1';
-      let client: Client;
-      if (noHeal) {
-        client = await connectDownstream(spec, timeoutMs, gatewayCfg);
-      } else {
-        const healPolicy = defaultHealPolicy();
-        client = await withHeal(
-          (_attempt) => connectDownstream(spec, timeoutMs, gatewayCfg),
-          healPolicy,
-          (event: HealEvent) => {
-            process.stderr.write(
-              `[ashlr mcp] heal(${event.kind}) "${spec.name}" attempt ${event.attempt}: ${event.detail}\n`,
-            );
-          },
-        );
-      }
-      let toolNames = new Set<string>();
-      try {
-        const listed = await Promise.race([
-          client.listTools({}, { timeout: timeoutMs }),
-          timeout<{ tools: { name: string }[] }>(timeoutMs, `tools/list(${spec.name})`),
-        ]);
-        toolNames = new Set((listed.tools ?? []).map((t) => t.name));
-      } catch (err) {
-        // Connected but couldn't list — close and rethrow so it's skipped.
-        try { await client.close(); } catch { /* ignore */ }
-        throw err;
-      }
-      return { spec, client, toolNames };
-    }),
-  );
-
-  const downstreams: Downstream[] = [];
-  settled.forEach((result, i) => {
-    const name = aggregable[i]?.name ?? '(unknown)';
-    if (result.status === 'fulfilled') {
-      downstreams.push(result.value);
-      process.stderr.write(
-        `[ashlr mcp] connected "${name}" (${result.value.toolNames.size} tools)\n`,
-      );
-    } else {
-      const reason = safeErrorMessage(result.reason);
-      process.stderr.write(`[ashlr mcp] WARN skipping "${name}": ${reason}\n`);
-    }
-  });
-
-  // ── Route map: namespaced gateway tool name -> { downstream, originalName } ─
-  interface Route { downstream: Downstream; original: string }
+  interface Route { downstream: Downstream; client: Client; original: string }
   const routes = new Map<string, Route>();
-  for (const d of downstreams) {
-    for (const toolName of d.toolNames) {
-      const key = `${d.spec.name}${NS}${toolName}`;
-      // M31 reserved-name guard (native wins; see tools/list for the live re-list guard).
-      if (isNativeTool(key)) {
-        process.stderr.write(
-          `[ashlr mcp] WARN downstream "${key}" collides with a native ashlr tool — skipped\n`,
-        );
-        continue;
+  let closed = false;
+  const noHeal = process.env['ASHLR_NO_HEAL'] === '1';
+
+  const rebuildRoutes = (): void => {
+    routes.clear();
+    if (closed) return;
+    for (const d of downstreams) {
+      if (!d.client) continue;
+      for (const tool of d.tools) {
+        const key = `${d.spec.name}${NS}${tool.name}`;
+        if (isNativeTool(key)) continue;
+        routes.set(key, { downstream: d, client: d.client, original: tool.name });
       }
-      // Guard: a server name containing the NS separator can collide with a
-      // different (server, tool) pair, silently shadowing one route. Warn so the
-      // ambiguity is visible rather than last-writer-wins.
-      const prior = routes.get(key);
-      if (prior && prior.downstream.spec.name !== d.spec.name) {
-        process.stderr.write(
-          `[ashlr mcp] WARN namespace collision on "${key}" ` +
-          `("${prior.downstream.spec.name}" vs "${d.spec.name}") — last one wins\n`,
-        );
-      }
-      routes.set(key, { downstream: d, original: toolName });
     }
-  }
+  };
+  const closeClient = async (client: Client): Promise<void> => {
+    try { await withDeadline(client.close(), timeoutMs, 'downstream close'); } catch { /* best effort; no retry */ }
+  };
+  const drop = async (d: Downstream, client: Client | null): Promise<void> => {
+    if (client && d.client !== client) return; // an old peer cannot revoke its replacement
+    d.generation++;
+    d.client = null;
+    d.tools = [];
+    d.failures++;
+    d.retryAfter = Date.now() + Math.min(30_000, 500 * 2 ** Math.min(d.failures - 1, 6));
+    rebuildRoutes(); // revoke before awaiting cleanup
+    if (client) await closeClient(client);
+  };
 
-  // ── Build the gateway server ──────────────────────────────────────────────
-  const server = new Server(
-    { name: 'ashlr', version: '0.1.0' },
-    { capabilities: { tools: {}, resources: {} } },
-  );
-
-  // This resource-read path bypasses native-tool audit writes. Gateway startup
-  // and existing native tools retain their separate configuration/audit behavior.
-  server.setRequestHandler(ListResourcesRequestSchema, async () => listFirmResources());
-  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => listFirmResourceTemplates());
-  server.setRequestHandler(ReadResourceRequestSchema, async (request) => readFirmResource(request.params.uri));
-
-  // tools/list — native ashlr tools first, then every downstream's, namespaced.
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools: { name: string; description?: string; inputSchema: unknown }[] = [];
-    // M31: native tools are served by the gateway itself (ashlr_<verb> — single
-    // underscore; downstream keys always contain `__`, so collision is
-    // structurally impossible, but the route loop below still guards).
-    for (const t of listNativeTools()) {
-      tools.push({ name: t.name, description: t.description, inputSchema: t.inputSchema });
-    }
-    // Re-list live in parallel, then merge in registry order. A slow server
-    // must not delay starting another lookup or change route precedence.
-    const listedResults = await Promise.allSettled(
-      downstreams.map(async (d) => d.client.listTools({}, { timeout: timeoutMs })),
-    );
-    for (const [index, d] of downstreams.entries()) {
+  const refresh = (d: Downstream, startup = false): Promise<void> => {
+    if (closed) return Promise.resolve();
+    if (d.inFlight) return d.inFlight;
+    if (!d.client && Date.now() < d.retryAfter) return Promise.resolve();
+    const generation = d.generation;
+    const operation = (async (): Promise<void> => {
+      let client = d.client;
       try {
-        const result = listedResults[index]!;
-        if (result.status === 'rejected') throw result.reason;
-        const listed = result.value;
-        for (const t of listed.tools ?? []) {
-          const key = `${d.spec.name}${NS}${t.name}`;
-          // M31 reserved-name guard: a downstream key can never shadow a native
-          // tool (native wins; the collision is reported, not silently dropped).
-          if (isNativeTool(key)) {
-            process.stderr.write(
-              `[ashlr mcp] WARN downstream "${key}" collides with a native ashlr tool — skipped\n`,
-            );
-            continue;
-          }
-          tools.push({
-            name: key,
-            description: t.description
-              ? `[${d.spec.name}] ${t.description}`
-              : `[${d.spec.name}] ${t.name}`,
-            inputSchema: t.inputSchema ?? { type: 'object' },
-          });
-          // Keep the route map fresh for tools/call.
-          routes.set(key, { downstream: d, original: t.name });
+        if (!client) {
+          const connect = (): Promise<Client> => connectDownstream(d.spec, timeoutMs, undefined, d.env);
+          client = startup && !noHeal
+            ? await withHeal(connect, defaultHealPolicy(), (event: HealEvent) => {
+              process.stderr.write(`[ashlr mcp] heal(${event.kind}) "${d.spec.name}" attempt ${event.attempt}: ${safeErrorMessage(event.detail)}\n`);
+            })
+            : await connect();
+          if (closed || generation !== d.generation) { await closeClient(client); return; }
+          d.client = client;
+          const connected = client;
+          client.onclose = () => { if (!closed && d.client === connected) void drop(d, connected); };
         }
+        const listed = await withDeadline(client.listTools({}, { timeout: timeoutMs }), timeoutMs, `tools/list(${d.spec.name})`);
+        const tools = (listed.tools ?? []).map((tool) => {
+          if (!tool || typeof tool.name !== 'string' || !tool.name) throw new Error('Invalid downstream tool name');
+          return { name: tool.name, description: tool.description, inputSchema: tool.inputSchema };
+        });
+        if (closed || generation !== d.generation || d.client !== client) return;
+        d.tools = tools;
+        d.failures = 0;
+        d.retryAfter = 0;
+        rebuildRoutes(); // replace the complete inventory, including deleted tools
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        process.stderr.write(`[ashlr mcp] WARN tools/list("${d.spec.name}") failed: ${msg}\n`);
+        if (closed || generation !== d.generation) return;
+        await drop(d, client);
+        process.stderr.write(`[ashlr mcp] WARN tools/list("${d.spec.name}") failed: ${safeErrorMessage(err)}\n`);
+      }
+    })();
+    d.inFlight = operation;
+    const clearFlight = (): void => { if (d.inFlight === operation) d.inFlight = undefined; };
+    void operation.then(clearFlight, clearFlight);
+    return operation;
+  };
+
+  await Promise.all(downstreams.map((d) => refresh(d, true)));
+  const server = new Server({ name: 'ashlr', version: '0.1.0' }, { capabilities: { tools: {}, resources: {} } });
+  const assertUsable = (): void => {
+    refuseSharedJobGateway();
+    if (closed) throw new Error('MCP gateway is closed');
+  };
+  server.setRequestHandler(ListResourcesRequestSchema, async () => { assertUsable(); return listFirmResources(); });
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => { assertUsable(); return listFirmResourceTemplates(); });
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => { assertUsable(); return readFirmResource(request.params.uri); });
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    assertUsable();
+    const tools: { name: string; description?: string; inputSchema: unknown }[] = listNativeTools()
+      .map((tool) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema }));
+    await Promise.all(downstreams.map((d) => refresh(d)));
+    assertUsable();
+    // Completion order never changes route precedence or response order.
+    for (const d of downstreams) {
+      if (!d.client) continue;
+      for (const tool of d.tools) {
+        const key = `${d.spec.name}${NS}${tool.name}`;
+        if (isNativeTool(key)) {
+          process.stderr.write(`[ashlr mcp] WARN downstream "${key}" collides with a native ashlr tool — skipped\n`);
+          continue;
+        }
+        tools.push({ name: key, description: `[${d.spec.name}] ${tool.description ?? tool.name}`, inputSchema: tool.inputSchema ?? { type: 'object' } });
       }
     }
-    // The SDK validates the result against ListToolsResultSchema.
     return { tools } as { tools: { name: string; description?: string; inputSchema: object }[] };
   });
 
-  // tools/call — native ashlr tools first, then proxy to the owning downstream.
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    assertUsable();
     const requested = request.params.name;
-    // M31: native tools route BEFORE the downstream map and never throw —
-    // failures come back as isError text results (audited in mcp-native).
-    if (isNativeTool(requested)) {
-      return callNativeTool(requested, request.params.arguments ?? {});
-    }
+    if (isNativeTool(requested)) return callNativeTool(requested, request.params.arguments ?? {});
     const route = routes.get(requested);
-    if (!route) {
-      throw new Error(
-        `Unknown tool "${requested}". Expected an \`ashlr_*\` native tool or ` +
-        `"<server>${NS}<tool>" form. Run \`ashlr mcp list\` to see available tools.`,
-      );
+    if (!route || route.downstream.client !== route.client) {
+      throw new Error(`Unknown tool "${requested}". Run \`ashlr mcp list\` to see available tools.`);
     }
-    const result = await route.downstream.client.callTool(
-      {
-        name: route.original,
-        arguments: request.params.arguments ?? {},
-      },
-      undefined,
-      { timeout: timeoutMs },
-    );
-    return result;
+    try {
+      return await withDeadline(route.client.callTool({ name: route.original, arguments: request.params.arguments ?? {} }, undefined, { timeout: timeoutMs }), timeoutMs, `tools/call(${route.downstream.spec.name})`);
+    } catch (err) {
+      await drop(route.downstream, route.client);
+      throw err; // never replay an effectful request, even after reconnection
+    }
   });
 
-  // ── Graceful shutdown: close every downstream on exit ─────────────────────
-  // Runs exactly once even if multiple shutdown paths fire (stdin EOF +
-  // SIGTERM/SIGINT). Tracks downstreams via closure so signal handlers reach
-  // them and reap the spawned children rather than orphaning them.
-  let closed = false;
-  const closeAll = async (): Promise<void> => {
-    if (closed) return;
+  let closing: Promise<void> | undefined;
+  const onSigint = (): void => onSignal('SIGINT');
+  const onSigterm = (): void => onSignal('SIGTERM');
+  let onSignal: (signal: NodeJS.Signals) => void;
+  const closeAll = (): Promise<void> => {
+    if (closing) return closing;
     closed = true;
-    for (const d of downstreams) {
-      try { await d.client.close(); } catch { /* ignore */ }
-    }
+    process.removeListener('SIGINT', onSigint);
+    process.removeListener('SIGTERM', onSigterm);
+    const clients = downstreams.flatMap((d) => {
+      d.generation++;
+      const client = d.client;
+      d.client = null;
+      d.tools = [];
+      return client ? [client] : [];
+    });
+    routes.clear();
+    // Defer teardown until `closing` is assigned: server.close may call our
+    // onclose handler synchronously, and every shutdown path shares this job.
+    closing = Promise.resolve().then(async () => {
+      await Promise.all([
+        Promise.all(clients.map(closeClient)),
+        withDeadline(server.close(), timeoutMs, 'gateway close').catch(() => {}),
+        Promise.allSettled(downstreams.map((d) => d.inFlight)),
+      ]);
+    });
+    return closing;
   };
-
-  // ── Serve on stdio ────────────────────────────────────────────────────────
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-
-  process.stderr.write(
-    `[ashlr mcp] gateway ready — ${listNativeTools().length} native ashlr tool(s) + ` +
-    `${routes.size} downstream tool(s) from ${downstreams.length}/${aggregable.length} server(s)\n`,
-  );
-
-  // Resolve when the transport closes (stdin EOF) OR a termination signal
-  // arrives — awaiting closeAll() in every path so children are torn down
-  // before we exit (the SDK's own child SIGTERM→SIGKILL teardown can take ~4s).
-  await new Promise<void>((resolve) => {
-    const finish = (): void => { void closeAll().finally(() => resolve()); };
-
-    // stdin EOF (normal MCP client disconnect).
+  const finished = new Promise<void>((resolve) => {
+    const finish = (): void => { void closeAll().then(resolve, resolve); };
     server.onclose = finish;
-
-    // Signal-based shutdown (common, normal termination path) — onclose does
-    // not necessarily fire, so handle SIGINT/SIGTERM explicitly.
-    const onSignal = (sig: NodeJS.Signals): void => {
-      process.stderr.write(`[ashlr mcp] received ${sig} — shutting down\n`);
+    onSignal = (signal): void => {
+      process.stderr.write(`[ashlr mcp] received ${signal} — shutting down\n`);
       finish();
     };
-    process.once('SIGINT', onSignal);
-    process.once('SIGTERM', onSignal);
+    process.once('SIGINT', onSigint);
+    process.once('SIGTERM', onSigterm);
   });
+  try {
+    await server.connect(new StdioServerTransport());
+    if (!closed) process.stderr.write(`[ashlr mcp] gateway ready — ${listNativeTools().length} native ashlr tool(s) + ${routes.size} downstream tool(s) from ${downstreams.filter((d) => d.client).length}/${downstreams.length} server(s)\n`);
+    await finished;
+  } finally {
+    await closeAll();
+  }
 }
