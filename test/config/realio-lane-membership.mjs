@@ -44,6 +44,7 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  */
 export const REAL_IO_TEST_FILES = [
   'test/proactive-profiles.test.ts', // actual private metadata storage, stale-write races and symlink refusal
+  'test/candidate-version-sync.test.ts', // real bounded CLI subprocesses; the subprocess case retains its original 5s deadline
   'test/anthropic-messages-client.test.ts', // actual loopback HTTP requests and durable private API reservations
   'test/claude-api-grant.test.ts', // real child processes and private-store financial reservation races
   'test/m54.self-eval.test.ts', // real temporary Git repositories for source-bound legacy/canonical self-target discovery

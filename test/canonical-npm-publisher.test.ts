@@ -72,6 +72,19 @@ describe('canonical npm publication admission', () => {
     expect(raw).not.toContain('workflow_call');
     expect(workflow.jobs.publish.env.NODE_AUTH_TOKEN).toBe('');
   });
+  it('initializes runner-local npm configuration after runner assignment', () => {
+    const workflow = parse(readFileSync(new URL('../.github/workflows/publish-canonical-npm.yml', import.meta.url), 'utf8'));
+    for (const job of Object.values(workflow.jobs) as { env?: Record<string, string> }[]) {
+      // GitHub rejects runner context in job-level env before any steps execute.
+      expect(Object.values(job.env ?? {}).join('\n')).not.toContain('${{ runner.');
+    }
+    for (const name of ['publish', 'promote']) {
+      const configure = workflow.jobs[name].steps.find((step: { name?: string }) => step.name?.startsWith('Configure token-free'));
+      expect(configure.run).toContain('export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/phantom-npmrc"');
+      expect(configure.run).toContain('export NPM_CONFIG_GLOBALCONFIG="$RUNNER_TEMP/phantom-global-npmrc"');
+      expect(configure.run).toContain('>> "$GITHUB_ENV"');
+    }
+  });
 });
 
 describe('canonical publication recovery', () => {

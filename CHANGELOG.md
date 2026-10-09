@@ -22,9 +22,15 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   exact staged-deployment reconciliation and preserved public configuration.
 - One candidate-version synchronization command and clear installed-desktop
   versus interface-build versions in Settings and About.
+- Shared website and article metadata generated from the freshly verified
+  public release, separately from the local candidate version.
 
 ### Changed
 
+- Reduce excess sidebar padding and enlarge the Phantom ghost, with a preview
+  of the saved accent and accessible keyboard color controls.
+- Reject inconsistent candidate metadata before a build; keep historical and
+  dependency versions unchanged.
 - Admit useful documentation, CI, dependency and maintenance improvements;
   size ordered goal plans to the work rather than padding or truncating them.
 - Include eligible Codex resources in balanced routing; preserve manual choices
