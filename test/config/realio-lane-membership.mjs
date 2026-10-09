@@ -43,6 +43,8 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/locus-job-env.test.ts', // actual inert Node children and central engine dispatch prove concurrent sealed-job environment isolation
+  'test/mcp-gateway-recovery-probe.test.ts', // real MCP SDK subprocess initialization/list/close against a disposable inert local protocol fixture
   'test/anthropic-messages-client.test.ts', // actual loopback HTTP requests and durable private API reservations
   'test/claude-api-grant.test.ts', // real child processes and private-store financial reservation races
   'test/m54.self-eval.test.ts', // real temporary Git repositories for source-bound legacy/canonical self-target discovery

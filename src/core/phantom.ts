@@ -7,6 +7,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { resolve } from 'node:path';
 import type { PhantomAgentReportRollup, PhantomCapabilitySnapshot, PhantomStatus } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -17,6 +18,8 @@ const PHANTOM_BIN = 'phantom';
 const TIMEOUT_MS = 5_000;
 const FLEET_TIMEOUT_MS = 500;
 const FLEET_CACHE_TTL_MS = 30_000;
+const OUTPUT_MAX_BYTES = 1_048_576;
+const SECRET_NAMES_MAX = 10_000;
 
 const UNKNOWN_PHANTOM_COMMANDS: PhantomCapabilitySnapshot['commands'] = {
   commandsKnown: false,
@@ -32,6 +35,7 @@ const AGENT_REPORT_ARRAY_MAX = 10_000;
 type CountKind = 'status' | 'risk' | 'severity' | 'safety' | 'action';
 
 interface PhantomStatusOptions {
+  cwd?: string;
   timeoutMs?: number;
   includeAgentReport?: boolean;
 }
@@ -58,6 +62,7 @@ function runPhantom(
     const result = spawnSync(PHANTOM_BIN, args, {
       encoding: 'utf8',
       timeout: options.timeoutMs ?? TIMEOUT_MS,
+      maxBuffer: OUTPUT_MAX_BYTES,
       cwd: options.cwd,
       // Do NOT inherit env vars that could trigger interactive prompts.
       env: { ...process.env, PHANTOM_NO_UPDATE_CHECK: '1' },
@@ -84,8 +89,9 @@ function runPhantom(
 
 let cachedFleetStatus: { key: string; expiresAt: number; status: PhantomStatus } | null = null;
 
-function phantomCacheKey(options: { includeAgentReport?: boolean } = {}): string {
+function phantomCacheKey(options: { cwd: string; includeAgentReport?: boolean }): string {
   return JSON.stringify({
+    cwd: options.cwd,
     home: process.env.HOME ?? '',
     userProfile: process.env.USERPROFILE ?? '',
     path: process.env.PATH ?? '',
@@ -97,7 +103,7 @@ function phantomCacheKey(options: { includeAgentReport?: boolean } = {}): string
  * Returns true when the `phantom` binary is resolvable and executes without a
  * fatal error.  Uses `phantom --version` as the probe (fast, side-effect-free).
  */
-export function phantomInstalled(options: { timeoutMs?: number } = {}): boolean {
+export function phantomInstalled(options: { cwd?: string; timeoutMs?: number } = {}): boolean {
   const { status, error } = runPhantom(['--version'], options);
   // spawnSync returns null status when the binary could not be found/launched.
   return error === undefined && status !== null && status === 0;
@@ -114,8 +120,21 @@ export function phantomInstalled(options: { timeoutMs?: number } = {}): boolean 
  */
 export function getPhantomStatus(options: PhantomStatusOptions = {}): PhantomStatus {
   const timeoutMs = options.timeoutMs;
+  let cwd: string;
+  try {
+    cwd = resolve(options.cwd ?? process.cwd());
+  } catch {
+    return {
+      installed: false,
+      version: null,
+      initialized: false,
+      secretNames: [],
+      error: 'status-unavailable',
+      capability: buildPhantomCapabilitySnapshot({ installed: false, initialized: false, secretNames: [] }),
+    };
+  }
   // ── 1. Binary presence ──────────────────────────────────────────────────
-  if (!phantomInstalled({ timeoutMs })) {
+  if (!phantomInstalled({ cwd, timeoutMs })) {
     return {
       installed: false,
       version: null,
@@ -132,49 +151,33 @@ export function getPhantomStatus(options: PhantomStatusOptions = {}): PhantomSta
   // ── 2. Version ──────────────────────────────────────────────────────────
   let version: string | null = null;
   {
-    const { stdout, status } = runPhantom(['--version'], { timeoutMs });
+    const { stdout, status } = runPhantom(['--version'], { cwd, timeoutMs });
     if (status === 0) {
       // Expected format: "phantom 0.6.0"
       const match = stdout.trim().match(/\d+\.\d+(?:\.\d+)?/);
-      version = match ? match[0] : stdout.trim() || null;
+      version = match ? match[0] : null;
     }
   }
 
-  // ── 3. Initialized state (phantom status --json) ─────────────────────────
-  //
-  // Prefer the documented `--json` flag and read a structured initialized /
-  // secret-count field when present (robust against wording/localization
-  // changes). Fall back to the legacy human-text heuristic only when the
-  // output is not parseable JSON.
-  //
-  // Human-text fallback: when NOT initialized, phantom prints something like
-  //   "! Not initialized. Run phantom init to get started."
-  // When initialized it prints proxy state and a mapped-secrets count. We treat
-  // the presence of "not initialized" / "run phantom init" as initialized:false.
-  //
-  // statusError is reserved for GENUINE spawn failures (binary missing /
-  // crashed). A non-zero exit whose output is parseable (e.g. proxy stopped)
-  // is NOT a fault and records no error.
+  // ── 3. Project configuration (schema-versioned metadata only) ────────────
+  // A valid report proves readable project configuration, not vault health,
+  // listener authentication, injection capability, or authorization to act.
+  // Legacy text and unsuccessful commands remain unknown, never "ready".
   let initialized = false;
   let statusError: string | undefined;
   {
-    const { stdout, stderr, status, error } = runPhantom(['status', '--json'], { timeoutMs });
-    if (error !== undefined) {
-      // Genuine spawn failure (could not launch the binary).
-      statusError = error;
+    const { stdout, status, error } = runPhantom(['status', '--json'], { cwd, timeoutMs });
+    if (error !== undefined || status !== 0) {
+      statusError = 'status-unavailable';
     } else {
-      const combined = stdout + stderr;
-      const structured = parseInitializedFromJson(combined);
-      if (structured !== null) {
-        initialized = structured;
+      const structured = parseMetadataStatus(stdout);
+      if (structured === null) {
+        statusError = 'status-contract-unsupported';
+      } else if (structured.configUnavailable) {
+        statusError = 'status-config-unavailable';
       } else {
-        // Fallback: human-text heuristic (labeled, brittle-by-design).
-        const lc = combined.toLowerCase();
-        initialized = !lc.includes('not initialized') && !lc.includes('run phantom init');
+        initialized = structured.initialized;
       }
-      // A stopped proxy / non-zero exit is benign once we have parseable
-      // output; do not surface it as a hard error. statusError stays unset.
-      void status;
     }
   }
 
@@ -187,15 +190,15 @@ export function getPhantomStatus(options: PhantomStatusOptions = {}): PhantomSta
   // risk accidentally surfacing values.
   let secretNames: string[] = [];
   if (initialized) {
-    const { stdout, status, error } = runPhantom(['list', '--json'], { timeoutMs });
+    const { stdout, status, error } = runPhantom(['list', '--json'], { cwd, timeoutMs });
     if (error === undefined && status === 0 && stdout.trim().length > 0) {
       secretNames = parseSecretNames(stdout);
     }
   }
 
-  const commands = detectPhantomCommandSupport({ timeoutMs });
+  const commands = detectPhantomCommandSupport({ cwd, timeoutMs });
   const agentReport = options.includeAgentReport === true && commands.agentAvailable
-    ? readPhantomAgentReport({ timeoutMs })
+    ? readPhantomAgentReport({ cwd, timeoutMs })
     : undefined;
 
   const base = {
@@ -220,17 +223,25 @@ export function getPhantomStatus(options: PhantomStatusOptions = {}): PhantomSta
 }
 
 export function getCachedFleetPhantomStatus(options: {
+  cwd?: string;
   ttlMs?: number;
   timeoutMs?: number;
   nowMs?: number;
   includeAgentReport?: boolean;
 } = {}): PhantomStatus {
   const nowMs = options.nowMs ?? Date.now();
-  const key = phantomCacheKey({ includeAgentReport: options.includeAgentReport });
+  let cwd: string;
+  try {
+    cwd = resolve(options.cwd ?? process.cwd());
+  } catch {
+    return getPhantomStatus(options);
+  }
+  const key = phantomCacheKey({ cwd, includeAgentReport: options.includeAgentReport });
   if (cachedFleetStatus && cachedFleetStatus.key === key && cachedFleetStatus.expiresAt > nowMs) {
     return cachedFleetStatus.status;
   }
   const status = getPhantomStatus({
+    cwd,
     timeoutMs: options.timeoutMs ?? FLEET_TIMEOUT_MS,
     includeAgentReport: options.includeAgentReport,
   });
@@ -251,7 +262,7 @@ export function buildPhantomCapabilitySnapshot(
     commands?: PhantomCapabilitySnapshot['commands'];
   },
 ): PhantomCapabilitySnapshot {
-  const safeNames = [...new Set(status.secretNames.filter(isSafeSecretName))].sort();
+  const safeNames = [...new Set(status.secretNames.slice(0, SECRET_NAMES_MAX).filter(isSafeSecretName))].sort();
   const known = [...PHANTOM_KNOWN_FLEET_SECRET_NAMES];
   const present = known.filter((name) => safeNames.includes(name));
   const missing = known.filter((name) => !safeNames.includes(name));
@@ -269,8 +280,10 @@ export function buildPhantomCapabilitySnapshot(
     },
     modes: {
       metadataStatus: true,
-      childEnvInjectionAvailable: status.installed && status.initialized,
-      mcpServerAvailable: status.installed,
+      // Configuration and command presence cannot verify a credential-using
+      // runtime. This observer never authenticates or activates one.
+      childEnvInjectionAvailable: false,
+      mcpServerAvailable: status.installed && commands.commandsKnown && commands.mcpAvailable,
       mutationRequiresHumanApproval: status.installed,
     },
     commands,
@@ -282,68 +295,58 @@ export function buildPhantomCapabilitySnapshot(
 // ---------------------------------------------------------------------------
 
 /**
- * Read the initialized state from `phantom status --json` output.
- *
- * Returns:
- *   - true / false when a structured boolean field can be determined
- *   - null when the output is not JSON (caller should fall back to the
- *     human-text heuristic)
- *
- * Recognised shapes (defensive — phantom's exact schema may evolve):
- *   { "initialized": true, ... }
- *   { "vault": { "initialized": true }, ... }
- *   { "secrets": 3, ... }  / { "secretCount": 3 } → initialized when count >= 0
- * Never reads or returns secret values — only boolean/count metadata.
+ * Validate the closed, values-free schema v1 shipped by Secrets v0.7.9.
+ * Unsupported or malformed reports are unknown; no legacy text inference.
+ * See phantom-secrets/docs/hub-status-contract.md.
  */
-function parseInitializedFromJson(raw: string): boolean | null {
-  const trimmed = raw.trim();
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
+function parseMetadataStatus(raw: string): { initialized: boolean; configUnavailable: boolean } | null {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(trimmed);
+    parsed = JSON.parse(raw);
   } catch {
     return null;
   }
-  if (parsed === null || typeof parsed !== 'object') return null;
-  if (Array.isArray(parsed)) return false;
-  const obj = parsed as Record<string, unknown>;
-
-  // Direct boolean field
-  if (typeof obj['initialized'] === 'boolean') return obj['initialized'];
-
-  // Nested vault.initialized
-  const vault = obj['vault'];
-  if (vault !== null && typeof vault === 'object') {
-    const v = (vault as Record<string, unknown>)['initialized'];
-    if (typeof v === 'boolean') return v;
+  if (!hasExactKeys(parsed, [
+    'schema_version', 'initialized', 'inspection', 'managed_dotenv', 'vault', 'proxy', 'issues',
+  ])) return null;
+  if (parsed['schema_version'] !== 1 || typeof parsed['initialized'] !== 'boolean' ||
+      parsed['inspection'] !== 'metadata-only') return null;
+  const dotenv = parsed['managed_dotenv'];
+  const vault = parsed['vault'];
+  const proxy = parsed['proxy'];
+  if (!hasExactKeys(dotenv, ['inspected']) || dotenv['inspected'] !== false ||
+      !hasExactKeys(vault, ['inspected']) || vault['inspected'] !== false ||
+      !hasExactKeys(proxy, ['lifecycle_lock', 'listener_authenticated']) ||
+      proxy['listener_authenticated'] !== false) return null;
+  if (typeof proxy['lifecycle_lock'] !== 'string' ||
+      !['not-inspected', 'missing', 'available', 'held', 'unknown'].includes(proxy['lifecycle_lock'])) {
+    return null;
   }
+  const issues = parsed['issues'];
+  const allowedIssues = ['config-missing', 'config-unreadable', 'config-invalid', 'proxy-lock-unavailable'];
+  if (!Array.isArray(issues) || issues.length > allowedIssues.length ||
+      !issues.every((issue: unknown) => typeof issue === 'string' && allowedIssues.includes(issue))) return null;
+  return {
+    initialized: parsed['initialized'],
+    configUnavailable: issues.includes('config-unreadable') || issues.includes('config-invalid'),
+  };
+}
 
-  // A numeric secret count implies an initialized vault.
-  for (const key of ['secretCount', 'secrets', 'mapped', 'count']) {
-    if (typeof obj[key] === 'number') return true;
-  }
-
-  for (const key of ['error', 'message', 'status', 'detail']) {
-    const value = obj[key];
-    if (typeof value !== 'string') continue;
-    const lc = value.toLowerCase();
-    if (lc.includes('not initialized') || lc.includes('run phantom init')) return false;
-    if (lc === 'initialized' || lc === 'ready') return true;
-  }
-
-  // Unknown structured output is not enough proof of initialization.
-  return false;
+function hasExactKeys(value: unknown, keys: string[]): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }
 
 function detectPhantomCommandSupport(
-  options: { timeoutMs?: number } = {},
+  options: { cwd?: string; timeoutMs?: number } = {},
 ): PhantomCapabilitySnapshot['commands'] {
   const { stdout, stderr, status, error } = runPhantom(['--help'], options);
   if (error !== undefined || status !== 0) return UNKNOWN_PHANTOM_COMMANDS;
   return parsePhantomCommandHelp(`${stdout}\n${stderr}`);
 }
 
-function readPhantomAgentReport(options: { timeoutMs?: number } = {}): PhantomAgentReportRollup {
+function readPhantomAgentReport(options: { cwd?: string; timeoutMs?: number } = {}): PhantomAgentReportRollup {
   const { stdout, error } = runPhantom(['agent', 'report', '--json'], options);
   if (error !== undefined || stdout.trim().length === 0) {
     return failedAgentReportRollup();
@@ -868,7 +871,7 @@ function parseSecretNames(raw: string): string[] {
     // ── Array of objects: [{ name: "KEY" }, ...]  or  [{ key: "KEY" }, ...]
     if (Array.isArray(parsed)) {
       const names: string[] = [];
-      for (const item of parsed) {
+      for (const item of parsed.slice(0, SECRET_NAMES_MAX)) {
         if (item !== null && typeof item === 'object') {
           const obj = item as Record<string, unknown>;
           // Prefer "name", fall back to "key" — both are safe identifier fields.
@@ -939,7 +942,7 @@ function parseSecretNamesFromText(text: string): string[] {
   const ENV_VAR_RE = /^[A-Z_][A-Z0-9_]{0,127}$/;
   const names: string[] = [];
 
-  for (const raw of text.split('\n')) {
+  for (const raw of text.split('\n').slice(0, SECRET_NAMES_MAX)) {
     const line = raw.trim();
     if (!line) continue;
     const token = line.split(/\s+/)[0];

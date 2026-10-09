@@ -12,8 +12,8 @@ import { assertSelectedOutcomeAdmission, selectedOutcomeAdmissionCurrent } from 
  * Flag-off parity: cfg.foundry.bestOfN defaults to 1 → identical to a single run.
  *
  * CI session isolation (opt-in via LOCUS_CI_BINDING / LOCUS_BINDING):
- *   runBestOfN mints an ephemeral Locus pin and overlays LOCUS_* onto
- *   process.env so sandboxed engines (runEngineSandboxed /
+ *   runBestOfN mints an ephemeral Locus pin in a private job context
+ *   so sandboxed engines (runEngineSandboxed /
  *   runApiModelSandboxed) inherit the sealed session. LOCUS_ENFORCE without a
  *   binding refuses as empty-candidate result (never throws). Default is a
  *   no-op pass-through. Does not add a second pre-mutate gate — that lives on
@@ -54,7 +54,6 @@ import {
   finishExecutionAuthority,
 } from '../util/execution-lease.js';
 import {
-  applyLocusSessionEnv,
   LocusMintError,
   LocusSessionConfigError,
   runWithLocusSessionIfConfigured,
@@ -665,30 +664,12 @@ export async function runBestOfN(
   });
 
   // CI isolation: when LOCUS_CI_BINDING/LOCUS_BINDING is set, mint an
-  // ephemeral sealed session and overlay LOCUS_* onto process.env so
-  // sandboxed engines inherit it. Restores prior values after the fan-out.
+  // ephemeral sealed session in a private job context for sandboxed engines.
   // Default (unset binding + LOCUS_ENFORCE off) is a no-op pass-through.
   // Never throws — session refuse/mint failures become empty-candidate refuse.
   try {
-    return await runWithLocusSessionIfConfigured(async (handle) => {
-      const restored: Array<[string, string | undefined]> = [];
-      if (handle) {
-        const overlay: NodeJS.ProcessEnv = {};
-        applyLocusSessionEnv(overlay, handle.env);
-        for (const [key, value] of Object.entries(overlay)) {
-          if (typeof value !== 'string') continue;
-          restored.push([key, process.env[key]]);
-          process.env[key] = value;
-        }
-      }
-      try {
-        return await runBestOfNWithAuthority(item, cfg, opts, refused);
-      } finally {
-        for (const [key, prev] of restored) {
-          if (prev === undefined) delete process.env[key];
-          else process.env[key] = prev;
-        }
-      }
+    return await runWithLocusSessionIfConfigured(async () => {
+      return await runBestOfNWithAuthority(item, cfg, opts, refused);
     });
   } catch (error) {
     if (

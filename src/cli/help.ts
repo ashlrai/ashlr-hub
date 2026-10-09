@@ -39,6 +39,12 @@ export interface AgentCommandDoc {
  */
 export const AGENT_COMMANDS: AgentCommandDoc[] = [
   {
+    usage: 'phm companions [--json] [--root <install-root>] [--bin-dir <dir>]',
+    description: 'Separate companion executable inventory using scrubbed version/help probes only; installed is not bundled or runtime-ready. Exit 0 reports inventory, including missing/incompatible tools; 2 bad usage.',
+    safety: 'read',
+    jsonShape: 'CompanionInventory (schemaVersion 1); no credential, trust, MCP or service inspection',
+  },
+  {
     usage: 'ashlr verify-pr <owner/repo> <PR> --confirm-head <SHA> [--json]',
     description: 'Host-owned maintainer PR intake: authenticates the caller, runs base-derived checks confined on the exact tree and posts the ruleset-bound App check. Does not merge or deploy; saved receipts never authorize a check.',
     safety: 'append',
@@ -629,6 +635,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'mcp',                          desc: 'Run the MCP aggregation gateway on stdio (point any agent here; includes 21 native ashlr_* tools).', topic: 'integrations' },
   { cmd: 'mcp list',                     desc: 'List native ashlr tools + discovered MCP servers with per-server tool counts.', topic: 'integrations' },
   { cmd: 'mcp doctor',                   desc: 'Per-server MCP health: does it start? how many tools?', topic: 'integrations' },
+  { cmd: 'companions [--json] [--root <dir>] [--bin-dir <dir>]', desc: 'Read-only Secrets/Locus/Lexicon executable identity and version inventory; no runtime readiness or activation.', topic: 'integrations' },
   { cmd: 'mcp install <claude|ashlrcode>', desc: 'Add the ashlr gateway to a target mcpServers config (backs up first).', topic: 'integrations' },
   { cmd: 'gh <pr|issue|ci>',             desc: 'Read GitHub open PRs, issues, or CI status for the current repo (read-only).', topic: 'integrations' },
   { cmd: 'gh pr create',                 desc: 'Create a PR via gh CLI — explicit + confirm-gated (the only gh mutation).', topic: 'integrations' },

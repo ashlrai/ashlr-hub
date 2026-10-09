@@ -84,12 +84,20 @@ function spawnHelp(commands = ['setup', 'mcp', 'exec', 'status', 'list']): Spawn
 
 /** Simulate `phantom status` returning initialized status output. */
 function spawnStatusInitialized(): SpawnSyncReturns<string> {
-  return makeSpawnResult('Phantom is initialized\nvault: ~/.phantom\n');
+  return makeSpawnResult(JSON.stringify({
+    schema_version: 1, initialized: true, inspection: 'metadata-only',
+    managed_dotenv: { inspected: false }, vault: { inspected: false },
+    proxy: { lifecycle_lock: 'missing', listener_authenticated: false }, issues: [],
+  }));
 }
 
 /** Simulate `phantom status` returning uninitialized status output. */
 function spawnStatusUninitialized(): SpawnSyncReturns<string> {
-  return makeSpawnResult('', 'Phantom vault not initialized\n', 1);
+  return makeSpawnResult(JSON.stringify({
+    schema_version: 1, initialized: false, inspection: 'metadata-only',
+    managed_dotenv: { inspected: false }, vault: { inspected: false },
+    proxy: { lifecycle_lock: 'not-inspected', listener_authenticated: false }, issues: ['config-missing'],
+  }));
 }
 
 /**
@@ -280,7 +288,7 @@ describe('getPhantomStatus — installed and initialized', () => {
       },
       modes: {
         metadataStatus: true,
-        childEnvInjectionAvailable: true,
+        childEnvInjectionAvailable: false,
         mcpServerAvailable: true,
         mutationRequiresHumanApproval: true,
       },
