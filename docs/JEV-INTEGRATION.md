@@ -37,7 +37,9 @@ Response:
 
 Models: `jev-latest`, `jev-preview`. Several questions may be asked in ONE call — prefer that over
 N calls. Credential lives at `~/.ashlr/secrets/typesafe.env` (mode 0600) as `TYPESAFE_API_KEY`;
-resolve it through `resolveProviderKey` so Phantom wins when installed.
+The existing environment route uses `resolveProviderKey`; the private file remains
+the fallback. In-process vault extraction is unsupported; child `phantom exec`
+proxy execution is a separate transport.
 
 In an earlier live observation, a bug-fix titled "Stop the dashboard from double-counting merges"
 — zero bug-fix keywords — classified correctly at confidence 1.0, where the existing keyword table

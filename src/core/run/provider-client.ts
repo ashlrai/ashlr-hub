@@ -1462,7 +1462,7 @@ export async function getActiveClient(
       );
     }
     // allowCloud is true — verify the API key is present. M65: resolve via the
-    // phantom vault first (phantom rewrites .env to worthless tokens), then env.
+    // Existing environment route; Secrets placeholders cannot authenticate.
     const envVar = CLOUD_PROVIDER_ENV[activeId.toLowerCase()];
     if (envVar) {
       const key = resolveProviderKey(envVar, cfg);

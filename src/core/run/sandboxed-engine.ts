@@ -180,7 +180,7 @@ import { runCompletenessGate } from './completeness-gate.js';
 import { lookup as cacheLookup, write as cacheWrite } from '../fabric/cache/store.js';
 import type { CacheEntry } from '../fabric/cache/store.js';
 // M195: resolve api-model keys (e.g. NVIDIA_NIM_API_KEY) via the engine-auth
-// mechanism — phantom vault first, then process.env. Never logs the value.
+// mechanism — existing environment credentials. Never logs the value.
 import { resolveProviderKey } from '../integrations/secrets.js';
 import { normalizeNumericLoopbackOllamaBaseUrl } from './ollama-identity.js';
 // M264: elite context injection for local api-model engines (local-coder, local-agent).
@@ -869,7 +869,7 @@ const CRED_ENV_DENY =
  * NIM is an api-model engine driven IN-PROCESS by runApiModelSandboxed (below) —
  * it never spawns a CLI subprocess, so its bearer key must never be exported into
  * a subprocess env. The key is resolved in-process at dispatch time via the
- * engine-auth mechanism resolveProviderKey() (phantom vault → process.env), used
+ * engine-auth mechanism resolveProviderKey() (existing environment), used
  * over the wire as an `Authorization: Bearer` header by buildOpenAICompatibleClient
  * and never logged. CRED_ENV_DENY correctly STRIPS NVIDIA_NIM_API_KEY from every
  * spawned cli-agent subprocess — that is the intended containment, not a gap. */
@@ -3821,9 +3821,9 @@ export async function runApiModelSandboxed(
       ((baseUrlEnv && process.env[baseUrlEnv]?.trim()) ||
         spec.api.defaultBaseUrl ||
         'http://localhost:11434/v1');
-    // M195: source the bearer key via the engine-auth mechanism (phantom vault
-    // first, then process.env) so NVIDIA_NIM_API_KEY etc. work whether stored in
-    // the phantom vault or the raw env. The VALUE is never logged or returned.
+    // M195: resolve the existing environment bearer key. Parent API calls do
+    // not inherit the Secrets child proxy; placeholders remain unavailable.
+    // The VALUE is never logged or returned.
     // The API credit client resolves its exact credential only AFTER reserving
     // durable exposure. Ordinary OpenAI-compatible engines keep their path.
     const apiKey = isClaudeApi ? '' : (spec.api.envKey && resolveProviderKey(spec.api.envKey, cfg)?.trim()) || '';

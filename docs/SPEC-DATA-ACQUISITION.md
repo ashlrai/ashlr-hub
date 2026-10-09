@@ -194,7 +194,7 @@ spawnEngineInner() settle(ok:true) for claude engine
         │
         ▼
         resolveProviderKey('ANTHROPIC_API_KEY', cfg)
-          │  phantom vault first, then process.env
+          │  existing process.env; no vault extraction
           │  returns undefined when absent → probe is skipped silently
           │
           ▼
@@ -268,8 +268,8 @@ claude cli-agent path.
 
 Key properties:
 - Uses `node:https` only (zero new dependencies).
-- Reads key via `resolveProviderKey('ANTHROPIC_API_KEY', cfg)` — phantom vault
-  first.  Key value is passed only as an `Authorization` header on the wire;
+- Reads the existing environment key via
+  `resolveProviderKey('ANTHROPIC_API_KEY', cfg)`; vault extraction is unsupported.  Key value is passed only as an `Authorization` header on the wire;
   never written to disk, env, or logs.
 - 60-second debounce per backend — at most one probe per minute.
 - On any network error, times out in 5s and exits silently.
@@ -720,9 +720,11 @@ multiple machines from simultaneously approaching a quota ceiling.
 ### 7.1 Phantom Vault — No Secret Leakage
 
 All credential resolution goes through `resolveProviderKey(envKey, cfg)` in
-`src/core/integrations/secrets.ts`.  The phantom vault is checked first when
-`cfg.phantom.enabled` is true and `phantom` is installed; `process.env` is the
-fallback.
+`src/core/integrations/secrets.ts`. Existing environment keys are resolved on
+demand; blank values and `phm_` placeholders are unavailable. Secrets 0.7.9 does
+not support unattended plaintext extraction. Parent-process API use of a vault
+requires a separately qualified request transport; configuration alone supplies
+no credential or spending readiness.
 
 Rules that apply to every new data-acquisition path:
 

@@ -27,6 +27,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig, GenAiSpan } from '../src/core/types.js';
 
+const credentialSpawn = vi.hoisted(() => vi.fn(() => { throw new Error('telemetry credential subprocess forbidden'); }));
+vi.mock('node:child_process', () => ({ spawn: credentialSpawn, spawnSync: credentialSpawn }));
+
 // ---------------------------------------------------------------------------
 // Mock node:fs for LocalFileSink (prevent real filesystem writes in tests)
 // ---------------------------------------------------------------------------
@@ -149,6 +152,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env['ASHLR_PULSE_TOKEN'];
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
@@ -177,6 +181,29 @@ describe('localTelemetryDir', () => {
 // ---------------------------------------------------------------------------
 
 describe('patAvailable', () => {
+  it.each(['', '  ', 'phm_test_placeholder', ' phm_test_placeholder '])('does not call a placeholder/blank PAT ready: %s', value => {
+    process.env.ASHLR_PULSE_TOKEN = value;
+    const cfg = { ...makeConfig({ pulse: PULSE_ENDPOINT }), phantom: { enabled: true } };
+    expect(patAvailable(cfg)).toBe(false);
+    expect(credentialSpawn).not.toHaveBeenCalled();
+  });
+  it('configured Secrets does not prove a usable telemetry credential', async () => {
+    delete process.env.ASHLR_PULSE_TOKEN;
+    const cfg = { ...makeConfig({ pulse: PULSE_ENDPOINT }), phantom: { enabled: true } };
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    expect(patAvailable(cfg)).toBe(false);
+    expect(await getSink(cfg, false).emit([makeSpan()])).toEqual({ sink: 'otlp', ok: false, detail: 'PAT unavailable' });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(credentialSpawn).not.toHaveBeenCalled();
+  });
+  it('placeholder PAT prevents provider contact on the emit path', async () => {
+    process.env.ASHLR_PULSE_TOKEN = 'phm_test_placeholder';
+    const cfg = { ...makeConfig({ pulse: PULSE_ENDPOINT }), phantom: { enabled: true } };
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    expect(await getSink(cfg, false).emit([makeSpan()])).toEqual({ sink: 'otlp', ok: false, detail: 'PAT unavailable' });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(credentialSpawn).not.toHaveBeenCalled();
+  });
   it('returns a boolean (true) when ASHLR_PULSE_TOKEN env is set', () => {
     process.env['ASHLR_PULSE_TOKEN'] = PAT_VALUE;
     const result = patAvailable(makeConfig({ pulse: PULSE_ENDPOINT }));

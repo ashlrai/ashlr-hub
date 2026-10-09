@@ -41,7 +41,7 @@ import * as http from 'http';
 import type { AshlrConfig, EngineId } from '../types.js';
 import { readCodexRateLimits } from '../observability/codex-source.js';
 import { readDecisions } from '../fleet/decisions-ledger.js';
-import { resolveProviderKey } from '../integrations/secrets.js';
+import { resolveProviderKey, explainProviderKey } from '../integrations/secrets.js';
 import { resolveEngineRegistry } from '../run/engine-registry.js';
 import {
   readClaudeUsage,
@@ -1108,7 +1108,7 @@ function senseNimState(cfg: unknown, rcfg: ResourceCfgShape): BackendResourceSta
         costPerMTokenOut: rcfg.nim?.costPerMTokenOut ?? 0.42,
         p50LatencyMs: null,
         snapshotAt: now,
-        reason: `nim credential unavailable: ${credentialName} could not be resolved`,
+        reason: `nim credential unavailable: ${credentialName} (${explainProviderKey(credentialName, typedCfg)})`,
         backoffUntilMs: null,
       };
     }

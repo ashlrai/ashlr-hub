@@ -45,21 +45,24 @@ The default endpoint when you run `ashlr pulse connect` with no URL is:
 Stores the Pulse PAT. The token is **never** printed, logged, or written to
 `config.json`.
 
-**PAT storage (in priority order):**
+**PAT storage and current sending support:**
 
-1. **Phantom vault** (preferred) — stored as secret `ASHLR_PULSE_TOKEN` via
+1. **Phantom vault storage** — stored as secret `ASHLR_PULSE_TOKEN` via
    `phantom add ASHLR_PULSE_TOKEN <value>`. Requires `phantom.enabled: true` in
    your config and the `phantom` CLI on PATH.
 
-2. **Environment variable fallback** — if Phantom is unavailable, the command
+2. **Current OTLP sending route: existing environment variable.** The command
    prints instructions to set:
    ```bash
    export ASHLR_PULSE_TOKEN=<your-token>
    ```
    Add to `~/.zshrc` or `~/.bashrc` for persistence.
 
-OtlpHttpSink reads the PAT at emit time from Phantom (via async `phantom exec`)
-or from `ASHLR_PULSE_TOKEN` — the same resolution order, the same secret name.
+OtlpHttpSink currently reads a valid existing `ASHLR_PULSE_TOKEN` environment
+value at emit time. Empty values and `phm_` placeholders are unavailable. A vault
+store confirms storage only; child `phantom exec` cannot return a PAT to this
+parent-process sender. Vault-backed sending requires a separately qualified
+transport. No vault extraction or availability subprocess runs on emission.
 
 ### `ashlr pulse connect --status`
 
@@ -170,11 +173,11 @@ The endpoint is stored in `~/.ashlr/config.json` under `telemetry.pulse`:
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `detail=PAT unavailable` | No PAT found | `ashlr pulse connect --token <pat>` |
+| `detail=PAT unavailable` | No usable environment PAT | Set the existing `ASHLR_PULSE_TOKEN` environment route; vault storage alone does not activate sending |
 | `detail=no endpoint configured` | `telemetry.pulse` not set | `ashlr pulse connect <url>` |
-| `detail=HTTP 401` | Wrong or expired PAT | Re-run `--token` with a fresh PAT |
+| `detail=HTTP 401` | Wrong or expired PAT | Refresh the existing `ASHLR_PULSE_TOKEN` environment route |
 | `detail=request timed out` | Network/endpoint unreachable | Check connectivity; try `--test` again |
-| Phantom not used | `phantom.enabled` not set | Set in config or use env var fallback |
+| Vault PAT stored, sink unavailable | In-process vault transport unsupported | Use the existing environment route; enabling Secrets does not qualify transport |
 
 ---
 

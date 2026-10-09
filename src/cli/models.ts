@@ -339,7 +339,7 @@ async function cmdModelsList(
       `  ${dim('Enable an API engine:')} add its id to ${cyan('foundry.allowedBackends')} in ${cyan('~/.ashlr/config.json')}`,
     );
     console.log(
-      `  ${dim('Set key via phantom:')} ${cyan('phantom add NVIDIA_NIM_API_KEY')}`,
+      `  ${dim('Existing environment key:')} ${cyan('NVIDIA_NIM_API_KEY')}`,
     );
     console.log('');
   }

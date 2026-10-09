@@ -385,7 +385,7 @@ function printTelemetryHelp(): void {
   console.log('');
   console.log('  ' + bold('Security:'));
   console.log('');
-  console.log(`    ${dim('• The PAT (ASHLR_PULSE_TOKEN or phantom) is NEVER printed or returned.')}`);
+  console.log(`    ${dim('• The existing environment PAT (ASHLR_PULSE_TOKEN) is NEVER printed or returned.')}`);
   console.log(`    ${dim('• Only boolean availability is shown.')}`);
   console.log(`    ${dim('• Span attributes are metadata only (model, tokens, cost, ids).')}`);
   console.log(`    ${dim('• No prompts, completions, tool args, or file contents ever appear.')}`);
@@ -395,7 +395,7 @@ function printTelemetryHelp(): void {
   console.log(`    ${dim('• Default: LocalFileSink — spans appended to ~/.ashlr/telemetry/*.jsonl')}`);
   console.log(`    ${dim('• OtlpHttpSink: active when cfg.telemetry.pulse AND PAT are both configured.')}`);
   console.log(`    ${dim('• Configure: ashlr config set telemetry.pulse https://your-endpoint/v1/traces')}`);
-  console.log(`    ${dim('• PAT via:   phantom add ASHLR_PULSE_TOKEN  OR  export ASHLR_PULSE_TOKEN=...')}`);
+  console.log(`    ${dim('• PAT via:   existing ASHLR_PULSE_TOKEN env; vault transport is unsupported.')}`);
   console.log('');
   console.log('  ' + bold('Spend governance:'));
   console.log('');
