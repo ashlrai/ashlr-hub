@@ -12,6 +12,8 @@ flowchart LR
   Current --> Sidebar
   Capture["Account-bound balance capture"] --> Credits["Separate recorded credit pools"]
   Credits --> Drawer["Expandable credit details"]
+  ApiHistory["Recorded API promotions"] --> ApiSidebar["Separate dollars and Held status"]
+  ApiHistory --> Drawer
   Estimate["Operator cloud estimate"] --> Drawer
 ```
 
@@ -33,7 +35,7 @@ Dollar references are not invoices, purchased-credit prices, or attributed task 
 
 ## Credit details
 
-Opening Resources and then **Credit balances** mounts the recorded-balance reader. The authorized GET is `/api/verse/resources/credit-pools`; it accepts no query parameters, provider command, file path, or caller-selected identity. A cold request returns `warming` while the existing bounded worker reads private evidence. Stale and unavailable readings retain their qualifiers. The HTTP fast path uses existing in-memory collector status and identity snapshots.
+The visible resource bar and the open **Credit balances** disclosure share one recorded-balance query cache. The bar shows API promotion records separately from subscription meters; the disclosure shows each pool in detail. The authorized GET is `/api/verse/resources/credit-pools`; it accepts no query parameters, provider command, file path, or caller-selected identity. A cold request returns `warming` while the existing bounded worker reads private evidence. Stale and unavailable readings retain their qualifiers. The HTTP fast path uses existing in-memory collector status and identity snapshots.
 
 Credit records project only their account ID, pool kind, exact amount, original capture time, scope, source, and expiration. Private identity digests, credential paths, and collection generations do not enter the response. Native account evidence verifies the association, not a manually captured monetary balance. Internal capture requires paired fresh native witnesses and a matching generation at publication. A changed or unknown identity hides the amounts. This read surface neither captures new balances nor changes provider billing.
 
@@ -41,7 +43,7 @@ The endpoint reads fixed local stores. Opening it does not start a model, provid
 
 ## Claude API promotional grants
 
-The expandable credit view can show a private, verified API grant observation separately from Claude's subscription and cloud-session credits. Money is stored as exact integer microdollars and displayed with two significant figures; hover over a balance to see the exact recorded amount. Its asynchronous local read does not wait for the subscription worker or request billing credentials. API organization, workspace and credential digests remain private. Windows currently reports this new read unavailable until asynchronous private-file ACL verification is supported.
+The resource bar and expandable credit view can show a private, verified API grant observation separately from Claude's subscription and cloud-session credits. A single promotion shows last-recorded dollars and **Held**; several records show their count without adding possibly overlapping history. On a cold local read, the bar checks every two seconds for at most thirty seconds, then returns to its regular fifteen-second cadence. Hidden surfaces stop polling. Money is stored as exact integer microdollars and displayed with two significant figures; hover over a balance to see the exact recorded amount. Its asynchronous local read does not wait for the subscription worker or request billing credentials. API organization, workspace and credential digests remain private. Windows currently reports this new read unavailable until asynchronous private-file ACL verification is supported.
 
 A provider-reported UTC expiry date is displayed as a date. When no exact expiry instant is supplied, Phantom conservatively stops new admissions at the **start** of that UTC date. This is Phantom's policy, not a claim about the provider's expiration time. Unknown balances or dates block admission. A future billing cycle never creates a synthetic new grant.
 

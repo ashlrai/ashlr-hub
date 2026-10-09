@@ -15,7 +15,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 - Separate recorded Claude API promotions from subscriptions, cloud gifts and
   purchased credits. Show exact-money tooltips, rounded dollar balances,
-  verified expiry dates and explicit automatic-use holds in Resources.
+  verified expiry dates and explicit automatic-use holds in the resource bar
+  and expandable Resources details.
 - Add an internal first-party Messages adapter with durable organization-wide
   reservations, verified request pricing and retained unknown-charge exposure.
   The new API lane stays off until fresh billing, credential binding and

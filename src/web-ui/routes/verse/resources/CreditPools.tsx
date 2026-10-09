@@ -27,10 +27,10 @@ export function narrowCreditPoolsEnvelope(raw: unknown): CreditPoolsRead | null 
   return ['current', 'stale'].includes(row.state) && narrowCreditPoolsRead(row.pools) !== null ? raw as CreditPoolsRead : null;
   } catch { return null; }
 }
-const query = optionalQuery('verse-credit-pools', CREDIT_POOLS_PATH, 'Recorded credit balances', narrowCreditPoolsEnvelope);
+export const creditPoolsQuery = optionalQuery('verse-credit-pools', CREDIT_POOLS_PATH, 'Recorded credit balances', narrowCreditPoolsEnvelope);
 function CreditPoolReading({ accountNames }: { accountNames: ReadonlyMap<string, string> }) {
-  const reading = useQuery(query, { freshMs: 15_000 });
-  const refetch = useRefetch(query);
+  const reading = useQuery(creditPoolsQuery, { freshMs: 15_000 });
+  const refetch = useRefetch(creditPoolsQuery);
   const [openedAt] = useState(() => Date.now());
   const now = useNow(2_000);
   const value = reading.data?.value;
@@ -77,7 +77,7 @@ function CreditPoolReading({ accountNames }: { accountNames: ReadonlyMap<string,
     <Button size="sm" variant="ghost" onClick={refetch}>Refresh balances</Button>
   </div>;
 }
-/** The resource drawer and this disclosure must both be open before any read. */
+/** This disclosure shares its recorded-balance cache with the visible resource bar. */
 export function CreditPools({ accountNames = new Map() }: { accountNames?: ReadonlyMap<string, string> }) {
   const [open, setOpen] = useState(false);
   const titleId = useId();
