@@ -9,10 +9,17 @@
  * Built-in playbooks resolve from code, so nothing is written to disk except
  * the one auto-matching playbook the "never auto" case saves (isolated HOME).
  */
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+// Recording adapters run inert Node children, never the host local-model CLI.
+vi.mock('../src/core/verse/local-harness.js', () => ({
+  LOCAL_HARNESS_UNAVAILABLE: 'Claude Code is required to run local tool sessions. Install it or refresh Apps & Accounts after updating your PATH.',
+  localHarnessInvocation: () => ({ executable: '/opt/fake/bin/fake-cli', path: '/opt/fake/bin' }),
+  discoverLocalHarness: async () => ({ executable: '/opt/fake/bin/fake-cli', path: '/opt/fake/bin' }),
+}));
 
 import { chatPlaybook } from '../src/core/playbooks/lanes.js';
 import { savePlaybook } from '../src/core/playbooks/store.js';
