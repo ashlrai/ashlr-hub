@@ -138,6 +138,15 @@ describe('verse account collector — read-only lease retry on touch()', () => {
     // asking for a clean close; unregistered cancellation remains held.
     expect(await waitFor(() => {
       const ledger = accountsLedgerRoot(root);
+      const pending = JSON.parse(fs.readFileSync(path.join(ledger, '.resource-quota-refresh-pending.json'), 'utf8')) as
+        { schemaVersion: number };
+      // Hosts without a verified native boot identity retain a v1 fence and
+      // track reservations in memory; they do not publish a durable activity
+      // sidecar. The real pending marker determines which proof exists.
+      if (pending.schemaVersion === 1) {
+        expect(fs.existsSync(path.join(ledger, '.resource-quota-refresh-activity.json'))).toBe(false);
+        return true;
+      }
       const record = JSON.parse(fs.readFileSync(path.join(ledger, '.resource-quota-refresh-activity.json'), 'utf8')) as
         { reservations: Array<{ launchId?: string | null }> };
       return record.reservations.every(value => typeof value.launchId !== 'string' ||
