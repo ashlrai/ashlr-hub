@@ -753,8 +753,8 @@ describe('runDoctor — compatible CLI installation guidance', () => {
     const report = await runDoctor(makeConfig(tmpHome));
     const check = report.checks.find(check => check.id === 'ashlr');
     expect(check?.status).toBe('pass');
-    expect(realpathSync(check!.detail!))
-      .toBe(realpathSync(join(tmpHome, 'bin', process.platform === 'win32' ? 'phm.cmd' : 'phm')));
+    expect(realpathSync.native(check!.detail!))
+      .toBe(realpathSync.native(join(tmpHome, 'bin', process.platform === 'win32' ? 'phm.cmd' : 'phm')));
   });
 
   it('still recognizes the compatible ashlr launcher', async () => {
@@ -762,8 +762,8 @@ describe('runDoctor — compatible CLI installation guidance', () => {
     const report = await runDoctor(makeConfig(tmpHome));
     const check = report.checks.find(check => check.id === 'ashlr');
     expect(check?.status).toBe('pass');
-    expect(realpathSync(check!.detail!))
-      .toBe(realpathSync(join(tmpHome, 'bin', process.platform === 'win32' ? 'ashlr.cmd' : 'ashlr')));
+    expect(realpathSync.native(check!.detail!))
+      .toBe(realpathSync.native(join(tmpHome, 'bin', process.platform === 'win32' ? 'ashlr.cmd' : 'ashlr')));
   });
 
   it('recognizes phm when the compatible launcher is absent', async () => {
