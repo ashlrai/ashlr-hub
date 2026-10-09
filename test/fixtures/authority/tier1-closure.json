@@ -142,7 +142,8 @@
     "src/core/vision/leader-seat.ts",
     "src/core/vision/leader.ts",
     "src/core/website/host-adapter.ts",
-    "src/core/website/host-release.ts"
+    "src/core/website/host-release.ts",
+    "src/core/website/output-materialization.ts"
   ],
   "closure": [
     "scripts/evaluators/preparation-verification-activity.mjs",
@@ -945,6 +946,7 @@
     "src/core/web/visibility.ts",
     "src/core/website/host-adapter.ts",
     "src/core/website/host-release.ts",
+    "src/core/website/output-materialization.ts",
     "src/planning/triviality.ts"
   ]
 }

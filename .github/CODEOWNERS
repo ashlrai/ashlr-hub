@@ -881,4 +881,5 @@
 /test/w1.run-window-loop.test.ts @masonwyatt23
 /test/web-console-sse-backpressure.test.ts @masonwyatt23
 /test/website-host-release.test.ts @masonwyatt23
+/test/website-output-materialization.test.ts @masonwyatt23
 /test/website-public-build-env.test.ts @masonwyatt23
