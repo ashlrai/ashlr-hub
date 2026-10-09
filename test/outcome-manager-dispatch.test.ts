@@ -1,6 +1,7 @@
 import { formatProductDisplayText } from '../src/core/vision/leader-display-text.js';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -18,7 +19,7 @@ import type { OutcomeManagerRoute } from '../src/core/goals/outcome-manager-type
 import type { RunState } from '../src/core/types.js';
 
 const roots: string[] = [];
-afterEach(() => { vi.restoreAllMocks(); mocks.directory.mockReset(); mocks.run.mockReset(); mocks.proposal.mockReset(); mocks.enrollment.mockReset();
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); mocks.directory.mockReset(); mocks.run.mockReset(); mocks.proposal.mockReset(); mocks.enrollment.mockReset();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 function fixture(interactive = false, selected: Partial<OutcomeManagerRoute> = {}, desiredOutcome = 'Ship a useful verified improvement') {
   const route: OutcomeManagerRoute = { engine: 'codex', seatId: 'selected-native-seat', model: 'actual-frontier-model', tier: 'frontier', ...selected };
@@ -102,6 +103,31 @@ describe('actual tool-capable manager host bridge', () => {
     f.setRun({ ...f.run(), engineTier: 'frontier' });
     expect(await d.finishWithRetry()).toBe(true);
     expect(f.state().manager!.stages[0]!.state).toBe('failed'); expect(f.state().graphDigest).toBeNull();
+  });
+  it('reads an existing interactive primary scope through its unique enrolled mirror without rewriting the saved scope', () => {
+    const f = fixture(true); vi.stubEnv('HOME', f.root);
+    execFileSync('git', ['init', f.repo], { stdio: 'pipe' });
+    execFileSync('git', ['-C', f.repo, 'remote', 'add', 'origin', 'https://github.com/fixture/session.git']);
+    const mirror = join(f.root, '.ashlr', 'fleet', 'mirrors', 'fixture__session');
+    mkdirSync(join(f.root, '.ashlr', 'fleet', 'mirrors'), { recursive: true });
+    execFileSync('git', ['clone', '--local', f.repo, mirror], { stdio: 'pipe' });
+    const saved = JSON.stringify(f.state());
+    const ledger = join(f.store.directory, 'ledger');
+    const recordBytes = () => readdirSync(ledger).filter(name => /^\d{16}\.json$/.test(name)).sort()
+      .map(name => [name, readFileSync(join(ledger, name), 'utf8')]);
+    const savedBytes = recordBytes();
+    mocks.enrollment.mockReturnValue({ state: 'ready', repos: [mirror] });
+    expect(readOutcomeManagerSession({ outcomeId: 'outcome', sessionId: 'chat-1', roots: [f.repo] })).toBe(true);
+    expect(readOutcomeManagerSessionProjection('chat-1', [f.repo])).toMatchObject({ sourceState: 'healthy', association: { outcomeId: 'outcome' } });
+    expect(JSON.stringify(f.state())).toBe(saved); expect(f.state().manager!.stages).toEqual([]);
+    mocks.enrollment.mockReturnValue({ state: 'ready', repos: [f.repo, mirror] });
+    expect(readOutcomeManagerSession({ outcomeId: 'outcome', sessionId: 'chat-1', roots: [f.repo] })).toBe(false);
+    expect(readOutcomeManagerSessionProjection('chat-1', [f.repo])).toEqual({ sourceState: 'degraded', association: null });
+    const foreign = join(f.root, '.ashlr', 'fleet', 'mirrors', 'fixture__foreign'); mkdirSync(foreign);
+    mocks.enrollment.mockReturnValue({ state: 'ready', repos: [foreign] });
+    expect(readOutcomeManagerSession({ outcomeId: 'outcome', sessionId: 'chat-1', roots: [f.repo] })).toBe(false);
+    expect(JSON.stringify(f.state())).toBe(saved); expect(recordBytes()).toEqual(savedBytes);
+    expect(mocks.run).not.toHaveBeenCalled();
   });
   it('records only one parent and refuses replayed or wrong-seat launches', () => {
     const f = fixture(); const first = f.dispatch(); expect(first.begin()).toBe(true);

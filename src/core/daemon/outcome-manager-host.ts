@@ -3,7 +3,7 @@ import type { OutcomeAdmission } from '../goals/outcome-coordinator.js';
 import type { OutcomeManagerAdmission } from '../goals/outcome-manager.js';
 import type { OutcomeManagerRoute, OutcomeManagerStage } from '../goals/outcome-manager-types.js';
 import type { OutcomeState } from '../goals/outcome-types.js';
-import { managerSessionTargetsMatch } from '../verse/manager-scope.js';
+import { managerSessionTargetsMatch, resolveManagerSessionTargets } from '../verse/manager-scope.js';
 import { readEnrollmentRegistry } from '../sandbox/policy.js';
 import type { EffectivePolicy } from '../authority/types.js';
 import { readOutcomeManagerConversation } from '../verse/manager-conversation.js';
@@ -37,13 +37,19 @@ export function managerHostAdmission(base: OutcomeAdmission, options: {
   sources?: ManagerHostSources;
 }): OutcomeManagerAdmission {
   const reads = options.sources ?? sources;
+  const targetRepoAllowed = (target: string): boolean => {
+    const enrolled = reads.enrolled();
+    const execution = enrolled && resolveManagerSessionTargets([target], enrolled)?.[0];
+    return base.stillAuthorized() && typeof execution === 'string' && base.executionRepoAllowed(target, execution);
+  };
   const sessionAllowed: OutcomeManagerAdmission['sessionAllowed'] = (sessionId, state) => {
     const session = reads.session(sessionId);
     const enrolled = reads.enrolled();
-    return !!session && enrolled !== null && reads.targetsMatch(session.roots, enrolled, state.scope.targetRepos) &&
-      state.scope.targetRepos.every(target => base.executionRepoAllowed(target, target));
+    const targets = enrolled && resolveManagerSessionTargets(state.scope.targetRepos, enrolled);
+    return !!session && enrolled !== null && targets !== null &&
+      reads.targetsMatch(session.roots, enrolled, targets) && state.scope.targetRepos.every(targetRepoAllowed);
   };
-  return { ...base, routeAllowed: options.routeAllowed, routeCurrent: options.routeCurrent, sessionAllowed,
+  return { ...base, targetRepoAllowed, routeAllowed: options.routeAllowed, routeCurrent: options.routeCurrent, sessionAllowed,
     messageExists: (ref, state) => sessionAllowed(ref.sessionId, state) &&
       reads.conversation(ref.sessionId, state.id, [ref])?.length === 1,
     planAllowed: (state, plan) => {
@@ -53,7 +59,7 @@ export function managerHostAdmission(base: OutcomeAdmission, options: {
       return plan.nodes.every(node => {
         const target = node.targetRepo;
         if (node.kind !== 'work' || typeof target !== 'string' || !state.scope.targetRepos.includes(target) ||
-            !base.executionRepoAllowed(target, target)) return false;
+            !targetRepoAllowed(target)) return false;
         const identity = options.repoIdentity(target);
         const granted = identity && policy.repos.find(repo => repo.nameWithOwner.toLowerCase() === identity.toLowerCase());
         return !!granted && risk[node.riskClass] <= risk[granted.maxRisk];

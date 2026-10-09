@@ -9,6 +9,10 @@ import { managerGeneration, managerWorkItemId, outcomeManagerBasis, validOutcome
 
 export interface OutcomeManagerMessageRef { sessionId: string; messageId: string; eventSeq: number }
 export interface OutcomeManagerAdmission extends OutcomeAdmission {
+  /** Host-only coverage of an immutable target by its current admitted workspace.
+   * Absence retains the legacy exact-target execution check. This cannot admit
+   * actual contact: that still needs executionRepoAllowed and the exact route. */
+  targetRepoAllowed?(target: string): boolean;
   /** Exact native account/model contact admission, including current capacity. */
   routeAllowed(route: OutcomeManagerRoute, executionRepo: string): boolean;
   /** Exact current native route/policy binding; terminal metadata needs no new quota ticket. */
@@ -57,10 +61,15 @@ export function projectOutcomeManager(state: OutcomeState): OutcomeManagerProjec
       : attempts.some(attempt => ['proposed', 'complete'].includes(attempt.state)) ? 'review' : null;
   return intent ? { ...basic, next: { intent, basis, basisDigest, workItemId: managerWorkItemId(state.id, basisDigest) } } : basic;
 }
+function targetAllowed(target: string, admission: OutcomeManagerAdmission): boolean {
+  return admission.targetRepoAllowed
+    ? admission.targetRepoAllowed(target)
+    : admission.executionRepoAllowed(target, target);
+}
 function admitted(state: OutcomeState, admission: OutcomeManagerAdmission): boolean {
   try {
     return !state.paused && admission.stillAuthorized() && state.scope.targetRepos.every(repo =>
-      realpathSync.native(repo) === repo && admission.executionRepoAllowed(repo, repo)) &&
+      realpathSync.native(repo) === repo && targetAllowed(repo, admission)) &&
       (state.manager?.sessionId == null || admission.sessionAllowed(state.manager.sessionId, state));
   } catch { return false; }
 }
@@ -171,7 +180,7 @@ export class OutcomeManagerCoordinator {
         if (terminal.plan) {
           if (terminal.plan.missionKey !== current.id || terminal.plan.objective !== current.scope.desiredOutcome ||
               terminal.plan.nodes.some(node => node.kind !== 'work' || !current.scope.targetRepos.includes(node.targetRepo!) ||
-                !admission.executionRepoAllowed(node.targetRepo!, node.targetRepo!))) return null;
+                !targetAllowed(node.targetRepo!, admission))) return null;
           if (!admission.planAllowed(current, terminal.plan)) {
             stage.state = 'failed'; stage.failureReason = 'plan-refused';
             stage.terminalRunId = terminal.runId; stage.resultDigest = terminal.resultDigest; stage.proposalId = terminal.proposalId;

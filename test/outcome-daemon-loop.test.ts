@@ -29,8 +29,8 @@ import { scanGoals } from '../src/core/portfolio/scanners.js';
 import { loadGoal } from '../src/core/goals/store.js';
 import { createProposal, inboxDir, loadProposal } from '../src/core/inbox/store.js';
 import { hashDiff, signLocalMergeIntent, signLocalRealizedMergeReceipt } from '../src/core/foundry/provenance.js';
-import { mirrorPathFor } from '../src/core/fleet/mirrors.js';
-import { enroll, unenroll } from '../src/core/sandbox/policy.js';
+import { mirrorPathFor, runInAutonomousLane } from '../src/core/fleet/mirrors.js';
+import { enroll, unenroll, setKill } from '../src/core/sandbox/policy.js';
 import { DEFAULT_TICK_HOOKS, type TickHooks } from '../src/core/daemon/tick-hooks.js';
 import { savePlaybook, readPlaybookUses } from '../src/core/playbooks/store.js';
 import { noteIdFor, knowledgePath, updateKnowledge, readKnowledgeHits } from '../src/core/learn/retro/store.js';
@@ -307,6 +307,78 @@ describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'funct
     expect(state.nodes[state.activeNodeIds[0]!]!.completion).toBeNull();
     expect(state.nodes[state.activeNodeIds[0]!]!.attempts).toEqual([]);
   });
+  it.each(['codex', 'local-coder'] as const)('plans with %s from the admitted mirror inside the real autonomous lane without changing the saved target', async engine => {
+    const f = await managerFixture();
+    const model = engine === 'codex' ? 'frontier-test' : 'qualified-local-model';
+    const tier = engine === 'codex' ? 'frontier' : 'mid';
+    if (engine === 'local-coder') {
+      f.cfg.foundry = { ...f.cfg.foundry, allowedBackends: [engine], models: { [engine]: model } };
+      mocks.policy.mockReturnValue({ switch: 'autonomous', repos: [{ nameWithOwner: 'fixture/outcome', maxRisk: 'medium' }],
+        engines: ['local'], spend: { seats: { local: { enabled: true, roles: ['producer'] } } } });
+      f.hooks.route = () => ({ backend: engine, tier, model, hold: null, reason: 'offline exact local manager route',
+        seatDecision: { seatId: 'local', candidates: ['local'], exclusions: [], why: 'offline', summary: 'offline', mode: 'balanced' } });
+    }
+    const mirror = mirrorPathFor('fixture/outcome'); mkdirSync(dirname(mirror), { recursive: true });
+    execFileSync('git', ['clone', '--local', f.repo.dir, mirror], { stdio: 'pipe' });
+    execFileSync('git', ['-C', mirror, 'remote', 'set-url', 'origin', 'https://github.com/fixture/outcome.git']);
+    enroll(mirror);
+    const originalScope = JSON.stringify(f.store.read().state!.scope);
+    mocks.goal.mockImplementation(async (goal, _cfg, opts) => {
+      const stage = f.store.read().state!.manager!.stages.at(-1)!;
+      expect(opts.cwd).toBe(mirror); expect(stage.executionRepo).toBe(mirror);
+      expect(opts.selectedOutcomeAdmission()).toBe(true);
+      expect(JSON.stringify(f.store.read().state!.scope)).toBe(originalScope);
+      const result = { ...managerRun(opts.runId, goal), engine, engineModel: `${engine}:${model}`, engineTier: tier } as RunState;
+      saveRun(result); return result;
+    });
+    const result = await runInAutonomousLane(f.drive);
+    expect(result.dispatches?.find(dispatch => dispatch.itemId.startsWith('outcome-manager:'))).toMatchObject({
+      dispatched: true, backend: engine, production: { outcome: 'empty-diff' },
+    });
+    expect(mocks.goal).toHaveBeenCalledTimes(1);
+    expect(f.store.read().state!.manager!.stages.at(-1)).toMatchObject({ executionRepo: mirror, state: 'succeeded', resultKind: 'plan-applied' });
+    expect(JSON.stringify(f.store.read().state!.scope)).toBe(originalScope);
+    expect(f.coordinator.project().complete).toBe(false);
+  });
+
+  it('does not invent an execution workspace from a foreign enrolled mirror', async () => {
+    const f = await managerFixture(); const mirror = mirrorPathFor('fixture/foreign');
+    mkdirSync(dirname(mirror), { recursive: true });
+    execFileSync('git', ['clone', '--local', f.repo.dir, mirror], { stdio: 'pipe' });
+    execFileSync('git', ['-C', mirror, 'remote', 'set-url', 'origin', 'https://github.com/fixture/foreign.git']);
+    enroll(mirror); mocks.backlog.mockResolvedValue({ generatedAt: new Date().toISOString(), repos: [mirror], items: [] });
+    const scope = JSON.stringify(f.store.read().state!.scope);
+    await runInAutonomousLane(f.drive);
+    expect(mocks.goal).not.toHaveBeenCalled(); expect(mocks.bon).not.toHaveBeenCalled();
+    expect(f.store.read().state!.manager!.stages).toEqual([]);
+    expect(JSON.stringify(f.store.read().state!.scope)).toBe(scope);
+    expect(f.manager.project().next).not.toBeNull();
+  });
+
+  it.each(['enrollment', 'grant', 'Stop'] as const)('refuses %s withdrawn after mirror selection without contacting the Manager', async kind => {
+    const f = await managerFixture(); const mirror = mirrorPathFor('fixture/outcome');
+    mkdirSync(dirname(mirror), { recursive: true });
+    execFileSync('git', ['clone', '--local', f.repo.dir, mirror], { stdio: 'pipe' });
+    execFileSync('git', ['-C', mirror, 'remote', 'set-url', 'origin', 'https://github.com/fixture/outcome.git']);
+    enroll(mirror); mocks.backlog.mockResolvedValue({ generatedAt: new Date().toISOString(), repos: [mirror], items: [] });
+    const route = f.hooks.route; let changed = false;
+    f.hooks.route = (item, cfg) => {
+      const selected = route(item, cfg);
+      if (!changed && item.id.startsWith('outcome-manager:')) {
+        changed = true;
+        if (kind === 'enrollment') unenroll(mirror);
+        else if (kind === 'grant') mocks.policy.mockReturnValue(null);
+        else setKill(true);
+      }
+      return selected;
+    };
+    const scope = JSON.stringify(f.store.read().state!.scope);
+    await runInAutonomousLane(f.drive);
+    expect(changed).toBe(true); expect(mocks.goal).not.toHaveBeenCalled(); expect(mocks.bon).not.toHaveBeenCalled();
+    expect(f.store.read().state!.manager!.stages).toEqual([]);
+    expect(JSON.stringify(f.store.read().state!.scope)).toBe(scope);
+  });
+
   it('routes a real Manager prompt and guidance inside a 64k window while preserving private scope and effort', async () => {
     const f = await managerFixture(); const nativeRoute = f.hooks.route; const note = await managerGuidance();
     const guidance = 'Inspect the named file before editing. ' + 'g'.repeat(2000);

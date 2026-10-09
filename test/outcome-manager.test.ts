@@ -72,6 +72,34 @@ describe('durable tool-capable outcome manager', () => {
     expect(f.manager.claimRun(f.command(), next, f.repo, { ...f.route, tier: 'mid' }, 'actual-mid', f.admission).ok).toBe(true);
     expect(new OutcomeStore(f.store.directory).read().state!.manager!.stages[0]!.route.tier).toBe('mid');
   });
+  it('keeps target coverage separate from exact execution permission and preserves the legacy fallback', () => {
+    const f = fixture(); expect(f.configure().ok).toBe(true);
+    const mirror = join(f.root, 'mirror'); const foreign = join(f.root, 'foreign');
+    mkdirSync(mirror); mkdirSync(foreign);
+    f.admission.executionRepoAllowed = (target, execution) => target === f.repo && execution === mirror;
+    const next = f.manager.project().next!;
+    // Without a host coverage callback, the original exact-target rule remains.
+    expect(f.manager.claimRun(f.command(), next, mirror, f.route, 'legacy-refused', f.admission).ok).toBe(false);
+    f.admission.targetRepoAllowed = target => target === f.repo;
+    expect(f.manager.claimRun(f.command(), next, foreign, f.route, 'foreign-refused', f.admission).ok).toBe(false);
+    expect(f.store.read().state!.manager!.stages).toEqual([]);
+    expect(f.manager.claimRun(f.command(), next, mirror, f.route, 'actual-mirror', f.admission).ok).toBe(true);
+    expect(f.stage().executionRepo).toBe(mirror); expect(f.store.read().state!.scope).toEqual(f.scope);
+    f.admission.targetRepoAllowed = () => false;
+    expect(f.manager.inspectStage(f.stage().id, f.admission).admitted).toBe(false);
+    expect(f.manager.registerProviderRun(f.command(), f.stage().id, 'late-contact', f.admission).ok).toBe(false);
+    expect(f.stage().providerRunIds).toEqual(['actual-mirror']);
+  });
+
+  it('requires current host coverage for every saved target, not only the Manager workspace', () => {
+    const f = fixture(); expect(f.configure().ok).toBe(true);
+    const secondary = join(f.root, 'secondary'); mkdirSync(secondary);
+    expect(f.work.editScope(f.command(), { ...f.scope, targetRepos: [f.repo, secondary] }).ok).toBe(true);
+    f.admission.targetRepoAllowed = target => target === f.repo;
+    expect(f.claim().ok).toBe(false); expect(f.store.read().state!.manager!.stages).toEqual([]);
+    expect(f.store.read().state!.scope.targetRepos).toEqual([f.repo, secondary]);
+  });
+
   it('records a real parent atomically, prevents duplicate claims and never replays a launch', () => {
     const f = fixture(); expect(f.configure().ok).toBe(true); const next = f.manager.project().next!; const command = f.command();
     const claimed = f.manager.claimRun(command, next, f.repo, f.route, 'run-manager', f.admission);
