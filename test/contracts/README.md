@@ -88,6 +88,109 @@ Dirty source provenance at inspection:
   attached stdin/stderr terminals and typed confirmation. This is source
   inspection evidence, **not a tested behavior of either compiled binary**.
 
+## Clean current and release-source qualification, 2026-10-09 UTC
+
+Inspected a separate clean, isolated local `origin/main` snapshot at
+`/Users/masonwyatt/Documents/Codex/2026-10-08/task-3/secrets-current`, HEAD
+`8f3795bb1ee62a5723e622d7bcdf1d2781c71624`, workspace version **0.7.9**.
+This post-release main snapshot is distinct from the immutable release commit
+`7a51ce5` and from the dirty owner's checkout above. A second detached worktree
+at `/Users/masonwyatt/Documents/Codex/2026-10-08/task-3/secrets-release-v079`
+was created from task-owned `secrets-support-base` Git metadata at exact commit
+`7a51ce512ec4aee12cc29ff859036af63fbe93db`. Both source checkouts stayed clean;
+no source or lockfile edits were made.
+
+The pinned installed compiler was verified as
+`rustc 1.95.0 (59807616e 2026-04-14)` and
+`cargo 1.95.0 (f2d3ce0bd 2026-03-21)`. Both builds used a separate task-owned
+target cache, two jobs, and locked dependency versions:
+
+```sh
+CARGO_TARGET_DIR=/Users/masonwyatt/Documents/Codex/2026-10-08/task-3/secrets-current-target \
+RUSTUP_TOOLCHAIN=1.95.0-aarch64-apple-darwin \
+/Users/masonwyatt/.cargo/bin/cargo build --locked -p phantom-secrets --bin phantom --jobs 2
+```
+
+The first offline main build stopped because locked `rmcp 3.5.0` was absent
+from the cached index. Normal online access then hit sandbox DNS failure;
+normal test/release builds hit sandbox registry-cache unpack permissions.
+Subsequent requested sandbox escalations were approved for only the recognized,
+public crates.io dependencies in the existing locks. Every external lock source
+was `registry+https://github.com/rust-lang/crates.io-index`; no alternate registry
+or Git dependency was used. The main build then succeeded in **2m51s**, and the
+exact release-source build succeeded in **1m08s**. No dependency upgrades,
+global companion installation, credential provisioning, or owner build-target use occurred.
+
+The binaries were preserved separately before target reuse. Both report
+`phantom 0.7.9`; SHA-256 distinguishes the post-release main source from the
+exact release source:
+
+| Source | Preserved executable under the task workspace | SHA-256 | Real grammar | Missing/invalid status |
+| --- | --- | --- | --- | --- |
+| Main `8f3795bb` | `secrets-current-bin/phantom` | `ffa6508d77ae22d293549e6989d2670c05d8cfed3ece8d6ad8992e27b2f6199d` | 9/9 passed | 2/2 passed |
+| Release `7a51ce51` | `secrets-release-v079-bin/phantom` | `81a5eeaed46b938887808607996ddb175664e7c87a80b31cec4af64a60fd44c8` | 9/9 passed | 2/2 passed |
+
+The synthetic grammar-safety lane passed **4/4**. Main's three `help_tests::`
+unit tests passed **3/3**. The exact
+`commands::reveal::tests::legacy_noninteractive_bypass_is_always_rejected`
+unit test passed **1/1 on each source**; it returns before config/vault access.
+Native tests used a scrubbed environment and task-owned HOME/config/temp paths.
+The release source has no `help_tests::` module: that initial filter matched zero
+tests, which is not counted as a pass. Its exact denial test subsequently passed.
+
+The release grammar fixture initially cancelled all nine tests when its copied
+executable was named `secrets-release-v079-phantom`: clap's usage text includes
+the actual executable basename, while the guard requires canonical `phantom`.
+Safe `env --help` confirmed that spelling difference. Copying the byte-identical
+binary to `secrets-release-v079-bin/phantom` passed all nine checks. The guard was
+not weakened; no negative probe ran after the initial preflight failure. Use a
+preserved file named `phantom` when reproducing this strict grammar lane.
+
+The separate task-owned `secrets-status-smoke.mjs` executed only `status --json`
+against absent and deliberately malformed synthetic configs in disposable
+directories. On both binaries it asserted the entire exact v1 object:
+`initialized: false`, `inspection: "metadata-only"`, dotenv/vault uninspected,
+proxy lifecycle `"not-inspected"`, listener unauthenticated, and only
+`config-missing` or `config-invalid`. Stderr was empty; synthetic dotenv markers
+and filesystem paths never appeared; fixtures and binary hashes stayed unchanged.
+No valid config, real profile, vault operation, provider call, or listener was used.
+
+Evidence logs under `/Users/masonwyatt/Documents/Codex/2026-10-08/task-3`:
+`secrets-current-approved-build.log`, `secrets-current-cli-contract.log`,
+`secrets-current-safety-contract.log`, `secrets-current-approved-help-unit.log`,
+`secrets-current-reveal-denial-unit.log`, `secrets-current-status-contract.log`,
+`secrets-release-v079-approved-build.log`,
+`secrets-release-v079-canonical-cli-contract.log`,
+`secrets-release-v079-status-contract.log`, and
+`secrets-release-v079-reveal-denial-unit.log`. Initial offline/sandbox/renamed
+failures are preserved in the corresponding earlier logs.
+
+The clean checkout remained unchanged after the attempt. `Cargo.lock` retained
+SHA-256 `3a2a17c8692ba851e7ea9e997e570729710371580f1fecb1d7d397c200a3faa0`;
+`rust-toolchain.toml` has SHA-256
+`24ef3b9d3edbd850aa386cb0a98e10450b0030991a4537cb359f54d49dbbb33a`.
+The release lock retained SHA-256
+`c276fff73a9bce35facd5258a3a6c4871264cf0d3b8311d62c2913c14ff17baf` and
+pins `rmcp 1.5.0`, rather than main's `3.5.0`.
+
+Read-only current-source checks still establish the incompatible grammar:
+
+- `crates/phantom-cli/src/main.rs`, SHA-256
+  `acec55674c9d391cf176eaacb3db497a67d7aba53ae456497407fc2c39b96a90`:
+  `Env` exposes only an output filename option, and `Unwrap` has no positional
+  key argument.
+- `crates/phantom-cli/src/commands/reveal.rs`, SHA-256
+  `b0689e5e7ad93ac7d403fe52fe4f94ec0c76e0b05ff036a4babd0853281087db`:
+  legacy `--yes` is rejected before config/vault access; otherwise attached
+  stdin/stderr terminals and typed confirmation are required. The early `--yes`
+  rejection is also covered by the exact unit test above; the full terminal
+  ceremony remains unexercised.
+
+These are local, unoptimized macOS ARM64 builds from pinned source, not downloaded
+or attested official release assets. Full workspace tests, cross-platform behavior,
+initialized/locked-vault status, the terminal ceremony, credential injection,
+broker/lease readiness, and official release-asset execution remain unverified.
+
 ## Adapter-owner handoff
 
 Keep `foundry.usePhantom` disabled by default. Remove the unsupported plaintext
@@ -104,7 +207,7 @@ cover missing/uninitialized/locked state, per-project isolation, rejection, and
 value-free outputs. Proxy URLs may contain session bearers and must never be
 logged or persisted. Dormant lease/broker paths must remain fail-closed.
 
-Not exercised here: current 0.7.9 release artifacts, dirty source build/tests,
-trusted-terminal reveal rejection, real vault metadata, child injection,
+Not exercised here: official 0.7.9 release assets, dirty source build/tests,
+the full trusted-terminal reveal ceremony, real vault metadata, child injection,
 broker/lease readiness, cross-platform execution, or the workbench adapter's
 runtime behavior. Those remain owner-coordinated follow-up validation.
