@@ -167,15 +167,18 @@ class FrameQueue {
     const batch = this.queue;
     this.queue = [];
     const before = getVerseSessionState(this.sessionId);
-    const completedLocalTurn = before.session?.engine === 'local' && batch.some(event =>
-      event.type === 'turn-done' && event.ok && Number.isFinite(event.durationMs) && event.durationMs > 0 &&
-      Number.isFinite(Date.parse(event.at)) && !before.events.some(saved => saved.seq === event.seq));
     const result = applyVerseEvents(this.sessionId, batch);
     if (result.settled) {
       invalidateVerseLists();
+      const accepted = getVerseSessionState(this.sessionId).events;
+      const completedLocalTurn = before.session?.engine === 'local' && batch.some(event =>
+        event.type === 'turn-done' && event.ok === true && Number.isFinite(event.seq) &&
+        Number.isFinite(event.durationMs) && event.durationMs > 0 && Number.isFinite(Date.parse(event.at)) &&
+        !before.events.some(saved => saved.seq === event.seq) && accepted.includes(event));
       // Speed is model-wide, but context queries are scoped by chat/folder.
       // Refresh mounted consumers once per completed batch, not on chunks,
-      // duplicate replay, or every daemon tick. The server validates evidence.
+      // duplicate replay, or every daemon tick. Object identity also excludes
+      // a terminal rejected by a same-batch seq collision; the server validates evidence.
       if (completedLocalTurn) invalidateObserved(MULTIMODEL_CONTEXT_KEY_PREFIX, true);
     }
   }

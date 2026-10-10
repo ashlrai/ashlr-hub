@@ -148,6 +148,22 @@ describe('snapshot reconciliation during a real reload', () => {
 });
 
 describe('frame batching', () => {
+  it('does not refresh speed for a successful terminal rejected by a same-batch sequence collision', () => {
+    const refresh = vi.spyOn(cache, 'invalidateObserved');
+    const frames = manualFrames();
+    seedVerseSession('vs_1', session({ engine: 'local' }), []);
+    const release = acquireVerseSessionStream('vs_1');
+    const stream = MockEventSource.forSession('vs_1');
+    stream.emit(ev(1, 'user-message', { turnId: 't', text: 'go' }));
+    stream.emit(ev(2, 'assistant-message', { turnId: 't', text: 'partial' }));
+    stream.emit(ev(2, 'turn-done', { turnId: 't', ok: true, nativeSessionId: null, durationMs: 1000 }));
+    stream.emit(ev(3, 'cancelled', { turnId: 't' }));
+    frames.frame();
+    expect(getVerseSessionState('vs_1').events.map(event => event.type)).toEqual(['user-message', 'assistant-message', 'cancelled']);
+    expect(refresh).not.toHaveBeenCalled();
+    release();
+  });
+
   it.each(['codex', 'failed', 'cancelled', 'zero-duration', 'chunk'] as const)('does not refresh local speed context for %s frames', kind => {
     const refresh = vi.spyOn(cache, 'invalidateObserved');
     const frames = manualFrames();
