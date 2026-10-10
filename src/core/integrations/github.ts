@@ -13,7 +13,8 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import type { GithubStatus } from '../types.js';
+import type { GithubStatus, ProtectedPrObservedBypass, ProtectedRemoteRepositoryExpectation } from '../types.js';
+import { normalizeProtectedPrObservedBypass, normalizeProtectedRemoteRegistry, PROTECTED_PR_HANDOFF_OPERATION } from '../autonomy/protected-pr-handoff.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -2741,6 +2742,68 @@ export function evaluateSafeMinimumProtectedRemotePolicyV1(
     sourceCount,
     detail: `safe-minimum protected-remote policy V1 satisfied by ${sourceCount} source(s); signatures ${signaturePolicy}`,
   };
+}
+
+/**
+ * PR-only operation evaluation. Expected actor metadata stays in the original
+ * signed digest; an actor-free COPY is used solely to reuse unchanged V1 safety
+ * checks. This provides no permission to bypass, merge or push a default branch.
+ */
+export function evaluateProtectedPrHandoffPolicy(
+  policySnapshot: unknown,
+  configuredBindings: readonly RequiredCheckBinding[],
+  expectedActors: readonly ProtectedPrObservedBypass[],
+): { ok: boolean; detail: string } {
+  const expected = normalizeProtectedPrObservedBypass(expectedActors);
+  const snapshot = objectRecord(policySnapshot);
+  if (!expected || !snapshot || snapshot['schemaVersion'] !== 2 ||
+      !hasExactKeys(snapshot, ['schemaVersion', 'classic', 'rulesets']) ||
+      !Array.isArray(snapshot['rulesets']) ||
+      !consumePolicySnapshotShape(policySnapshot, { nodes: 0, bytes: 0 }) ||
+      !policySnapshotAggregatesWithinBudget(snapshot) ||
+      canonicalProtectedRemotePolicySnapshot(policySnapshot) === null) {
+    return { ok: false, detail: 'PR handoff requires complete original canonical policy and exact observed actors' };
+  }
+  const classicFailure = validateCanonicalClassicSource(snapshot['classic']);
+  if (classicFailure) return classicFailure;
+  const observed: unknown[] = [];
+  const projected: Record<string, unknown>[] = [];
+  for (const value of snapshot['rulesets']) {
+    const failure = validateCanonicalRulesetSource(value);
+    if (failure) return failure;
+    const rule = objectRecord(value)!;
+    for (const actor of rule['bypassActors'] as CanonicalRulesetBypassActor[]) {
+      observed.push({ rulesetId: rule['id'], sourceType: rule['sourceType'], source: rule['source'], ...actor });
+    }
+    projected.push({ ...rule, bypassActors: [] });
+  }
+  const actual = normalizeProtectedPrObservedBypass(observed);
+  if (!actual || JSON.stringify(actual) !== JSON.stringify(expected)) {
+    return { ok: false, detail: 'PR handoff observed bypass metadata is unknown or differs from the repository expectation' };
+  }
+  const safety = evaluateSafeMinimumProtectedRemotePolicyV1({ ...snapshot, rulesets: projected }, configuredBindings);
+  return safety.ok ? { ok: true, detail: 'exact PR-only policy and observed actors qualified; bypass is not authorized' } : safety;
+}
+
+/** New domain binds the ORIGINAL complete actor policy and exact operation/target. */
+export function buildCanonicalProtectedPrHandoffPolicyDigest(
+  policySnapshot: unknown,
+  configuredBindings: readonly RequiredCheckBinding[],
+  expected: ProtectedRemoteRepositoryExpectation,
+): string | null {
+  const registry = normalizeProtectedRemoteRegistry([expected]);
+  const configured = validateExactAppBindings(configuredBindings);
+  const selected = registry ? validateExactAppBindings(registry[0]!.requiredChecks as RequiredCheckBinding[]) : null;
+  if (!registry || !configured.ok || !selected?.ok || JSON.stringify(configured.keys) !== JSON.stringify(selected.keys) || registry[0]!.branchProtection !== true ||
+      !evaluateProtectedPrHandoffPolicy(policySnapshot, configuredBindings, registry[0]!.observedRulesetBypassActors).ok) return null;
+  const snapshot = canonicalProtectedRemotePolicySnapshot(policySnapshot);
+  if (snapshot === null) return null;
+  const entry = registry[0]!;
+  return createHash('sha256').update(JSON.stringify([
+    'ashlr:protected-pr-handoff-policy:v1', PROTECTED_PR_HANDOFF_OPERATION,
+    entry.nameWithOwner, entry.repositoryId, entry.defaultBranch,
+    configured.keys, entry.observedRulesetBypassActors, snapshot,
+  ]), 'utf8').digest('hex');
 }
 
 function isBooleanField(record: Record<string, unknown>, field: string): boolean {

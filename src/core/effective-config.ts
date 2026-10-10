@@ -16,7 +16,9 @@ import type {
   EngineKind,
   EngineTier,
   ProtectedRemoteRequiredCheckExpectation,
+  ProtectedRemoteRepositoryExpectation,
 } from './types.js';
+import { normalizeProtectedRemoteRegistry } from './autonomy/protected-pr-handoff.js';
 import { defaultConfig, loadConfig } from './config.js';
 import { resolveAutonomyControlMode } from './fleet/status.js';
 import { resolveEngineRegistry } from './run/engine-registry.js';
@@ -99,6 +101,8 @@ export interface EffectiveConfigSnapshot {
         requiredChecks: EffectiveConfigValue<ProtectedRemoteRequiredCheckExpectation[]>;
         requiredCheckIdentity: EffectiveConfigValue<'exact' | 'legacy' | 'invalid' | 'missing'>;
       };
+      protectedRemoteMode: EffectiveConfigValue<'legacy' | 'per-repository'>;
+      protectedRemotes: EffectiveConfigValue<ProtectedRemoteRepositoryExpectation[]>;
       midToBranch: EffectiveConfigValue<boolean>;
       allowWithoutVerification: EffectiveConfigValue<boolean>;
     };
@@ -503,6 +507,10 @@ export function buildEffectiveConfigSnapshot(
             'derived',
           ),
         },
+        protectedRemoteMode: value(raw, 'foundry.autoMerge.protectedRemotes',
+          autoMerge && Object.hasOwn(autoMerge, 'protectedRemotes') ? 'per-repository' : 'legacy', 'derived'),
+        protectedRemotes: value(raw, 'foundry.autoMerge.protectedRemotes',
+          normalizeProtectedRemoteRegistry(autoMerge?.protectedRemotes) ?? []),
         midToBranch: boolValue(raw, 'foundry.autoMerge.midToBranch', autoMerge?.midToBranch === true),
         allowWithoutVerification: boolValue(raw, 'foundry.autoMerge.allowWithoutVerification', autoMerge?.allowWithoutVerification === true),
       },

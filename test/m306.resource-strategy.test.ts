@@ -813,3 +813,46 @@ describe('3.15: a standing tick is not held at verify-only by pending proposals'
     expect(one.proposals.pending).toBe(1);
   });
 });
+
+
+it('withholds previously ready legacy main evidence after selecting repository-bound PR routing', async () => {
+  const record = outcome();
+  const config = cfg({ foundry: { autoMerge: { enabled: true } } });
+  const report = () => buildResourceStrategyReport(config, { now: new Date('2026-07-01T00:30:00.000Z'),
+    deps: deps({ listReadyEvidenceOutcomeRecords: () => [record] }) });
+  expect((await report()).outcomes.readyEvidence).toBe(1);
+  config.foundry!.autoMerge!.protectedRemotes = [{ nameWithOwner: 'ashlrai/fixture', repositoryId: 'R_fixture',
+    defaultBranch: 'main', operation: 'protected-pr-handoff-v1', branchProtection: true,
+    requiredChecks: [{ context: 'ci/test', appId: '1' }], observedRulesetBypassActors: [] }];
+  config.foundry!.autoMerge!.pushToRemote = true;
+  expect((await report()).outcomes.readyEvidence).toBe(0);
+});
+
+it('keeps a signed PR-only summary useful without treating it as a main merge or retaining readiness after route drift', async () => {
+  const record = outcome();
+  const evidence = record.evidencePacks[0]!;
+  evidence.remotePreferred = true;
+  evidence.policy = { tier: 'T3', action: 'open-ready-pr', allowed: true, reason: 'PR only' };
+  const actors = [{ rulesetId: '101', sourceType: 'Repository' as const, source: 'ashlrai/fixture',
+    actorType: 'RepositoryRole' as const, actorId: '5', bypassMode: 'always' as const }];
+  evidence.gates.remoteProtection = { ok: true, live: true, detail: 'current policy', nameWithOwner: 'ashlrai/fixture',
+    repositoryId: 'R_fixture', branch: 'main', baseHead: 'b'.repeat(40), observedAt: '2026-07-01T00:09:00.000Z',
+    requirements: ['required_status_checks'], requiredChecks: ['ci/test'], requiredCheckBindings: [{ context: 'ci/test', appId: '1' }],
+    policySources: ['ruleset'], policyHash: 'c'.repeat(64), operation: 'protected-pr-handoff-v1', observedRulesetBypassActors: actors };
+  const config = cfg({ foundry: { autoMerge: { enabled: true, pushToRemote: true, protectedRemotes: [{
+    nameWithOwner: 'ashlrai/fixture', repositoryId: 'R_fixture', defaultBranch: 'main', operation: 'protected-pr-handoff-v1',
+    branchProtection: true, requiredChecks: [{ context: 'ci/test', appId: '1' }], observedRulesetBypassActors: actors,
+  }] } } });
+  const report = () => buildResourceStrategyReport(config, { now: new Date('2026-07-01T00:30:00.000Z'),
+    deps: deps({ listReadyEvidenceOutcomeRecords: () => [record] }) });
+  expect((await report()).outcomes.readyEvidence).toBe(1);
+  config.foundry!.autoMerge!.pushToRemote = false;
+  expect((await report()).outcomes.readyEvidence).toBe(0);
+  config.foundry!.autoMerge!.pushToRemote = true;
+  config.foundry!.autoMerge!.protectedRemotes![0]!.repositoryId = 'R_other';
+  expect((await report()).outcomes.readyEvidence).toBe(0);
+  config.foundry!.autoMerge!.protectedRemotes![0]!.repositoryId = 'R_fixture';
+  evidence.policy.action = 'merge-main';
+  evidence.policy.tier = 'T4';
+  expect((await report()).outcomes.readyEvidence).toBe(0);
+});

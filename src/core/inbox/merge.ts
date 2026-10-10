@@ -127,6 +127,7 @@ import type {
   ProposalVerifyResult,
   LocalDefaultBranchMergeObservation,
   ProposalLocalMergeIntent,
+  ProtectedRemoteRepositoryExpectation,
 } from '../types.js';
 import { loadProposal, recordRealizedMerge, setStatus, updateProposalField } from './store.js';
 import { canonicalModelTag } from '../run/model-catalog.js';
@@ -142,12 +143,15 @@ import {
 import type { GitHubOriginAuthority } from '../git.js';
 import {
   buildCanonicalProtectedRemotePolicyDigestV1,
+  buildCanonicalProtectedPrHandoffPolicyDigest,
+  evaluateProtectedPrHandoffPolicy,
   createPr,
   evaluateSafeMinimumProtectedRemotePolicyV1,
   readBranchProtectionAttestation,
   viewPr,
   type CreatePrResult,
 } from '../integrations/github.js';
+import { normalizeProtectedRemoteRegistry, protectedPrOperationShape, PROTECTED_PR_HANDOFF_OPERATION } from '../autonomy/protected-pr-handoff.js';
 import { scrubSecrets } from '../knowledge/index.js';
 import { isSelfTargetProposal, guardSafetyTests, selfEvalParityAsync } from '../fleet/self.js';
 import { observeAutoMergeCanaryShadowAsync } from '../fleet/automerge-canary-observer.js';
@@ -1034,7 +1038,7 @@ export function evaluateAutoMergeReadinessPreflight(
 
     const targetsMain = trustBasis !== 'tier' || mergeTargetForTier(proposal.engineTier) === 'main';
     if (targetsMain && cfg.foundry?.autoMerge?.pushToRemote === true) {
-      const remoteProtection = evaluateEvidenceRemoteProtectionSignal(cfg);
+      const remoteProtection = evaluateEvidenceRemoteProtectionSignal(cfg, proposal.repo, proposal.verifyResult?.baseBranch);
       if (!remoteProtection.ok) {
         return block(`protected remote preflight: ${remoteProtection.detail}`, advisories, false);
       }
@@ -1163,6 +1167,7 @@ export interface EvidenceRemoteProtectionSignal {
   requiredChecks: string[];
   requiredCheckBindings: Array<{ context: string; appId: string }>;
   expectationMode: 'exact' | 'legacy' | 'invalid' | 'missing';
+  repositoryExpectation?: ProtectedRemoteRepositoryExpectation;
 }
 
 const MAX_CONFIGURED_GITHUB_APP_ID_LENGTH = 20;
@@ -1181,8 +1186,25 @@ export interface EvidenceAutoMergePreflightOptions {
   requireVerificationEvidence?: boolean;
 }
 
-export function evaluateEvidenceRemoteProtectionSignal(cfg: AshlrConfig): EvidenceRemoteProtectionSignal {
-  const signal = autoMergeConfigValue(cfg, 'protectedRemote');
+export function evaluateEvidenceRemoteProtectionSignal(
+  cfg: AshlrConfig,
+  repo?: string | null,
+  branch?: string,
+): EvidenceRemoteProtectionSignal {
+  let repositoryExpectation: ProtectedRemoteRepositoryExpectation | undefined;
+  let signal = autoMergeConfigValue(cfg, 'protectedRemote');
+  const autoMerge = cfg.foundry?.autoMerge;
+  if (autoMerge && Object.hasOwn(autoMerge, 'protectedRemotes')) {
+    const registry = normalizeProtectedRemoteRegistry(autoMergeConfigValue(cfg, 'protectedRemotes'));
+    const name = repo ? githubNameWithOwnerFromOrigin(repo)?.toLowerCase() : undefined;
+    repositoryExpectation = registry?.find((entry) => entry.nameWithOwner === name);
+    if (!registry || !repositoryExpectation || (branch !== undefined && branch !== repositoryExpectation.defaultBranch)) {
+      return { ok: false, detail: !registry ? 'per-repository protected remote registry is invalid' :
+        'selected repository/default branch has no exact protected remote expectation',
+        requiredChecks: [], requiredCheckBindings: [], expectationMode: registry ? 'missing' : 'invalid' };
+    }
+    signal = repositoryExpectation;
+  }
   if (!isObjectRecord(signal)) {
     return {
       ok: false,
@@ -1286,6 +1308,7 @@ export function evaluateEvidenceRemoteProtectionSignal(cfg: AshlrConfig): Eviden
     requiredChecks,
     requiredCheckBindings,
     expectationMode,
+    ...(repositoryExpectation ? { repositoryExpectation } : {}),
   };
 }
 
@@ -1317,8 +1340,11 @@ export async function evaluateLiveProtectedRemoteAuthority(
   baseHead: string,
   cfg: AshlrConfig,
 ): Promise<{ authorized: true; evidence: AutonomyRemoteProtectionEvidence } | { authorized: false; reason: string }> {
-  const expected = evaluateEvidenceRemoteProtectionSignal(cfg);
+  const expected = evaluateEvidenceRemoteProtectionSignal(cfg, repo, branch);
   if (!expected.ok) return { authorized: false, reason: expected.detail };
+  if (expected.repositoryExpectation && cfg.foundry?.autoMerge?.pushToRemote !== true) {
+    return { authorized: false, reason: 'repository-bound PR handoff requires the current remote route' };
+  }
   const expectedNameWithOwner = githubNameWithOwnerFromOrigin(repo);
   if (!expectedNameWithOwner) {
     return { authorized: false, reason: 'canonical GitHub origin identity is unavailable' };
@@ -1327,30 +1353,36 @@ export async function evaluateLiveProtectedRemoteAuthority(
     forceFresh: true,
     expectedNameWithOwner,
   });
+  if (expected.repositoryExpectation) {
+    const current = evaluateEvidenceRemoteProtectionSignal(cfg, repo, branch);
+    if (cfg.foundry?.autoMerge?.pushToRemote !== true || !current.ok ||
+        JSON.stringify(current.repositoryExpectation) !== JSON.stringify(expected.repositoryExpectation)) {
+      return { authorized: false, reason: 'selected protected PR expectation or remote route changed during observation' };
+    }
+  }
   if (!live.available || !live.ok || !live.protected || !live.policySnapshot) {
     return { authorized: false, reason: `live branch protection unavailable: ${live.detail}` };
   }
   if (
     !live.nameWithOwner || live.nameWithOwner.toLowerCase() !== expectedNameWithOwner.toLowerCase() ||
     !live.repositoryId || !live.defaultBranch || !live.branch || !live.baseHead ||
-    live.defaultBranch !== branch || live.branch !== branch || live.baseHead !== baseHead
+    live.defaultBranch !== branch || live.branch !== branch || live.baseHead !== baseHead ||
+    (expected.repositoryExpectation !== undefined && live.repositoryId !== expected.repositoryExpectation.repositoryId)
   ) {
     return { authorized: false, reason: 'live branch protection identity/base binding does not match verification' };
   }
-  const safeMinimum = evaluateSafeMinimumProtectedRemotePolicyV1(
-    live.policySnapshot,
-    expected.requiredCheckBindings,
-  );
+  const safeMinimum = expected.repositoryExpectation
+    ? evaluateProtectedPrHandoffPolicy(live.policySnapshot, expected.requiredCheckBindings, expected.repositoryExpectation.observedRulesetBypassActors)
+    : evaluateSafeMinimumProtectedRemotePolicyV1(live.policySnapshot, expected.requiredCheckBindings);
   if (!safeMinimum.ok) {
     return {
       authorized: false,
-      reason: `live safe-minimum protected-remote policy unavailable (${safeMinimum.reason}): ${safeMinimum.detail}`,
+      reason: `live safe-minimum protected-remote policy unavailable (${'reason' in safeMinimum ? safeMinimum.reason : 'pr-operation-unqualified'}): ${safeMinimum.detail}`,
     };
   }
-  const policyHash = buildCanonicalProtectedRemotePolicyDigestV1(
-    live.policySnapshot,
-    expected.requiredCheckBindings,
-  );
+  const policyHash = expected.repositoryExpectation
+    ? buildCanonicalProtectedPrHandoffPolicyDigest(live.policySnapshot, expected.requiredCheckBindings, expected.repositoryExpectation)
+    : buildCanonicalProtectedRemotePolicyDigestV1(live.policySnapshot, expected.requiredCheckBindings);
   if (!policyHash) {
     return {
       authorized: false,
@@ -1391,6 +1423,10 @@ export async function evaluateLiveProtectedRemoteAuthority(
       requiredCheckBindings: live.requiredCheckBindings.map((binding) => ({ ...binding })),
       policySources: [...live.sources],
       policyHash,
+      ...(expected.repositoryExpectation ? {
+        operation: PROTECTED_PR_HANDOFF_OPERATION,
+        observedRulesetBypassActors: expected.repositoryExpectation.observedRulesetBypassActors.map((actor) => ({ ...actor })),
+      } : {}),
     },
   };
 }
@@ -1428,7 +1464,7 @@ export function evaluateEvidenceAutoMergePreflight(
     return refuse('a GitHub remote is required for protected remote PR handoff');
   }
 
-  const remoteProtection = evaluateEvidenceRemoteProtectionSignal(cfg);
+  const remoteProtection = evaluateEvidenceRemoteProtectionSignal(cfg, proposal.repo, proposal.verifyResult?.baseBranch);
   if (!remoteProtection.ok) {
     return refuse(`protected remote signal missing: ${remoteProtection.detail}`);
   }
@@ -2248,6 +2284,8 @@ function remoteProtectionEvidenceMatches(
     left.branch === right.branch &&
     left.baseHead === right.baseHead &&
     left.policyHash === right.policyHash &&
+    left.operation === right.operation &&
+    isDeepStrictEqual(left.observedRulesetBypassActors, right.observedRulesetBypassActors) &&
     isDeepStrictEqual(left.requirements, right.requirements) &&
     isDeepStrictEqual(left.requiredChecks, right.requiredChecks) &&
     isDeepStrictEqual(left.requiredCheckBindings, right.requiredCheckBindings) &&
@@ -4206,6 +4244,9 @@ export async function autoMergeProposal(
     const preEvidenceConflict = currentProposalConflict();
     if (preEvidenceConflict) return refuse(preEvidenceConflict, repo);
     const wantRemote = cfg.foundry?.autoMerge?.pushToRemote === true;
+    if (toMain && cfg.foundry?.autoMerge && Object.hasOwn(cfg.foundry.autoMerge, 'protectedRemotes') && !wantRemote) {
+      return refuse('repository-bound PR handoff cannot select a local default-branch merge', repo);
+    }
     const githubOrigin = resolveGitHubOriginAuthorityDetails(repo);
     const hasGithub = githubOrigin !== null;
     const selfTarget = isSelfTargetProposal(proposal, cfg);
@@ -4330,7 +4371,9 @@ export async function autoMergeProposal(
       persistNonAuthorizingEvidence(id, sealedEvidencePack);
       return refuse(`autonomy policy denied ${policy.action}: ${policy.reason}`, repo);
     }
-    if (toMain && policy.action !== 'merge-main') {
+    const prOnlyHandoff = policy.action === 'open-ready-pr' && wantRemote && Boolean(githubOrigin) &&
+      protectedPrOperationShape(remoteProtectionEvidence) === 'handoff';
+    if (toMain && policy.action !== 'merge-main' && !prOnlyHandoff) {
       persistNonAuthorizingEvidence(id, sealedEvidencePack);
       return refuse(`autonomy policy returned '${policy.action}' but main merge requires 'merge-main'`, repo);
     }
@@ -4833,6 +4876,9 @@ export async function autoMergeProposal(
       });
       return remoteResult;
     } else if (toMain) {
+      if (policy.action !== 'merge-main' || protectedPrOperationShape(remoteProtectionEvidence) === 'handoff') {
+        return refuseStaged('PR handoff evidence cannot authorize a local default-branch merge');
+      }
       // LOCAL fallback — conservative; refuses if default branch is checked out.
       const preMergeConflict = currentProposalConflict();
       if (preMergeConflict) return refuse(preMergeConflict, repo);
@@ -5073,6 +5119,8 @@ function operatorProtectedPrConfig(
 ): AshlrConfig | null {
   const authority = exactOperatorSubmissionAuthority(proposal);
   if (!authority) return null;
+  const selectedProtection = evaluateEvidenceRemoteProtectionSignal(cfg, proposal.repo, proposal.verifyResult?.baseBranch);
+  if (cfg.foundry?.autoMerge && Object.hasOwn(cfg.foundry.autoMerge, 'protectedRemotes') && !selectedProtection.ok) return null;
   const configuredProtection = cfg.foundry?.autoMerge?.protectedRemote;
   const configuredRisk = cfg.foundry?.autoMerge?.maxRisk;
   const configuredFiles = cfg.foundry?.autoMerge?.maxAutomergeFiles;
@@ -5118,7 +5166,12 @@ function operatorProtectedPrConfig(
         pushToRemote: true,
         midToBranch: false,
         allowWithoutVerification: false,
-        ...(protectedRemote ? { protectedRemote } : {}),
+        ...(selectedProtection.repositoryExpectation ? {
+          protectedRemotes: [{ ...selectedProtection.repositoryExpectation,
+            requiredChecks: selectedProtection.requiredCheckBindings.map((check) => ({ ...check })),
+            observedRulesetBypassActors: selectedProtection.repositoryExpectation.observedRulesetBypassActors.map((actor) => ({ ...actor })),
+          }],
+        } : protectedRemote ? { protectedRemote } : {}),
       },
     },
   };

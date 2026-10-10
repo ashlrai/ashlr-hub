@@ -6,6 +6,7 @@
  * writes ledgers, or changes policy.
  */
 
+import { protectedPrOperationShape, protectedPrEvidenceMatchesRegistry } from './protected-pr-handoff.js';
 import type { AshlrConfig, AutoMergeTrustBasis, EngineId } from '../types.js';
 import type { GuardHealthDiagnosis } from '../daemon/guard-health.js';
 import type { FleetStatus } from '../fleet/status.js';
@@ -331,6 +332,7 @@ function isCurrentReadyEvidence(record: OutcomeRecord, cfg: AshlrConfig, now: Da
   const currentMaxRisk = configuredMaxRisk(cfg);
   const risk = evidence.riskClass;
   const gates = evidence.gates;
+  const operation = gates.remoteProtection ? protectedPrOperationShape(gates.remoteProtection) : 'legacy';
   const gateValues = [
     gates.authority,
     gates.provenance,
@@ -350,7 +352,11 @@ function isCurrentReadyEvidence(record: OutcomeRecord, cfg: AshlrConfig, now: Da
     evidence.target === 'main' &&
     evidence.trustBasis === currentTrustBasis &&
     evidence.policy?.allowed === true &&
-    evidence.policy.action === 'merge-main' &&
+    (evidence.policy.action === 'merge-main' && operation === 'legacy' &&
+      !(cfg.foundry?.autoMerge && Object.hasOwn(cfg.foundry.autoMerge, 'protectedRemotes')) ||
+      evidence.policy.action === 'open-ready-pr' && evidence.remotePreferred === true &&
+      cfg.foundry?.autoMerge?.pushToRemote === true && isLiveRemoteProtectionEvidence(gates.remoteProtection) &&
+      protectedPrEvidenceMatchesRegistry(gates.remoteProtection, cfg.foundry.autoMerge.protectedRemotes)) &&
     evidence.verification.passed === true &&
     evidence.verification.commandKinds.length > 0 &&
     gateValues.every((gate) => gate.ok) &&

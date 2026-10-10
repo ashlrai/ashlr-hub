@@ -31,6 +31,7 @@ import {
   readAutonomyEvidencePack,
   verifyAutonomyEvidencePackV3,
 } from '../autonomy/evidence-pack.js';
+import { protectedPrOperationShape } from '../autonomy/protected-pr-handoff.js';
 import { sanitizeGithubMergedAt } from './remote-handoff-time.js';
 import {
   acquireProposalMutationLock,
@@ -198,7 +199,9 @@ function activeV3EvidenceMatches(proposal: Proposal): boolean {
       pack.producer.engineModel === proposal.engineModel &&
       pack.producer.engineTier === proposal.engineTier && pack.diff.hash === diffHash &&
       pack.remotePreferred === true && pack.policy?.allowed === true &&
-      ((pack.target === 'main' && pack.policy.action === 'merge-main') ||
+      ((pack.target === 'main' && (
+        pack.policy.action === 'merge-main' && protectedPrOperationShape(pack.gates.remoteProtection) === 'legacy' ||
+        pack.policy.action === 'open-ready-pr' && protectedPrOperationShape(pack.gates.remoteProtection) === 'handoff')) ||
         (pack.target === 'branch' && pack.policy.action === 'open-ready-pr')) &&
       pack.verification.passed === verification.passed &&
       isDeepStrictEqual(

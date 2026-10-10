@@ -698,3 +698,76 @@ describe('M301 autonomy evidence pack persistence', () => {
     });
   });
 });
+
+
+describe('signed PR-only main-target operation', () => {
+  function handoffCfg() {
+    return cfg({ pushToRemote: true, protectedRemotes: [{ nameWithOwner: 'ashlrai/fixture', repositoryId: 'R_fixture',
+      defaultBranch: 'main', operation: 'protected-pr-handoff-v1', branchProtection: true,
+      requiredChecks: [{ context: 'ci/test', appId: '1' }], observedRulesetBypassActors: [{ rulesetId: '101',
+        sourceType: 'Repository', source: 'ashlrai/fixture', actorType: 'RepositoryRole', actorId: '5', bypassMode: 'always' }] }] });
+  }
+  function handoffDraft(trustBasis: 'tier' | 'verification' | 'evidence' = 'evidence') {
+    const draft = goodPack({ trustBasis, remoteProtection: {
+      ...liveRemoteProtection(), operation: 'protected-pr-handoff-v1',
+      observedRulesetBypassActors: [{ rulesetId: '101', sourceType: 'Repository', source: 'ashlrai/fixture',
+        actorType: 'RepositoryRole', actorId: '5', bypassMode: 'always' }],
+    } });
+    draft.generatedAt = '2026-07-01T00:02:00.000Z';
+    draft.policy = evaluateAutonomyPolicy(draft, handoffCfg());
+    if (draft.evidenceOutcome) Object.assign(draft.evidenceOutcome, { policyAllowed: draft.policy.allowed,
+      policyAction: draft.policy.action, policyTier: draft.policy.tier });
+    return draft;
+  }
+
+  it('seals PR opening for every trust basis without granting main merge or local fallback', () => {
+    for (const trustBasis of ['tier', 'verification', 'evidence'] as const) {
+      const draft = handoffDraft(trustBasis);
+      expect(draft.policy).toMatchObject({ tier: 'T3', action: 'open-ready-pr', allowed: true });
+      const signed = sealAutonomyEvidencePackV3(draft);
+      expect(signed).not.toBeNull();
+      expect(verifyAutonomyEvidencePackV3(signed).ok).toBe(true);
+      expect(signed!.gates.remoteProtection).toMatchObject({ operation: 'protected-pr-handoff-v1',
+        observedRulesetBypassActors: draft.gates.remoteProtection!.observedRulesetBypassActors });
+      const direct = structuredClone(draft);
+      direct.policy = { tier: 'T4', action: 'merge-main', allowed: true, reason: 'forged landing' };
+      if (direct.evidenceOutcome) Object.assign(direct.evidenceOutcome, { policyAllowed: true, policyAction: 'merge-main', policyTier: 'T4' });
+      expect(sealAutonomyEvidencePackV3(direct)).toBeNull();
+      const local = structuredClone(draft);
+      local.remotePreferred = false;
+      expect(evaluateAutonomyPolicy(local, handoffCfg()).allowed).toBe(false);
+      expect(sealAutonomyEvidencePackV3(local)).toBeNull();
+      const missingManifest = structuredClone(draft);
+      delete missingManifest.verification.requiredManifestDigest;
+      delete missingManifest.verification.requiredCommandCount;
+      expect(evaluateAutonomyPolicy(missingManifest, handoffCfg()).allowed).toBe(false);
+      expect(sealAutonomyEvidencePackV3(missingManifest)).toBeNull();
+    }
+  });
+
+  it('refuses stripped, foreign and actor-tampered signed operation evidence', () => {
+    const signed = sealAutonomyEvidencePackV3(handoffDraft())!;
+    expect(signed).not.toBeNull();
+    const stripped = structuredClone(signed);
+    delete stripped.gates.remoteProtection!.operation;
+    expect(verifyAutonomyEvidencePackV3(stripped).ok).toBe(false);
+    delete stripped.gates.remoteProtection!.observedRulesetBypassActors;
+    expect(verifyAutonomyEvidencePackV3(stripped).ok).toBe(false);
+    const foreign = structuredClone(signed);
+    Object.assign(foreign.gates.remoteProtection!, { operation: 'admin-merge' });
+    expect(verifyAutonomyEvidencePackV3(foreign).ok).toBe(false);
+    const actor = structuredClone(signed);
+    actor.gates.remoteProtection!.observedRulesetBypassActors![0]!.actorId = '6';
+    expect(verifyAutonomyEvidencePackV3(actor).ok).toBe(false);
+    const missing = handoffDraft();
+    delete missing.gates.remoteProtection!.operation;
+    delete missing.gates.remoteProtection!.observedRulesetBypassActors;
+    expect(evaluateAutonomyPolicy(missing, handoffCfg()).allowed).toBe(false);
+    const localCfg = handoffCfg();
+    localCfg.foundry!.autoMerge!.pushToRemote = false;
+    expect(evaluateAutonomyPolicy(handoffDraft(), localCfg).allowed).toBe(false);
+    const branch = handoffDraft();
+    branch.target = 'branch';
+    expect(evaluateAutonomyPolicy(branch, handoffCfg()).allowed).toBe(false);
+  });
+});
