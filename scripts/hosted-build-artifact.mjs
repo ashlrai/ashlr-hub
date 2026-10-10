@@ -499,11 +499,15 @@ function verifyArtifactBody({ root, revision, bundle, policy, githubRead, attest
     revision, dirty: false, provenance: 'git' }, 'build identity differs');
   assert.match(manifest.archive?.sha256 ?? '', HASH); assert.equal(manifest.archive.filename, 'dist.tar');
   const archive = boundedBytes(join(bundle, 'dist.tar')); assert.equal(sha(archive), manifest.archive.sha256); assert.equal(archive.length, manifest.archive.bytes);
-  const entries = inspectTar(archive, manifest.archive.entries);
+  const identityBytes = [];
+  const entries = inspectTar(archive, manifest.archive.entries, (entry, data) => {
+    if (entry.path === 'dist/build-identity.json') identityBytes.push(data);
+  });
   assert.ok(entries.every((entry) => entry.path === 'dist' || entry.path.startsWith('dist/')), 'archive escapes dist');
   assert.equal(entries[0].path, 'dist'); assert.equal(entries[0].type, 'directory');
-  const identities = [];
-  inspectTar(archive, entries, (entry, data) => { if (entry.path === 'dist/build-identity.json') identities.push(JSON.parse(data)); });
+  // Parse identity only after the entire captured archive and its scope passed;
+  // collecting it in the existing walk avoids hashing every member twice.
+  const identities = identityBytes.map(data => JSON.parse(data));
   assert.deepEqual(identities, [manifest.buildIdentity], 'archive build identity differs');
   safePath(manifest.package.filename); assert.ok(!manifest.package.filename.includes('/'), 'package filename must be basename');
   const tgz = boundedBytes(join(bundle, manifest.package.filename), 128 * 1024 * 1024);

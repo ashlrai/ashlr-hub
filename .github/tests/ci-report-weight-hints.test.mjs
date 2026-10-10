@@ -10,7 +10,7 @@ import { qualifiedFixture, digest } from './helpers/hosted-artifact-fixture.mjs'
 
 const readOwn = file => readFileSync(new URL(`../../${file}`, import.meta.url));
 const inputs = ['package-lock.json', 'vitest.config.ts', 'test/config/realio-lane-membership.mjs',
-  'test/setup/home.ts', 'test/setup/home-isolation-guard.ts', 'scripts/test-ci.mjs', 'scripts/test-ci-sharded.mjs',
+  'vitest.config.mock-compat.ts', 'test/setup/home.ts', 'test/setup/home-isolation-guard.ts', 'scripts/test-ci.mjs', 'scripts/test-ci-sharded.mjs',
   'test/config/weighted-sequencer.mjs', '.github/scripts/ci-partition-shadow.mjs'];
 const sourceFiles = () => Object.fromEntries(inputs.filter(file => !['vitest.config.ts', 'scripts/test-ci-sharded.mjs'].includes(file))
   .map(file => [file, file === 'package-lock.json' ? JSON.stringify({ packages: { 'node_modules/vitest': { version: '4.1.11' } } }) :

@@ -244,7 +244,11 @@ describe('M30 CI workflow', () => {
       expect(full).not.toContain('continue-on-error');
       expect(job.indexOf(observations[0])).toBeGreaterThan(job.indexOf(full));
     }
-    expect(ciYml).toContain('.github/tests/ci-impact-shadow.test.mjs');
+    const capture = workflowJob('ci').match(
+      /^ {6}- name: Capture pack smoke build snapshot[\s\S]*?(?=^ {6}- name:)/m,
+    )?.[0] ?? '';
+    expect(capture).toContain('npm run check:pack-contracts');
+    expect(pkg.scripts?.['check:pack-contracts']).toContain('.github/tests/ci-impact-shadow.test.mjs');
     expect(qualificationLane).not.toContain('shadow');
     const verifier = readFileSync(resolve(repoRoot, 'scripts/hosted-build-artifact.mjs'), 'utf8');
     expect(verifier).not.toContain('ci-impact-shadow');
@@ -263,7 +267,7 @@ describe('M30 CI workflow', () => {
     expect(ciYml).not.toContain('pull_request_target');
   });
 
-  it('defers only the two short Mac gates until every exhaustive Mac lane settles', () => {
+  it('releases only the two short Mac gates after isolated work while general lanes remain independent', () => {
     type Job = {
       name: string;
       'runs-on': string;
@@ -290,7 +294,16 @@ describe('M30 CI workflow', () => {
     expect(shared, 'shared Mac still requires its own complete named gate').toBeDefined();
     for (const id of ['ci-shared-macos', 'native-macos-broker-foundation']) {
       const short = jobs[id]!;
-      expect(short.needs).toEqual(['classify', 'mac-general', 'mac-isolated']);
+      expect(short.needs).toEqual(['classify', 'mac-isolated']);
+      expect(jobs['mac-isolated']!.needs).toBe('classify');
+      // The actual transitive graph cannot reintroduce the general matrix as
+      // a predecessor; this is scheduling overlap, never missing coverage.
+      const predecessors = (jobId: string): string[] => {
+        const needs = jobs[jobId]!.needs;
+        const dependencies = needs === undefined ? [] : Array.isArray(needs) ? needs : [needs];
+        return dependencies.flatMap((dependency) => [dependency, ...predecessors(dependency)]);
+      };
+      expect(new Set(predecessors(id))).toEqual(new Set(['classify', 'mac-isolated']));
       // An explicit status function keeps the short gate eligible on predecessor
       // failure; cancellation stops it rather than starting more work.
       expect(short.if).toBe("${{ !cancelled() && needs.classify.outputs.lane == 'full' }}");

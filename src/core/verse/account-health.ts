@@ -899,7 +899,11 @@ function nativeReport(seat: VerseSeat, facts: SeatAccountFacts | null, checkedAt
   } else if (connection === 'expiring') {
     const expiresAt = credential.expiresAt!;
     const refreshed = credential.lastRefreshAt !== null ? `; last refreshed ${localDate(credential.lastRefreshAt)}` : '';
-    reasons.push(`The access credential expires ${localDate(expiresAt)}${refreshed}. Use this seat or reconnect before then.`);
+    // A saved access-token expiry is not proof that the native CLI's current
+    // login has expired: it may have refreshed since this observation.
+    reasons.push(atMs(expiresAt) <= now
+      ? `The recorded access expiry passed ${localDate(expiresAt)}${refreshed}. Current access validity and native refresh are unconfirmed. Try this seat or check again; reconnect if the CLI asks.`
+      : `The recorded access credential expires ${localDate(expiresAt)}${refreshed}. The native CLI may refresh it when used; reconnect if the CLI asks.`);
     fix = { kind: 'reauth' };
   } else if (connection === 'binary-skew') {
     reasons.push(`Pinned to ${PROVIDER_CLI[engine]} ${cliVersion}; ${newest!.version} is installed. Re-pin to pick up newer models.`);

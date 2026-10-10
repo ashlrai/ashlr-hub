@@ -20,7 +20,7 @@
 
 Canonical Phantom releases use `@ashlr/phantom` from `ashlrai/phantom`.
 Install the canonical package's promoted release.
-This source tree targets version 3.29.8; check canonical release availability and exact matching assets before installation.
+This source tree targets version 3.29.9; check canonical release availability and exact matching assets before installation.
 
 ```sh
 npm install -g @ashlr/phantom   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
@@ -36,7 +36,10 @@ install, select a published version from
 Find current desktop artifacts at [GitHub releases](https://github.com/ashlrai/phantom/releases/latest):
 the signed `Phantom_<version>_aarch64.app.tar.gz` archive and paired
 [`latest.json`](https://github.com/ashlrai/phantom/releases/latest/download/latest.json),
-rather than a DMG. Match them to the installed CLI version. Existing installations use the qualified signed-update flow. Maintainer
+rather than a DMG. Match them to the installed CLI version. Qualified releases
+from 3.29.8 support `phm desktop install` for a new Apple silicon Mac installation;
+see [consumer installation](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#consumer-first-install).
+Clean-Mac acceptance remains unverified. Existing installations use the qualified signed-update flow. Maintainer
 artifact installation requires the original qualified bundle and prior
 Stop/drain and Quit; downloading the archive alone is not that installation.
 See [desktop installation](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install). The app is locally signed,
@@ -76,8 +79,8 @@ purchased credits. Check each resource's readiness and budget before delegating.
 For unattended work, give the fleet an outcome and observable acceptance
 criteria. The **Leader** refines priorities and briefs you in Phantom, Telegram
 or the terminal. The fleet works only in enrolled repositories under your
-current signed standing grant; it starts in shadow, recording what it would
-merge, and climbs a rollout ladder from there.
+current signed standing grant. A shadow stage records what it would merge;
+a judged ladder or eligible elite-direct stage follows the mode you sign.
 
 It ships as a macOS desktop app and as the `phm` CLI (canonical package
 `@ashlr/phantom`, also available as `ashlr`), which

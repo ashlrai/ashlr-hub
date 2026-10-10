@@ -114,6 +114,8 @@ describe('planTests', () => {
     const backendSetup = plan(['test/setup/home.ts']);
     expect(backendSetup.backend.mode).toBe('full');
     expect(backendSetup.web.mode).toBe('related');
+    const mockCompatSetup = plan(['vitest.config.mock-compat.ts']);
+    expect([mockCompatSetup.backend.mode, mockCompatSetup.web.mode]).toEqual(['full', 'full']);
     const webSetup = plan(['src/web-ui/test/setup.ts']);
     expect(webSetup.web.mode).toBe('full');
     expect(webSetup.backend.mode).toBe('related');

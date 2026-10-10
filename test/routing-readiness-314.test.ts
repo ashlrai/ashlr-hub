@@ -131,6 +131,18 @@ function input(over: Partial<ReadinessInput> = {}): ReadinessInput {
 const row = (r: ReturnType<typeof buildResourceReadiness>, id: string) => r.resources.find((x) => x.id === id)!;
 
 describe('readiness — the machine as diagnosed (idle Verse, empty capacity snapshot)', () => {
+  it('keeps a passed recorded access expiry as a warning, not a native sign-in refusal', () => {
+    const warning: SeatHealthReport = {
+      seatId: 'codex-personal', engine: 'codex', connection: 'expiring', checkedAt: FRESH,
+      cliVersion: null, newestCliVersion: null, credentialExpiresAt: new Date(NOW - 1).toISOString(),
+      lastRefreshAt: null, resetAt: null, reasons: [], fix: { kind: 'reauth' },
+    };
+    const chat = row(buildResourceReadiness(input({ reports: [warning] })), warning.seatId).chat;
+    expect(chat).toMatchObject({ ready: true, word: 'Ready', tone: 'warn' });
+    expect(chat.detail).toContain('recorded access expiry needs checking');
+    expect(chat.detail).toContain('native CLI may refresh');
+    expect(chat.detail).not.toContain('expires soon');
+  });
   it('never reports chat or fleet ready for an API seat using native Claude facts', () => {
     const s = standing();
     s.grant!.seats = { ...s.grant!.seats, 'claude-api': grantSeat(['producer'], 0) };

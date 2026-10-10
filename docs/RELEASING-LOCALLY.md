@@ -114,11 +114,14 @@ not treat a saved receipt or an unfinished CI run as a passing gate.
 ## Fast development feedback
 
 Run the whole test modules affected by a change first. Use `npm run check:release`
-for publication, CLI and documentation contracts; use `node --test` with the
-affected `.github/tests` modules for workflow and packaging changes. Import-based
-related selection cannot discover every test that reads a workflow as text.
-The preflight includes the whole resident-service documentation and release-workflow
-modules so their display and activation contracts fail before the producer build.
+for source-only publication, CLI and documentation contracts before a build.
+After your normal local build, run `npm run check:release:fast` before pushing a
+release candidate. It runs the eight whole workflow and packaging Node modules,
+then the existing fourteen Vitest contract modules. The Node suite requires
+existing `dist` output; the source-only check does not. This catches workflow
+contracts that import-based related selection cannot discover. Hosted CI keeps
+the Node suite once in its original post-build capture step; its gate order and
+complete release qualification remain unchanged.
 
 Use `npm run gate -- --base <ref>` for broader feedback while coding. Before
 shipping, consolidate changes into one clean candidate and run its complete
@@ -399,17 +402,21 @@ returning `409 Conflict — Cannot publish over previously staged version`.
 npm view @ashlr/hub version
 ```
 
-## Installing your own build
+## Installing a qualified release
 
-`npm run ship:local` does this (and updates the app). By hand: the managed install is a SHA-pinned release directory with a `current` symlink.
-Point it at an extracted tarball, never at the git worktree — a worktree install
-changes under you when you switch branches.
+Use the [desktop installation guide](../desktop/README.md#install) for the
+qualified paired app and CLI installation. The maintainer artifact installer
+requires a clean qualified source checkout, the original signed hosted bundle
+and the original private finalizer output. It verifies these inputs without
+rebuilding, repacking or signing; inspection is the default. From the separate
+qualified installer checkout, inspect its exact arguments with:
 
 ```sh
-SHA=$(git rev-parse HEAD)
-DEST=~/.local/share/ashlr/releases/$SHA
-mkdir -p "$DEST"
-tar -xzf /tmp/ashlr-hub-<version>.tgz -C "$DEST" --strip-components=1
-ln -sfn "$DEST" ~/.local/share/ashlr/current
-ashlr --version
+node scripts/install-desktop-artifacts.mjs --help
 ```
+
+Before `--apply`, use the existing authority Stop, verify drained leases and
+quit Phantom normally. Preserve the original assets and rollback data. Verify
+the installed app, CLI version and startup separately; installation keeps Stop
+engaged and does not resume the fleet. Manual tarball extraction or replacing
+the `current` symlink does not perform this qualified transaction.

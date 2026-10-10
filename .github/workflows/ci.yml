@@ -264,7 +264,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node --test .github/tests/ci-pack-smoke.test.mjs .github/tests/desktop-update-finalizer.test.mjs .github/tests/first-paint-built.test.mjs .github/tests/ci-qualification-lane.test.mjs .github/tests/ci-impact-shadow.test.mjs .github/tests/ci-attestation-inputs.test.mjs .github/tests/hosted-build-artifact.test.mjs .github/tests/hosted-native-build.test.mjs
+          npm run check:pack-contracts
           snapshot="$(node .github/scripts/ci-pack-smoke.mjs capture "$RUNNER_TEMP")"
           printf 'ASHLR_PACK_SMOKE_SNAPSHOT=%s\n' "$snapshot" >> "$GITHUB_ENV"
           npm run check:first-paint:built
@@ -401,9 +401,9 @@ jobs:
           retention-days: 7
 
   ci-shared-macos:
-    # Scheduling experiment: defer this short Mac gate until all five long
-    # lanes settle. Keep it eligible after their failures, unless cancelled.
-    needs: [classify, mac-general, mac-isolated]
+    # Scheduling experiment: start this short Mac gate after the isolated
+    # lane settles so it can overlap unfinished general lanes, unless cancelled.
+    needs: [classify, mac-isolated]
     if: ${{ !cancelled() && needs.classify.outputs.lane == 'full' }}
     name: CI (Node 22, ${{ matrix.label }})
     strategy:
@@ -562,9 +562,9 @@ jobs:
 
   native-macos-broker-foundation:
     name: Native macOS broker foundation (Rust 1.97.1)
-    # Own checkout and fixtures remain independent evidence. Defer this short
-    # gate until all five exhaustive Mac lanes settle, including failed lanes.
-    needs: [classify, mac-general, mac-isolated]
+    # Own checkout and fixtures remain independent evidence. Start this short
+    # gate after the isolated lane settles, including failure, to overlap general lanes.
+    needs: [classify, mac-isolated]
     if: ${{ !cancelled() && needs.classify.outputs.lane == 'full' }}
     runs-on: macos-latest
     steps:

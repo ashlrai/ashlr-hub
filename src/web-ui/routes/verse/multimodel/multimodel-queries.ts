@@ -33,9 +33,9 @@ import { apiGet, apiPost } from '../../../data/client.js';
 import { invalidate } from '../../../data/cache.js';
 import type { QueryDef } from '../../../data/queries.js';
 import { VerseMutationLockedError } from '../verse-queries.js';
+import { MULTIMODEL_CONTEXT_KEY_PREFIX, MULTIMODEL_METER_KEY_PREFIX } from './multimodel-query-keys.js';
 
-export const MULTIMODEL_CONTEXT_KEY_PREFIX = 'verse-multimodel-context:';
-export const MULTIMODEL_METER_KEY_PREFIX = 'verse-multimodel-meter:';
+export { MULTIMODEL_CONTEXT_KEY_PREFIX, MULTIMODEL_METER_KEY_PREFIX } from './multimodel-query-keys.js';
 
 /** A chat (every root it reaches is checked) or a folder about to become one. */
 export function multimodelContextQuery(scope: { sessionId: string } | { projectPath: string | null }): QueryDef<MultimodelContext> {

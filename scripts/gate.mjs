@@ -143,7 +143,7 @@ function isVitestConfig(file) {
 
 /** Files that make vitest rerun a whole suite (its forceRerunTriggers incl. setupFiles). */
 export const SUITE_TRIGGERS = Object.freeze({
-  backend: ['vitest.config.ts', 'test/setup/home.ts', 'test/setup/home-isolation-guard.ts'],
+  backend: ['vitest.config.ts', 'vitest.config.mock-compat.ts', 'test/setup/home.ts', 'test/setup/home-isolation-guard.ts'],
   web: ['src/web-ui/test/setup.ts'],
 });
 

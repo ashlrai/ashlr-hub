@@ -1,4 +1,3 @@
-import { vi } from 'vitest';
 import { defineConfig } from 'vitest/config';
 // Lives under test/config/, not scripts/, on purpose: M457's artifact-firewall
 // guard scans every file in scripts/ and bin/ for literal test-name strings
@@ -7,35 +6,11 @@ import { defineConfig } from 'vitest/config';
 import { REAL_IO_LANE_TIMEOUT_MS, REAL_IO_TEST_FILES } from './test/config/realio-lane-membership.mjs';
 import { WeightedCalibrationSequencer } from './test/config/weighted-sequencer.mjs';
 
-const spyOnCompatKey = '__ASHLR_VITEST_3_SPY_ON_COMPAT__';
-const testGlobal = globalThis as typeof globalThis & { [spyOnCompatKey]?: boolean };
 const configuredTestTimeoutMs = Number(process.env['ASHLR_VITEST_TEST_TIMEOUT_MS']);
 const testTimeoutMs = Number.isFinite(configuredTestTimeoutMs) &&
   configuredTestTimeoutMs >= 1_000 && configuredTestTimeoutMs <= 60_000
   ? Math.floor(configuredTestTimeoutMs)
   : 5_000;
-
-// Preserve the Vitest 3 mock isolation semantics expected by the existing suite.
-if (process.env['VITEST_WORKER_ID'] && !testGlobal[spyOnCompatKey]) {
-  const spyOn = vi.spyOn.bind(vi) as (...args: unknown[]) => unknown;
-  const doUnmock = vi.doUnmock.bind(vi);
-  vi.spyOn = ((...args: unknown[]) => {
-    const [target, property, accessType] = args as [object, PropertyKey, 'get' | 'set' | undefined];
-    const descriptor = Object.getOwnPropertyDescriptor(target, property);
-    const current = accessType
-      ? descriptor?.[accessType]
-      : Reflect.get(target, property);
-
-    if (vi.isMockFunction(current)) current.mockClear();
-    return spyOn(...args);
-  }) as typeof vi.spyOn;
-  vi.doUnmock = ((path: string) => {
-    const result = doUnmock(path);
-    vi.resetModules();
-    return result;
-  }) as typeof vi.doUnmock;
-  testGlobal[spyOnCompatKey] = true;
-}
 
 // Shared exclude list: stray scaffolds and build output must never be collected
 // by either lane. See the `projects` comment below for why `test.include` is
@@ -67,7 +42,7 @@ export default defineConfig({
     // home-isolation-guard.ts runs AFTER home.ts (it reads the real home that
     // home.ts captured) and blocks + fails any fs write under the REAL
     // ~/.ashlr, including writers that swallow their own errors.
-    setupFiles: ['./vitest.config.ts', './test/setup/home.ts', './test/setup/home-isolation-guard.ts'],
+    setupFiles: ['./vitest.config.mock-compat.ts', './test/setup/home.ts', './test/setup/home-isolation-guard.ts'],
     clearMocks: true,
     pool: 'forks',
     exclude: BASE_EXCLUDE,

@@ -7,6 +7,7 @@ import {
   getQuerySnapshot,
   subscribeQuery,
   invalidate,
+  invalidateObserved,
   evict,
   evictAll,
   queryGateStats,
@@ -155,6 +156,29 @@ describe('cache — ensureQuery freshness', () => {
 // ---------------------------------------------------------------------------
 
 describe('cache — refetchQuery', () => {
+  it('forces only observed matching keys past a pre-write read and preserves the newer result', async () => {
+    const key = 'verse-multimodel-context:?sessionId=one';
+    const detach = subscribeQuery(key, vi.fn());
+    const old = deferred<string>();
+    const fetcher = vi.fn().mockReturnValueOnce(old.promise).mockResolvedValue('new turn');
+    const hidden = vi.fn(async () => 'hidden');
+    const provider = vi.fn(async () => 'provider');
+    await runQuery('verse-multimodel-context:unmounted', hidden);
+    const detachProvider = subscribeQuery('verse-usage-accounts', vi.fn());
+    await runQuery('verse-usage-accounts', provider);
+    const pending = runQuery(key, fetcher);
+    await settle();
+    invalidateObserved('verse-multimodel-context:', true);
+    await settle();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(getQuerySnapshot(key).data).toBe('new turn');
+    old.resolve('old turn');
+    await pending;
+    expect(getQuerySnapshot(key).data).toBe('new turn');
+    expect(hidden).toHaveBeenCalledTimes(1);
+    expect(provider).toHaveBeenCalledTimes(1);
+    detach(); detachProvider();
+  });
   beforeEach(() => {
     evictAll();
   });

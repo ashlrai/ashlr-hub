@@ -278,7 +278,22 @@ describe('release workflow', () => {
     expect(snapshot?.if).toBe("matrix.label == 'ubuntu, authority 1/3'");
     expect(ciSteps.indexOf(snapshot!)).toBe(ciSteps.findIndex((step) => step.name === 'Build') + 1);
     expect(ciSteps.indexOf(snapshot!)).toBeLessThan(ciSteps.findIndex((step) => step.name === 'Test (hermetic)'));
-    expect(snapshot?.run).toContain('node --test .github/tests/ci-pack-smoke.test.mjs');
+    const releaseScripts = pkg['scripts'] as Record<string, string>;
+    expect(releaseScripts['check:pack-contracts']).toBe([
+      'node --test',
+      '.github/tests/ci-pack-smoke.test.mjs',
+      '.github/tests/desktop-update-finalizer.test.mjs',
+      '.github/tests/first-paint-built.test.mjs',
+      '.github/tests/ci-qualification-lane.test.mjs',
+      '.github/tests/ci-impact-shadow.test.mjs',
+      '.github/tests/ci-attestation-inputs.test.mjs',
+      '.github/tests/hosted-build-artifact.test.mjs',
+      '.github/tests/hosted-native-build.test.mjs',
+    ].join(' '));
+    expect(releaseScripts['check:release:fast']).toBe('npm run check:pack-contracts && npm run check:release');
+    expect(snapshot?.run).toContain('npm run check:pack-contracts');
+    expect(snapshot?.run?.indexOf('npm run check:pack-contracts'))
+      .toBeLessThan(snapshot?.run?.indexOf('node .github/scripts/ci-pack-smoke.mjs capture') ?? -1);
     expect(snapshot?.run).toContain('node .github/scripts/ci-pack-smoke.mjs capture "$RUNNER_TEMP"');
     expect(snapshot?.run).toContain('node .github/scripts/ci-pack-smoke.mjs prepare "$snapshot"');
     expect(snapshot?.run).toContain('ASHLR_PACK_SMOKE_RECORD_SHA256=%s');

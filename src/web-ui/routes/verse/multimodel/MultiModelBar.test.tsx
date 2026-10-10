@@ -9,9 +9,10 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MultimodelContext, PromptClassification } from '../../../../core/verse/multimodel/types.js';
-import { setMutationToken, clearMutationToken } from '../../../data/auth-store.js';
+import { setMutationToken, clearMutationToken, markCheckComplete } from '../../../data/auth-store.js';
 import { evictAll } from '../../../data/cache.js';
-import { CLAUDE_SEAT, LOCAL_SEAT, session } from '../fixtures.test-support.js';
+import { CLAUDE_SEAT, LOCAL_SEAT, session, ev, MockEventSource } from '../fixtures.test-support.js';
+import { acquireVerseSessionStream, closeAllVerseSessionStreams, setVerseFrameScheduler } from '../session-stream.js';
 import { resetVerseStore, seedVerseSession } from '../verse-store.js';
 import { MultiModelBar, resetPendingDraftsForTest, type SendInterceptor } from './MultiModelBar.js';
 import { saveAutoPref, loadAutoPref, toAdvisorSeats } from './useAutoSeat.js';
@@ -330,4 +331,40 @@ it('renders the new-chat local badge with the measured age and scope', async () 
     tokPerSecObservedAt: '2026-10-07T00:00:00Z', tokPerSecScope: 'warm-end-to-end' }] });
   render(<LocalSeatBadge seatId={LOCAL_SEAT.id} projectPath="/repo" />);
   expect(await screen.findByText('41 tok/s · warm-up, end to end · 2 h ago')).toBeInTheDocument();
+});
+
+it('refreshes local speed after a newly completed turn without remounting or replay churn', async () => {
+  const now = Date.parse('2026-10-10T19:52:37Z');
+  let completed = false;
+  let contextReads = 0;
+  const freshContext = () => ({ ...CONTEXT, sampledAt: new Date(now).toISOString(), local: [{ ...CONTEXT.local[0]!,
+    tokPerSec: completed ? 208 / 70.497 : 5.2, tokPerSecScope: 'turn-end-to-end',
+    tokPerSecObservedAt: new Date(now - (completed ? 0 : 14 * 3_600_000)).toISOString() }] });
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input).includes('/multimodel/context')) { contextReads += 1; return Response.json(freshContext()); }
+    return new Response('not found', { status: 404 });
+  }));
+  MockEventSource.reset();
+  vi.stubGlobal('EventSource', MockEventSource);
+  markCheckComplete(true);
+  setVerseFrameScheduler(flush => { flush(); return () => {}; });
+  seedVerseSession('vs_1', session({ engine: 'local', seatId: LOCAL_SEAT.id, model: LOCAL_SEAT.models[0]!.id }), []);
+  render(<MultiModelBar sessionId="vs_1" seats={[LOCAL_SEAT]} text="" running={false}
+    registerInterceptor={vi.fn()} onConsumeDraft={vi.fn()} />);
+  const release = acquireVerseSessionStream('vs_1');
+  try {
+    expect(await screen.findByText(/5.2 tok\/s · 14 h ago/)).toBeInTheDocument();
+    const stream = MockEventSource.forSession('vs_1');
+    act(() => stream.emit(ev(1, 'user-message', { turnId: 'new', text: 'Read the file' })));
+    expect(contextReads).toBe(1);
+    completed = true;
+    const done = ev(2, 'turn-done', { turnId: 'new', ok: true, nativeSessionId: null, durationMs: 70_497 });
+    act(() => stream.emit(done));
+    expect(await screen.findByText(/3 tok\/s · just measured/)).toHaveAttribute('title', '3 tok/s · last turn, end to end · just measured');
+    expect(contextReads).toBe(2);
+    act(() => stream.emit(done));
+    expect(contextReads).toBe(2);
+  } finally {
+    release(); closeAllVerseSessionStreams(); setVerseFrameScheduler(null); markCheckComplete(false);
+  }
 });

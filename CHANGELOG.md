@@ -9,7 +9,35 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.29.8] — Unreleased
+## [3.29.9] — Unreleased
+
+### Changed
+- Load doctor, init and setup only for their selected CLI commands. Local
+  fresh-process measurements reduced compiled Node help, version and resource-help
+  startup from about 120 ms to 32–33 ms; installed native and full CI gains remain
+  unmeasured.
+- Keep worker mock compatibility in a lightweight setup module instead of loading
+  test tooling for each worker, preserving mock behavior and complete coverage.
+- Load only the selected command in package smoke fixtures. One complete local
+  38-case comparison ran about 6% faster; hosted gains remain unmeasured.
+- Let short Mac checks overlap unfinished general test lanes after the isolated
+  lane settles. All 15 release gates remain required; hosted gains are unmeasured.
+- Remove one duplicate walk over the same captured release archive per fresh
+  verification, preserving complete validation and fresh source, byte and
+  signature checks. Wall-time savings remain unmeasured.
+- Add `check:release:fast` to run the existing workflow and packaging contracts
+  with local release checks before pushing a built candidate. Hosted CI runs
+  the packaging contracts once, with all 15 release gates still required.
+- Explain dependency audit coverage, including the Universe example graph gap.
+
+### Fixed
+- Refresh displayed local-model speed after a successful completed local turn,
+  including when an older context read is still pending. Streaming chunks and
+  duplicate events do not trigger additional reads; token evidence stays server-owned.
+- Describe a passed recorded access expiry without claiming the native CLI has
+  signed out. Cached warnings remain non-blocking and suggest checking sign-in.
+
+## [3.29.8] — 2026-10-10
 
 ### Added
 - Install the signed Apple silicon desktop app with `phm desktop install`, using

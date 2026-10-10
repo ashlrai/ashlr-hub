@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { markCheckComplete } from '../../data/auth-store.js';
 import { evictAll } from '../../data/cache.js';
+import * as cache from '../../data/cache.js';
 import { ev, MockEventSource, session, verseFetch } from './fixtures.test-support.js';
 import {
   acquireVerseSessionStream,
@@ -147,6 +148,37 @@ describe('snapshot reconciliation during a real reload', () => {
 });
 
 describe('frame batching', () => {
+  it('does not refresh speed for a successful terminal rejected by a same-batch sequence collision', () => {
+    const refresh = vi.spyOn(cache, 'invalidateObserved');
+    const frames = manualFrames();
+    seedVerseSession('vs_1', session({ engine: 'local' }), []);
+    const release = acquireVerseSessionStream('vs_1');
+    const stream = MockEventSource.forSession('vs_1');
+    stream.emit(ev(1, 'user-message', { turnId: 't', text: 'go' }));
+    stream.emit(ev(2, 'assistant-message', { turnId: 't', text: 'partial' }));
+    stream.emit(ev(2, 'turn-done', { turnId: 't', ok: true, nativeSessionId: null, durationMs: 1000 }));
+    stream.emit(ev(3, 'cancelled', { turnId: 't' }));
+    frames.frame();
+    expect(getVerseSessionState('vs_1').events.map(event => event.type)).toEqual(['user-message', 'assistant-message', 'cancelled']);
+    expect(refresh).not.toHaveBeenCalled();
+    release();
+  });
+
+  it.each(['codex', 'failed', 'cancelled', 'zero-duration', 'chunk'] as const)('does not refresh local speed context for %s frames', kind => {
+    const refresh = vi.spyOn(cache, 'invalidateObserved');
+    const frames = manualFrames();
+    seedVerseSession('vs_1', session({ engine: kind === 'codex' ? 'codex' : 'local' }), []);
+    const release = acquireVerseSessionStream('vs_1');
+    const stream = MockEventSource.forSession('vs_1');
+    stream.emit(ev(1, 'user-message', { turnId: 't', text: 'go' }));
+    if (kind === 'cancelled') stream.emit(ev(2, 'cancelled', { turnId: 't' }));
+    else if (kind === 'chunk') stream.emit(ev(2, 'text-delta', { turnId: 't', text: 'partial' }));
+    else stream.emit(ev(2, 'turn-done', { turnId: 't', ok: kind !== 'failed', nativeSessionId: null, durationMs: kind === 'zero-duration' ? 0 : 1000 }));
+    frames.frame();
+    expect(refresh).not.toHaveBeenCalled();
+    release();
+  });
+
   it('applies every frame that arrives within one animation frame with ONE store update', () => {
     const frames = manualFrames();
     seedVerseSession('vs_1', session({ status: 'running' }), [ev(1, 'user-message', { turnId: 't1', text: 'go' })]);
