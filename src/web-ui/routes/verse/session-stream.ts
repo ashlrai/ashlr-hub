@@ -46,7 +46,7 @@ import { invalidateObserved } from '../../data/cache.js';
 import { isRemoteMobileMode } from '../../data/remote-mode.js';
 import { parseVerseEventFrame, VERSE_EVENT_TYPES } from './verse-event-frame.js';
 import { fetchVerseSessionDetail, invalidateVerseLists, verseSessionPath } from './verse-queries.js';
-import { MULTIMODEL_CONTEXT_KEY_PREFIX } from './multimodel/multimodel-queries.js';
+import { MULTIMODEL_CONTEXT_KEY_PREFIX } from './multimodel/multimodel-query-keys.js';
 import {
   applyVerseEvents,
   getVerseSessionState,

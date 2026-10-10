@@ -89,6 +89,22 @@ function declaredTestTitles(file: string): string[] {
 }
 
 describe('M30 CI workflow', () => {
+  it('routes only exact ecosystem PR edits to a read-only site check', () => {
+    const classifier = workflowJob('classify');
+    const site = workflowJob('site');
+    expect(classifier).toContain('run: node .github/scripts/ci-site-lane.mjs');
+    expect(classifier).toContain('run: node .github/scripts/ci-source-binding.mjs');
+    expect(classifier).toContain('fetch-depth: 0');
+    expect(site).toContain('run: node .github/scripts/ci-source-binding.mjs');
+    expect(site).toContain('run: node --test .github/tests/ci-site-lane.test.mjs');
+    expect(site).toContain('run: npm run test:ci -- test/site-ecosystem-smoke.test.ts');
+    expect(site).not.toMatch(/continue-on-error|upload-artifact|npm publish|deploy/);
+    expect(ciYml).not.toMatch(/paths-ignore:|pull_request_target:/);
+    const policy = readFileSync(resolve(repoRoot, '.github/scripts/ci-site-lane.mjs'), 'utf8');
+    expect(policy).toContain("if (eventName !== 'pull_request') return 'full'");
+    expect(policy).toContain("if (paths.some((path) => !allowed.has(path))) return 'full'");
+  });
+
   it('is reusable as the canonical release verification authority', () => {
     expect(ciYml).toMatch(/(?:^|\n)\s{2}workflow_call:\s*(?:\n|$)/);
     // Policy-bearing permissions are independent of explanatory header comments.
@@ -101,7 +117,7 @@ describe('M30 CI workflow', () => {
   });
 
   it('checks out the exact candidate and binds its tree to the original event before gates', () => {
-    for (const id of ['ci', 'ci-shared-macos', 'mac-general', 'mac-isolated', 'native-macos-broker-foundation', 'windows-service-authority']) {
+    for (const id of ['site', 'ci', 'ci-shared-macos', 'mac-general', 'mac-isolated', 'native-macos-broker-foundation', 'windows-service-authority']) {
       const job = workflowJob(id);
       expect(job, `missing job ${id}`).not.toBe('');
       expect(job).toContain('ref: ${{ github.event.pull_request.head.sha || github.sha }}');
@@ -251,7 +267,8 @@ describe('M30 CI workflow', () => {
     type Job = {
       name: string;
       'runs-on': string;
-      needs?: string[];
+      needs?: string | string[];
+      outputs?: Record<string, string>;
       if?: string;
       'continue-on-error'?: boolean;
       env?: Record<string, string>;
@@ -265,24 +282,32 @@ describe('M30 CI workflow', () => {
     const { jobs } = parse(ciYml) as { jobs: Record<string, Job> };
     const ci = jobs.ci!;
     const shared = jobs['ci-shared-macos']!;
+    expect(jobs.classify?.outputs).toEqual({ lane: '${{ steps.lane.outputs.lane }}' });
+    expect(jobs.classify?.needs).toBeUndefined();
+    expect(jobs.classify?.if).toBeUndefined();
+    expect(jobs.site?.needs).toBe('classify');
+    expect(jobs.site?.if).toBe("needs.classify.outputs.lane == 'site'");
     expect(shared, 'shared Mac still requires its own complete named gate').toBeDefined();
     for (const id of ['ci-shared-macos', 'native-macos-broker-foundation']) {
       const short = jobs[id]!;
-      expect(short.needs).toEqual(['mac-isolated']);
-      expect(jobs['mac-isolated']!.needs).toBeUndefined();
+      expect(short.needs).toEqual(['classify', 'mac-isolated']);
+      expect(jobs['mac-isolated']!.needs).toBe('classify');
       // The actual transitive graph cannot reintroduce the general matrix as
       // a predecessor; this is scheduling overlap, never missing coverage.
-      const predecessors = (jobId: string): string[] => (jobs[jobId]!.needs ?? [])
-        .flatMap((dependency) => [dependency, ...predecessors(dependency)]);
-      expect(predecessors(id)).toEqual(['mac-isolated']);
+      const predecessors = (jobId: string): string[] => {
+        const needs = jobs[jobId]!.needs;
+        const dependencies = needs === undefined ? [] : Array.isArray(needs) ? needs : [needs];
+        return dependencies.flatMap((dependency) => [dependency, ...predecessors(dependency)]);
+      };
+      expect(new Set(predecessors(id))).toEqual(new Set(['classify', 'mac-isolated']));
       // An explicit status function keeps the short gate eligible on predecessor
       // failure; cancellation stops it rather than starting more work.
-      expect(short.if).toBe('${{ !cancelled() }}');
+      expect(short.if).toBe("${{ !cancelled() && needs.classify.outputs.lane == 'full' }}");
       expect(short['continue-on-error']).toBeUndefined();
     }
     for (const id of ['ci', 'mac-general', 'mac-isolated', 'windows-service-authority']) {
-      expect(jobs[id]!.needs).toBeUndefined();
-      expect(jobs[id]!.if).toBeUndefined();
+      expect(jobs[id]!.needs).toBe('classify');
+      expect(jobs[id]!.if).toBe("needs.classify.outputs.lane == 'full'");
     }
     expect(jobs['mac-general']!.strategy!.matrix.shard).toEqual([1, 2, 3, 4]);
     expect(jobs['mac-general']!.strategy!['max-parallel']).toBe(4);
@@ -303,8 +328,8 @@ describe('M30 CI workflow', () => {
       if (matrix?.shard) return matrix.shard.map((shard) => job.name.replace('${{ matrix.shard }}', String(shard)));
       return [job.name];
     });
-    expect(names).toHaveLength(15);
-    expect(new Set(names).size).toBe(15);
+    expect(names).toHaveLength(17);
+    expect(new Set(names).size).toBe(17);
     expect(names.filter((name) => name.startsWith('Mac exhaustive ('))).toHaveLength(5);
     expect(names).toContain('CI (Node 22, macos, shared queue authority)');
     expect(names).toContain('Native macOS broker foundation (Rust 1.97.1)');
@@ -795,6 +820,7 @@ describe('M30 CI workflow', () => {
       'test/authority-codeowners-310b.test.ts',
       'test/m30.ci.test.ts',
       'test/m25.index.test.ts',
+      'test/site-ecosystem-smoke.test.ts',
     ].sort());
     expect(windowsPortabilityThree).toContain('--reporter=dot');
     expect(windowsPortabilityOverflow).toContain('--reporter=dot');
