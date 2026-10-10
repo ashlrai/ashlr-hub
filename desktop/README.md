@@ -10,12 +10,14 @@ archive, paired with [`latest.json`](https://github.com/ashlrai/phantom/releases
 rather than a DMG. These are update artifacts; downloading or unpacking them
 alone does not perform the qualified installation described below.
 
-### Consumer first install (source implementation)
+<a id="consumer-first-install-source-implementation"></a>
 
-The source includes `phm desktop install` for an empty Apple silicon Mac
-installation. It is not included in the published release above, and acceptance
-on a clean Mac remains unverified. After this command is published and accepted,
-use the canonical CLI's matching release:
+### Consumer first install
+
+Qualified releases from 3.29.8 support `phm desktop install` for an empty Apple
+silicon Mac installation. Confirm the installed canonical CLI version with
+`phm --version` and use its matching public release. Acceptance on a clean Mac
+remains unverified; publication and clean-Mac acceptance are separate results.
 
 ```sh
 phm authority stop --json

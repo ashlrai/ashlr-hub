@@ -47,10 +47,11 @@ installation, desktop installation and fleet activation are separate steps.
 
 ### Desktop app on Apple silicon Mac
 
-The source-only `phm desktop install [--apply]` first-install command is described
-in the [consumer installation notes](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#consumer-first-install-source-implementation).
-It is not available in the published release below; clean-Mac acceptance remains
-unverified.
+Qualified releases from 3.29.8 support `phm desktop install [--apply]` for a new
+Apple silicon Mac installation. Check `phm --version` and use its matching
+public release. See the [consumer installation notes](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#consumer-first-install).
+Clean-Mac acceptance remains unverified; command publication does not establish
+that acceptance.
 
 The [current qualified macOS release](https://github.com/ashlrai/phantom/releases/latest)
 provides the signed `Phantom_<version>_aarch64.app.tar.gz` archive and paired

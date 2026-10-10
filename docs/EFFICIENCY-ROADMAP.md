@@ -2,7 +2,7 @@
 
 ## Current measurements and next experiment: 2026-10-10
 
-The 3.29.9 source candidate includes three independent performance changes.
+The 3.29.9 source candidate includes four independent performance changes.
 These are local measurements and a scheduling experiment, not published or
 installed performance claims.
 
@@ -38,7 +38,8 @@ The required native library lane also tests the real updater HTTP client in a fr
 process. Moving its two cases from the binary suite preserves 371 passing cases
 and four existing ignores across both suites. Every platform job, full qualification,
 Audit, original-artifact verification and installed startup check remains required.
-Publication and installed acceptance of this candidate are still pending.
+At the time of this October 8 observation, publication and installed acceptance
+of the 3.25.3 candidate were still pending.
 
 ## Measured engineering efficiency: 2026-10-07
 

@@ -399,17 +399,21 @@ returning `409 Conflict — Cannot publish over previously staged version`.
 npm view @ashlr/hub version
 ```
 
-## Installing your own build
+## Installing a qualified release
 
-`npm run ship:local` does this (and updates the app). By hand: the managed install is a SHA-pinned release directory with a `current` symlink.
-Point it at an extracted tarball, never at the git worktree — a worktree install
-changes under you when you switch branches.
+Use the [desktop installation guide](../desktop/README.md#install) for the
+qualified paired app and CLI installation. The maintainer artifact installer
+requires a clean qualified source checkout, the original signed hosted bundle
+and the original private finalizer output. It verifies these inputs without
+rebuilding, repacking or signing; inspection is the default. From the separate
+qualified installer checkout, inspect its exact arguments with:
 
 ```sh
-SHA=$(git rev-parse HEAD)
-DEST=~/.local/share/ashlr/releases/$SHA
-mkdir -p "$DEST"
-tar -xzf /tmp/ashlr-hub-<version>.tgz -C "$DEST" --strip-components=1
-ln -sfn "$DEST" ~/.local/share/ashlr/current
-ashlr --version
+node scripts/install-desktop-artifacts.mjs --help
 ```
+
+Before `--apply`, use the existing authority Stop, verify drained leases and
+quit Phantom normally. Preserve the original assets and rollback data. Verify
+the installed app, CLI version and startup separately; installation keeps Stop
+engaged and does not resume the fleet. Manual tarball extraction or replacing
+the `current` symlink does not perform this qualified transaction.
