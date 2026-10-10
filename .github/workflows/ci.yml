@@ -108,29 +108,12 @@ jobs:
               test/npm-cli-launch.test.ts
               test/activation-readiness-package.test.ts
               test/activation-readiness-windows.test.ts
-          - os: macos-latest
-            label: macos, shared queue authority
-            native_launchd: "1"
-            test_args: >-
-              test/m111.work-queue.test.ts test/m392.queue-lease-epochs.test.ts
-              test/m395.effect-terminal-retention.test.ts
-              test/m367.daemon-observer-scheduler.test.ts
-              test/m93.daemon-service.test.ts
-              test/m93.daemon-service-launchd-integration.test.ts
-              test/m455.external-skill-maturity.test.ts
-              test/m456.skill-retrieval-calibration.test.ts
-              test/m457.external-skill-artifact-firewall.test.ts
-              test/m460.policy-assignment-receipts.test.ts
-              test/m463.claimed-batch-admission.test.ts
-              test/m464.agent-work-transitions.test.ts
-              test/m466.host-merge-revocation-protocol.test.ts
-              test/m467.detached-post-merge-verification.test.ts
     runs-on: ${{ matrix.os }}
-    env:
+    env: &node_ci_environment
       ASHLR_VITEST_TEST_TIMEOUT_MS: ${{ matrix.os == 'windows-latest' && '30000' || '5000' }}
       ASHLR_RUN_NATIVE_LAUNCHD_TEST: ${{ matrix.native_launchd || '0' }}
 
-    steps:
+    steps: &node_ci_steps
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -360,6 +343,37 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  ci-shared-macos:
+    # Scheduling experiment: defer this short Mac gate until all five long
+    # lanes settle. Keep it eligible after their failures, unless cancelled.
+    needs: [mac-general, mac-isolated]
+    if: ${{ !cancelled() }}
+    name: CI (Node 22, ${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macos, shared queue authority
+            native_launchd: "1"
+            test_args: >-
+              test/m111.work-queue.test.ts test/m392.queue-lease-epochs.test.ts
+              test/m395.effect-terminal-retention.test.ts
+              test/m367.daemon-observer-scheduler.test.ts
+              test/m93.daemon-service.test.ts
+              test/m93.daemon-service-launchd-integration.test.ts
+              test/m455.external-skill-maturity.test.ts
+              test/m456.skill-retrieval-calibration.test.ts
+              test/m457.external-skill-artifact-firewall.test.ts
+              test/m460.policy-assignment-receipts.test.ts
+              test/m463.claimed-batch-admission.test.ts
+              test/m464.agent-work-transitions.test.ts
+              test/m466.host-merge-revocation-protocol.test.ts
+              test/m467.detached-post-merge-verification.test.ts
+    runs-on: ${{ matrix.os }}
+    env: *node_ci_environment
+    steps: *node_ci_steps
+
   mac-general:
     name: Mac exhaustive (${{ matrix.shard }}/4)
     runs-on: macos-15
@@ -487,8 +501,10 @@ jobs:
 
   native-macos-broker-foundation:
     name: Native macOS broker foundation (Rust 1.97.1)
-    # Own checkout and fixtures: overlap Mac suites; artifact admission still
-    # requires this job and every complete Mac qualification lane to pass.
+    # Own checkout and fixtures remain independent evidence. Defer this short
+    # gate until all five exhaustive Mac lanes settle, including failed lanes.
+    needs: [mac-general, mac-isolated]
+    if: ${{ !cancelled() }}
     runs-on: macos-latest
     steps:
       - name: Checkout

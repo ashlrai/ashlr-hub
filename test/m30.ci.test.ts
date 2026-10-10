@@ -1,7 +1,7 @@
 /**
  * M30 POLISH — CI workflow guard.
  *
- * Parses .github/workflows/ci.yml (line-based; no YAML dependency, no new deps)
+ * Parses .github/workflows/ci.yml using the existing YAML dependency for topology
  * and asserts the CI runs on Node 22.15+ (the hard minimum — install.sh hard-fails
  * below 22.15, so a 20+22 matrix would silently lie), runs the required
  * typecheck / lint / build / test steps with hermetic isolation, that npm
@@ -14,6 +14,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import ts from 'typescript';
+import { parse } from 'yaml';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..');
@@ -24,7 +25,11 @@ const sourceBinding = readFileSync(resolve(repoRoot, '.github/scripts/ci-source-
 const qualificationLane = readFileSync(resolve(repoRoot, '.github/scripts/ci-qualification-lane.mjs'), 'utf8');
 
 function workflowJob(id: string): string {
-  return ciYml.match(new RegExp(`^ {2}${id}:\\n[\\s\\S]*?(?=^ {2}[\\w-]+:|$(?![\\s\\S]))`, 'm'))?.[0] ?? '';
+  const raw = (key: string): string => ciYml.match(new RegExp(`^ {2}${key}:\\n[\\s\\S]*?(?=^ {2}[\\w-]+:|$(?![\\s\\S]))`, 'm'))?.[0] ?? '';
+  const job = raw(id);
+  // Expand only this reviewed alias for the existing source-level step guards.
+  const sharedSteps = raw('ci').match(/^ {4}steps: &node_ci_steps\n[\s\S]*/m)?.[0] ?? '';
+  return job.replace('    steps: *node_ci_steps', sharedSteps);
 }
 
 const pkg = JSON.parse(
@@ -96,7 +101,7 @@ describe('M30 CI workflow', () => {
   });
 
   it('checks out the exact candidate and binds its tree to the original event before gates', () => {
-    for (const id of ['ci', 'mac-general', 'mac-isolated', 'native-macos-broker-foundation', 'windows-service-authority']) {
+    for (const id of ['ci', 'ci-shared-macos', 'mac-general', 'mac-isolated', 'native-macos-broker-foundation', 'windows-service-authority']) {
       const job = workflowJob(id);
       expect(job, `missing job ${id}`).not.toBe('');
       expect(job).toContain('ref: ${{ github.event.pull_request.head.sha || github.sha }}');
@@ -229,9 +234,9 @@ describe('M30 CI workflow', () => {
     expect(verifier).not.toContain('ci-impact-shadow');
   });
 
-  it('runs independent native broker coverage without giving CI signing authority', () => {
+  it('runs separate native broker coverage without giving CI signing authority', () => {
     const native = workflowJob('native-macos-broker-foundation');
-    expect(native).not.toMatch(/^ {4}(?:needs|if|continue-on-error):/m);
+    expect(native).not.toMatch(/^ {4}continue-on-error:/m);
     expect(native).not.toMatch(/download-artifact|\$\{\{\s*needs\./);
     expect(native).toContain('ref: ${{ github.event.pull_request.head.sha || github.sha }}');
     expect(native).toContain('run: node .github/scripts/ci-source-binding.mjs');
@@ -240,6 +245,63 @@ describe('M30 CI workflow', () => {
     }
     expect(ciYml).not.toMatch(/id-token:\s*write|attestations:\s*write|actions\/attest/);
     expect(ciYml).not.toContain('pull_request_target');
+  });
+
+  it('defers only the two short Mac gates until every exhaustive Mac lane settles', () => {
+    type Job = {
+      name: string;
+      'runs-on': string;
+      needs?: string[];
+      if?: string;
+      'continue-on-error'?: boolean;
+      env?: Record<string, string>;
+      steps: Array<Record<string, unknown>>;
+      strategy?: {
+        'fail-fast': boolean;
+        'max-parallel'?: number;
+        matrix: { include?: Array<{ os: string; label: string }>; shard?: number[] };
+      };
+    };
+    const { jobs } = parse(ciYml) as { jobs: Record<string, Job> };
+    const ci = jobs.ci!;
+    const shared = jobs['ci-shared-macos']!;
+    expect(shared, 'shared Mac still requires its own complete named gate').toBeDefined();
+    for (const id of ['ci-shared-macos', 'native-macos-broker-foundation']) {
+      const short = jobs[id]!;
+      expect(short.needs).toEqual(['mac-general', 'mac-isolated']);
+      // An explicit status function keeps the short gate eligible on predecessor
+      // failure; cancellation stops it rather than starting more work.
+      expect(short.if).toBe('${{ !cancelled() }}');
+      expect(short['continue-on-error']).toBeUndefined();
+    }
+    for (const id of ['ci', 'mac-general', 'mac-isolated', 'windows-service-authority']) {
+      expect(jobs[id]!.needs).toBeUndefined();
+      expect(jobs[id]!.if).toBeUndefined();
+    }
+    expect(jobs['mac-general']!.strategy!.matrix.shard).toEqual([1, 2, 3, 4]);
+    expect(jobs['mac-general']!.strategy!['max-parallel']).toBe(4);
+    expect(ci.strategy!.matrix.include).toHaveLength(7);
+    expect(ci.strategy!.matrix.include!.every((row) => row.os !== 'macos-latest')).toBe(true);
+    expect(shared.strategy!.matrix.include).toHaveLength(1);
+    expect(shared.strategy!.matrix.include![0]).toMatchObject({
+      os: 'macos-latest', label: 'macos, shared queue authority',
+    });
+    expect(shared.name).toBe(ci.name);
+    expect(shared['runs-on']).toBe(ci['runs-on']);
+    expect(shared.env).toEqual(ci.env);
+    expect(shared.steps).toEqual(ci.steps);
+    expect(shared.strategy!['fail-fast']).toBe(false);
+    const names = Object.values(jobs).flatMap((job) => {
+      const matrix = job.strategy?.matrix;
+      if (matrix?.include) return matrix.include.map((row) => job.name.replace('${{ matrix.label }}', row.label));
+      if (matrix?.shard) return matrix.shard.map((shard) => job.name.replace('${{ matrix.shard }}', String(shard)));
+      return [job.name];
+    });
+    expect(names).toHaveLength(15);
+    expect(new Set(names).size).toBe(15);
+    expect(names.filter((name) => name.startsWith('Mac exhaustive ('))).toHaveLength(5);
+    expect(names).toContain('CI (Node 22, macos, shared queue authority)');
+    expect(names).toContain('Native macOS broker foundation (Rust 1.97.1)');
   });
 
   it('keeps native cache reuse independent from test and artifact admission', () => {
