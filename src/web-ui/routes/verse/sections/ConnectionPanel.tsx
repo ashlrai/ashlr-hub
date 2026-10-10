@@ -52,7 +52,7 @@ export function ConnectionPanel() {
 
   return (
     <Panel title="Connection">
-      <SettingRow label="Server" description="This window talks to one local server. Nothing leaves your machine.">
+      <SettingRow label="Server" description="This window connects to one local server. Connected models and tools may contact their providers.">
         <div className={styles.origin}>
           <Input value={origin} readOnly mono size="sm" aria-label="Server address" />
         </div>

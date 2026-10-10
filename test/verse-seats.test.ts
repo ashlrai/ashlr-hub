@@ -686,7 +686,7 @@ describe('verse seats — per-seat catalogs and pinned binaries (V3.9)', () => {
 
     expect(seat.notes).toEqual([
       'Pinned to Claude Code 2.1.257; 2.1.280 is installed — Opus 5.5 needs it. '
-      + 'Re-pin with: ashlr resources profile repin --directory ~/.ashlr/native-profiles/claude-a '
+      + 'Re-pin with: phm resources profile repin --directory ~/.ashlr/native-profiles/claude-a '
       + '--executable ~/.local/share/claude/versions/2.1.280',
     ]);
     // Remediation text is home-relative; the private state path never appears.
@@ -697,12 +697,13 @@ describe('verse seats — per-seat catalogs and pinned binaries (V3.9)', () => {
   });
 
   it('names a repin command the CLI actually routes', () => {
-    // The note is copy-paste remediation. `ashlr` routes `resources` → `profile`
-    // (src/cli/resources.ts) and the profile CLI owns `repin`; its own usage
-    // text spells the full command, so a drifted spelling fails here.
-    expect(VERSE_REPIN_COMMAND).toBe('ashlr resources profile repin');
+    // Canonical `phm` and the compatibility alias share the same entrypoint;
+    // the profile CLI's legacy help still owns the exact repin arguments.
+    expect(VERSE_REPIN_COMMAND).toBe('phm resources profile repin');
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    expect(pkg.bin.phm).toBe(pkg.bin.ashlr);
     const cli = fs.readFileSync(path.join(__dirname, '..', 'src', 'cli', 'resource-profile.ts'), 'utf8');
-    expect(cli).toContain(`${VERSE_REPIN_COMMAND} --directory`);
+    expect(cli).toContain('ashlr resources profile repin --directory');
     expect(cli).toContain('--dry-run');
   });
 

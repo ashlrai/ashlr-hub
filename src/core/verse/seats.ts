@@ -359,10 +359,10 @@ function runnableFirst(models: VerseModelOption[]): VerseModelOption[] {
  * does not route (`ashlr resource-profile …` never existed) is worse than no
  * hint, and tests pin the exact text through this one name.
  */
-export const VERSE_REPIN_COMMAND = 'ashlr resources profile repin';
+export const VERSE_REPIN_COMMAND = 'phm resources profile repin';
 
 export const VERSE_CATALOG_PENDING_NOTE =
-  "Model list is Verse's built-in list until this seat's first turn fetches its own catalog.";
+  "Model list is Phantom's built-in list until this seat's first turn fetches its own catalog.";
 
 /**
  * One native seat's models, pinned CLI version and notes.
