@@ -101,6 +101,10 @@ const childEnvironment = {
   ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING: process.env.ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING ?? '1',
   ASHLR_ACCEPTANCE_PHASE_TIMING: process.env.ASHLR_ACCEPTANCE_PHASE_TIMING ?? '1',
 };
+// Isolated acceptance never participates in duration-weighted calibration.
+const isolatedEnvironment = { ...childEnvironment };
+delete isolatedEnvironment.ASHLR_TEST_CI_WEIGHTED_PARTITION;
+delete isolatedEnvironment.ASHLR_TEST_CI_WEIGHTED_HINTS;
 const children = new Map();
 let stopping = false;
 let failure = 0;
@@ -171,7 +175,7 @@ if (failure || !expectedShards.every((shard) => codes[shard - 1] === 0)) {
     if (failure) break;
     const child = spawn(process.execPath, [runner, file, ...(filter ? ['-t', filter] : []), '--maxWorkers=1', '--fileParallelism=false', '--bail=1',
       ...reportArgs(`isolated-${String(index + 1).padStart(2, '0')}.json`)], {
-      cwd: process.cwd(), env: childEnvironment, stdio: 'inherit',
+      cwd: process.cwd(), env: isolatedEnvironment, stdio: 'inherit',
     });
     children.set(`isolated-${label}`, child);
     console.error(`[test-ci:sharded] started isolated acceptance ${label} (pid ${child.pid ?? 'unavailable'})`);

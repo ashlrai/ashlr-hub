@@ -68,7 +68,7 @@ function runFixture(
   }
   writeFileSync(join(root, 'node_modules', 'vitest', 'vitest.mjs'), `
 const shard = process.argv.find((arg) => arg.startsWith('--shard='));
-console.log(JSON.stringify({ pid: process.pid, wrapperPid: process.ppid, shard, file: process.argv.find((arg) => arg.endsWith('.test.ts') && !arg.startsWith('--exclude=')), filter: process.argv.includes('-t') ? process.argv[process.argv.indexOf('-t') + 1] : undefined, excludes: process.argv.filter((arg) => arg.startsWith('--exclude=')), reporters: process.argv.filter((arg) => arg.startsWith('--reporter=')), outputFiles: process.argv.filter((arg) => arg.startsWith('--outputFile')), reportDirectory: process.env.ASHLR_TEST_CI_REPORT_DIRECTORY, workers: process.argv.find((arg) => arg.startsWith('--maxWorkers=')), parallelism: process.argv.filter((arg) => arg.startsWith('--fileParallelism=')), bail: process.argv.find((arg) => arg.startsWith('--bail=')), home: process.env.HOME, tmp: process.env.TMPDIR, setupTiming: process.env.ASHLR_ENGINEERING_SETUP_PHASE_TIMING, successorTiming: process.env.ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING, admissionTiming: process.env.ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING, acceptanceTiming: process.env.ASHLR_ACCEPTANCE_PHASE_TIMING, hardTimeout: process.env.ASHLR_TEST_CI_TIMEOUT_MS, idleTimeout: process.env.ASHLR_TEST_CI_IDLE_TIMEOUT_MS }));
+console.log(JSON.stringify({ pid: process.pid, wrapperPid: process.ppid, shard, file: process.argv.find((arg) => arg.endsWith('.test.ts') && !arg.startsWith('--exclude=')), filter: process.argv.includes('-t') ? process.argv[process.argv.indexOf('-t') + 1] : undefined, excludes: process.argv.filter((arg) => arg.startsWith('--exclude=')), reporters: process.argv.filter((arg) => arg.startsWith('--reporter=')), outputFiles: process.argv.filter((arg) => arg.startsWith('--outputFile')), reportDirectory: process.env.ASHLR_TEST_CI_REPORT_DIRECTORY, workers: process.argv.find((arg) => arg.startsWith('--maxWorkers=')), parallelism: process.argv.filter((arg) => arg.startsWith('--fileParallelism=')), bail: process.argv.find((arg) => arg.startsWith('--bail=')), home: process.env.HOME, tmp: process.env.TMPDIR, setupTiming: process.env.ASHLR_ENGINEERING_SETUP_PHASE_TIMING, successorTiming: process.env.ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING, admissionTiming: process.env.ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING, acceptanceTiming: process.env.ASHLR_ACCEPTANCE_PHASE_TIMING, weighted: process.env.ASHLR_TEST_CI_WEIGHTED_PARTITION, weightHints: process.env.ASHLR_TEST_CI_WEIGHTED_HINTS, hardTimeout: process.env.ASHLR_TEST_CI_TIMEOUT_MS, idleTimeout: process.env.ASHLR_TEST_CI_IDLE_TIMEOUT_MS }));
 if (process.env.ASHLR_FAKE_FAILURE === 'signal') {
   if (shard === '--shard=3/4') setTimeout(() => {
     process.kill(Number(process.env.ASHLR_FAKE_COORDINATOR_PID), 'SIGTERM');
@@ -94,6 +94,8 @@ if (process.env.ASHLR_FAKE_FAILURE === 'signal') {
   delete environment.ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING;
   delete environment.ASHLR_ACCEPTANCE_PHASE_TIMING;
   delete environment.ASHLR_TEST_CI_REPORT_DIRECTORY;
+  delete environment.ASHLR_TEST_CI_WEIGHTED_PARTITION;
+  delete environment.ASHLR_TEST_CI_WEIGHTED_HINTS;
   if (reportDirectory !== undefined) environment.ASHLR_TEST_CI_REPORT_DIRECTORY = reportDirectory;
   return spawnSync(process.execPath, [join(root, 'scripts', 'test-ci-sharded.mjs'), ...args], {
     cwd: root, encoding: 'utf8', timeout: 8_000,
@@ -174,6 +176,18 @@ describe('local exhaustive prepublish shards', () => {
     expect(result.stderr).toContain(`[test-ci:sharded] PASS (general ${shard}/4)`);
     expect(result.stderr).not.toContain('started isolated acceptance');
     expect(rows.every(row => !existsSync(row.home))).toBe(true);
+  });
+
+  it('keeps explicit weighted calibration on general lanes and removes it from every isolated child', () => {
+    const calibration = { ASHLR_TEST_CI_WEIGHTED_PARTITION: '1', ASHLR_TEST_CI_WEIGHTED_HINTS: '/private/inert-hints.json' };
+    const general = runFixture('none', calibration, ['--general-shard=1/4']);
+    expect(general.status).toBe(0);
+    expect(JSON.parse(general.stdout.trim())).toMatchObject({ shard: '--shard=1/4', weighted: '1', weightHints: '/private/inert-hints.json' });
+    const isolated = runFixture('none', calibration, ['--isolated-only']);
+    expect(isolated.status).toBe(0);
+    const rows = isolated.stdout.trim().split('\n').map(line => JSON.parse(line) as { weighted?: string; weightHints?: string; shard?: string });
+    expect(rows).toHaveLength(14);
+    expect(rows.every(row => row.weighted === undefined && row.weightHints === undefined && row.shard === undefined)).toBe(true);
   });
 
   it('runs the complete isolated lane alone in fourteen separate homes', () => {

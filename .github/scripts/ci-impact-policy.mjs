@@ -11,6 +11,7 @@ export const IMPACT_POLICY = Object.freeze({
     'vitest.config.ts', 'vitest.config.web.ts', 'vite.config.ts',
     'test/setup/home.ts', 'test/setup/home-isolation-guard.ts', 'src/web-ui/test/setup.ts',
     'test/config/realio-lane-membership.mjs', 'scripts/test-ci.mjs', 'scripts/test-ci-sharded.mjs',
+    'test/config/weighted-sequencer.mjs', '.github/scripts/ci-partition-shadow.mjs',
     '.github/workflows/ci.yml', '.github/scripts/ci-qualification-lane.mjs',
     '.github/scripts/ci-impact-policy.mjs', '.github/scripts/ci-impact-shadow.mjs',
   ]),

@@ -6,7 +6,7 @@ ashlr-hub is the local kernel for Ashlr Universe, built contract-first in TypeSc
 
 ## Prerequisites
 
-- **Node.js 22.15+** for the package runtime. A release gate can require stricter, exact tool versions; use the [release policy](docs/RELEASING.md#local-verification-for-the-340-successor) for release verification.
+- **Node.js 22.15+** for the package runtime. A release gate can require stricter, exact tool versions; use the [release policy](docs/RELEASING.md#qualified-ci-build-handoff) for release verification.
 - **git** on `PATH`
 - `~/.local/bin` on your `PATH` if you want to install the CLI locally
 - Optional (only exercised at runtime by specific commands): `phantom`, `ollama`, LM Studio, `gh`, `vercel`, `claude`, `codex`. None are required to build or test.
@@ -94,6 +94,18 @@ The JSON reports whole-module import suggestions and unknown/global-input
 warnings. It runs no tests and cannot authorize release skips or result reuse;
 an empty suggestion list does not establish coverage.
 
+Duration-weighted Mac partition calibration is disabled by default. An explicit
+`ASHLR_TEST_CI_WEIGHTED_PARTITION=1` plus `ASHLR_TEST_CI_WEIGHTED_HINTS` pointing
+to a local `phantom-partition-hints/v1` JSON file enables the sequencer for
+general shards in a clean checkout at its committed source revision. The original
+sharder handles absent, invalid or incompatible
+hints; isolated acceptance always ignores these settings. No timing file is
+downloaded or supplied by default. Hints must retain their original successful
+run, source, runtime/config digest and observation time. Reporter spans are
+historical costs, not CPU measurements or promised wall time. New files remain
+included; hints cannot replace complete fresh tests or release qualification.
+The current checked-in tool does not generate a qualified timing manifest.
+
 ### Definition of green
 
 For the complete local source release check, run the canonical script once:
@@ -111,7 +123,7 @@ Preserve meaningful coverage. Backend tests live under `test/`; DOM tests live
 beside the web features under `src/web-ui/`. Report skipped or unavailable
 platform checks separately. A passing source suite is not installed-artifact,
 provider, production or user-acceptance evidence. Release work also follows the
-[local production gate](docs/RELEASING.md#local-verification-for-the-340-successor).
+[qualified release handoff](docs/RELEASING.md#qualified-ci-build-handoff).
 
 ### Running tests hermetically on the local host
 
