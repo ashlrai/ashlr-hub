@@ -32,9 +32,10 @@ function sourcePackageEvidence(bytes: Buffer) {
     blob: { sha, encoding: 'base64', size: bytes.length, content: bytes.toString('base64').match(/.{1,60}/g)!.join('\n') + '\n' } };
 }
 function fixtureReader(change?: (endpoint: string, value: unknown) => unknown,
-  options: { repository?: typeof REPO | 'ashlrai/phantom'; packageName?: '@ashlr/hub' | '@ashlr/phantom'; packageBytes?: Buffer } = {}): ReleasePublicReader {
+  options: { repository?: typeof REPO | 'ashlrai/phantom'; packageName?: '@ashlr/hub' | '@ashlr/phantom'; packageBytes?: Buffer; workflowBytes?: Buffer } = {}): ReleasePublicReader {
   const repository = options.repository ?? REPO; const packageName = options.packageName ?? '@ashlr/hub';
   const source = sourcePackageEvidence(options.packageBytes ?? Buffer.from(JSON.stringify({ name: packageName, version: proposed.version })));
+  const workflow = sourcePackageEvidence(options.workflowBytes ?? Buffer.from('name: CI\njobs:\n  ci:\n    name: Historical authority matrix\n'));
   const boundRepo = { ...repo, full_name: repository };
   const published = { ...release, html_url: release.html_url.replace(REPO, repository),
     assets: release.assets.map(asset => ({ ...asset, browser_download_url: asset.browser_download_url.replace(REPO, repository) })) };
@@ -42,6 +43,7 @@ function fixtureReader(change?: (endpoint: string, value: unknown) => unknown,
     let value: unknown;
     if (endpoint === `repos/${repository}`) value = boundRepo;
     else if (endpoint.endsWith('/releases/latest') || endpoint.endsWith('/releases/tags/v3.24.3')) value = published;
+    else if (endpoint === `repos/${repository}/contents/.github/workflows/ci.yml?ref=${SOURCE}`) value = { ...workflow.blob, type: 'file', path: '.github/workflows/ci.yml' };
     else if (endpoint.endsWith('/git/ref/tags/v3.24.3')) value = ref;
     else if (endpoint.endsWith(`/git/commits/${MERGED}`)) value = { sha: MERGED, tree: { sha: TREE }, parents: [{ sha: 'f'.repeat(40) }, { sha: SOURCE }] };
     else if (endpoint.endsWith(`/git/commits/${SOURCE}`)) value = { sha: SOURCE, tree: { sha: TREE } };
@@ -267,6 +269,78 @@ describe('fresh public facts are data, not saved release authority', () => {
     expect(RELEASE_CI_JOBS).toHaveLength(15); expect(reader.npm).toHaveBeenCalledWith('3.24.3', undefined, '@ashlr/hub');
     expect((reader.github as ReturnType<typeof vi.fn>).mock.calls.filter(([path]) => path === `repos/${REPO}`)).toHaveLength(2);
   });
+  function withAncillaryJobs(endpoint: string, raw: unknown): unknown {
+    const value = raw as Record<string, unknown>;
+    if (endpoint.includes('/runs/20/') && endpoint.includes('/jobs?')) {
+      const jobs = value['jobs'] as Record<string, unknown>[];
+      jobs.push({ id: 900, name: 'Classify PR site lane', run_id: 20, head_sha: SOURCE,
+        status: 'completed', conclusion: 'success', labels: ['ubuntu-latest'], steps: [
+          { name: 'Bind candidate source', status: 'completed', conclusion: 'success' },
+          { name: 'Classify exact ecosystem-only PR', status: 'completed', conclusion: 'success' },
+        ] }, { id: 901, name: 'Site PR (ecosystem)', run_id: 20, head_sha: SOURCE,
+        status: 'completed', conclusion: 'skipped', labels: ['ubuntu-latest'], steps: [] });
+      value['total_count'] = jobs.length;
+    }
+    return value;
+  }
+  it('binds the current source classifier/site pair without replacing any of the 15 required gates', async () => {
+    const reader = fixtureReader(withAncillaryJobs, { workflowBytes: readFileSync(join(process.cwd(), '.github/workflows/ci.yml')) });
+    expect(await verifyPublishedRelease(proposed, reader, NOW)).toMatchObject({ sourceSha: SOURCE, ci: { id: 20, attempt: 1 } });
+    expect(reader.github).toHaveBeenCalledWith(`repos/${REPO}/contents/.github/workflows/ci.yml?ref=${SOURCE}`, undefined);
+  });
+  it.each(['unknown', 'duplicate-id', 'duplicate-name', 'required-failed', 'required-missing', 'classifier-failed',
+    'classifier-step-skipped', 'classifier-step-duplicate', 'site-success', 'site-ran', 'ancillary-run', 'ancillary-head',
+    'ancillary-runner', 'missing-pair'])('refuses current qualification topology %s', async (kind) => {
+    const reader = fixtureReader((endpoint, raw) => {
+      const value = withAncillaryJobs(endpoint, raw) as Record<string, unknown>;
+      if (endpoint.includes('/runs/20/') && endpoint.includes('/jobs?')) {
+        const jobs = value['jobs'] as Record<string, unknown>[];
+        const classifier = jobs.find(job => job['name'] === 'Classify PR site lane')!;
+        const site = jobs.find(job => job['name'] === 'Site PR (ecosystem)')!;
+        if (kind === 'unknown') jobs[0]!['name'] = 'Unknown qualification';
+        if (kind === 'duplicate-id') classifier['id'] = jobs[0]!['id'];
+        if (kind === 'duplicate-name') jobs[0]!['name'] = jobs[1]!['name'];
+        if (kind === 'required-failed') jobs[0]!['conclusion'] = 'failure';
+        if (kind === 'required-missing') jobs.splice(0, 1);
+        if (kind === 'classifier-failed') classifier['conclusion'] = 'failure';
+        if (kind === 'classifier-step-skipped') (classifier['steps'] as Record<string, unknown>[])[0]!['conclusion'] = 'skipped';
+        if (kind === 'classifier-step-duplicate') (classifier['steps'] as Record<string, unknown>[]).push({ ...(classifier['steps'] as Record<string, unknown>[])[0]! });
+        if (kind === 'site-success') site['conclusion'] = 'success';
+        if (kind === 'site-ran') site['steps'] = [{ name: 'Site checks', status: 'completed', conclusion: 'success' }];
+        if (kind === 'ancillary-run') classifier['run_id'] = 99;
+        if (kind === 'ancillary-head') classifier['head_sha'] = 'e'.repeat(40);
+        if (kind === 'ancillary-runner') classifier['labels'] = ['ubuntu-latest', 'self-hosted'];
+        if (kind === 'missing-pair') jobs.splice(-2);
+        value['total_count'] = jobs.length;
+      }
+      return value;
+    }, { workflowBytes: readFileSync(join(process.cwd(), '.github/workflows/ci.yml')) });
+    await expect(verifyPublishedRelease(proposed, reader, NOW)).rejects.toThrow();
+  });
+  it('refuses ancillary jobs when the exact historical source does not declare them', async () => {
+    await expect(verifyPublishedRelease(proposed, fixtureReader(withAncillaryJobs), NOW)).rejects.toThrow('Unexpected qualification job inventory');
+  });
+  it.each(['path', 'type', 'size', 'base64', 'digest', 'utf8', 'duplicate-key', 'incomplete-pair', 'site-condition', 'classifier-command'])('refuses unbound or incompatible source workflow %s', async (kind) => {
+      const current = readFileSync(join(process.cwd(), '.github/workflows/ci.yml'));
+      let workflowBytes = current;
+      if (kind === 'utf8') workflowBytes = Buffer.from([0xff]);
+      if (kind === 'duplicate-key') workflowBytes = Buffer.from('name: CI\nname: Other\njobs: {}\n');
+      if (kind === 'incomplete-pair') workflowBytes = Buffer.from('name: CI\njobs:\n  classify: {}\n');
+      if (kind === 'site-condition') workflowBytes = Buffer.from(current.toString().replace("needs.classify.outputs.lane == 'site'", 'always()'));
+      if (kind === 'classifier-command') workflowBytes = Buffer.from(current.toString().replace('node .github/scripts/ci-site-lane.mjs', 'echo site'));
+      const reader = fixtureReader((endpoint, raw) => {
+        const value = withAncillaryJobs(endpoint, raw) as Record<string, unknown>;
+        if (endpoint.includes('/contents/.github/workflows/ci.yml?')) {
+          if (kind === 'path') value['path'] = '.github/workflows/other.yml';
+          if (kind === 'type') value['type'] = 'symlink';
+          if (kind === 'size') value['size'] = Number(value['size']) + 1;
+          if (kind === 'base64') value['content'] = 'MB==';
+          if (kind === 'digest') value['sha'] = 'e'.repeat(40);
+        }
+        return value;
+      }, { workflowBytes });
+      await expect(verifyPublishedRelease(proposed, reader, NOW)).rejects.toThrow();
+    });
   it.each(['numeric', 'redirect', 'tree', 'ci-failed', 'audit-failed', 'job-missing', 'step-skipped', 'runner', 'tag-race', 'release-race', 'rerun-race'])('withholds facts for %s', async (kind) => {
     let refs = 0; let releases = 0;
     const reader = fixtureReader((endpoint, raw) => {
