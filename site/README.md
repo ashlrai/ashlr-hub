@@ -37,6 +37,14 @@ Vercel deploys `site/` to `verse.ashlr.ai` from `master`. Any static host
 pointed at this directory works; nothing needs to run and there is no server
 side.
 
+CI has a short PR lane only for modifications to the existing ecosystem.html,
+assets/ecosystem.js, assets/star-history.js, and sitemap.xml files. It checks
+the exact Git diff, regular-file modes, script syntax, page assets, chart data
+and interactions, and sitemap. New files, deletions, other site files, source
+or release changes, and uncertain diffs use the full matrix. Every master push
+and reusable release verification also uses the full matrix; a site PR result
+is never release qualification.
+
 Before merging a change, check both pages at a phone width: neither page may
 scroll sideways at 390 px (tables and code blocks scroll inside their own boxes).
 The hero tabs are explanatory, not a live dispatch surface; check click and

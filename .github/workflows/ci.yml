@@ -18,7 +18,64 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  classify:
+    name: Classify PR site lane
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      lane: ${{ steps.lane.outputs.lane }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Bind candidate source
+        env:
+          ASHLR_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node .github/scripts/ci-source-binding.mjs
+      - name: Classify exact ecosystem-only PR
+        id: lane
+        env:
+          ASHLR_CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          ASHLR_CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node .github/scripts/ci-site-lane.mjs
+
+  site:
+    name: Site PR (ecosystem)
+    needs: classify
+    if: needs.classify.outputs.lane == 'site'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Bind candidate source
+        env:
+          ASHLR_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node .github/scripts/ci-source-binding.mjs
+      - name: Set up Node.js 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.22.3'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Check ecosystem JavaScript syntax
+        run: node --check site/assets/star-history.js && node --check site/assets/ecosystem.js
+      - name: Test fail-closed lane classification
+        run: node --test .github/tests/ci-site-lane.test.mjs
+      - name: Smoke-test ecosystem markup, data, and controls
+        run: npm run test:ci -- test/site-ecosystem-smoke.test.ts
+
   ci:
+    needs: classify
+    if: needs.classify.outputs.lane == 'full'
     # Node 22.15 is the hard minimum — install.sh and CONTRIBUTING.md both enforce it.
     # Ubuntu is the exhaustive authority, partitioned by Vitest's deterministic
     # file sharding so the full suite has margin below the hermetic hard cap.
@@ -346,8 +403,8 @@ jobs:
   ci-shared-macos:
     # Scheduling experiment: defer this short Mac gate until all five long
     # lanes settle. Keep it eligible after their failures, unless cancelled.
-    needs: [mac-general, mac-isolated]
-    if: ${{ !cancelled() }}
+    needs: [classify, mac-general, mac-isolated]
+    if: ${{ !cancelled() && needs.classify.outputs.lane == 'full' }}
     name: CI (Node 22, ${{ matrix.label }})
     strategy:
       fail-fast: false
@@ -375,6 +432,8 @@ jobs:
     steps: *node_ci_steps
 
   mac-general:
+    needs: classify
+    if: needs.classify.outputs.lane == 'full'
     name: Mac exhaustive (${{ matrix.shard }}/4)
     runs-on: macos-15
     timeout-minutes: 90
@@ -440,6 +499,8 @@ jobs:
         run: node scripts/cleanup-launchd-test.mjs
 
   mac-isolated:
+    needs: classify
+    if: needs.classify.outputs.lane == 'full'
     name: Mac exhaustive (isolated)
     runs-on: macos-15
     timeout-minutes: 90
@@ -503,8 +564,8 @@ jobs:
     name: Native macOS broker foundation (Rust 1.97.1)
     # Own checkout and fixtures remain independent evidence. Defer this short
     # gate until all five exhaustive Mac lanes settle, including failed lanes.
-    needs: [mac-general, mac-isolated]
-    if: ${{ !cancelled() }}
+    needs: [classify, mac-general, mac-isolated]
+    if: ${{ !cancelled() && needs.classify.outputs.lane == 'full' }}
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -686,6 +747,8 @@ jobs:
           key: ${{ steps.cargo-inputs.outputs.key }}
 
   windows-service-authority:
+    needs: classify
+    if: needs.classify.outputs.lane == 'full'
     name: Windows service authority (Server 2022)
     runs-on: windows-2022
     env:

@@ -116,6 +116,13 @@ describe('M481 CI workflow action trust chain', () => {
     const refs = Object.values(refsByJob).flat();
 
     expect(refsByJob).toEqual({
+      classify: [
+        'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+      ],
+      site: [
+        'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+        'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
+      ],
       ci: [
         'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
         'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020',
