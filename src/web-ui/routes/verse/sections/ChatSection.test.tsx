@@ -24,7 +24,8 @@ import { clearMutationToken, markCheckComplete, setMutationToken } from '../../.
 import { evictAll } from '../../../data/cache.js';
 import { bootstrap as bootstrapFixture, ev, MockEventSource, session as sessionFixture, verseFetch } from '../fixtures.test-support.js';
 import { CLAUDE_CONTEXT_SEAT } from '../seat-fixtures.test-support.js';
-import { resetVerseStore } from '../verse-store.js';
+import { getVerseSessionState, resetVerseStore, seedVerseSession } from '../verse-store.js';
+import { openVerseSession as reloadSession } from '../session-stream.js';
 import { getVerseUiState, openVerseSession, requestVerseCommand, resetVerseUi, VERSE_UI_STORAGE_KEY } from '../verse-ui-store.js';
 import { resetCommandBus, runCommand } from '../shell/command-bus.js';
 import { mockCompactViewport, mockViewport } from '../shell/viewport.test-support.js';
@@ -111,6 +112,45 @@ describe('ChatSection bootstrap', () => {
     // The server list and every activity response still carry their old state.
     // Only the selected stream's correlated terminal can have settled this row.
     expect(state.sessions[0]!.status).toBe('idle');
+  });
+
+  it('snapshot reconciliation keeps the selected header and Stop control running after a delayed idle reload', async () => {
+    const { fetch } = verseFetch();
+    const baseFetch = fetch as typeof globalThis.fetch;
+    const old = sessionFixture({ status: 'idle', updatedAt: '2026-10-10T05:35:00.000Z' });
+    seedVerseSession('vs_1', old, []);
+    let resolve!: (response: Response) => void;
+    let reloadPending = false;
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (reloadPending && String(input) === '/api/verse/sessions/vs_1') {
+        return new Promise<Response>(done => { resolve = done; });
+      }
+      return baseFetch(input, init);
+    }));
+    const user = userEvent.setup();
+    mount();
+    const nav = await screen.findByRole('navigation', { name: 'Chats' });
+    await user.click(await within(nav).findByRole('button', { name: /Fix the login bug/ }));
+    await screen.findByRole('heading', { name: 'Fix the login bug' });
+    reloadPending = true;
+    let close!: () => void;
+    act(() => { close = reloadSession('vs_1', { reload: true }); });
+    const stream = MockEventSource.forSession('vs_1');
+    const start = { ...ev(1, 'turn-started', { turnId: 't1', pid: 1 }), at: '2026-10-10T05:36:00.000Z' };
+    act(() => stream.emit(start));
+    await waitFor(() => expect(screen.getByTestId('chat-status')).toHaveAttribute('data-status', 'running'));
+    expect(screen.getByRole('button', { name: 'Stop the running turn' })).toBeInTheDocument();
+    await act(async () => {
+      resolve(new Response(JSON.stringify({ session: old, events: [start] }),
+        { headers: { 'Content-Type': 'application/json' } }));
+    });
+    expect(getVerseSessionState('vs_1').session?.status).toBe('running');
+    expect(screen.getByTestId('chat-status')).toHaveAttribute('data-status', 'running');
+    expect(screen.getByRole('button', { name: 'Stop the running turn' })).toBeInTheDocument();
+    act(() => stream.emit({ ...ev(2, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: null, durationMs: 1 }), at: '2026-10-10T05:37:00.000Z' }));
+    await waitFor(() => expect(screen.getByTestId('chat-status')).toHaveAttribute('data-status', 'idle'));
+    expect(screen.queryByRole('button', { name: 'Stop the running turn' })).not.toBeInTheDocument();
+    act(() => close());
   });
 
   it('renders seats, projects and grouped sessions from the stubbed bootstrap', async () => {

@@ -101,10 +101,10 @@ describe('selected terminal evidence beats only stale activity', () => {
     seedVerseSession('b', idle, []);
     applyVerseEvent('b', start);
     expect(getVerseSessionHead('b').session?.status).toBe('running');
-    seedVerseSession('b', idle, []); // Delayed pre-turn detail: the separate upstream race is retained.
+    seedVerseSession('b', idle, []); // Delayed pre-turn detail must preserve the observed open turn.
     applyVerseEvent('b', { ...ev(2, 'context', { turnId: 't1', contextTokens: 12, contextWindow: 65_536, exact: true }), at: terminalAt });
     const head = getVerseSessionHead('b');
-    expect(head.session?.status).toBe('idle');
+    expect(head.session?.status).toBe('running');
     expect(head.session?.updatedAt).toBe(terminalAt);
     expect(selectedTerminal(head.events)).toBeNull();
     const model = build({ sessions: [head.session!], selectedId: 'b', activity: activity(),
