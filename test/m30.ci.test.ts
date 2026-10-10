@@ -247,7 +247,7 @@ describe('M30 CI workflow', () => {
     expect(ciYml).not.toContain('pull_request_target');
   });
 
-  it('defers only the two short Mac gates until every exhaustive Mac lane settles', () => {
+  it('releases only the two short Mac gates after isolated work while general lanes remain independent', () => {
     type Job = {
       name: string;
       'runs-on': string;
@@ -268,7 +268,13 @@ describe('M30 CI workflow', () => {
     expect(shared, 'shared Mac still requires its own complete named gate').toBeDefined();
     for (const id of ['ci-shared-macos', 'native-macos-broker-foundation']) {
       const short = jobs[id]!;
-      expect(short.needs).toEqual(['mac-general', 'mac-isolated']);
+      expect(short.needs).toEqual(['mac-isolated']);
+      expect(jobs['mac-isolated']!.needs).toBeUndefined();
+      // The actual transitive graph cannot reintroduce the general matrix as
+      // a predecessor; this is scheduling overlap, never missing coverage.
+      const predecessors = (jobId: string): string[] => (jobs[jobId]!.needs ?? [])
+        .flatMap((dependency) => [dependency, ...predecessors(dependency)]);
+      expect(predecessors(id)).toEqual(['mac-isolated']);
       // An explicit status function keeps the short gate eligible on predecessor
       // failure; cancellation stops it rather than starting more work.
       expect(short.if).toBe('${{ !cancelled() }}');

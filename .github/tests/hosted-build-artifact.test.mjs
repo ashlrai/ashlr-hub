@@ -2,13 +2,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { URL } from 'node:url';
+import { URL, fileURLToPath } from 'node:url';
 import * as fs from 'node:fs';
 import { join } from 'node:path';
 import ts from 'typescript';
+import { parse } from 'yaml';
 import { HUB_REPOSITORY_IDENTITY as hub, requireRepositoryMetadata, requireRepositoryReference, requireProducerEnvironment, requireManifestProducer } from '../scripts/github-repository-binding.mjs';
 import { captureBuild, packBuild } from '../scripts/ci-pack-smoke.mjs';
-import { auditGithub, captureArtifact, inspectTar, sourceBinding, validateCoverage, isolatedScope, verifyArtifact, adoptArtifact, validateAdoptedArtifact, verifyAttestation, npmCliPath, assertEffectiveManualProtection, assertManualAttestorAncestry, verifyPublishedManualArtifact } from '../../scripts/hosted-build-artifact.mjs';
+import { auditGithub, requiredJobPolicy, captureArtifact, inspectTar, sourceBinding, validateCoverage, isolatedScope, verifyArtifact, adoptArtifact, validateAdoptedArtifact, verifyAttestation, npmCliPath, assertEffectiveManualProtection, assertManualAttestorAncestry, verifyPublishedManualArtifact } from '../../scripts/hosted-build-artifact.mjs';
 
 import { metadata, digest, tinyTar, fixture, qualifiedFixture } from './helpers/hosted-artifact-fixture.mjs';
 
@@ -126,6 +127,38 @@ function official() {
     read: (endpoint) => endpoint === `repos/${hub.legacyName}` ? metadata() : endpoint.includes('/jobs?') ? { total_count: 1, jobs: [job] } : endpoint.includes('/git/commits/') ? { sha: endpoint.split('/').at(-1), tree: { sha: tree } } : endpoint.includes('/artifacts/') ? artifact : run };
   return { input, job, run, artifact };
 }
+test('overlapping short Mac gates cannot qualify a release before all fifteen source-owned gates succeed', () => {
+  const root = new URL('../../', import.meta.url);
+  const { jobs: workflowJobs } = parse(fs.readFileSync(new URL('.github/workflows/ci.yml', root), 'utf8'));
+  const names = Object.values(workflowJobs).flatMap((job) => {
+    const matrix = job.strategy?.matrix;
+    if (matrix?.include) return matrix.include.map((row) => job.name.replace('${{ matrix.label }}', row.label));
+    if (matrix?.shard) return matrix.shard.map((shard) => job.name.replace('${{ matrix.shard }}', String(shard)));
+    return [job.name];
+  });
+  const required = requiredJobPolicy(fileURLToPath(root));
+  assert.equal(required.length, 15);
+  assert.equal(new Set(names).size, 15);
+  assert.deepEqual(required.map((job) => job.name).sort(), names.sort());
+  const f = official();
+  const completed = required.map((job, index) => ({ ...f.job, id: index + 10, name: job.name, labels: job.labels,
+    steps: job.steps.map((name) => ({ name, status: 'completed', conclusion: 'success' })) }));
+  let observed = completed;
+  const input = { ...f.input, requiredJobs: required, read: (endpoint) => endpoint.includes('/jobs?')
+    ? { total_count: observed.length, jobs: observed } : f.input.read(endpoint) };
+  assert.equal(auditGithub(input).jobs.length, 15);
+  // Even a completed-success run summary and successful short gates cannot
+  // substitute for each general lane, or for any other required named gate.
+  for (const job of completed) {
+    for (const state of ['queued', 'failure', 'missing']) {
+      observed = state === 'missing' ? completed.filter((entry) => entry !== job)
+        : completed.map((entry) => entry !== job ? entry : { ...entry,
+          status: state === 'queued' ? 'queued' : 'completed', conclusion: state === 'queued' ? null : 'failure' });
+      assert.throws(() => auditGithub(input), state === 'missing' ? /required job missing or ambiguous/
+        : state === 'queued' ? /completed/ : /success/, `${job.name}: ${state}`);
+    }
+  }
+});
 test('GitHub audit uses exact official run attempt, merge-tree and required successful job/step', () => {
   const f = official(); assert.equal(auditGithub(f.input).jobs[0].id, 5);
 });
