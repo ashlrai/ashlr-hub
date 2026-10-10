@@ -8,8 +8,11 @@ import { performance } from 'node:perf_hooks';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { create as createTar, Header } from 'tar';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as durability from '../src/core/util/durability.js';
 import {
   extractPinnedRuntimeArchive,
+  extractPinnedRuntimeArchiveWithTiming,
+  type RuntimeExtractionTiming,
   readPinnedRuntimeArchive,
   readCompatiblePinnedRuntimeArchive,
 } from '../src/core/local-runtime/archive.js';
@@ -58,6 +61,7 @@ async function fixture(options: {
   name?: string;
   failSmoke?: boolean;
   omitSdkExport?: boolean;
+  emptyFile?: boolean;
 } = {}) {
   const base = temporary();
   const source = join(base, 'bootstrap', 'package');
@@ -92,6 +96,7 @@ async function fixture(options: {
   write(join(source, 'scripts/scorecard-history-worker.mjs'), 'export const fixture = true;\n');
   write(join(source, 'node_modules/fixture-dependency/package.json'), '{"name":"fixture-dependency","version":"1.0.0"}\n');
   write(join(source, 'node_modules/fixture-dependency/index.js'), 'export const fixture = true;\n');
+  if (options.emptyFile) write(join(source, 'schema/empty.json'), '');
   const inventory = buildRuntimeReleaseDependencyInventory(source);
   if (!inventory.ok) throw new Error(`Acceptance fixture inventory: ${inventory.reason}`);
   write(join(source, RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH), inventory.canonicalJson);
@@ -116,6 +121,122 @@ afterEach(() => {
 });
 
 describe('independent pinned local runtime archive acceptance', () => {
+  it('timed extraction preserves exact bytes, modes and syscall order with one post-barrier summary', async () => {
+    const value = await fixture({emptyFile: true}), archive = await readPinnedRuntimeArchive(value.pins);
+    const roots = ['ordinary', 'traced'].map(name => { const path = join(value.base, name); fs.mkdirSync(path, {mode: 0o700}); return path; });
+    const events: string[][] = [[], []]; let arm = 0;
+    const handles = new Map<number, string>();
+    const barrier = durability.fsyncDirectory;
+    vi.spyOn(durability, 'fsyncDirectory').mockImplementation((path, options) => {
+      events[arm]!.push(`directory-barrier:${relative(roots[arm]!, path)}`); return barrier(path, options);
+    });
+    const open = fs.openSync, write = fs.writeSync, chmod = fs.fchmodSync, sync = fs.fsyncSync, close = fs.closeSync;
+    vi.spyOn(fs, 'openSync').mockImplementation(((path: string, flags: number, mode: number) => {
+      const fd = open(path, flags, mode); handles.set(fd, relative(roots[arm]!, String(path))); events[arm]!.push(`open:${handles.get(fd)}`); return fd;
+    }) as typeof fs.openSync);
+    vi.spyOn(fs, 'writeSync').mockImplementation(((fd: number, ...args: unknown[]) => {
+      events[arm]!.push(`write:${handles.get(fd)}`); return Reflect.apply(write, fs, [fd, ...args]);
+    }) as typeof fs.writeSync);
+    vi.spyOn(fs, 'fchmodSync').mockImplementation((fd, mode) => {events[arm]!.push(`chmod:${handles.get(fd)}`); return chmod(fd, mode);});
+    vi.spyOn(fs, 'fsyncSync').mockImplementation(fd => {events[arm]!.push(`sync:${handles.get(fd)}`); return sync(fd);});
+    vi.spyOn(fs, 'closeSync').mockImplementation(fd => {events[arm]!.push(`close:${handles.get(fd)}`); const result = close(fd); handles.delete(fd); return result;});
+    syncBuiltinESMExports();
+    expect(extractPinnedRuntimeArchive(archive, roots[0]!)).toBeUndefined();
+    arm = 1; const summaries: RuntimeExtractionTiming[] = []; let handlesAtEmission = -1;
+    expect(extractPinnedRuntimeArchiveWithTiming(archive, roots[1]!, summary => {
+      handlesAtEmission = handles.size; summaries.push(summary);
+    })).toBeUndefined();
+    expect(events[1]).toEqual(events[0]); expect(summaries).toHaveLength(1); expect(handlesAtEmission).toBe(0);
+    const firstBarrier = events[1]!.findIndex(event => event.startsWith('directory-barrier:'));
+    expect(firstBarrier).toBeGreaterThan(0);
+    expect(events[1]!.slice(firstBarrier).every(event => event.startsWith('directory-barrier:'))).toBe(true);
+    expect(snapshot(roots[1]!)).toEqual(snapshot(roots[0]!));
+    expect(files(roots[1]!).map(path => fs.lstatSync(path).mode & 0o777)).toEqual(files(roots[0]!).map(path => fs.lstatSync(path).mode & 0o777));
+    const summary = summaries[0]!;
+    expect(summary.outcome).toBe('returned');
+    expect(summary.buckets['entry-digests'].completed).toBe(archive.entries.length);
+    for(const label of ['leaf-open', 'leaf-chmod', 'leaf-fsync', 'leaf-close'] as const) {
+      expect(summary.buckets[label].attempted).toBe(archive.entries.length); expect(summary.buckets[label].completed).toBe(archive.entries.length);
+    }
+    expect(summary.buckets['leaf-write'].completed).toBe(archive.entries.filter(entry => entry.bytes.length > 0).length);
+    expect(summary.writtenBytes).toBe(archive.entries.reduce((count, entry) => count + entry.bytes.length, 0));
+    expect(summary.buckets['ancestor-validation'].completed).toBe(archive.entries.reduce((count, entry) => count + entry.path.split('/').length - 1, 0));
+    const directories = new Set(archive.entries.flatMap(entry => {const parts = entry.path.split('/'); return parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join('/'));}));
+    expect(summary.buckets['directory-create'].completed).toBe(directories.size);
+    expect(summary.buckets['directory-barrier'].completed).toBe(directories.size + 2);
+    expect(Object.isFrozen(summary)).toBe(true); expect(Object.isFrozen(summary.buckets)).toBe(true);
+    expect(JSON.stringify(summary)).not.toContain(value.base); expect(JSON.stringify(summary)).not.toContain('package.json');
+    expect(summary.durationMs).toBeGreaterThanOrEqual(0); expect(summary.unattributedMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('does not call a sink before admitted buffers are consumed and keeps sink failures inert', async () => {
+    const value = await fixture(), archive = await readPinnedRuntimeArchive(value.pins);
+    const original = archive.entries[0]!.bytes[0]!;
+    for(const asynchronous of [false, true]) {
+      const destination = join(value.base, asynchronous ? 'rejecting-sink' : 'throwing-sink'); fs.mkdirSync(destination, {mode: 0o700});
+      let calls = 0; let snapshotAtEmission: Record<string, string> | undefined;
+      extractPinnedRuntimeArchiveWithTiming(archive, destination, () => {
+        calls += 1; archive.entries[0]!.bytes[0] = original ^ 255;
+        snapshotAtEmission = snapshot(destination);
+        if (asynchronous) return Promise.reject(new Error('private sink rejection'));
+        throw new Error('private sink failure');
+      });
+      expect(calls).toBe(1);
+      expect(snapshotAtEmission).toEqual(Object.fromEntries(value.archiveFiles.map(path => [relative(value.source, path), hash(fs.readFileSync(path))])));
+      archive.entries[0]!.bytes[0] = original;
+      await Promise.resolve();
+    }
+  });
+
+  it.each(['ordinary', 'traced'] as const)('preserves the exact file-sync failure and closes its descriptor in %s mode', async mode => {
+    const value = await fixture(), archive = await readPinnedRuntimeArchive(value.pins), error = new Error('private file sync failure');
+    const destination = join(value.base, mode); fs.mkdirSync(destination, {mode: 0o700});
+    const close = vi.spyOn(fs, 'closeSync'), sync = vi.spyOn(fs, 'fsyncSync').mockImplementation(() => {throw error;}); syncBuiltinESMExports();
+    const summaries: RuntimeExtractionTiming[] = [];
+    let observed: unknown;
+    try {
+      if(mode === 'traced') extractPinnedRuntimeArchiveWithTiming(archive, destination, summary => {summaries.push(summary); throw new Error('private observer failure');});
+      else extractPinnedRuntimeArchive(archive, destination);
+    } catch (caught) {observed = caught;}
+    expect(observed).toBe(error); expect(sync).toHaveBeenCalledTimes(1); expect(close).toHaveBeenCalledTimes(1);
+    if(mode === 'traced') {
+      expect(summaries).toHaveLength(1); expect(summaries[0]!.outcome).toBe('threw');
+      expect(summaries[0]!.buckets['leaf-fsync']).toMatchObject({attempted: 1, completed: 0});
+      expect(summaries[0]!.buckets['leaf-close'].completed).toBe(1);
+      expect(summaries[0]!.buckets['directory-barrier'].attempted).toBe(0);
+    }
+  });
+
+  it.each(['mutated', 'unverified', 'occupied'] as const)('tracing retains %s archive refusal before writes', async kind => {
+    const value = await fixture(), archive = await readPinnedRuntimeArchive(value.pins);
+    const destination = join(value.base, 'refused'); fs.mkdirSync(destination, {mode: 0o700});
+    if(kind === 'mutated') archive.entries[0]!.bytes[0] = archive.entries[0]!.bytes[0]! ^ 255;
+    if(kind === 'occupied') fs.writeFileSync(join(destination, 'existing'), 'preserved');
+    const before = snapshot(destination), summaries: RuntimeExtractionTiming[] = [];
+    expect(() => extractPinnedRuntimeArchiveWithTiming(kind === 'unverified' ? {...archive} : archive, destination,
+      summary => summaries.push(summary))).toThrow(kind === 'mutated' ? 'admitted bytes changed' : kind === 'unverified' ? 'not admitted' : 'not empty');
+    expect(snapshot(destination)).toEqual(before); expect(summaries).toHaveLength(1);
+    expect(summaries[0]!.outcome).toBe('threw'); expect(summaries[0]!.buckets['leaf-open'].attempted).toBe(0);
+  });
+
+  it('counts actual short writes and refuses zero progress without directory barriers', async () => {
+    const value = await fixture(), archive = await readPinnedRuntimeArchive(value.pins);
+    const write = fs.writeSync;
+    vi.spyOn(fs, 'writeSync').mockImplementation(((fd: number, buffer: Buffer, offset: number, length: number, position: number) =>
+      write(fd, buffer, offset, Math.max(1, Math.floor(length / 2)), position)) as typeof fs.writeSync); syncBuiltinESMExports();
+    const destination = join(value.base, 'short-writes'); fs.mkdirSync(destination, {mode: 0o700});
+    let summary: RuntimeExtractionTiming | undefined;
+    extractPinnedRuntimeArchiveWithTiming(archive, destination, value => {summary = value;});
+    expect(summary!.buckets['leaf-write'].completed).toBeGreaterThan(archive.entries.length);
+    expect(summary!.writtenBytes).toBe(archive.entries.reduce((count, entry) => count + entry.bytes.length, 0));
+    expect(snapshot(destination)).toEqual(Object.fromEntries(value.archiveFiles.map(path => [relative(value.source, path), hash(fs.readFileSync(path))])));
+    vi.mocked(fs.writeSync).mockImplementation(() => 0); syncBuiltinESMExports();
+    const zero = join(value.base, 'zero-write'); fs.mkdirSync(zero, {mode: 0o700});
+    expect(() => extractPinnedRuntimeArchiveWithTiming(archive, zero, value => {summary = value;})).toThrow('write made no progress');
+    expect(summary!.outcome).toBe('threw'); expect(summary!.writtenBytes).toBe(0);
+    expect(summary!.buckets['leaf-close'].completed).toBe(1); expect(summary!.buckets['directory-barrier'].attempted).toBe(0);
+  });
+
   it('requires an explicit canonical profile for actual canonical original archive bytes', async () => {
     const value = await fixture({name: '@ashlr/phantom'});
     await expect(readPinnedRuntimeArchive(value.pins)).rejects.toThrow('package name');

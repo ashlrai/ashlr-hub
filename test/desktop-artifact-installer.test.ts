@@ -8,7 +8,7 @@ import {gzipSync} from 'node:zlib';
 import {Header} from 'tar';
 import {canonicalJson} from '../src/core/authority/canonical-json.js';
 import {authoritySurfaceDigest,verifyAuthoritySurfaceAt} from '../src/core/authority/surface.js';
-import {readPinnedRuntimeArchive,extractPinnedRuntimeArchive} from '../src/core/local-runtime/archive.js';
+import {readPinnedRuntimeArchive,extractPinnedRuntimeArchive,extractPinnedRuntimeArchiveWithTiming} from '../src/core/local-runtime/archive.js';
 import {verifyUpdateManifest,verifyCompatibleUpdateManifest,desktopUpdateProfileForPackage,getDesktopUpdateProfile,verifyMinisign,verifyUpdateBundleRecord} from '../src/core/desktop/update-manifest.js';
 import {inspectSignedAppArchive,extractSignedAppArchive,verifyInstalledRuntimeArchive} from '../src/core/desktop/qualified-update.js';
 import {qualifiedFixture} from '../.github/tests/helpers/hosted-artifact-fixture.mjs';
@@ -101,7 +101,7 @@ function fixture(profileName:DesktopUpdateProfileName='legacy-v1',currentPackage
   ports.source.mockImplementation(()=>({revision,tree,tracked:[],inputs:[]}));
   const initialImplementation={source:'exact independently qualified installer',build:'fixed compiled snapshot'};
   const implementationSnapshot=vi.fn(async()=>structuredClone(initialImplementation));
-  const primitives={verifyUpdateManifest,verifyCompatibleUpdateManifest,desktopUpdateProfileForPackage,verifyMinisign,verifyUpdateBundleRecord,inspectSignedAppArchive,extractSignedAppArchive,verifyInstalledRuntimeArchive,readPinnedRuntimeArchive,extractPinnedRuntimeArchive,verifyAuthoritySurfaceAt,trust,appleSigner:m.app.signer};
+  const primitives={verifyUpdateManifest,verifyCompatibleUpdateManifest,desktopUpdateProfileForPackage,verifyMinisign,verifyUpdateBundleRecord,inspectSignedAppArchive,extractSignedAppArchive,verifyInstalledRuntimeArchive,readPinnedRuntimeArchive,extractPinnedRuntimeArchive,extractPinnedRuntimeArchiveWithTiming,verifyAuthoritySurfaceAt,trust,appleSigner:m.app.signer};
   const deps={home,environment:{HOME:home,PATH:'/usr/bin:/bin',LANG:'C',LC_ALL:'C'},primitives,implementationSnapshot,initialImplementation,
     transport:{githubRead:vi.fn(()=>{throw new Error('live network forbidden');}),attestRun:vi.fn(()=>{throw new Error('live network forbidden');})}};
   const oldRevision='a'.repeat(40),old=join(home,'.local/share/ashlr/releases',oldRevision),current=join(home,'.local/share/ashlr/current');
@@ -168,10 +168,21 @@ describe.skipIf(process.platform==='win32')('manual original paired artifact ins
     },{emit:(record:any)=>records.push(record),now:()=>++clock});
     expect(result).toMatchObject({state:'installed',installationPerformed:true,authorityResumed:false});
     expect(ports.verify).toHaveBeenCalledTimes(4);
+    const summary=records.find(record=>record.kind==='artifact-runtime-extraction-timing');
+    expect(summary).toMatchObject({schemaVersion:1,outcome:'returned'});
+    expect(summary.buckets['leaf-fsync'].completed).toBe(summary.buckets['leaf-open'].completed);
+    expect(summary.buckets['leaf-close'].completed).toBe(summary.buckets['leaf-open'].completed);
+    expect(summary.durationMs).toBeGreaterThanOrEqual(0);
+    expect(summary.unattributedMs).toBeGreaterThanOrEqual(0);
+    expect(Object.keys(summary).sort()).toEqual(['schemaVersion','kind','sequence','parentSpanId','outcome','durationMs','unattributedMs','writtenBytes','buckets'].sort());
+    for(const label of ['install-total','native-app-extraction','native-app-inspection']) {
+      expect(records.filter(record=>record.event==='finished' && record.label===label)).toHaveLength(1);
+    }
     const starts=records.filter(record=>record.event==='started'),finishes=records.filter(record=>record.event==='finished');
     expect(starts.length).toBeGreaterThan(20);expect(finishes).toHaveLength(starts.length);
     expect(new Set(starts.map(record=>record.spanId)).size).toBe(starts.length);
     expect(starts.some(record=>record.parentSpanId!==null)).toBe(true);
+    expect(starts.find(record=>record.spanId===summary.parentSpanId)?.label).toBe('staging');
     expect(starts.filter(record=>record.label==='late-hosted-proof')).toHaveLength(3);
     for(const finish of finishes) {
       expect(finish).toMatchObject({schemaVersion:1,kind:'artifact-install-timing',outcome:'returned'});
