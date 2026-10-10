@@ -120,6 +120,32 @@ describe('openVerseSession — one load, then a resumed stream', () => {
   });
 });
 
+describe('snapshot reconciliation during a real reload', () => {
+  it.each([false, true])('keeps streamed work when delayed detail contains start: %s', async includesStart => {
+    const frames = manualFrames();
+    const old = session({ status: 'idle', updatedAt: '2026-10-10T05:35:00.000Z' });
+    const start = { ...ev(1, 'turn-started', { turnId: 't1', pid: 1 }), at: '2026-10-10T05:36:00.000Z' };
+    seedVerseSession('vs_1', old, []);
+    const release = acquireVerseSessionStream('vs_1');
+    let resolve!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(done => { resolve = done; })));
+    const close = openVerseSession('vs_1', { reload: true });
+    const stream = MockEventSource.forSession('vs_1');
+    stream.emit(start);
+    frames.frame();
+    expect(getVerseSessionState('vs_1').session?.status).toBe('running');
+    resolve(new Response(JSON.stringify({ session: old, events: includesStart ? [start] : [] }),
+      { headers: { 'Content-Type': 'application/json' } }));
+    await vi.waitFor(() => expect(verseStreamRegistrySnapshot()[0]?.refs).toBe(2));
+    expect(getVerseSessionState('vs_1').session?.status).toBe('running');
+    expect(getVerseLive('vs_1').turnId).toBe('t1');
+    stream.emit({ ...ev(2, 'cancelled', { turnId: 't1' }), at: '2026-10-10T05:37:00.000Z' });
+    frames.frame();
+    expect(getVerseSessionState('vs_1').session?.status).toBe('idle');
+    close(); release();
+  });
+});
+
 describe('frame batching', () => {
   it('applies every frame that arrives within one animation frame with ONE store update', () => {
     const frames = manualFrames();

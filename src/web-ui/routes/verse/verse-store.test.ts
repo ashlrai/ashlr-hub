@@ -16,6 +16,7 @@ import {
   seedVerseSession,
   setVerseSession,
   settledStatus,
+  turnSettlement,
   subscribeVerseSession,
   subscribeVerseStore,
   subscribeVerseStoreLifecycle,
@@ -235,6 +236,22 @@ describe('verse store', () => {
     // Pure form: a running snapshot with no events at all is left alone.
     expect(settledStatus(session({ status: 'running' }), []).status).toBe('running');
     expect(settledStatus(session({ status: 'idle' }), [ev(1, 'cancelled', { turnId: 'x' })]).status).toBe('idle');
+  });
+
+  it('shares latest-turn terminal correlation with explicit-turn snapshot reconciliation', () => {
+    const start = ev(1, 'user-message', { turnId: 't1', text: 'first' });
+    const error = ev(2, 'error', { turnId: 't1', message: 'failed' });
+    const done = ev(3, 'turn-done', { turnId: 't1', ok: false, nativeSessionId: null, durationMs: 1 });
+    const next = ev(4, 'user-message', { turnId: 't2', text: 'second' });
+    expect(turnSettlement([])).toBeNull();
+    expect(turnSettlement([done])).toBeNull();
+    expect(turnSettlement([start, error])).toBeNull();
+    expect(turnSettlement([start, error, done])).toEqual({ terminal: done, lastError: 'failed' });
+    expect(turnSettlement([start, error, done, next])).toBeNull();
+    expect(turnSettlement([start, error, done, next], 't1')).toEqual({ terminal: done, lastError: 'failed' });
+    expect(turnSettlement([start, error, done, next], 't2')).toBeNull();
+    const cancel = ev(5, 'cancelled', { turnId: 't2' });
+    expect(turnSettlement([start, error, done, next, cancel])).toEqual({ terminal: cancel, lastError: null });
   });
 
   it('returns a stable empty state for no selection', () => {
@@ -757,5 +774,130 @@ describe('client data path — §1 targets (best of several runs)', () => {
     }
     console.info('[verse-perf] store+derive per delta at 5k, median ms', Number(median(samples).toFixed(3)));
     expect(median(samples)).toBeLessThan(1);
+  });
+});
+
+describe('snapshot reconciliation against observed turns', () => {
+  const oldAt = '2026-10-10T05:35:00.000Z';
+  const startAt = '2026-10-10T05:36:00.000Z';
+  const endAt = '2026-10-10T05:37:00.000Z';
+  const idle = () => session({ status: 'idle', updatedAt: oldAt });
+  const start = () => ({ ...ev(1, 'turn-started', { turnId: 't1', pid: 1 }), at: startAt });
+  beforeEach(() => resetVerseStore());
+  function open() {
+    seedVerseSession('vs_1', idle(), []);
+    applyVerseEvent('vs_1', start());
+  }
+  it.each([false, true])('preserves streamed open work when old detail already includes start: %s', includesStart => {
+    open();
+    applyVerseEvent('vs_1', transient(1, { type: 'thinking-delta', turnId: 't1', text: 'Still thinking' }));
+    const live = getVerseLive('vs_1');
+    seedVerseSession('vs_1', idle(), includesStart ? [start()] : []);
+    expect(getVerseSessionState('vs_1').session?.status).toBe('running');
+    expect(getVerseLive('vs_1')).toBe(live);
+    applyVerseEvent('vs_1', { ...ev(2, 'context', { turnId: 't1', contextTokens: 12, contextWindow: 65_536, exact: true }), at: endAt });
+    expect(getVerseSessionState('vs_1').session?.status).toBe('running');
+    expect(getVerseSessionState('vs_1').session?.usage.contextTokens).toBe(12);
+  });
+  it('preserves open lifecycle while accepting metadata and keeps repeated snapshots structurally stable', () => {
+    open();
+    const renamed = { ...idle(), title: 'Renamed during work' };
+    setVerseSession('vs_1', renamed);
+    expect(getVerseSessionState('vs_1').session).toMatchObject({ status: 'running', title: renamed.title, updatedAt: startAt });
+    const head = getVerseSessionHead('vs_1');
+    const notified = vi.fn();
+    const unsub = subscribeVerseSession('vs_1', notified);
+    setVerseSession('vs_1', { ...renamed });
+    seedVerseSession('vs_1', { ...renamed }, [start()]);
+    expect(getVerseSessionHead('vs_1')).toBe(head);
+    expect(notified).not.toHaveBeenCalled();
+    unsub();
+  });
+  it.each(['idle', 'error'] as const)('rejects a delayed pre-start %s POST snapshot for the active turn', status => {
+    open();
+    setVerseSession('vs_1', session({ status, lastError: status === 'error' ? 'Previous failure' : null, updatedAt: oldAt }), 't1');
+    expect(getVerseSessionState('vs_1').session).toMatchObject({ status: 'running', lastError: null });
+  });
+  it.each(['running', 'error', 'cancelled'] as const)('an old explicit POST cannot overwrite newer observed %s work', phase => {
+    open();
+    applyVerseEvent('vs_1', { ...ev(2, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: null, durationMs: 1 }), at: endAt });
+    applyVerseEvent('vs_1', { ...ev(3, 'turn-started', { turnId: 't2', pid: 2 }), at: '2026-10-10T05:38:00.000Z' });
+    if (phase === 'error') applyVerseEvent('vs_1', ev(4, 'error', { turnId: 't2', message: 'New failure' }));
+    if (phase === 'cancelled') applyVerseEvent('vs_1', ev(4, 'cancelled', { turnId: 't2' }));
+    const head = getVerseSessionHead('vs_1');
+    setVerseSession('vs_1', session({ status: 'running', updatedAt: '2026-10-10T05:39:00.000Z' }), 't1');
+    expect(getVerseSessionHead('vs_1')).toBe(head);
+  });
+  it.each(['done', 'cancelled', 'error'] as const)('old idle detail cannot overwrite actual %s evidence', terminal => {
+    open();
+    if (terminal === 'error') applyVerseEvent('vs_1', { ...ev(2, 'error', { turnId: 't1', message: 'Actual failure' }), at: endAt });
+    else applyVerseEvent('vs_1', terminal === 'cancelled'
+      ? { ...ev(2, 'cancelled', { turnId: 't1' }), at: endAt }
+      : { ...ev(2, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: null, durationMs: 1 }), at: endAt });
+    seedVerseSession('vs_1', idle(), []);
+    expect(getVerseSessionState('vs_1').session).toMatchObject({ status: terminal === 'error' ? 'error' : 'idle',
+      lastError: terminal === 'error' ? 'Actual failure' : null, updatedAt: endAt });
+  });
+  it('accepts a correlated failed terminal delivered alongside the stale idle detail', () => {
+    open();
+    seedVerseSession('vs_1', idle(), [start(),
+      { ...ev(2, 'error', { turnId: 't1', message: 'Actual failure' }), at: endAt },
+      { ...ev(3, 'turn-done', { turnId: 't1', ok: false, nativeSessionId: null, durationMs: 1 }), at: endAt }]);
+    expect(getVerseSessionState('vs_1').session).toMatchObject({ status: 'error', lastError: 'Actual failure', updatedAt: endAt });
+    expect(getVerseLive('vs_1').turnId).toBeNull();
+  });
+  it('folds newly fetched correlated error evidence before its SSE replay is deduplicated', () => {
+    open();
+    const failure = { ...ev(2, 'error', { turnId: 't1', message: 'Fetched failure' }), at: endAt };
+    seedVerseSession('vs_1', idle(), [start(), failure]);
+    expect(getVerseSessionState('vs_1').session).toMatchObject({ status: 'error', lastError: 'Fetched failure', updatedAt: endAt });
+    expect(applyVerseEvent('vs_1', failure)).toBe(false);
+    expect(getVerseSessionState('vs_1').session?.status).toBe('error');
+  });
+  it('folds a newly fetched completion payload exactly once before its SSE replay', () => {
+    open();
+    const before = getVerseSessionState('vs_1').session!;
+    const done = { ...ev(2, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: 'native-new-terminal', durationMs: 1 }), at: endAt };
+    seedVerseSession('vs_1', idle(), [start(), done]);
+    expect(getVerseSessionState('vs_1').session).toMatchObject({ status: 'idle', turnCount: before.turnCount + 1,
+      nativeSessionId: 'native-new-terminal', updatedAt: endAt });
+    expect(applyVerseEvent('vs_1', done)).toBe(false);
+    seedVerseSession('vs_1', idle(), [start(), done]);
+    expect(getVerseSessionState('vs_1').session?.turnCount).toBe(before.turnCount + 1);
+  });
+  it('preserves already observed terminal counters and native resume identity', () => {
+    open();
+    applyVerseEvent('vs_1', { ...ev(2, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: 'native-fixture', durationMs: 1 }), at: endAt });
+    const completed = getVerseSessionState('vs_1').session!;
+    seedVerseSession('vs_1', idle(), []);
+    expect(getVerseSessionState('vs_1').session).toMatchObject({ turnCount: completed.turnCount, nativeSessionId: 'native-fixture', status: 'idle' });
+  });
+  it('does not let an old open turn mask a newer error in a detail snapshot', () => {
+    open();
+    const newer = session({ status: 'error', lastError: 'New turn failure', updatedAt: endAt });
+    seedVerseSession('vs_1', newer, [start(),
+      { ...ev(2, 'turn-started', { turnId: 't2', pid: 2 }), at: endAt },
+      { ...ev(3, 'error', { turnId: 't2', message: 'New turn failure' }), at: endAt }]);
+    expect(getVerseSessionState('vs_1').session).toMatchObject({ status: 'error', lastError: 'New turn failure' });
+  });
+  it.each([startAt, endAt, 'invalid'])('does not infer stale open work from equal/newer/invalid snapshot time %s', updatedAt => {
+    open();
+    seedVerseSession('vs_1', session({ status: 'idle', updatedAt }), []);
+    expect(getVerseSessionState('vs_1').session?.status).toBe('idle');
+  });
+  it('does not revive cold historical starts or optimistic status without an observed start', () => {
+    seedVerseSession('vs_1', idle(), [start()]);
+    seedVerseSession('vs_1', idle(), []);
+    expect(getVerseSessionState('vs_1').session?.status).toBe('idle');
+    setVerseSession('vs_1', session({ status: 'running', updatedAt: startAt }), 'unseen');
+    seedVerseSession('vs_1', idle(), []);
+    expect(getVerseSessionState('vs_1').session?.status).toBe('idle');
+  });
+  it.each(['forget', 'reset'] as const)('drops observed turn evidence on %s and session reuse', method => {
+    open();
+    if (method === 'forget') forgetVerseSession('vs_1'); else resetVerseStore();
+    seedVerseSession('vs_1', idle(), []);
+    expect(getVerseSessionState('vs_1').session?.status).toBe('idle');
+    expect(getVerseLive('vs_1').turnId).toBeNull();
   });
 });

@@ -58,6 +58,7 @@ import {
   type SidebarFilter,
   type SidebarGroup,
   type SidebarRow,
+  type SidebarSelectedTerminal,
 } from './chat/sidebar-model.js';
 import { ArchiveGlyph, HandoffGlyph, MoreGlyph, PinGlyph, RenameGlyph, TrashGlyph } from './dock/dock-icons.js';
 import { PlusIcon, SearchIcon, SidebarIcon } from './verse-icons.js';
@@ -84,6 +85,8 @@ export interface SidebarProps {
   onDisconnect: () => void;
   /** 3.10 — C1's activity (null: not on this server / not answered yet). */
   activity?: VerseActivityResponse | null;
+  /** Selected head's correlated terminal; never inferred from updatedAt. */
+  selectedTerminal?: SidebarSelectedTerminal | null;
   /** 3.10 — C1's per-chat meta (null: not on this server / not answered yet). */
   meta?: VerseSessionMetaResponse | null;
   /**
@@ -115,7 +118,7 @@ const SessionSearch = lazy(() => import('./context/SessionSearch.js').then((m) =
 
 export function Sidebar(props: SidebarProps) {
   const { sessions, sessionsStatus, sessionsError, projects, seats, selectedId, query, onQuery, onSelect, onNew,
-    onRetry, onCollapse, onDisconnect, activity = null, meta = null, metaError = null, localSeen = NO_SEEN, actions } = props;
+    onRetry, onCollapse, onDisconnect, activity = null, selectedTerminal = null, meta = null, metaError = null, localSeen = NO_SEEN, actions } = props;
   const searchId = useId();
   const newChatShortcut = findCommand('chat.new')?.keys[0];
   const sidebarShortcut = findCommand('chat.sidebar')?.keys[0];
@@ -130,8 +133,8 @@ export function Sidebar(props: SidebarProps) {
   const disconnectTitleId = useId();
   const disconnectCancelRef = useRef<HTMLButtonElement>(null);
   const model = useMemo(
-    () => buildSidebar({ sessions, projects, query, filter, activity, meta, localSeen, selectedId }),
-    [sessions, projects, query, filter, activity, meta, localSeen, selectedId],
+    () => buildSidebar({ sessions, projects, query, filter, activity, meta, localSeen, selectedId, selectedTerminal }),
+    [sessions, projects, query, filter, activity, meta, localSeen, selectedId, selectedTerminal],
   );
   const loading = sessionsStatus === 'loading' || (sessionsStatus === 'idle' && sessions.length === 0);
   const searching = query.trim().length > 0;

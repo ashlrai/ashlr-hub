@@ -10,6 +10,40 @@ archive, paired with [`latest.json`](https://github.com/ashlrai/phantom/releases
 rather than a DMG. These are update artifacts; downloading or unpacking them
 alone does not perform the qualified installation described below.
 
+### Consumer first install (source implementation)
+
+The source includes `phm desktop install` for an empty Apple silicon Mac
+installation. It is not included in the published release above, and acceptance
+on a clean Mac remains unverified. After this command is published and accepted,
+use the canonical CLI's matching release:
+
+```sh
+phm authority stop --json
+phm desktop install           # downloads and verifies a fresh private stage
+phm desktop install --apply   # fresh inspection, then explicit installation
+```
+
+Inspection preserves downloaded data under `~/.ashlr/updates/consumer-staging`;
+it does not install, stop work or create command links. Apply requires absent
+`Phantom.app`/`Ashlr.app`, managed current pointer and both managed command links.
+It verifies the original signed app and paired npm archive, keeps Stop engaged,
+and never builds, re-signs, creates a signing key or resumes the fleet.
+
+Installation acceptance and shell setup are separate results. The exact managed
+CLI must report the matching version. An unrelated global npm command, missing
+command or unknown login-shell target reports `shell-setup-required`; the
+installer does not rewrite global aliases, PATH or shell profiles. Native updates
+use the managed current CLI; Fleet's login-shell discovery can resolve another
+installation. A same-version authenticated feed means no update, while a newer
+feed still needs the existing update admission and grant.
+
+Existing app/current/link collisions use the update or recovery flow instead.
+Failed launch can roll back to absence; a live or uncertain replacement is
+preserved for normal Quit and recovery. `/Applications` permission, isolated
+system Python and macOS Gatekeeper acceptance remain fresh-Mac prerequisites.
+The app is locally signed, not Developer ID notarized; this command never bypasses
+Gatekeeper or changes system security settings.
+
 ### Historical DMG: 3.27.0
 
 The published canonical 3.27.0 release includes `Phantom.app`, with
@@ -51,7 +85,7 @@ For routine drift detection, `node scripts/sync-candidate-version.mjs --check`
 uses the root package version as the expected value; writing still requires an
 explicit version.
 
-This source tree targets version 3.29.7; check canonical release availability and exact matching assets before installation.
+This source tree targets version 3.29.8; check canonical release availability and exact matching assets before installation.
 
 Canonical releases use `ashlrai/phantom` and `@ashlr/phantom`.
 Its fixed discovery endpoint is

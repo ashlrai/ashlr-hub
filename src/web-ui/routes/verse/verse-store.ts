@@ -297,7 +297,7 @@ export function getVerseThinkingStats(sessionId: string): ReadonlyMap<number, Ve
 export function seedVerseSession(sessionId: string, session: VerseSession, events: readonly VerseEvent[]): void {
   const current = entryFor(sessionId);
   const merged = mergeEvents(current.events, events);
-  const settled = settledStatus(session, merged);
+  const settled = reconcileSessionSnapshot(current, session, merged);
   const nextSession = current.session && sameSession(current.session, settled) ? current.session : settled;
   const eventsChanged = merged !== current.events;
   const live = eventsChanged || nextSession !== current.session ? liveFromLog(current.live, merged, nextSession) : current.live;
@@ -332,20 +332,82 @@ export function setVerseStreamState(sessionId: string, stream: VerseStreamState)
  */
 export function setVerseSession(sessionId: string, session: VerseSession, turnId?: string): void {
   const current = entryFor(sessionId);
-  patch(sessionId, { session: settledStatus(session, current.events, turnId) });
+  const reconciled = reconcileSessionSnapshot(current, session, current.events, turnId);
+  if (current.session && sameSession(current.session, reconciled)) return;
+  patch(sessionId, { session: reconciled });
+}
+
+/** Reconcile a response with lifecycle evidence already observed by this tab.
+ * Detail reads capture the record before awaiting manager reconciliation, then
+ * read events afterward: even a response containing the start can carry an old
+ * idle record. A timestamp orders that record against a real lifecycle event;
+ * it never establishes running/completion on its own. */
+function reconcileSessionSnapshot(current: VerseSessionState, incoming: VerseSession,
+  events: readonly VerseEvent[], turnId?: string): VerseSession {
+  let anchor: Extract<VerseEvent, { type: 'user-message' | 'turn-started' }> | undefined;
+  for (const event of current.events) {
+    if (event.type === 'user-message' || event.type === 'turn-started') anchor = event;
+  }
+  // A delayed POST for a known older turn cannot settle a newer observed turn.
+  // An unseen turnId may be a new POST whose stream has not arrived yet.
+  if (turnId && anchor && turnId !== anchor.turnId && current.session) {
+    const older = current.events.some(event => (event.type === 'user-message' || event.type === 'turn-started')
+      && event.turnId === turnId && event.seq < anchor!.seq);
+    if (older) return current.session;
+  }
+  const snapshotAt = Date.parse(incoming.updatedAt);
+  const settlement = turnSettlement(events, turnId);
+  if (settlement && Number.isFinite(snapshotAt) && snapshotAt < Date.parse(settlement.terminal.at)) {
+    const settled = settledStatus({ ...incoming, status: 'running' }, events, turnId);
+    const observed = turnSettlement(current.events, turnId);
+    if (current.session && observed?.terminal.seq === settlement.terminal.seq) {
+      return { ...settled, turnCount: current.session.turnCount, nativeSessionId: current.session.nativeSessionId };
+    }
+    if (current.session && anchor?.type === 'turn-started' && anchor.turnId === settlement.terminal.turnId) {
+      // A newly fetched terminal will be deduplicated when SSE replays it.
+      // Fold its lifecycle payload once, using the same rule as the stream.
+      const folded = sessionAfter(current.session, settlement.terminal);
+      return { ...settled, turnCount: folded.turnCount, nativeSessionId: folded.nativeSessionId };
+    }
+    return settled;
+  }
+  let latest: typeof anchor;
+  for (const event of events) {
+    if (event.type === 'user-message' || event.type === 'turn-started') latest = event;
+  }
+  if (current.session && anchor?.type === 'turn-started' && latest?.turnId === anchor.turnId
+    && (!turnId || turnId === anchor.turnId) && !settlement && Number.isFinite(snapshotAt)) {
+    // Only an actually observed start with its live identity proves open work.
+    // Cold historical logs and optimistic status flips provide no such proof.
+    const open = current.session.status === 'running' && current.live.turnId === anchor.turnId;
+    let error: Extract<VerseEvent, { type: 'error' }> | undefined;
+    for (const event of events) {
+      if (event.seq > latest.seq && event.type === 'error' && event.turnId === anchor.turnId) error = event;
+    }
+    const evidenceAt = Date.parse(error?.at ?? anchor.at);
+    if ((open || (error && current.session.status === 'error')) && snapshotAt < evidenceAt) {
+      return { ...incoming, status: error ? 'error' : current.session.status,
+        lastError: error ? error.message : current.session.lastError,
+        updatedAt: error && !current.events.some(event => event.seq === error!.seq) ? error.at : current.session.updatedAt,
+        turnCount: current.session.turnCount, nativeSessionId: current.session.nativeSessionId };
+    }
+  }
+  return settledStatus(incoming, events, turnId);
 }
 
 /**
- * Reconcile a `running` snapshot against the event log. Without a `turnId`
- * the running turn is the last `user-message`/`turn-started` in the log; a
+ * Find correlated terminal evidence in the ordered event log. Without a `turnId`
+ * the relevant turn is the last `user-message`/`turn-started` in the log; a
  * later `turn-done`/`cancelled` means the server already settled it. With a
  * `turnId`, only that turn's terminal event counts (its `user-message` may
  * not have streamed in yet, so a previous turn's `turn-done` proves nothing).
  * Status follows the same rules applyVerseEvent uses: cancelled → idle,
  * `turn-done ok:false` → error only when an `error` event was logged for it.
  */
-export function settledStatus(session: VerseSession, events: readonly VerseEvent[], turnId?: string): VerseSession {
-  if (session.status !== 'running') return session;
+export function turnSettlement(events: readonly VerseEvent[], turnId?: string): {
+  terminal: Extract<VerseEvent, { type: 'turn-done' | 'cancelled' }>;
+  lastError: string | null;
+} | null {
   let anchorSeq = -1;
   let anchorTurn: string | null = turnId ?? null;
   if (!turnId) {
@@ -355,7 +417,7 @@ export function settledStatus(session: VerseSession, events: readonly VerseEvent
         anchorTurn = e.turnId;
       }
     }
-    if (anchorTurn === null) return session;
+    if (anchorTurn === null) return null;
   }
   let terminal: Extract<VerseEvent, { type: 'turn-done' | 'cancelled' }> | null = null;
   let lastError: string | null = null;
@@ -364,7 +426,15 @@ export function settledStatus(session: VerseSession, events: readonly VerseEvent
     if (e.type === 'error' && e.turnId === anchorTurn) lastError = e.message;
     if ((e.type === 'turn-done' || e.type === 'cancelled') && e.turnId === anchorTurn) terminal = e;
   }
-  if (!terminal) return session;
+  return terminal ? { terminal, lastError } : null;
+}
+
+/** Apply the same terminal evidence to a potentially stale running snapshot. */
+export function settledStatus(session: VerseSession, events: readonly VerseEvent[], turnId?: string): VerseSession {
+  if (session.status !== 'running') return session;
+  const settlement = turnSettlement(events, turnId);
+  if (!settlement) return session;
+  const { terminal, lastError } = settlement;
   const failed = terminal.type === 'turn-done' && !terminal.ok && lastError !== null;
   return {
     ...session,

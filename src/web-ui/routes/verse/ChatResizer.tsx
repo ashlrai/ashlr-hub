@@ -26,24 +26,19 @@
  *    (everything selects, the cursor sticks) is the most visible bug this
  *    control can have.
  */
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent, type PointerEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
 import {
   CHAT_PANEL_RANGES,
   CHAT_PANEL_STEP,
   CHAT_PANEL_STEP_COARSE,
-  getChatPanelSizing,
   nudgeChatPanelWidth,
   resetChatPanelWidth,
   setChatPanelWidth,
-  subscribeChatPanels,
   type ChatPanelSide,
-  type ChatPanelSizing,
 } from './chat-panel-sizing.js';
 
-/** The React glue over chat-panel-sizing.ts (same split as useVerseUi.ts). */
-export function useChatPanelSizing(): ChatPanelSizing {
-  return useSyncExternalStore(subscribeChatPanels, getChatPanelSizing, getChatPanelSizing);
-}
+import { useChatPanelSizing } from './use-chat-panel-sizing.js';
+export { useChatPanelSizing } from './use-chat-panel-sizing.js';
 
 /**
  * Marks the body for the duration of a drag so the stylesheet can suppress

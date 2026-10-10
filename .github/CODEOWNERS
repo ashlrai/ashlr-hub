@@ -139,6 +139,7 @@
 /desktop/src-tauri/src/lib.rs @masonwyatt23
 /src/core/run/desktop-metadata-launch-trust.ts @masonwyatt23
 /src/cli/desktop-update.ts @masonwyatt23
+/src/cli/desktop.ts @masonwyatt23
 /scripts/desktop-release-policy.mjs @masonwyatt23
 /scripts/finalize-desktop-update.mjs @masonwyatt23
 /src/core/daemon/activation-permit.ts @masonwyatt23
@@ -271,6 +272,7 @@
 /test/decide-judge-manager-315.test.ts @masonwyatt23
 /test/decide-resource-choice.test.ts @masonwyatt23
 /test/desktop-artifact-installer.test.ts @masonwyatt23
+/test/desktop-consumer-install.test.ts @masonwyatt23
 /test/desktop-metadata-launch-trust.test.ts @masonwyatt23
 /test/desktop-qualified-update.test.ts @masonwyatt23
 /test/desktop-update-cli.test.ts @masonwyatt23
