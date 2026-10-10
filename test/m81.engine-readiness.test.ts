@@ -11,6 +11,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { spawn } from 'node:child_process';
 import type { AshlrConfig, EngineId } from '../src/core/types.js';
 import {
   engineReadiness,
@@ -236,6 +237,44 @@ describe('codex — auth probes', () => {
 // ---------------------------------------------------------------------------
 
 describe('api-model engines', () => {
+  it('probes loopback without treating the compiled sidecar as Node', async () => {
+    const fixtureCode = [
+      "const http = require('node:http');",
+      "const server = http.createServer((request, response) => {",
+      "  response.setHeader('content-type', 'application/json');",
+      "  response.statusCode = request.url === '/v1/models' ? 200 : 404;",
+      "  response.end(JSON.stringify({data: [{id: 'fixture-model'}]}));",
+      "});",
+      "server.listen(0, '127.0.0.1', () => process.stdout.write(String(server.address().port) + '\\n'));",
+    ].join('\n');
+    const fixture = spawn(process.execPath, ['-e', fixtureCode], { stdio: ['ignore', 'pipe', 'pipe'] });
+    try {
+      const port = await new Promise<number>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('loopback fixture did not start')), 3000);
+        fixture.once('error', (error) => { clearTimeout(timeout); reject(error); });
+        fixture.stdout.once('data', (chunk: Buffer) => {
+          clearTimeout(timeout);
+          const parsed = Number(String(chunk).trim());
+          if (!Number.isInteger(parsed) || parsed < 1) reject(new Error('invalid fixture port'));
+          else resolve(parsed);
+        });
+      });
+      const originalExecPath = process.execPath;
+      try {
+        process.execPath = '/compiled-phantom-sidecar-cannot-eval';
+        const cfg = withFoundry({ allowedBackends: ['local-coder'], models: { 'local-coder': 'fixture-model' } });
+        const result = engineReadiness('local-coder', cfg, {
+          getEnv: (key) => key === 'OLLAMA_BASE_URL' ? 'http://127.0.0.1:' + String(port) + '/v1' : undefined,
+        });
+        expect(result).toMatchObject({ installed: true, authed: 'unknown', ready: true });
+      } finally {
+        process.execPath = originalExecPath;
+      }
+    } finally {
+      fixture.kill();
+    }
+  }, 10000);
+
   it('accepts only a valid 2xx model list from a loopback local-coder', () => {
     const cfg = withFoundry({ allowedBackends: ['local-coder'], models: { 'local-coder': 'configured-qwen' } });
     const isInstalled = vi.fn(() => true);

@@ -105,40 +105,29 @@ function localModelsUrl(baseUrl: string): string | null {
   }
 }
 
-/** A small, read-only GET in a bounded child; no redirects or arbitrary hosts. */
+/** A small, read-only GET in a bounded system tool; compiled sidecars cannot run `-e`. */
 function readLocalModels(url: string): { statusCode: number; body: string } | null {
-  const script = `
-    const u = new URL(process.argv[1]);
-    const h = require(u.protocol === 'https:' ? 'https' : 'http');
-    const req = h.get(u, {
-      timeout: 1500,
-      lookup: u.hostname === 'localhost'
-        ? (_host, options, callback) => options.all
-          ? callback(null, [{ address: '127.0.0.1', family: 4 }])
-          : callback(null, '127.0.0.1', 4)
-        : undefined,
-    }, (res) => {
-      let body = '';
-      res.setEncoding('utf8');
-      res.on('data', (chunk) => {
-        body += chunk;
-        if (body.length > 131072) req.destroy();
-      });
-      res.on('end', () => process.stdout.write(JSON.stringify({ statusCode: res.statusCode, body })));
-    });
-    req.on('error', () => process.exit(1));
-    req.on('timeout', () => req.destroy());
-  `;
   try {
-    const result = spawnSync(process.execPath, ['-e', script, url], {
+    // -q must be first: ignore user curl config, including redirects and proxy
+    // overrides. Use the OS binary by absolute path, not an agent-modified PATH.
+    const curl = process.platform === 'win32'
+      ? join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'curl.exe')
+      : '/usr/bin/curl';
+    const result = spawnSync(curl, [
+      '-q', '--silent', '--show-error', '--noproxy', '*',
+      '--proto', '=http,https', '--connect-timeout', '1', '--max-time', '2',
+      '--max-filesize', '131072', '--write-out', '\n%{http_code}', '--', url,
+    ], {
       encoding: 'utf8', timeout: 2500, maxBuffer: 262144,
       stdio: ['ignore', 'pipe', 'ignore'],
     });
     if (result.status !== 0 || result.error) return null;
-    const response = JSON.parse(result.stdout ?? '') as { statusCode?: unknown; body?: unknown };
-    return typeof response.statusCode === 'number' && typeof response.body === 'string'
-      ? { statusCode: response.statusCode, body: response.body }
-      : null;
+    const output = result.stdout ?? '';
+    const boundary = output.lastIndexOf('\n');
+    if (boundary < 0) return null;
+    const status = output.slice(boundary + 1);
+    if (!/^\d{3}$/.test(status)) return null;
+    return { statusCode: Number(status), body: output.slice(0, boundary) };
   } catch {
     return null;
   }
