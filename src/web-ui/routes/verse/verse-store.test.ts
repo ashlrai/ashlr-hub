@@ -16,6 +16,7 @@ import {
   seedVerseSession,
   setVerseSession,
   settledStatus,
+  turnSettlement,
   subscribeVerseSession,
   subscribeVerseStore,
   subscribeVerseStoreLifecycle,
@@ -235,6 +236,22 @@ describe('verse store', () => {
     // Pure form: a running snapshot with no events at all is left alone.
     expect(settledStatus(session({ status: 'running' }), []).status).toBe('running');
     expect(settledStatus(session({ status: 'idle' }), [ev(1, 'cancelled', { turnId: 'x' })]).status).toBe('idle');
+  });
+
+  it('shares latest-turn terminal correlation with explicit-turn snapshot reconciliation', () => {
+    const start = ev(1, 'user-message', { turnId: 't1', text: 'first' });
+    const error = ev(2, 'error', { turnId: 't1', message: 'failed' });
+    const done = ev(3, 'turn-done', { turnId: 't1', ok: false, nativeSessionId: null, durationMs: 1 });
+    const next = ev(4, 'user-message', { turnId: 't2', text: 'second' });
+    expect(turnSettlement([])).toBeNull();
+    expect(turnSettlement([done])).toBeNull();
+    expect(turnSettlement([start, error])).toBeNull();
+    expect(turnSettlement([start, error, done])).toEqual({ terminal: done, lastError: 'failed' });
+    expect(turnSettlement([start, error, done, next])).toBeNull();
+    expect(turnSettlement([start, error, done, next], 't1')).toEqual({ terminal: done, lastError: 'failed' });
+    expect(turnSettlement([start, error, done, next], 't2')).toBeNull();
+    const cancel = ev(5, 'cancelled', { turnId: 't2' });
+    expect(turnSettlement([start, error, done, next, cancel])).toEqual({ terminal: cancel, lastError: null });
   });
 
   it('returns a stable empty state for no selection', () => {

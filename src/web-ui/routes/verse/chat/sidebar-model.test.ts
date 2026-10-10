@@ -6,8 +6,10 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
-import { bootstrap, session } from '../fixtures.test-support.js';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { VerseEvent } from '../../../data/api-types.js';
+import { bootstrap, ev, session } from '../fixtures.test-support.js';
+import { applyVerseEvent, getVerseSessionHead, resetVerseStore, seedVerseSession, turnSettlement } from '../verse-store.js';
 import { buildSidebar, liveLine, needsYouSessionIds } from './sidebar-model.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -54,6 +56,101 @@ describe('buildSidebar', () => {
     expect(liveLine({ phase: 'thinking', tool: null, elapsedMs: 1, thinkingTail: tail })!.length).toBeLessThanOrEqual(72);
     expect(liveLine({ phase: 'waiting', tool: null, elapsedMs: 1, thinkingTail: null })).toBe('Waiting for the model');
     expect(liveLine({ phase: null, tool: null, elapsedMs: 1, thinkingTail: null })).toBeNull();
+  });
+});
+
+describe('selected terminal evidence beats only stale activity', () => {
+  const startAt = '2026-10-10T05:35:49.916Z';
+  const terminalAt = '2026-10-10T05:37:33.145Z';
+  const start = { ...ev(1, 'turn-started', { turnId: 't1', pid: 1 }), at: startAt };
+  const done = { ...ev(2, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: null, durationMs: 1 }), at: terminalAt };
+  const activity = (startedAt = startAt, sessionId = 'b') => ({
+    running: [{ sessionId, startedAt, live: { phase: 'waiting', tool: null, elapsedMs: 1, thinkingTail: null } }], needsYou: [],
+  }) as never;
+  function selectedTerminal(events: readonly VerseEvent[], sessionId = 'b') {
+    const settlement = turnSettlement(events);
+    return settlement ? { sessionId, terminal: settlement.terminal } : null;
+  }
+  const row = (model: ReturnType<typeof build>) => model.groups.flatMap(group => group.rows)[0]!;
+  beforeEach(resetVerseStore);
+  afterEach(resetVerseStore);
+
+  it.each(['idle', 'error'] as const)('a matching terminal settles stale activity for a selected %s session', status => {
+    const model = build({ sessions: [session({ id: 'b', status, updatedAt: 'not-a-date' })], selectedId: 'b',
+      activity: activity(), selectedTerminal: selectedTerminal([start, done]) });
+    expect(model.counts.running).toBe(0);
+    expect(row(model).status.kind).toBe(status === 'error' ? 'failed' : 'time');
+    expect(row(model).live).toBeNull();
+  });
+
+  it('derives completion from the real selected head and clears stale activity', () => {
+    seedVerseSession('b', session({ id: 'b', status: 'running' }), []);
+    applyVerseEvent('b', start);
+    applyVerseEvent('b', done);
+    const head = getVerseSessionHead('b');
+    expect(head.session?.status).toBe('idle');
+    const model = build({ sessions: [head.session!], selectedId: 'b', activity: activity(),
+      selectedTerminal: selectedTerminal(head.events) });
+    expect(model.counts.running).toBe(0);
+    expect(row(model).status.kind).toBe('time');
+    expect(row(model).live).toBeNull();
+  });
+
+  it('keeps activity after an old idle detail and a newer nonterminal context update', () => {
+    const idle = session({ id: 'b', status: 'idle', updatedAt: '2026-10-10T05:35:00.000Z' });
+    seedVerseSession('b', idle, []);
+    applyVerseEvent('b', start);
+    expect(getVerseSessionHead('b').session?.status).toBe('running');
+    seedVerseSession('b', idle, []); // Delayed pre-turn detail: the separate upstream race is retained.
+    applyVerseEvent('b', { ...ev(2, 'context', { turnId: 't1', contextTokens: 12, contextWindow: 65_536, exact: true }), at: terminalAt });
+    const head = getVerseSessionHead('b');
+    expect(head.session?.status).toBe('idle');
+    expect(head.session?.updatedAt).toBe(terminalAt);
+    expect(selectedTerminal(head.events)).toBeNull();
+    const model = build({ sessions: [head.session!], selectedId: 'b', activity: activity(),
+      selectedTerminal: selectedTerminal(head.events) });
+    expect(model.counts.running).toBe(1);
+    expect(row(model).status.kind).toBe('running');
+    expect(row(model).live?.text).toBe('Waiting for the model');
+  });
+
+  it.each(['user-message', 'turn-started'] as const)('a newer %s without its own terminal invalidates old proof', type => {
+    const next = type === 'user-message' ? ev(3, type, { turnId: 't2', text: 'again' })
+      : ev(3, type, { turnId: 't2', pid: 2 });
+    const model = build({ sessions: [session({ id: 'b', status: 'idle', updatedAt: terminalAt })], selectedId: 'b',
+      activity: activity(), selectedTerminal: selectedTerminal([start, done, next]) });
+    expect(model.counts.running).toBe(1);
+  });
+
+  it('an error alone and an unrelated terminal prove no completion of the latest turn', () => {
+    const events = [start, ev(2, 'error', { turnId: 't1', message: 'fixture error' }),
+      ev(3, 'cancelled', { turnId: 'unrelated' })];
+    expect(selectedTerminal(events)).toBeNull();
+    expect(build({ sessions: [session({ id: 'b', status: 'error', updatedAt: terminalAt })], selectedId: 'b',
+      activity: activity(), selectedTerminal: selectedTerminal(events) }).counts.running).toBe(1);
+  });
+
+  it('accepts a matching cancel as terminal evidence', () => {
+    const cancelled = { ...ev(2, 'cancelled', { turnId: 't1' }), at: terminalAt };
+    expect(build({ sessions: [session({ id: 'b', status: 'idle' })], selectedId: 'b',
+      activity: activity(), selectedTerminal: selectedTerminal([start, cancelled]) }).counts.running).toBe(0);
+  });
+
+  it.each([
+    [terminalAt, terminalAt], // Equality cannot establish an older activity row.
+    [terminalAt, '2026-10-10T05:38:00.000Z'],
+    ['not-a-date', startAt],
+    [terminalAt, 'not-a-date'],
+  ])('keeps activity with unproven terminal/start ordering (%s, %s)', (at, startedAt) => {
+    expect(build({ sessions: [session({ id: 'b', status: 'idle' })], selectedId: 'b',
+      activity: activity(startedAt), selectedTerminal: selectedTerminal([start, { ...done, at }]) }).counts.running).toBe(1);
+  });
+
+  it.each(['running', 'different-selection', 'different-proof', 'no-selection'] as const)('keeps activity for %s', scenario => {
+    const model = build({ sessions: [session({ id: 'b', status: scenario === 'running' ? 'running' : 'idle' })],
+      selectedId: scenario === 'no-selection' ? null : scenario === 'different-selection' ? 'other' : 'b',
+      activity: activity(), selectedTerminal: selectedTerminal([start, done], scenario === 'different-proof' ? 'other' : 'b') });
+    expect(model.counts.running).toBe(1);
   });
 });
 

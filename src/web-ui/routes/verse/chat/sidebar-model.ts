@@ -26,7 +26,7 @@
  *
  * Pure: no React, no fetch.
  */
-import type { VerseProject, VerseSession } from '../../../data/api-types.js';
+import type { VerseEvent, VerseProject, VerseSession } from '../../../data/api-types.js';
 import type {
   NeedsYouItem,
   VerseActivityLive,
@@ -92,6 +92,13 @@ export interface SidebarInput {
   localSeen: ReadonlyMap<string, number>;
   /** The open chat is never unread. */
   selectedId: string | null;
+  /** The selected head's latest turn has a correlated terminal event. */
+  selectedTerminal?: SidebarSelectedTerminal | null;
+}
+
+export interface SidebarSelectedTerminal {
+  sessionId: string;
+  terminal: Extract<VerseEvent, { type: 'turn-done' | 'cancelled' }>;
 }
 
 /** Ids of chats a Needs-you item points at (as its subject or its target). */
@@ -128,7 +135,7 @@ function metaFor(meta: VerseSessionMetaResponse | null, id: string): VerseSessio
 }
 
 export function buildSidebar(input: SidebarInput): SidebarModel {
-  const { sessions, projects, query, filter, activity, meta, localSeen, selectedId } = input;
+  const { sessions, projects, query, filter, activity, meta, localSeen, selectedId, selectedTerminal } = input;
   const running = new Map((activity?.running ?? []).map((r) => [r.sessionId, r]));
   const needs = needsYouSessionIds(activity?.needsYou ?? []);
   const metaAvailable = meta !== null;
@@ -136,7 +143,16 @@ export function buildSidebar(input: SidebarInput): SidebarModel {
   const rows = new Map<string, SidebarRow>();
   for (const session of sessions) {
     const m = metaFor(meta, session.id);
-    const activityRow = running.get(session.id);
+    const candidateActivity = running.get(session.id);
+    const terminalAt = Date.parse(selectedTerminal?.terminal.at ?? '');
+    const activityAt = Date.parse(candidateActivity?.startedAt ?? '');
+    // A streamed terminal for the selected turn can settle an older activity
+    // poll. updatedAt also changes for context/renames and proves no completion.
+    // Activity has no turn id, so equal/newer/unknown start times stay running.
+    const settledActivity = session.status !== 'running' && session.id === selectedId
+      && selectedTerminal?.sessionId === session.id && Number.isFinite(terminalAt)
+      && Number.isFinite(activityAt) && terminalAt > activityAt;
+    const activityRow = settledActivity ? undefined : candidateActivity;
     const isRunning = session.status === 'running' || activityRow !== undefined;
     const serverSeen = m?.seenTurnCount ?? null;
     const seen = Math.max(serverSeen ?? -1, localSeen.get(session.id) ?? -1);

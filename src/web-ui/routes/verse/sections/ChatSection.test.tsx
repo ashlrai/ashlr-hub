@@ -74,6 +74,45 @@ afterEach(() => {
 });
 
 describe('ChatSection bootstrap', () => {
+  it('settles selected sidebar activity from a matching streamed terminal without waiting for the activity poll', async () => {
+    const { fetch, state } = verseFetch();
+    const baseFetch = fetch as typeof globalThis.fetch;
+    const startAt = '2026-10-10T05:35:49.916Z';
+    const terminalAt = '2026-10-10T05:37:33.145Z';
+    const staleActivity = {
+      running: [{ sessionId: 'vs_1', title: state.sessions[0]!.title, engine: 'claude', seatId: 'claude-main',
+        startedAt: startAt, live: { phase: 'waiting', tool: null, elapsedMs: 1, thinkingTail: null } }],
+      needsYou: [],
+    };
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).startsWith('/api/verse/activity')) {
+        return Promise.resolve(new Response(JSON.stringify(staleActivity), { headers: { 'Content-Type': 'application/json' } }));
+      }
+      return baseFetch(input, init);
+    }));
+    const user = userEvent.setup();
+    mount();
+    const nav = await screen.findByRole('navigation', { name: 'Chats' });
+    await user.click(await within(nav).findByRole('button', { name: /Fix the login bug/ }));
+    await screen.findByRole('heading', { name: 'Fix the login bug' });
+    await within(nav).findByRole('img', { name: 'Running' });
+    expect(within(nav).getByText('Waiting for the model')).toBeInTheDocument();
+    const stream = MockEventSource.forSession('vs_1');
+    act(() => {
+      stream.emit({ ...ev(1, 'user-message', { turnId: 't1', text: 'Read one file' }), at: startAt });
+      stream.emit({ ...ev(2, 'turn-started', { turnId: 't1', pid: 1 }), at: startAt });
+    });
+    await waitFor(() => expect(within(nav).getByRole('img', { name: 'Running' })).toBeInTheDocument());
+    act(() => {
+      stream.emit({ ...ev(3, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: null, durationMs: 1 }), at: terminalAt });
+    });
+    await waitFor(() => expect(within(nav).queryByRole('img', { name: 'Running' })).not.toBeInTheDocument());
+    expect(within(nav).queryByText('Waiting for the model')).not.toBeInTheDocument();
+    // The server list and every activity response still carry their old state.
+    // Only the selected stream's correlated terminal can have settled this row.
+    expect(state.sessions[0]!.status).toBe('idle');
+  });
+
   it('renders seats, projects and grouped sessions from the stubbed bootstrap', async () => {
     const { fetch } = verseFetch();
     vi.stubGlobal('fetch', fetch);

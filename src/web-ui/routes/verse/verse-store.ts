@@ -336,16 +336,18 @@ export function setVerseSession(sessionId: string, session: VerseSession, turnId
 }
 
 /**
- * Reconcile a `running` snapshot against the event log. Without a `turnId`
- * the running turn is the last `user-message`/`turn-started` in the log; a
+ * Find correlated terminal evidence in the ordered event log. Without a `turnId`
+ * the relevant turn is the last `user-message`/`turn-started` in the log; a
  * later `turn-done`/`cancelled` means the server already settled it. With a
  * `turnId`, only that turn's terminal event counts (its `user-message` may
  * not have streamed in yet, so a previous turn's `turn-done` proves nothing).
  * Status follows the same rules applyVerseEvent uses: cancelled → idle,
  * `turn-done ok:false` → error only when an `error` event was logged for it.
  */
-export function settledStatus(session: VerseSession, events: readonly VerseEvent[], turnId?: string): VerseSession {
-  if (session.status !== 'running') return session;
+export function turnSettlement(events: readonly VerseEvent[], turnId?: string): {
+  terminal: Extract<VerseEvent, { type: 'turn-done' | 'cancelled' }>;
+  lastError: string | null;
+} | null {
   let anchorSeq = -1;
   let anchorTurn: string | null = turnId ?? null;
   if (!turnId) {
@@ -355,7 +357,7 @@ export function settledStatus(session: VerseSession, events: readonly VerseEvent
         anchorTurn = e.turnId;
       }
     }
-    if (anchorTurn === null) return session;
+    if (anchorTurn === null) return null;
   }
   let terminal: Extract<VerseEvent, { type: 'turn-done' | 'cancelled' }> | null = null;
   let lastError: string | null = null;
@@ -364,7 +366,15 @@ export function settledStatus(session: VerseSession, events: readonly VerseEvent
     if (e.type === 'error' && e.turnId === anchorTurn) lastError = e.message;
     if ((e.type === 'turn-done' || e.type === 'cancelled') && e.turnId === anchorTurn) terminal = e;
   }
-  if (!terminal) return session;
+  return terminal ? { terminal, lastError } : null;
+}
+
+/** Apply the same terminal evidence to a potentially stale running snapshot. */
+export function settledStatus(session: VerseSession, events: readonly VerseEvent[], turnId?: string): VerseSession {
+  if (session.status !== 'running') return session;
+  const settlement = turnSettlement(events, turnId);
+  if (!settlement) return session;
+  const { terminal, lastError } = settlement;
   const failed = terminal.type === 'turn-done' && !terminal.ok && lastError !== null;
   return {
     ...session,

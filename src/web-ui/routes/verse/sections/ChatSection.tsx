@@ -74,7 +74,7 @@ import {
   verseWorkspacesQuery,
   VerseMutationLockedError,
 } from '../verse-queries.js';
-import { forgetVerseSession, setVerseSession, setVerseSessionStatus } from '../verse-store.js';
+import { forgetVerseSession, setVerseSession, setVerseSessionStatus, turnSettlement } from '../verse-store.js';
 import {
   clearVerseCommand,
   lastVerseSeat,
@@ -338,6 +338,11 @@ export function ChatSection() {
 
   const view = useVerseSession(selectedId, reload);
   const roots = useSessionRoots(view.session);
+  // The head's structural log stays stable across token deltas/live progress.
+  const selectedTerminal = useMemo(() => {
+    const settlement = turnSettlement(view.events);
+    return selectedId && settlement ? { sessionId: selectedId, terminal: settlement.terminal } : null;
+  }, [selectedId, view.events]);
 
   // Sidebar list: the sessions query, else bootstrap's copy, with the live
   // store record overlaid for the open chat so its running dot is immediate.
@@ -803,7 +808,7 @@ export function ChatSection() {
         onSelect={selectFromList} onNew={() => openNewChat()}
         onRetry={() => { refetchSessions(); refetchBootstrap(); }}
         onCollapse={() => setVerseSidebarCollapsed(true)} onDisconnect={() => { void clearReadSession(); }}
-        activity={chatActivity.activity} meta={chatActivity.meta} metaError={chatActivity.metaError} localSeen={chatActivity.localSeen} actions={actions} />
+        activity={chatActivity.activity} selectedTerminal={selectedTerminal} meta={chatActivity.meta} metaError={chatActivity.metaError} localSeen={chatActivity.localSeen} actions={actions} />
       </Suspense>
       {sidebarCollapsed ? null : <ChatResizer side="sidebar" label="Resize chat list" className={styles.resize} />}
       {/* At phone width the sidebar floats over the transcript; the scrim dismisses it. */}
