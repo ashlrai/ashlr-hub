@@ -81,10 +81,12 @@ function fixture(options: { sdkOverride?: string; ignoreInvalidFlags?: boolean; 
     : join(compiledRoot!, 'src/cli/universe.js')).href;
   const runtimeCli = pathToFileURL(options.sourceBacked ? resolve('src/cli/runtime.ts')
     : join(compiledRoot!, 'src/cli/runtime.js')).href;
-  writeFileSync(bin, `#!/usr/bin/env node\nimport { cmdUniverse } from ${JSON.stringify(cli)};\n` +
-    `import { cmdRuntime } from ${JSON.stringify(runtimeCli)};\n` +
-    (options.brokenRuntimeRead ? "if (process.argv[2] === 'runtime' && process.argv[3] === 'status') { console.log('{}'); process.exit(1); }\n" : '') +
-    "if (process.argv[2] === 'runtime') { process.exit(await cmdRuntime(process.argv.slice(3))); }\n" +
+  writeFileSync(bin, '#!/usr/bin/env node\n' +
+    "if (process.argv[2] === 'runtime') {\n" +
+    `const { cmdRuntime } = await import(${JSON.stringify(runtimeCli)});\n` +
+    (options.brokenRuntimeRead ? "if (process.argv[3] === 'status') { console.log('{}'); process.exit(1); }\n" : '') +
+    "process.exit(await cmdRuntime(process.argv.slice(3))); }\n" +
+    `const { cmdUniverse } = await import(${JSON.stringify(cli)});\n` +
     (options.ignoreInvalidFlags ? "if (process.argv.includes('--unexpected')) { console.log('{}'); process.exit(0); }\n" : '') +
     (options.ignorePortfolioInvalidFlags ? "if (process.argv[3] === 'portfolio' && process.argv.includes('--unexpected')) { console.log('{}'); process.exit(0); }\n" : '') +
     (options.ignoreComparisonInvalidFlags ? "if (process.argv[3] === 'compare' && process.argv.includes('--unexpected')) { console.log('{}'); process.exit(0); }\n" : '') +
