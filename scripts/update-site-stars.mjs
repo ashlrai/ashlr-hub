@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 const owner = 'ashlrai';
 const projects = [
-  { repo: 'ashlr-hub', name: 'Phantom', role: 'Agent command center' },
+  { repo: 'phantom', name: 'Phantom', role: 'Agent command center' },
   { repo: 'phantom-secrets', name: 'Phantom Secrets', role: 'Secret boundary' },
   { repo: 'locus', name: 'Locus', role: 'Account identity' },
   { repo: 'lexicon', name: 'Lexicon', role: 'Voice vocabulary' },

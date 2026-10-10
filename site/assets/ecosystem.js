@@ -51,7 +51,7 @@
   const tickEnd = document.getElementById('tick-end');
   const svg = document.getElementById('history-svg');
   const colors = {
-    all: '#7dd8de', 'ashlr-hub': '#aba1ff', 'phantom-secrets': '#7dd8de',
+    all: '#7dd8de', phantom: '#aba1ff', 'phantom-secrets': '#7dd8de',
     locus: '#f1c374', lexicon: '#f19cb3', ashlrcode: '#a8d48e', morphkit: '#91b8f6',
   };
   let selected = 'all';
