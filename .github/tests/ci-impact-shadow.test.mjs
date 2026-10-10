@@ -101,6 +101,7 @@ for (const [file, text, reason] of [
   ['package.json', '{"name":"fixture","version":"1.0.1"}\n', 'package-or-version-change'],
   ['package-lock.json', '{"lockfileVersion":3}\n', 'package-or-version-change'],
   ['test/setup/home.ts', 'export const setup = true;\n', 'test-or-setup-change'],
+  ['vitest.config.mock-compat.ts', 'export const compat = true;\n', 'test-or-setup-change'],
   ['.github/workflows/ci.yml', 'name: changed\n', 'workflow-or-policy-or-tool-change'],
 ]) {
   test(`forces full for ${file} including a version-only edit`, (t) => {

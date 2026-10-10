@@ -13,7 +13,7 @@ export default defineConfig({
     // The write guard too: this gate drives the real pool/universe writers
     // in-process (keys, campaigns, supervisors), exactly the class of writer
     // that once leaked into the real ~/.ashlr (see the guard's header).
-    setupFiles: ['./vitest.config.ts', './test/setup/home.ts', './test/setup/home-isolation-guard.ts'],
+    setupFiles: ['./vitest.config.mock-compat.ts', './test/setup/home.ts', './test/setup/home-isolation-guard.ts'],
     pool: 'forks',
     maxWorkers: 1,
     fileParallelism: false,

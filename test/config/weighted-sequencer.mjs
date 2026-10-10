@@ -13,7 +13,7 @@ import { REAL_IO_TEST_FILES } from './realio-lane-membership.mjs';
 
 export const CALIBRATION_INPUTS = Object.freeze([
   'package-lock.json', 'vitest.config.ts', 'test/config/realio-lane-membership.mjs',
-  'test/setup/home.ts', 'test/setup/home-isolation-guard.ts', 'scripts/test-ci.mjs',
+  'vitest.config.mock-compat.ts', 'test/setup/home.ts', 'test/setup/home-isolation-guard.ts', 'scripts/test-ci.mjs',
   'scripts/test-ci-sharded.mjs', 'test/config/weighted-sequencer.mjs',
   '.github/scripts/ci-partition-shadow.mjs',
 ]);

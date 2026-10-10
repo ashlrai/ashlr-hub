@@ -16,7 +16,7 @@ describe('M478 root verification contract', () => {
       mergeProfileCommandCount: 6,
       requiredMergeProfileCommandCount: 6,
       mergeGradeExplicit: true,
-      authorityFileCount: 23,
+      authorityFileCount: 24,
     });
     expect(profile.verifyContract?.errors).toEqual([]);
     expect(profile.verifyCommands.map((command) => ({
@@ -82,6 +82,7 @@ describe('M478 root verification contract', () => {
       'tsconfig.json',
       'eslint.config.js',
       'vitest.config.ts',
+      'vitest.config.mock-compat.ts',
       'test/setup/home.ts',
       'test/setup/home-isolation-guard.ts',
       'scripts/test-ci.mjs',
