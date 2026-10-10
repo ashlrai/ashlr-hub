@@ -167,4 +167,12 @@ The internal first-party Messages adapter requires fresh verified prepaid, non-i
 
 The existing subscription standing grant does **not** enable this distinct API lane. The router keeps it off, and this read-only view says **Automatic use held** until the native authority and source-owned billing proof reader are commissioned. Manually recording a grant cannot enable it. See [reset-aware scheduling](RESET-AWARE-SCHEDULING.md#api-promotions).
 
+To record captured promotional-credit history locally, prepare a JSON observation in the existing [`claude-api-promotion-history` schema](../src/core/resources/claude-api-grant-types.ts), then run:
+
+```sh
+phm resources claude-promotion record --observation /absolute/path/history.json --json
+```
+
+Keep the original `capturedAt`, the capture's SHA-256 `evidenceDigest`, and the reported integer-microdollar amounts. Set `binding` and `cycleId` to `null`. For a UTC expiry date without an exact instant, use `expiry: {"precision":"date","date":"YYYY-MM-DD","timezone":"UTC","instant":null}`; unknown expiry or amounts stay unknown. The command validates the local schema, not the authenticity of billing evidence, and returns **Held**. It writes only the existing private history store, creates no credentials or financial authority, and makes no provider request. `--accounts-root` can select the same private root configured for the desktop; otherwise the configured accounts root is used. An identical observation ID is idempotent; a conflicting ID, unsafe file or busy store is refused without replacing existing history.
+
 For recorded attempt, verification, and GitHub outcomes, see [execution feedback](EXECUTION-FEEDBACK.md).

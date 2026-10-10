@@ -163,6 +163,7 @@ function printResourcesHelp(): void {
   console.log('         phm resources pool status|run|observe|probe|console|benchmark --help');
   console.log('         phm resources launcher --help');
   console.log('         phm resources profile --help');
+  console.log('         phm resources claude-promotion --help');
   console.log('');
   console.log(`    ${cyan('phm resources')}          ${dim('table view of availability/used%/cap/resets')}`);
   console.log(`    ${cyan('phm resources --json')}   ${dim('raw JSON (ResourceSnapshot)')}`);
@@ -171,6 +172,10 @@ function printResourcesHelp(): void {
 }
 
 export async function cmdResources(args: string[]): Promise<number> {
+  if (args[0] === 'claude-promotion') {
+    const { cmdClaudePromotion } = await import('./claude-promotion.js');
+    return cmdClaudePromotion(args.slice(1));
+  }
   if (args[0] === 'profile') {
     const { cmdResourceProfile } = await import('./resource-profile.js');
     return cmdResourceProfile(args.slice(1));
