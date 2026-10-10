@@ -865,6 +865,25 @@ describe('m120 judgeProposal — parse failure', () => {
 });
 
 describe('m120 judgeProposal — parse failure surfaced honestly in the decisions ledger', () => {
+  it('records a failed judge call as a network failure, not a parse failure', async () => {
+    const { getActiveClient } = await import('../src/core/run/provider-client.js');
+    const client = mockClientThrows();
+    (getActiveClient as ReturnType<typeof vi.fn>).mockResolvedValue(client);
+    mockProposals.push(makeProposal({ id: SEMANTIC_PROPOSAL_A }));
+
+    const { runManager } = await import('../src/core/fleet/manager.js');
+    const report = await runManager({} as never, { window: '7d', applyRejects: false });
+    expect(report.verdicts[0]).toMatchObject({ verdict: 'review', judgeFailure: 'network', wouldMerge: false });
+    expect(client.complete).toHaveBeenCalledTimes(1);
+
+    const { readDecisions } = await import('../src/core/fleet/decisions-ledger.js');
+    expect(readDecisions().find((entry) => entry.proposalId === SEMANTIC_PROPOSAL_A)).toMatchObject({
+      action: 'judged',
+      verdict: 'review',
+      judgeReasonCode: 'judge-network-failure',
+    });
+  });
+
   it('records judgeReasonCode="judge-parse-failure" (never "judge-review") for a parse failure', async () => {
     const { getActiveClient } = await import('../src/core/run/provider-client.js');
     (getActiveClient as ReturnType<typeof vi.fn>).mockResolvedValue(mockClientParseFail());

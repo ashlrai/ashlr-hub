@@ -27,7 +27,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { AshlrConfig, TaskSpec } from '../src/core/types.js';
+import type { AshlrConfig, Proposal, TaskSpec } from '../src/core/types.js';
 
 vi.mock('../src/core/daemon/activation-permit.js', () => ({
   liveConductorActivationAuthorized: () => true,
@@ -39,6 +39,11 @@ vi.mock('../src/core/daemon/activation-permit.js', () => ({
 const mockEngineInstalled = vi.hoisted(() =>
   vi.fn((engine: string) => engine === 'codex' || engine === 'claude')
 );
+const mockConfinementProfileFor = vi.hoisted(() => vi.fn(() => ({ mode: 'off' })));
+vi.mock('../src/core/sandbox/confine.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/core/sandbox/confine.js')>(),
+  confinementProfileFor: mockConfinementProfileFor,
+}));
 vi.mock('../src/core/run/engines.js', () => ({
   engineInstalled: mockEngineInstalled,
   buildEngineCommand: vi.fn((engine: string) => ({ bin: engine, argv: ['test'] })),
@@ -203,6 +208,7 @@ beforeEach(() => {
   process.env.HOME = tmpHome;
   vi.clearAllMocks();
   mockEngineInstalled.mockImplementation((engine: string) => engine === 'codex' || engine === 'claude');
+  mockConfinementProfileFor.mockReturnValue({ mode: 'off' });
   // Default: kill-switch off, assertMayMutate no-op, autoMergePass → 0 merged
   mockKillSwitchOn.mockReturnValue(false);
   mockAssertMayMutate.mockImplementation(() => { /* allow */ });
@@ -621,6 +627,132 @@ describe('M300 [J1] managerJudgeEngine=codex → codex judge client', () => {
     const client = resolveFrontierJudgeClient(cfg);
     expect(client).not.toBeNull();
     expect(client!.model).toMatch(/gpt-5/);
+  });
+
+  it('classifies a refused Codex CLI launch as unavailable without retrying the model', async () => {
+    const { spawnEngine } = await import('../src/core/run/engines.js');
+    vi.mocked(spawnEngine)
+      .mockResolvedValueOnce({ ok: false, output: '', error: 'refused' } as never)
+      .mockResolvedValueOnce({ ok: false, output: '', error: 'refused' } as never);
+    const { judgeProposal, resolveFrontierJudgeClient } = await import('../src/core/fleet/manager.js');
+    const cfg = makeConfig({ managerJudgeEngine: 'codex', managerJudgeModel: 'gpt-5.5' });
+    const client = resolveFrontierJudgeClient(cfg);
+    expect(client).not.toBeNull();
+    await expect(client!.complete('system', 'prompt')).rejects.toMatchObject({ name: 'JudgeUnavailableError' });
+
+    const proposal = { id: 'codex-judge-refusal', kind: 'patch', title: 'Fix', summary: 'Fix', diff: '' } as Proposal;
+    const verdict = await judgeProposal(proposal, cfg, client!, { cache: false });
+    expect(verdict).toMatchObject({ verdict: 'review', judgeFailure: 'network', wouldMerge: false });
+    expect(spawnEngine).toHaveBeenCalledTimes(2);
+  });
+
+  it('classifies a refused strict retry as unavailable after a blank successful reply', async () => {
+    const { spawnEngine } = await import('../src/core/run/engines.js');
+    vi.mocked(spawnEngine)
+      .mockResolvedValueOnce({ ok: true, output: ' ' } as never)
+      .mockResolvedValueOnce({ ok: false, output: '', error: 'refused' } as never);
+    const { judgeProposal, resolveFrontierJudgeClient } = await import('../src/core/fleet/manager.js');
+    const cfg = makeConfig({ managerJudgeEngine: 'codex', managerJudgeModel: 'gpt-5.5' });
+    const client = resolveFrontierJudgeClient(cfg);
+    expect(client).not.toBeNull();
+
+    const proposal = { id: 'codex-judge-retry-refusal', kind: 'patch', title: 'Fix', summary: 'Fix', diff: '' } as Proposal;
+    const verdict = await judgeProposal(proposal, cfg, client!, { cache: false });
+    expect(verdict).toMatchObject({ verdict: 'review', judgeFailure: 'network', wouldMerge: false });
+    expect(spawnEngine).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not spawn when the Codex judge command cannot be built', async () => {
+    const { buildEngineCommand, spawnEngine } = await import('../src/core/run/engines.js');
+    vi.mocked(buildEngineCommand).mockReturnValueOnce(null);
+    const { resolveFrontierJudgeClient } = await import('../src/core/fleet/manager.js');
+    const client = resolveFrontierJudgeClient(makeConfig({ managerJudgeEngine: 'codex', managerJudgeModel: 'gpt-5.5' }));
+    expect(client).not.toBeNull();
+    await expect(client!.complete('system', 'prompt')).rejects.toMatchObject({ name: 'JudgeUnavailableError' });
+    expect(spawnEngine).not.toHaveBeenCalled();
+  });
+
+  it('classifies a thrown Codex spawn error as unavailable without retry', async () => {
+    const { spawnEngine } = await import('../src/core/run/engines.js');
+    vi.mocked(spawnEngine).mockRejectedValueOnce(new Error('spawn failed'));
+    const { judgeProposal, resolveFrontierJudgeClient } = await import('../src/core/fleet/manager.js');
+    const cfg = makeConfig({ managerJudgeEngine: 'codex', managerJudgeModel: 'gpt-5.5' });
+    const client = resolveFrontierJudgeClient(cfg);
+    expect(client).not.toBeNull();
+
+    const proposal = { id: 'codex-judge-spawn-error', kind: 'patch', title: 'Fix', summary: 'Fix', diff: '' } as Proposal;
+    const verdict = await judgeProposal(proposal, cfg, client!, { cache: false });
+    expect(verdict).toMatchObject({ verdict: 'review', judgeFailure: 'network', wouldMerge: false });
+    expect(spawnEngine).toHaveBeenCalledTimes(1);
+  });
+
+  it('propagates outcome retirement during the first refused Codex spawn', async () => {
+    const { spawnEngine } = await import('../src/core/run/engines.js');
+    let current = true;
+    vi.mocked(spawnEngine).mockImplementationOnce(async () => {
+      current = false;
+      return { ok: false, output: '', error: 'refused' } as never;
+    });
+    const { judgeProposal, resolveFrontierJudgeClient } = await import('../src/core/fleet/manager.js');
+    const cfg = makeConfig({ managerJudgeEngine: 'codex', managerJudgeModel: 'gpt-5.5' });
+    const client = resolveFrontierJudgeClient(cfg);
+    expect(client).not.toBeNull();
+    const proposal = { id: 'codex-judge-retired-first', kind: 'patch', title: 'Fix', summary: 'Fix', diff: '' } as Proposal;
+
+    await expect(judgeProposal(proposal, cfg, client!, { cache: false, selectedOutcomeAdmission: () => current }))
+      .rejects.toMatchObject({ name: 'SelectedOutcomeAdmissionRefusal' });
+    expect(spawnEngine).toHaveBeenCalledTimes(1);
+  });
+
+  it('propagates outcome retirement during the refused strict retry', async () => {
+    const { spawnEngine } = await import('../src/core/run/engines.js');
+    let current = true;
+    vi.mocked(spawnEngine)
+      .mockResolvedValueOnce({ ok: true, output: ' ' } as never)
+      .mockImplementationOnce(async () => {
+        current = false;
+        return { ok: false, output: '', error: 'refused' } as never;
+      });
+    const { judgeProposal, resolveFrontierJudgeClient } = await import('../src/core/fleet/manager.js');
+    const cfg = makeConfig({ managerJudgeEngine: 'codex', managerJudgeModel: 'gpt-5.5' });
+    const client = resolveFrontierJudgeClient(cfg);
+    expect(client).not.toBeNull();
+    const proposal = { id: 'codex-judge-retired-retry', kind: 'patch', title: 'Fix', summary: 'Fix', diff: '' } as Proposal;
+
+    await expect(judgeProposal(proposal, cfg, client!, { cache: false, selectedOutcomeAdmission: () => current }))
+      .rejects.toMatchObject({ name: 'SelectedOutcomeAdmissionRefusal' });
+    expect(spawnEngine).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not select a confined Codex judge without a pinned seat or invoke its model', async () => {
+    mockConfinementProfileFor.mockReturnValue({ mode: 'on', autonomous: true } as never);
+    const { resolveFrontierJudgeClient } = await import('../src/core/fleet/manager.js');
+    const cfg = makeConfig({
+      managerJudgeEngine: 'codex',
+      managerJudgeModel: 'gpt-5.5',
+      judgeAllowedBackends: ['codex'],
+    });
+
+    expect(resolveFrontierJudgeClient(cfg)).toBeNull();
+    expect(mockConfinementProfileFor).toHaveBeenCalledWith('codex', cfg);
+    expect(vi.mocked((await import('../src/core/run/engines.js')).spawnEngine)).not.toHaveBeenCalled();
+  });
+
+  it('tries an independent Claude family when the configured confined Codex judge is unavailable', async () => {
+    mockConfinementProfileFor.mockReturnValue({ mode: 'on', autonomous: true } as never);
+    const { resolveFrontierJudgeClient } = await import('../src/core/fleet/manager.js');
+    const cfg = makeConfig({
+      managerJudgeEngine: 'codex',
+      managerJudgeModel: 'gpt-5.5',
+      judgeAllowedBackends: ['codex', 'claude'],
+    });
+
+    const client = resolveFrontierJudgeClient(cfg, {
+      producerModel: 'local:qwen3.8',
+      requireIndependent: true,
+    });
+    expect(client?.model).toMatch(/^claude/);
+    expect(vi.mocked((await import('../src/core/run/engines.js')).spawnEngine)).not.toHaveBeenCalled();
   });
 });
 
