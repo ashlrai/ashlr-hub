@@ -9,7 +9,25 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.29.9] — Unreleased
+## [3.29.10] — Unreleased
+
+### Changed
+- Remove fixed 3.26 labels from the landing-page story and footer so those
+  decorative elements do not imply a stale installed or published version.
+
+### Fixed
+- Restore fresh public release facts after the site-only CI lane added two
+  ancillary jobs. The reader binds their names and results to the exact
+  candidate workflow while retaining all 15 required release gates.
+- Check the configured model through a bounded loopback `/models` probe before
+  marking a keyless Ollama or llama-server fleet engine ready. Missing models and
+  probe errors remain unavailable; a model listing does not claim completion.
+- Keep a standing Codex judge off an unpinned native seat, allow another admitted
+  independent judge family when available, and record a CLI launch refusal as
+  unavailable instead of a malformed verdict. Genuine malformed replies still
+  receive the strict retry.
+
+## [3.29.9] — 2026-10-10
 
 ### Changed
 - Load doctor, init and setup only for their selected CLI commands. Local

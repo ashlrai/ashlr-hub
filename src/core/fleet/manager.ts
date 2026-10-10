@@ -200,6 +200,14 @@ type JudgeComplete = (
   selectedOutcomeAdmission?: () => boolean,
 ) => Promise<string>;
 
+/** A CLI launch refusal, distinct from a successful call with malformed text. */
+class JudgeUnavailableError extends Error {
+  constructor() {
+    super('Codex judge launch unavailable');
+    this.name = 'JudgeUnavailableError';
+  }
+}
+
 function judgeAbortReason(signal: AbortSignal): Error {
   if (signal.reason instanceof Error) return signal.reason;
   const error = new Error(
@@ -850,6 +858,7 @@ async function judgeRubricFromModel(
   } catch (error) {
     if (error instanceof SelectedOutcomeAdmissionRefusal) throw error;
     throwIfJudgeCancelled(signal);
+    assertSelectedOutcomeAdmission(selectedOutcomeAdmission);
     return 'network';
   }
 
@@ -887,12 +896,16 @@ async function judgeRubricFromModel(
       const retryPrompt = userPrompt + JUDGE_RETRY_SUFFIX;
       assertSelectedOutcomeAdmission(selectedOutcomeAdmission);
       const raw2 = await complete(system, retryPrompt, signal, ...(selectedOutcomeAdmission ? [selectedOutcomeAdmission] : []));
+      assertSelectedOutcomeAdmission(selectedOutcomeAdmission);
       const retryParsed = parseJudgeResponse(raw2);
       obj = retryParsed.obj;
       parseSource = retryParsed.source;
       fullReasoning = fullReasoning || retryParsed.fullReasoning;
-    } catch {
+    } catch (error) {
+      if (error instanceof SelectedOutcomeAdmissionRefusal) throw error;
       throwIfJudgeCancelled(signal);
+      assertSelectedOutcomeAdmission(selectedOutcomeAdmission);
+      if (error instanceof JudgeUnavailableError) return 'network';
       /* retry failed — fall through to fallback */
     }
   }
@@ -1485,8 +1498,8 @@ function buildGrokCliComplete(cfg: AshlrConfig, model: string, stats?: JudgeCall
  * Mirrors buildClaudeCliComplete. The Codex CLI `exec` subcommand takes a
  * JSON-wrapped goal via --json; output is plain text (the agent's response).
  *
- * Never-throws: any spawn/parse failure returns an empty string so the caller
- * falls through to the parse-failure → 'review' path.
+ * Launch refusals throw JudgeUnavailableError so the caller records an
+ * unavailable call. A successful blank reply remains parseable on retry.
  */
 function buildCodexCliComplete(
   cfg: AshlrConfig,
@@ -1507,7 +1520,7 @@ function buildCodexCliComplete(
       const t0 = Date.now();
       const combined = `${system}\n\n${user}`;
       const cmd = buildEngineCommand('codex', combined, cfg, { model });
-      if (!cmd) return '';
+      if (!cmd) throw new JudgeUnavailableError();
       // Under a standing policy a codex judge needs a seat's per-run
       // CODEX_HOME copy, and none is configured for judging — spawnJudge
       // refuses it (fail-closed 'review') rather than run it on Mason's own
@@ -1517,15 +1530,17 @@ function buildCodexCliComplete(
         ...(signal ? { signal } : {}),
         ...(selectedOutcomeAdmission ? { selectedOutcomeAdmission } : {}),
       }); // 5 min for frontier
-      if (!result.ok || !result.output) return '';
+      if (!result.ok) throw new JudgeUnavailableError();
+      if (!result.output) return '';
       // codex output is plain text — model + latency only (no parseable usage).
       if (stats) {
         stats.model = model;
         stats.durationMs = Date.now() - t0;
       }
       return result.output;
-    } catch {
-      return '';
+    } catch (error) {
+      if (error instanceof SelectedOutcomeAdmissionRefusal) throw error;
+      throw error instanceof JudgeUnavailableError ? error : new JudgeUnavailableError();
     }
   };
 }
@@ -1643,6 +1658,14 @@ function resolveJudgeClient(
   // The current concrete Codex model is a qualified frontier model; its judge attestations pass isFrontierJudge.
   const useCodex = wantCodex || (wantClaude && claudeUnavailableByResource);
   if (useCodex && codexAllowedForJudge && engineInstalled('codex', cfg)) {
+    // A confined Codex judge needs a selected native seat and its pinned
+    // CODEX_HOME. This resolver has neither, so selecting it would only make
+    // spawnJudge refuse and record a synthetic parse failure. Keep interactive
+    // judging available, but let the independent resolver try another family
+    // (or return no judge) while standing confinement is required.
+    let confined = true;
+    try { confined = confinementProfileFor('codex', cfg).autonomous === true; } catch { /* fail closed */ }
+    if (confined) throw new Error('Codex judge requires a selected pinned seat under confinement');
     // Use managerJudgeModel if it looks like a codex/gpt model, else the registry default.
     const isCodexModel = judgeModel.startsWith('gpt-') || judgeModel.startsWith('codex-');
     const codexDefaultModel = DEFAULT_CODEX_MODEL_ID;
@@ -2130,10 +2153,10 @@ export async function runManager(
         // distinct, finite detail sentinel (never free text) so the ledger's
         // judgeReasonCode is 'judge-parse-failure' / 'judge-network-failure'
         // instead of silently indistinguishable from a real 'judge-review'.
-        detail: verdict.judgeFailure === 'parse' || verdict.considered !== true
-          ? 'judge-parse-failure'
-          : verdict.judgeFailure === 'network'
-            ? 'judge-network-failure'
+        detail: verdict.judgeFailure === 'network'
+          ? 'judge-network-failure'
+          : verdict.judgeFailure === 'parse' || verdict.considered !== true
+            ? 'judge-parse-failure'
             : (verdict.wouldMerge && reviewerIndependent ? 'would-merge' : ''),
         ...(verdict.semanticEvents ? { semanticEvents: verdict.semanticEvents } : {}),
         ...(judgeAttestation !== undefined ? { judgeAttestation } : {}),

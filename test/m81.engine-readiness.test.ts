@@ -10,13 +10,14 @@
  * the binary is absent.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { spawn } from 'node:child_process';
 import type { AshlrConfig, EngineId } from '../src/core/types.js';
 import {
   engineReadiness,
   fleetReadiness,
 } from '../src/core/fleet/engine-readiness.js';
-import type { ProbeOverrides, EngineReadiness } from '../src/core/fleet/engine-readiness.js';
+import type { ProbeOverrides } from '../src/core/fleet/engine-readiness.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -236,6 +237,119 @@ describe('codex — auth probes', () => {
 // ---------------------------------------------------------------------------
 
 describe('api-model engines', () => {
+  it('probes loopback without treating the compiled sidecar as Node', async () => {
+    const fixtureCode = [
+      "const http = require('node:http');",
+      "const server = http.createServer((request, response) => {",
+      "  response.setHeader('content-type', 'application/json');",
+      "  response.statusCode = request.url === '/v1/models' ? 200 : 404;",
+      "  response.end(JSON.stringify({data: [{id: 'fixture-model'}]}));",
+      "});",
+      "server.listen(0, '127.0.0.1', () => process.stdout.write(String(server.address().port) + '\\n'));",
+    ].join('\n');
+    const fixture = spawn(process.execPath, ['-e', fixtureCode], { stdio: ['ignore', 'pipe', 'pipe'] });
+    try {
+      const port = await new Promise<number>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('loopback fixture did not start')), 3000);
+        fixture.once('error', (error) => { clearTimeout(timeout); reject(error); });
+        fixture.stdout.once('data', (chunk: Buffer) => {
+          clearTimeout(timeout);
+          const parsed = Number(String(chunk).trim());
+          if (!Number.isInteger(parsed) || parsed < 1) reject(new Error('invalid fixture port'));
+          else resolve(parsed);
+        });
+      });
+      const originalExecPath = process.execPath;
+      try {
+        process.execPath = '/compiled-phantom-sidecar-cannot-eval';
+        const cfg = withFoundry({ allowedBackends: ['local-coder'], models: { 'local-coder': 'fixture-model' } });
+        const result = engineReadiness('local-coder', cfg, {
+          getEnv: (key) => key === 'OLLAMA_BASE_URL' ? 'http://localhost:' + String(port) + '/v1' : undefined,
+        });
+        expect(result).toMatchObject({ installed: true, authed: 'unknown', ready: true });
+      } finally {
+        process.execPath = originalExecPath;
+      }
+    } finally {
+      fixture.kill();
+    }
+  }, 10000);
+
+  it('accepts only a valid 2xx model list from a loopback local-coder', () => {
+    const cfg = withFoundry({ allowedBackends: ['local-coder'], models: { 'local-coder': 'configured-qwen' } });
+    const isInstalled = vi.fn(() => true);
+    const localModelsResponse = vi.fn(() => ({ statusCode: 200, body: '{"data":[{"id":"configured-qwen"}]}' }));
+    const getEnv = vi.fn(() => undefined);
+    const r = engineReadiness('local-coder', cfg, { isInstalled, getEnv, localModelsResponse });
+    expect(localModelsResponse).toHaveBeenCalledWith('http://localhost:11434/v1/models');
+    expect(isInstalled).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ installed: true, authed: 'unknown', ready: true });
+    expect(r.detail).toContain('model completion are unverified');
+    expect(r.fix).toBeUndefined();
+  });
+
+  it.each([
+    [401, '{"data":[{"id":"configured-qwen"}]}'],
+    [404, '{"data":[{"id":"configured-qwen"}]}'],
+    [500, '{"data":[{"id":"configured-qwen"}]}'],
+    [200, '{"data":[]}'],
+    [200, '{"data":[{"id":"other-model"}]}'],
+    [200, '{"error":"not a model list"}'],
+    [200, 'not json'],
+  ])('rejects a local model response with status %i and body %s', (statusCode, body) => {
+    const cfg = withFoundry({ allowedBackends: ['local-coder'], models: { 'local-coder': 'configured-qwen' } });
+    const localModelsResponse = vi.fn(() => ({ statusCode, body }));
+    const r = engineReadiness('local-coder', cfg, { localModelsResponse });
+    expect(localModelsResponse).toHaveBeenCalledOnce();
+    expect(r).toMatchObject({ installed: false, authed: 'unknown', ready: false });
+    expect(r.detail).toContain('did not return a valid 2xx list containing the configured model ID');
+    expect(r.fix).toContain('/v1/models');
+  });
+
+  it('returns unavailable when the injected local models probe throws', () => {
+    const cfg = withFoundry({ allowedBackends: ['local-coder'], models: { 'local-coder': 'configured-qwen' } });
+    const localModelsResponse = vi.fn(() => { throw new Error('probe failed'); });
+    const r = engineReadiness('local-coder', cfg, { localModelsResponse });
+    expect(r).toMatchObject({ installed: false, authed: 'unknown', ready: false });
+    expect(localModelsResponse).toHaveBeenCalledOnce();
+  });
+
+  it('never contacts a custom keyless remote api-model endpoint', () => {
+    const cfg = withFoundry({
+      allowedBackends: ['remote-test' as EngineId],
+      engines: {
+        'remote-test': {
+          id: 'remote-test', kind: 'api-model', tier: 'mid',
+          api: { envKey: '', defaultBaseUrl: 'https://models.example.test/v1' },
+        },
+      },
+    } as NonNullable<AshlrConfig['foundry']>);
+    const localModelsResponse = vi.fn(() => ({ statusCode: 200, body: '{"data":[]}' }));
+    const r = engineReadiness('remote-test' as EngineId, cfg, { localModelsResponse });
+    expect(localModelsResponse).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ installed: false, ready: false });
+    expect(r.detail).toContain('no endpoint was contacted');
+  });
+
+  it('refuses a built-in local-coder redirected off loopback before probing', () => {
+    const cfg = withFoundry({ allowedBackends: ['local-coder'] });
+    const localModelsResponse = vi.fn(() => ({ statusCode: 200, body: '{"data":[]}' }));
+    const r = engineReadiness('local-coder', cfg, {
+      getEnv: (key) => key === 'OLLAMA_BASE_URL' ? 'https://models.example.test/v1' : undefined,
+      localModelsResponse,
+    });
+    expect(localModelsResponse).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ installed: false, ready: false });
+  });
+
+  it('probes a loopback llama-server model endpoint', () => {
+    const cfg = withFoundry({ allowedBackends: ['llama-server'], models: { 'llama-server': 'local-model' } });
+    const localModelsResponse = vi.fn(() => ({ statusCode: 200, body: '{"data":[{"id":"local-model"}]}' }));
+    const r = engineReadiness('llama-server', cfg, { localModelsResponse });
+    expect(localModelsResponse).toHaveBeenCalledOnce();
+    expect(r).toMatchObject({ installed: true, authed: 'unknown', ready: true });
+  });
+
   it('installed:false + ready:false when env key absent', () => {
     // Inject a minimal api-model spec via cfg.foundry.engines
     const cfg = withFoundry({
@@ -250,6 +364,8 @@ describe('api-model engines', () => {
       },
     } as NonNullable<AshlrConfig['foundry']>);
     const overrides: ProbeOverrides = {
+      isInstalled: vi.fn(() => true),
+      localModelsResponse: vi.fn(() => ({ statusCode: 200, body: '{"data":[]}' })),
       getEnv: () => undefined, // key absent
     };
     const r = engineReadiness('gpt-4o' as EngineId, cfg, overrides);
@@ -257,6 +373,8 @@ describe('api-model engines', () => {
     expect(r.authed).toBe(false);
     expect(r.ready).toBe(false);
     expect(r.fix).toContain('OPENAI_API_KEY');
+    expect(overrides.isInstalled).not.toHaveBeenCalled();
+    expect(overrides.localModelsResponse).not.toHaveBeenCalled();
   });
 
   it('installed:true + ready:true when env key present', () => {
@@ -272,12 +390,16 @@ describe('api-model engines', () => {
       },
     } as NonNullable<AshlrConfig['foundry']>);
     const overrides: ProbeOverrides = {
+      isInstalled: vi.fn(() => false),
+      localModelsResponse: vi.fn(() => null),
       getEnv: (k) => k === 'OPENAI_API_KEY' ? 'sk-test-key' : undefined,
     };
     const r = engineReadiness('gpt-4o' as EngineId, cfg, overrides);
     expect(r.installed).toBe(true);
     expect(r.authed).toBe(true);
     expect(r.ready).toBe(true);
+    expect(overrides.isInstalled).not.toHaveBeenCalled();
+    expect(overrides.localModelsResponse).not.toHaveBeenCalled();
   });
 });
 

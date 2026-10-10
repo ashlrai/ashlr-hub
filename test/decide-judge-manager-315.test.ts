@@ -71,6 +71,19 @@ const rubric = (verdict: string, dims: [string, string, string, string], conf = 
 });
 
 describe('manager judge — Jev extraction before the reprompt', () => {
+  it('recovers from a successful blank judge reply on the strict retry', async () => {
+    delete process.env[TYPESAFE_API_KEY_ENV];
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    const complete = vi.fn()
+      .mockResolvedValueOnce(' \n ')
+      .mockResolvedValueOnce(JSON.stringify({ verdict: 'review', value: 3, correctness: 4, scope: 2, alignment: 4, rationale: 'recovered' }));
+    const verdict = await judgeProposal(proposal(), {} as never, { model: 'fixture-judge', complete });
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(fake.fetch).not.toHaveBeenCalled();
+    expect(verdict).toMatchObject({ verdict: 'review', rationale: 'recovered' });
+    expect(verdict.judgeFailure).toBeUndefined();
+  });
+
   it('extracts a stated verdict from prose: one judge call, a considered judgment', async () => {
     const { judgeProposal } = await import('../src/core/fleet/manager.js');
     fake.respond(() => rubric('review', ['4', '4', '3', '4']));
@@ -126,5 +139,19 @@ describe('outcome retirement during critic response', () => {
       cache: false, selectedOutcomeAdmission: () => current,
     })).rejects.toMatchObject({ name: 'SelectedOutcomeAdmissionRefusal' });
     expect(complete).toHaveBeenCalledOnce(); expect(fake.fetch).not.toHaveBeenCalled();
+  });
+
+  it('propagates retirement when the strict retry returns an empty reply', async () => {
+    delete process.env[TYPESAFE_API_KEY_ENV];
+    const { judgeProposal } = await import('../src/core/fleet/manager.js');
+    let current = true;
+    const complete = vi.fn()
+      .mockResolvedValueOnce('unstructured review')
+      .mockImplementationOnce(async () => { current = false; return ' \n '; });
+    await expect(judgeProposal(proposal(), {} as never, { model: 'fixture-judge', complete }, {
+      cache: false, selectedOutcomeAdmission: () => current,
+    })).rejects.toMatchObject({ name: 'SelectedOutcomeAdmissionRefusal' });
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(fake.fetch).not.toHaveBeenCalled();
   });
 });
