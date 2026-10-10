@@ -11,6 +11,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { performance } from 'node:perf_hooks';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { delimiter, join, resolve } from 'node:path';
@@ -1245,6 +1246,51 @@ describe('verifyTaskStructured', () => {
 
 
 describe('signed metadata preflight under the original deadline', () => {
+  it('waits out an early timer wakeup and reports the original monotonic deadline', async () => {
+    vi.useFakeTimers();
+    let now = 100;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const prepared = vi.fn(), providerEntry = vi.fn();
+    let settled = false;
+    try {
+      const pending = runVerifySubprocessAsync(['node', '-e', "throw Error('no contact')"], {
+        cwd: workdir, env: {}, timeoutMs: 15, requireProcessGroupExit: true, _platform: 'linux',
+        _spawn: providerEntry as unknown as typeof import('node:child_process').spawn,
+        processGroupLifecycle: { preflight: async () => await new Promise<void>(() => {}), prepare: prepared },
+      }).then(result => { settled = true; return result; });
+      now = 114.5;
+      await vi.advanceTimersByTimeAsync(15);
+      expect(settled).toBe(false);
+      expect(prepared).not.toHaveBeenCalled(); expect(providerEntry).not.toHaveBeenCalled();
+      now = 115;
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toMatchObject({ timedOut: true, cancelled: false, processGroupSettlement: 'not-started' });
+      expect(vi.getTimerCount()).toBe(0);
+      expect(prepared).not.toHaveBeenCalled(); expect(providerEntry).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+  });
+  it('keeps proof rejection distinct from timeout and gives explicit cancellation precedence', async () => {
+    vi.useFakeTimers();
+    let now = 100;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const prepared = vi.fn(), providerEntry = vi.fn();
+    const controller = new AbortController();
+    const options = { cwd: workdir, env: {}, timeoutMs: 15, requireProcessGroupExit: true, _platform: 'linux' as const,
+      _spawn: providerEntry as unknown as typeof import('node:child_process').spawn };
+    try {
+      await expect(runVerifySubprocessAsync(['node'], { ...options,
+        processGroupLifecycle: { preflight: async () => { throw new Error('proof unavailable'); }, prepare: prepared },
+      })).resolves.toMatchObject({ timedOut: false, cancelled: false, processGroupSettlement: 'not-started' });
+      expect(vi.getTimerCount()).toBe(0);
+      const pending = runVerifySubprocessAsync(['node'], { ...options, signal: controller.signal,
+        processGroupLifecycle: { preflight: async () => await new Promise<void>(() => {}), prepare: prepared },
+      });
+      now = 120; controller.abort();
+      await expect(pending).resolves.toMatchObject({ timedOut: false, cancelled: true, processGroupSettlement: 'not-started' });
+      expect(vi.getTimerCount()).toBe(0);
+      expect(prepared).not.toHaveBeenCalled(); expect(providerEntry).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+  });
   it('does not prepare after pre-abort, timed out proof or fresh cancellation', async () => {
     const prepared = vi.fn(() => ({ spawned: vi.fn(), settled: vi.fn() }));
     const preflight = vi.fn(async (_signal: AbortSignal) => await new Promise<void>(() => {}));

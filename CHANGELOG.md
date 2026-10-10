@@ -17,6 +17,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   Preview the installation first; `--apply` installs into an absent app location.
 
 ### Fixed
+- Wait for the original process preflight deadline when a timer wakes early, so
+  a hung proof is reported as a timeout without starting the process.
 - Keep newer observed chat activity when an older session snapshot arrives, and
   settle sidebar activity only from a matching completed or cancelled turn.
 - Preserve unknown resource usage instead of inventing provider limits, check

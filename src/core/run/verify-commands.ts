@@ -919,13 +919,20 @@ export async function runVerifySubprocessAsync(
     const started = performance.now(), controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const abort = () => controller.abort(); opts.signal?.addEventListener('abort', abort, { once: true });
+    const expire = () => {
+      // Timers can wake fractionally early. Recheck the original monotonic
+      // deadline rather than refusing proof before its allowance has elapsed.
+      const remaining = opts.timeoutMs - (performance.now() - started);
+      if (remaining > 0) timer = setTimeout(expire, Math.max(1, Math.ceil(remaining)));
+      else abort();
+    };
     try {
       await Promise.race([
         opts.processGroupLifecycle.preflight(controller.signal),
         new Promise<never>((_, reject) => {
           const refuse = () => reject(new Error('Native metadata preflight unavailable'));
           controller.signal.addEventListener('abort', refuse, { once: true });
-          timer = setTimeout(abort, Math.max(1, opts.timeoutMs));
+          timer = setTimeout(expire, Math.max(1, opts.timeoutMs));
           if (opts.signal?.aborted) abort();
         }),
       ]);
