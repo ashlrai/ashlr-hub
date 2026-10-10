@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { canonicalEvidencePackJsonV3 } from '../src/core/foundry/provenance.js';
 import { canonicalResourceLedgerJson } from '../src/core/resources/pool-ledger-json.js';
+import { resourceGenerationTaskId, type ResourceTaskOrigin } from '../src/core/resources/task-origin.js';
 import { decodeResourcePoolState, requireResourcePoolSettlementHeadroom, resourcePoolStatus, runResourceTask,
   type ResourcePoolState, type ResourceTask, type ResourceTaskReceipt } from '../src/core/resources/pool-runtime.js';
 import { executeResourceWorker, type ResourceBinding, type ResourceWorkerResult } from '../src/core/resources/worker.js';
@@ -106,6 +107,24 @@ describe.skipIf(process.platform === 'win32')('pool ledger decoder matches its w
     const overCap = ledgerOfBytes(MAX_BYTES + 1);
     expect(() => decodeResourcePoolState(overCap, pool, bindings)).toThrow('Invalid bounded resource ledger');
     save(overCap); expect(() => status()).toThrow(/oversized/);
+  });
+
+  it('counts preserved historical origin bytes at the exact 4 MiB boundary', () => {
+    const identity = { universeId: 'historical-fixture', runId: 'fixture-run', variantId: 'a'.repeat(63) };
+    const origin: ResourceTaskOrigin = { kind: 'universe-generation', ...identity };
+    const receipt = { ...wideReceipt(0), id: resourceGenerationTaskId(identity), origin };
+    const extraBytes = Buffer.byteLength(canonical(receipt)) - Buffer.byteLength(canonical(wideReceipt(0)));
+    const atCap = ledgerOfBytes(MAX_BYTES - extraBytes); atCap.attempts[0] = receipt;
+    expect(Buffer.byteLength(canonical(atCap) + '\n')).toBe(MAX_BYTES);
+    expect(decodeResourcePoolState(atCap, pool, bindings).attempts[0]).toEqual(receipt);
+    save(atCap); const before = readFileSync(file(), 'utf8'); expect(status().attempts[0]?.origin).toEqual(origin);
+    expect(readFileSync(file(), 'utf8')).toBe(before);
+    const overCap = structuredClone(atCap); const larger = { ...identity, variantId: identity.variantId + 'a' };
+    overCap.attempts[0] = { ...receipt, id: resourceGenerationTaskId(larger), origin: { kind: 'universe-generation', ...larger } };
+    expect(Buffer.byteLength(canonical(overCap) + '\n')).toBe(MAX_BYTES + 1);
+    expect(() => decodeResourcePoolState(overCap, pool, bindings)).toThrow('Invalid bounded resource ledger');
+    expect(() => requireResourcePoolSettlementHeadroom(overCap, pool)).toThrow('settlement capacity reached');
+    expect(executeResourceWorker).not.toHaveBeenCalled();
   });
 
   it('refuses an over-4 MiB ledger in the writer gate and the decoder alike, without contacting a worker', async () => {

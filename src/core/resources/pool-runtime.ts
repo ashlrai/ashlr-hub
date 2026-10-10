@@ -1,5 +1,6 @@
 /** Foreground, explicitly enrolled resource tasks. No daemon or Universe authority is inferred. */
 import { randomUUID } from 'node:crypto';
+import { validResourceTaskOrigin, type ResourceTaskOrigin } from './task-origin.js';
 import { expandResourceQuotaDenials, sharesResourceQuota } from './quota-scope.js';
 import { excludedResourceQuotaScopeWorkerIds, validateResourceQuotaScopeExclusions,
   type ResourceQuotaScopeAccess, type ResourceQuotaScopeExclusion } from './quota-scope-access.js';
@@ -48,6 +49,8 @@ export interface ResourceTaskReceipt {
   outputTokens: number | null;
   reason: string;
   verifiedAccepted: false;
+  /** Reader compatibility for strict historical host provenance; new tasks cannot supply it. */
+  origin?: ResourceTaskOrigin;
   /** Absent on legacy receipts. No wall-clock-derived timing is backfilled. */
   execution?: ResourceExecutionMeasurement;
   /** Optional native invocation facts. Legacy receipts are never reconstructed from current host state. */
@@ -210,9 +213,11 @@ function inspectRoot(root: string, create: boolean): boolean {
 function checkedReceipt(value: unknown, stateDigest: string, bindings: ResourceBinding[], pool: ResourcePool): value is ResourceTaskReceipt {
   if (!object(value) || !exact(value, ['schemaVersion', 'id', 'taskDigest', 'poolDigest', 'workerId', 'capacityKey',
     'status', 'startedAt', 'finishedAt', 'outputDigest', 'inputTokens', 'outputTokens', 'reason', 'verifiedAccepted',
+    ...(Object.hasOwn(value, 'origin') ? ['origin'] : []),
     ...(Object.hasOwn(value, 'execution') ? ['execution'] : []),
     ...(Object.hasOwn(value, 'nativeProcess') ? ['nativeProcess'] : [])]) ||
     value.schemaVersion !== 1 || typeof value.id !== 'string' || !ID.test(value.id) ||
+    Object.hasOwn(value, 'origin') && !validResourceTaskOrigin(value.origin, value.id) ||
     typeof value.taskDigest !== 'string' || !HASH.test(value.taskDigest) || value.poolDigest !== stateDigest ||
     !bindings.some((binding) => binding.workerId === value.workerId && binding.capacityKey === value.capacityKey) ||
     typeof value.status !== 'string' || !['reserved', ...TERMINAL, 'uncertain'].includes(value.status) || !iso(value.startedAt) ||
