@@ -1,6 +1,7 @@
 /** Fresh public release facts. This is claim eligibility, never build or effect authority. */
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { parseDocument } from 'yaml';
 import { requireHubRepositoryMetadata, requireHubRepositoryReference, type HubRepositoryLabel } from './authority/repository-binding.js';
 import { desktopUpdateProfileForPackage, type DesktopUpdateProfile } from './desktop/update-manifest.js';
 
@@ -141,6 +142,62 @@ async function jobsFor(reader: ReleasePublicReader, base: string, id: number, at
   }
   throw new Error('Job enumeration limit exceeded');
 }
+/** The exact candidate workflow distinguishes historical full matrices from the
+ * added site-only PR lane. These two jobs never replace the 15 authority gates. */
+async function sourceCiAncillaryJobs(base: string, sourceSha: string, reader: ReleasePublicReader, signal?: AbortSignal): Promise<boolean> {
+  const path = '.github/workflows/ci.yml';
+  const file = object(await reader.github(`${base}/contents/${path}?ref=${sourceSha}`, signal));
+  equal(file['type'], 'file', 'CI workflow type'); equal(file['path'], path, 'CI workflow path');
+  const blobSha = hash(file['sha']);
+  if (!Number.isSafeInteger(file['size']) || Number(file['size']) < 1 || Number(file['size']) > MAX_PACKAGE) throw new Error('Bounded source CI workflow unavailable');
+  const bytes = decodeSourceBlob(file, blobSha, Number(file['size']), 'CI workflow');
+  const document = parseDocument(new TextDecoder('utf-8', { fatal: true }).decode(bytes), { uniqueKeys: true, prettyErrors: false });
+  if (document.errors.length > 0 || document.warnings.length > 0) throw new Error('Invalid source CI workflow');
+  const workflow = object(document.toJS({ maxAliasCount: 100 }) as unknown);
+  equal(workflow['name'], 'CI', 'CI workflow name');
+  const jobs = object(workflow['jobs']);
+  const hasClassifier = Object.hasOwn(jobs, 'classify'); const hasSite = Object.hasOwn(jobs, 'site');
+  if (!hasClassifier && !hasSite) return false;
+  if (!hasClassifier || !hasSite) throw new Error('Incomplete source CI site topology');
+  const classifier = object(jobs['classify']); const site = object(jobs['site']); const full = object(jobs['ci']);
+  equal(classifier['name'], 'Classify PR site lane', 'classifier source name');
+  equal(classifier['runs-on'], 'ubuntu-latest', 'classifier source runner');
+  equal(site['name'], 'Site PR (ecosystem)', 'site source name'); equal(site['runs-on'], 'ubuntu-latest', 'site source runner');
+  equal(site['needs'], 'classify', 'site source dependency'); equal(site['if'], "needs.classify.outputs.lane == 'site'", 'site source condition');
+  equal(full['needs'], 'classify', 'full source dependency'); equal(full['if'], "needs.classify.outputs.lane == 'full'", 'full source condition');
+  if (!Array.isArray(classifier['steps'])) throw new Error('Classifier source steps unavailable');
+  for (const [name, command] of [['Bind candidate source', 'node .github/scripts/ci-source-binding.mjs'],
+    ['Classify exact ecosystem-only PR', 'node .github/scripts/ci-site-lane.mjs']]) {
+    const matches = classifier['steps'].map(object).filter((step) => step['name'] === name);
+    if (matches.length !== 1) throw new Error('Classifier source step missing or ambiguous');
+    equal(matches[0]!['run'], command, 'classifier source command');
+  }
+  return true;
+}
+
+function verifyCiAncillaryJobs(jobs: Record<string, unknown>[], id: number, sourceSha: string): void {
+  for (const name of ['Classify PR site lane', 'Site PR (ecosystem)']) {
+    const matches = jobs.filter((job) => job['name'] === name);
+    if (matches.length !== 1) throw new Error('Ancillary qualification job missing or ambiguous');
+    const job = matches[0]!;
+    equal(job['run_id'], id, 'ancillary job run'); equal(job['head_sha'], sourceSha, 'ancillary job candidate');
+    equal(job['status'], 'completed', 'ancillary job status');
+    if (!Array.isArray(job['labels']) || job['labels'].includes('self-hosted') || !job['labels'].includes('ubuntu-latest')) throw new Error('Unexpected ancillary qualification runner');
+    if (!Array.isArray(job['steps'])) throw new Error('Ancillary qualification steps unavailable');
+    if (name === 'Site PR (ecosystem)') {
+      // A public full release must qualify every authority gate, not the site lane.
+      equal(job['conclusion'], 'skipped', 'site qualification outcome'); equal(job['steps'].length, 0, 'site skipped steps');
+    } else {
+      equal(job['conclusion'], 'success', 'classifier qualification outcome');
+      if (job['steps'].some((step) => !['success', 'skipped'].includes(String(object(step)['conclusion'])) || object(step)['status'] !== 'completed')) throw new Error('Classifier qualification steps incomplete');
+      for (const stepName of ['Bind candidate source', 'Classify exact ecosystem-only PR']) {
+        const steps = job['steps'].map(object).filter((step) => step['name'] === stepName);
+        if (steps.length !== 1 || steps[0]!['status'] !== 'completed' || steps[0]!['conclusion'] !== 'success') throw new Error('Required classifier step missing or skipped');
+      }
+    }
+  }
+}
+
 async function successfulRun(reader: ReleasePublicReader, base: string, repository: string, sourceSha: string, workflow: string, signal?: AbortSignal): Promise<{ id: number; attempt: number }> {
   // Query a fixed workflow and exact candidate. Pick the newest run, not an old
   // green attempt of a newer failed run; fresh attempt and jobs are rechecked.
@@ -157,7 +214,11 @@ async function successfulRun(reader: ReleasePublicReader, base: string, reposito
   if (!['pull_request', 'push', 'workflow_dispatch'].includes(String(run['event']))) throw new Error('Unexpected qualification event');
   const jobs = await jobsFor(reader, base, id, attempt, signal);
   const names = workflow === 'ci.yml' ? RELEASE_CI_JOBS : ['Dependency audit (root + Raycast)'];
-  if (jobs.length !== names.length || new Set(jobs.map((job) => job['id'])).size !== jobs.length) throw new Error('Unexpected qualification job inventory');
+  const ancillary = workflow === 'ci.yml' && await sourceCiAncillaryJobs(base, sourceSha, reader, signal);
+  const allNames: readonly string[] = ancillary ? [...names, 'Classify PR site lane', 'Site PR (ecosystem)'] : names;
+  if (jobs.length !== allNames.length || new Set(jobs.map((job) => job['id'])).size !== jobs.length ||
+      new Set(jobs.map((job) => job['name'])).size !== jobs.length || jobs.some((job) => !allNames.includes(String(job['name'])))) throw new Error('Unexpected qualification job inventory');
+  if (ancillary) verifyCiAncillaryJobs(jobs, id, sourceSha);
   for (const name of names) {
     const matches = jobs.filter((job) => job['name'] === name);
     if (matches.length !== 1) throw new Error('Required qualification job missing or ambiguous');
@@ -232,6 +293,23 @@ function stringAssetName(value: unknown): string {
   return value;
 }
 
+function decodeSourceBlob(blob: Record<string, unknown>, blobSha: string, expectedSize: number, label: string): Buffer {
+  equal(blob['sha'], blobSha, `${label} source blob`); equal(blob['encoding'], 'base64', `${label} blob encoding`);
+  equal(blob['size'], expectedSize, `${label} source size`);
+  const content = blob['content'];
+  if (typeof content !== 'string' || content.length > MAX_PACKAGE * 2) throw new Error(`${label} blob exceeds bound`);
+  // GitHub wraps Base64 with ASCII line breaks; Buffer's other tolerances are refused.
+  const encoded = content.replace(/[\r\n]/g, '');
+  if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
+    throw new Error(`Invalid ${label} blob Base64`);
+  }
+  const bytes = Buffer.from(encoded, 'base64');
+  equal(bytes.length, expectedSize, `${label} raw byte length`); equal(bytes.toString('base64'), encoded, `${label} Base64`);
+  const actualSha = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+  equal(actualSha, blobSha, `${label} Git blob hash`);
+  return bytes;
+}
+
 /** A renamed repository does not identify an historical release's npm package. */
 async function sourcePackageProfile(base: string, treeSha: string, pin: ProposedRelease, reader: ReleasePublicReader,
   signal?: AbortSignal): Promise<DesktopUpdateProfile> {
@@ -254,19 +332,7 @@ async function sourcePackageProfile(base: string, treeSha: string, pin: Proposed
     throw new Error('Regular bounded source package unavailable');
   }
   const blobSha = hash(entry['sha']); const blob = object(await reader.github(`${base}/git/blobs/${blobSha}`, signal));
-  equal(blob['sha'], blobSha, 'package source blob'); equal(blob['encoding'], 'base64', 'package blob encoding');
-  equal(blob['size'], entry['size'], 'package source size');
-  const content = blob['content'];
-  if (typeof content !== 'string' || content.length > MAX_PACKAGE * 2) throw new Error('Package blob exceeds bound');
-  // GitHub wraps Base64 with ASCII line breaks; Buffer's other tolerances are refused.
-  const encoded = content.replace(/[\r\n]/g, '');
-  if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
-    throw new Error('Invalid package blob Base64');
-  }
-  const bytes = Buffer.from(encoded, 'base64');
-  equal(bytes.length, entry['size'], 'package raw byte length'); equal(bytes.toString('base64'), encoded, 'package Base64');
-  const actualSha = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
-  equal(actualSha, blobSha, 'package Git blob hash');
+  const bytes = decodeSourceBlob(blob, blobSha, Number(entry['size']), 'package');
   const pkg = object(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown);
   const profile = desktopUpdateProfileForPackage(pkg['name']); equal(pkg['version'], pin.version, 'source package version');
   if (profile.name === 'canonical-v2') equal(pin.repository, profile.repository, 'canonical release repository');
