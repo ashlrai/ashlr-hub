@@ -111,7 +111,10 @@ export async function syncWebsiteReleaseMetadata(deps: WebsiteReleaseMetadataDep
           title: `Refresh Phantom ${release.version} website release metadata`, dedupeKey: `${PREFIX}${release.factsDigest}`,
           detail: `Refresh only apps/web/src/lib/workbench-release.json using fresh host-owned phm release-articles metadata --json. Expected public release data: ${JSON.stringify(release)}. Reobserve before editing; if latest changed, use its freshly verified record, never downgrade an existing newer record. If verification fails, leave prior metadata unchanged. This verifies public GitHub/source/CI/Audit/npm metadata, not original archive bytes, installer authority or installed acceptance. Preserve independent Secrets public-release.ts, Cloud/account flows and SEO. No company article, teaser, newsletter, outreach or paid artwork. Use normal source commit/PR/required checks/protected merge and the commissioned host website publisher; do not deploy directly. Task completion is not live publication.` });
       } catch { return result('held', 'Website metadata enqueue outcome is unknown; no replay will be attempted.'); }
-      if (!queued.ok) { attempt.attempted = false; writeState(state); return result('held', 'Website metadata enqueue was refused.'); }
+      if (!queued.ok) {
+        if (queued.writeAttempted !== false) return result('held', 'Website metadata enqueue outcome is unknown; no replay will be attempted.');
+        attempt.attempted = false; writeState(state); return result('held', 'Website metadata enqueue was refused before persistence.');
+      }
       attempt.taskId = queued.task.id; writeState(state); return result('queued', null, queued.task.id);
     } finally { releaseOutwardMutationFence(fence); }
   } finally { releaseLocalStoreLock(lock); }

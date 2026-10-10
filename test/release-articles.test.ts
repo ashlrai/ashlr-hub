@@ -155,9 +155,39 @@ describe('independent website release metadata maintenance', () => {
     expect(await syncWebsiteReleaseMetadata(ports)).toMatchObject({ phase: 'awaiting-source', taskId: queued.taskId });
     expect(ports.enqueue).toHaveBeenCalledTimes(1);
   });
+  it('preserves the reservation when enqueue reports failure after persisting a task', async () => {
+    const ports = metadataDeps();
+    const writer = preferences.writePrivateFileAtomic;
+    const fault = vi.spyOn(preferences, 'writePrivateFileAtomic').mockImplementation((file, ...args) => {
+      writer(file, ...args);
+      if (file === taskQueuePath()) throw new Error('post-persistence fixture failure');
+    });
+    const first = await syncWebsiteReleaseMetadata(ports);
+    fault.mockRestore();
+    expect(first).toMatchObject({ phase: 'held', reason: expect.stringContaining('outcome is unknown') });
+    const queue = readTaskQueue();
+    expect(queue.ok).toBe(true);
+    if (!queue.ok) throw new Error(queue.reason);
+    expect(queue.tasks).toHaveLength(1);
+    expect(vi.mocked(ports.enqueue).mock.results[0]?.value).toMatchObject({ ok: false, writeAttempted: true });
+    recordTaskDispatch(queue.tasks[0]!.id, { kind: 'produced', proposalId: null }, { nowMs: NOW + 1_000 });
+    const retained = JSON.parse(readFileSync(taskQueuePath(), 'utf8'));
+    writeFileSync(taskQueuePath(), JSON.stringify({ ...retained, tasks: [] }));
+    ports.now = () => NOW + 120_000;
+    expect((await syncWebsiteReleaseMetadata(ports)).phase).toBe('awaiting-source');
+    expect(ports.enqueue).toHaveBeenCalledTimes(1);
+  });
+  it('holds legacy enqueue failures without explicit pre-write proof', async () => {
+    const ports = metadataDeps();
+    ports.enqueue = vi.fn(() => ({ ok: false, reason: 'unclassified failure' }));
+    expect((await syncWebsiteReleaseMetadata(ports)).reason).toContain('outcome is unknown');
+    ports.now = () => NOW + 120_000;
+    expect((await syncWebsiteReleaseMetadata(ports)).phase).toBe('awaiting-source');
+    expect(ports.enqueue).toHaveBeenCalledTimes(1);
+  });
   it('allows retry after a known refusal but holds failed existing work for review', async () => {
     const ports = metadataDeps(); const original = ports.enqueue;
-    ports.enqueue = vi.fn(() => ({ ok: false, reason: 'queue full' }));
+    ports.enqueue = vi.fn(() => ({ ok: false, reason: 'queue full', writeAttempted: false }));
     expect((await syncWebsiteReleaseMetadata(ports)).reason).toContain('was refused');
     ports.enqueue = original; ports.now = () => NOW + 120_000;
     const queued = await syncWebsiteReleaseMetadata(ports); expect(queued.phase).toBe('queued');

@@ -264,22 +264,27 @@ function withQueue<T>(
   file: string,
   nowMs: number,
   mutate: (tasks: FleetTask[]) => { tasks: FleetTask[]; result: T; write: boolean },
-): { ok: true; result: T } | { ok: false; reason: string } {
+): { ok: true; result: T } | { ok: false; reason: string; writeAttempted: boolean } {
   try {
     ensurePrivateDirectory(dirname(file));
   } catch {
-    return { ok: false, reason: 'The fleet task queue directory is not a private directory.' };
+    return { ok: false, reason: 'The fleet task queue directory is not a private directory.', writeAttempted: false };
   }
   const lock = acquireLocalStoreLock(lockPath(file), TASK_QUEUE_LIMITS.lockWaitMs);
-  if (!lock) return { ok: false, reason: 'The fleet task queue is busy; try again.' };
+  if (!lock) return { ok: false, reason: 'The fleet task queue is busy; try again.', writeAttempted: false };
+  let writeAttempted = false;
   try {
     const read = readTaskQueue(file);
-    if (!read.ok) return { ok: false, reason: read.reason };
+    if (!read.ok) return { ok: false, reason: read.reason, writeAttempted };
     const outcome = mutate(prune(read.tasks, nowMs));
-    if (outcome.write) writeQueue(file, outcome.tasks, nowMs);
+    if (outcome.write) {
+      // Atomic rename may succeed before a later durability/close error.
+      writeAttempted = true;
+      writeQueue(file, outcome.tasks, nowMs);
+    }
     return { ok: true, result: outcome.result };
   } catch (err) {
-    return { ok: false, reason: `The fleet task queue could not be updated (${scrubSecrets(err instanceof Error ? err.message : String(err)).slice(0, 160)}).` };
+    return { ok: false, reason: `The fleet task queue could not be updated (${scrubSecrets(err instanceof Error ? err.message : String(err)).slice(0, 160)}).`, writeAttempted };
   } finally {
     releaseLocalStoreLock(lock);
   }
@@ -323,8 +328,8 @@ function validateInput(input: FleetTaskInput): { ok: true } | { ok: false; reaso
 /** Queue a task (idempotent on `dedupeKey`). */
 export function enqueueTask(input: FleetTaskInput, opts: TaskStoreOptions = {}): EnqueueTaskResult {
   const valid = validateInput(input);
-  if (!valid.ok) return valid;
-  if (opts.sizeBudget && !validSizeBudget(opts.sizeBudget)) return { ok: false, reason: 'sizeBudget must contain positive safe integers.' };
+  if (!valid.ok) return { ...valid, writeAttempted: false };
+  if (opts.sizeBudget && !validSizeBudget(opts.sizeBudget)) return { ok: false, reason: 'sizeBudget must contain positive safe integers.', writeAttempted: false };
   const nowMs = opts.nowMs ?? Date.now();
   const nowIso = new Date(nowMs).toISOString();
   const file = opts.file ?? taskQueuePath();
@@ -366,9 +371,9 @@ export function enqueueTask(input: FleetTaskInput, opts: TaskStoreOptions = {}):
     };
     return { tasks: [...tasks, task], result: { task, deduped: false, full: false }, write: true };
   });
-  if (!outcome.ok) return { ok: false, reason: outcome.reason };
+  if (!outcome.ok) return { ok: false, reason: outcome.reason, writeAttempted: outcome.writeAttempted };
   if (outcome.result.full) {
-    return { ok: false, reason: `The fleet already holds ${TASK_QUEUE_LIMITS.maxOpenTasks} unfinished tasks.` };
+    return { ok: false, reason: `The fleet already holds ${TASK_QUEUE_LIMITS.maxOpenTasks} unfinished tasks.`, writeAttempted: false };
   }
   return { ok: true, task: outcome.result.task!, deduped: outcome.result.deduped };
 }
