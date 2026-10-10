@@ -264,7 +264,7 @@ describe('api-model engines', () => {
         process.execPath = '/compiled-phantom-sidecar-cannot-eval';
         const cfg = withFoundry({ allowedBackends: ['local-coder'], models: { 'local-coder': 'fixture-model' } });
         const result = engineReadiness('local-coder', cfg, {
-          getEnv: (key) => key === 'OLLAMA_BASE_URL' ? 'http://127.0.0.1:' + String(port) + '/v1' : undefined,
+          getEnv: (key) => key === 'OLLAMA_BASE_URL' ? 'http://localhost:' + String(port) + '/v1' : undefined,
         });
         expect(result).toMatchObject({ installed: true, authed: 'unknown', ready: true });
       } finally {

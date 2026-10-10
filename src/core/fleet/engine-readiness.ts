@@ -111,12 +111,18 @@ function readLocalModels(url: string): { statusCode: number; body: string } | nu
     // -q must be first: ignore user curl config, including redirects and proxy
     // overrides. Use the OS binary by absolute path, not an agent-modified PATH.
     const curl = process.platform === 'win32'
-      ? join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'curl.exe')
+      ? 'C:\\Windows\\System32\\curl.exe'
       : '/usr/bin/curl';
+    const target = new URL(url);
+    // A hosts-file change must not turn the accepted "localhost" name into
+    // off-machine egress. Literal loopback IPs need no resolver override.
+    const localResolve = target.hostname === 'localhost'
+      ? ['--resolve', 'localhost:' + (target.port || (target.protocol === 'https:' ? '443' : '80')) + ':127.0.0.1']
+      : [];
     const result = spawnSync(curl, [
       '-q', '--silent', '--show-error', '--noproxy', '*',
       '--proto', '=http,https', '--connect-timeout', '1', '--max-time', '2',
-      '--max-filesize', '131072', '--write-out', '\n%{http_code}', '--', url,
+      '--max-filesize', '131072', '--write-out', '\n%{http_code}', ...localResolve, '--', url,
     ], {
       encoding: 'utf8', timeout: 2500, maxBuffer: 262144,
       stdio: ['ignore', 'pipe', 'ignore'],
