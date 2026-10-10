@@ -4,6 +4,7 @@ import {
   openSync, readSync, readdirSync, realpathSync, writeSync, type BigIntStats,
 } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { gunzipSync } from 'node:zlib';
 import { Header } from 'tar';
 import { parseBuildIdentity } from '../build-identity.js';
@@ -204,15 +205,86 @@ function privateDirectory(path: string): void {
       (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o700)) fail('extraction directory must be private');
 }
 
+const EXTRACTION_BUCKETS = ['destination-validation', 'entry-digests', 'ancestor-validation',
+  'directory-create', 'leaf-open', 'leaf-write', 'leaf-chmod', 'leaf-fsync', 'leaf-close',
+  'directory-barrier'] as const;
+type ExtractionBucket = typeof EXTRACTION_BUCKETS[number];
+interface BucketTiming { attempted: number; completed: number; durationMs: number | null }
+interface ExtractionTiming { buckets: Record<ExtractionBucket, BucketTiming>; writtenBytes: number }
+export interface RuntimeExtractionTiming {
+  readonly schemaVersion: 1;
+  readonly outcome: 'returned' | 'threw';
+  readonly durationMs: number | null;
+  readonly unattributedMs: number | null;
+  readonly writtenBytes: number;
+  readonly buckets: Readonly<Record<ExtractionBucket, Readonly<BucketTiming>>>;
+}
+// Capture the trusted clock once. Never accept a callback inside the no-yield interval
+// between admitted-buffer validation and consumption: caller-owned Buffers are mutable.
+const extractionClock = performance.now.bind(performance);
+function clock(): number | null {
+  try { const value = extractionClock(); return Number.isFinite(value) ? value : null; }
+  catch { return null; }
+}
+function elapsed(start: number | null, end: number | null): number | null {
+  if (start === null || end === null) return null;
+  const value = end - start;
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+function measure<T>(timing: ExtractionTiming, bucket: ExtractionBucket, operation: () => T): T {
+  const value = timing.buckets[bucket];
+  value.attempted += 1;
+  const start = clock();
+  try { const result = operation(); value.completed += 1; return result; }
+  finally {
+    const duration = elapsed(start, clock());
+    value.durationMs = duration === null || value.durationMs === null ? null : value.durationMs + duration;
+  }
+}
+
 /** Extract only admitted bytes into a fresh, caller-owned private directory. */
 export function extractPinnedRuntimeArchive(archive: VerifiedRuntimeArchive, packageRoot: string): void {
+  extractArchive(archive, packageRoot, null);
+}
+
+/** Diagnostic only: no observer runs until all synchronous extraction/finally work ends. */
+export function extractPinnedRuntimeArchiveWithTiming(archive: VerifiedRuntimeArchive, packageRoot: string,
+  emit: (summary: RuntimeExtractionTiming) => unknown): void {
+  const timing: ExtractionTiming = { writtenBytes: 0, buckets: Object.fromEntries(EXTRACTION_BUCKETS.map(bucket =>
+    [bucket, { attempted: 0, completed: 0, durationMs: 0 }])) as ExtractionTiming['buckets'] };
+  const start = clock();
+  let outcome: RuntimeExtractionTiming['outcome'] = 'threw';
+  try { extractArchive(archive, packageRoot, timing); outcome = 'returned'; }
+  finally {
+    const durationMs = elapsed(start, clock());
+    const durations = EXTRACTION_BUCKETS.map(bucket => timing.buckets[bucket].durationMs);
+    const sum = durations.every(value => value !== null) ? durations.reduce<number>((total, value) => total + value!, 0) : null;
+    const residual = durationMs === null || sum === null ? null : durationMs - sum;
+    const summary: RuntimeExtractionTiming = Object.freeze({ schemaVersion: 1, outcome, durationMs,
+      unattributedMs: residual !== null && Number.isFinite(residual) && residual >= 0 ? residual : null,
+      writtenBytes: timing.writtenBytes,
+      buckets: Object.freeze(Object.fromEntries(EXTRACTION_BUCKETS.map(bucket =>
+        [bucket, Object.freeze({ ...timing.buckets[bucket] })])) as RuntimeExtractionTiming['buckets']) });
+    try {
+      const result = emit(summary);
+      if (result && typeof (result as PromiseLike<unknown>).then === 'function') Promise.resolve(result).catch(() => {});
+    } catch { /* Diagnostics cannot alter extraction or its original thrown object. */ }
+  }
+}
+
+function extractArchive(archive: VerifiedRuntimeArchive, packageRoot: string, timing: ExtractionTiming | null): void {
   const digests = admitted.get(archive);
-  if (!digests) fail('archive was not admitted by this process');
-  if (!isAbsolute(packageRoot) || realpathSync(packageRoot) !== resolve(packageRoot)) fail('extraction path is not canonical');
-  privateDirectory(packageRoot);
-  if (readdirSync(packageRoot).length !== 0) fail('extraction directory is not empty');
+  const validate = (): void => {
+    if (!digests) fail('archive was not admitted by this process');
+    if (!isAbsolute(packageRoot) || realpathSync(packageRoot) !== resolve(packageRoot)) fail('extraction path is not canonical');
+    privateDirectory(packageRoot);
+    if (readdirSync(packageRoot).length !== 0) fail('extraction directory is not empty');
+  };
+  if (timing) measure(timing, 'destination-validation', validate); else validate();
   for (let index = 0; index < archive.entries.length; index += 1) {
-    if (digest(archive.entries[index]!.bytes) !== digests[index]) fail('admitted bytes changed before extraction');
+    const bytes = archive.entries[index]!.bytes;
+    const observed = timing ? measure(timing, 'entry-digests', () => digest(bytes)) : digest(bytes);
+    if (observed !== digests![index]) fail('admitted bytes changed before extraction');
   }
   const directories = new Set([packageRoot]);
   for (const entry of archive.entries) {
@@ -220,23 +292,34 @@ export function extractPinnedRuntimeArchive(archive: VerifiedRuntimeArchive, pac
     let parent = packageRoot;
     for (const part of parts.slice(0, -1)) {
       parent = join(parent, part);
-      if (!directories.has(parent)) { mkdirSync(parent, { mode: 0o700 }); directories.add(parent); }
-      privateDirectory(parent);
+      if (!directories.has(parent)) {
+        if (timing) measure(timing, 'directory-create', () => mkdirSync(parent, { mode: 0o700 }));
+        else mkdirSync(parent, { mode: 0o700 });
+        directories.add(parent);
+      }
+      if (timing) measure(timing, 'ancestor-validation', () => privateDirectory(parent)); else privateDirectory(parent);
     }
     const path = join(packageRoot, entry.path);
     const mode = entry.executable ? 0o700 : 0o600;
-    const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), mode);
+    const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+    const fd = timing ? measure(timing, 'leaf-open', () => openSync(path, flags, mode)) : openSync(path, flags, mode);
     try {
       let offset = 0;
       while (offset < entry.bytes.length) {
-        const count = writeSync(fd, entry.bytes, offset, entry.bytes.length - offset, offset);
+        const count = timing ? measure(timing, 'leaf-write', () => writeSync(fd, entry.bytes, offset, entry.bytes.length - offset, offset)) :
+          writeSync(fd, entry.bytes, offset, entry.bytes.length - offset, offset);
+        if (timing && count > 0) timing.writtenBytes += count;
         if (count <= 0) fail('extraction write made no progress');
         offset += count;
       }
-      fchmodSync(fd, mode);
-      fsyncSync(fd);
-    } finally { closeSync(fd); }
+      if (timing) measure(timing, 'leaf-chmod', () => fchmodSync(fd, mode)); else fchmodSync(fd, mode);
+      if (timing) measure(timing, 'leaf-fsync', () => fsyncSync(fd)); else fsyncSync(fd);
+    } finally {
+      if (timing) measure(timing, 'leaf-close', () => closeSync(fd)); else closeSync(fd);
+    }
   }
-  for (const directory of [...directories].reverse()) fsyncDirectory(directory);
-  fsyncDirectory(dirname(packageRoot));
+  for (const directory of [...directories].reverse()) {
+    if (timing) measure(timing, 'directory-barrier', () => fsyncDirectory(directory)); else fsyncDirectory(directory);
+  }
+  if (timing) measure(timing, 'directory-barrier', () => fsyncDirectory(dirname(packageRoot))); else fsyncDirectory(dirname(packageRoot));
 }

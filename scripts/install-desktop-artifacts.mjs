@@ -23,16 +23,17 @@ const same = (a, b) => ['dev','ino','uid','mode','nlink','size','mtimeMs','ctime
 // These labels identify the failed boundary, never the error's private details.
 const FAILURE_PHASES = new Set(['preflight','implementation','finalized-artifacts','manifest-signature','artifact-bytes','artifact-signature','app-record','package-archive','source','hosted-proof','current','app-identity','aliases','quiescence','staging','package','late-artifacts','late-source','late-implementation','late-hosted-proof','late-package','late-current','late-aliases','late-quiescence','app-transaction','app-move','app-signature','app-launch','owned-health','pointer-switch','alias-create','pointer-recovery','destination','late-destination']);
 const timingScope = new AsyncLocalStorage();
+const DETAIL_OPERATIONS = new Set(['install-total','native-app-extraction','native-app-inspection']);
 const TIMED_OPERATIONS = new Map([['/usr/bin/ditto','archive-copy'],['/usr/bin/plutil','bundle-identity'],['/usr/bin/codesign','signature-verify'],['/usr/bin/open','app-open'],['/bin/ps','process-observation'],['/usr/sbin/lsof','socket-observation']]);
 
 /** Opt-in diagnostic spans, never installation evidence. Observer failures are inert. */
 export function withArtifactInstallTiming(operation,{emit,now=()=>performance.now()}) {
   const tracer={emit,now,sequence:0,span:0};
-  return timingScope.run({tracer,parentSpanId:null},operation);
+  return timingScope.run({tracer,parentSpanId:null},()=>timed('install-total',operation,'operation'));
 }
 function timed(label,operation,kind='stage') {
   const scope=timingScope.getStore();
-  if (!scope || !(kind==='stage'?FAILURE_PHASES.has(label):[...TIMED_OPERATIONS.values()].includes(label))) return operation();
+  if (!scope || !(kind==='stage'?FAILURE_PHASES.has(label):(DETAIL_OPERATIONS.has(label) || [...TIMED_OPERATIONS.values()].includes(label)))) return operation();
   const {tracer,parentSpanId}=scope,spanId=++tracer.span;
   const clock=()=>{try{const value=tracer.now();return typeof value==='number' && Number.isFinite(value)?value:null;}catch{return null;}};
   const record=value=>{try{
@@ -276,7 +277,20 @@ export async function applyInspectedDesktopArtifacts(result) {
   const archivePins={artifactPath:join(input.artifacts,m.cli.filename),sha256:m.cli.sha256,revision:m.source.revision,version:m.version,identityProfile:d.primitives.desktopUpdateProfileForPackage(m.cli.packageName).name};
   if(createdDestination) {
     const archive=await boundary('package-archive',()=>d.primitives.readPinnedRuntimeArchive(archivePins));
-    boundary('staging',()=>d.primitives.extractPinnedRuntimeArchive(archive,destination));
+    boundary('staging',()=>{
+      const scope=timingScope.getStore();
+      if (!scope) return d.primitives.extractPinnedRuntimeArchive(archive,destination);
+      return d.primitives.extractPinnedRuntimeArchiveWithTiming(archive,destination,summary=>{
+        // The extractor emits only after synchronous writes, fsyncs and closes.
+        // Keep this bounded scalar observation outside every admission decision.
+        const {tracer,parentSpanId}=scope;
+        try {
+          const emitted=tracer.emit({schemaVersion:1,kind:'artifact-runtime-extraction-timing',
+            sequence:++tracer.sequence,parentSpanId,...summary});
+          if (emitted && typeof emitted.then==='function') Promise.resolve(emitted).catch(()=>{});
+        } catch {/* Diagnostics cannot alter installation or rollback. */}
+      });
+    });
   }
   // A retained release is data, not a replayed stage or saved admission. Never
   // overwrite it: fresh original-package proof and stable ownership are required.
@@ -295,8 +309,8 @@ export async function applyInspectedDesktopArtifacts(result) {
   await boundary('package',packageReady);
   const stageParent=join(d.home,'.ashlr/updates/manual-staging');safeInstallParents(d.home,stageParent);
   const stage=fs.mkdtempSync(join(stageParent,'paired-'));fs.chmodSync(stage,0o700);
-  const appRoot=d.primitives.extractSignedAppArchive(observed.files.get(m.app.filename).data,stage);
-  const app=transaction.inspectLocalApp(appRoot,m.app.signer,io);assert.equal(app.inventory,m.app.inventorySha256,'app inventory differs');
+  const appRoot=timed('native-app-extraction',()=>d.primitives.extractSignedAppArchive(observed.files.get(m.app.filename).data,stage),'operation');
+  const app=timed('native-app-inspection',()=>transaction.inspectLocalApp(appRoot,m.app.signer,io),'operation');assert.equal(app.inventory,m.app.inventorySha256,'app inventory differs');
   let switched=null,created=[],phase=null;
   const journal=io.writeInstallJournal.bind(io);
   io.writeInstallJournal=(owner,value)=>{journal(owner,value);phase=value.phase;};
