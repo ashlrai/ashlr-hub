@@ -256,7 +256,7 @@ commands and next integration steps.
 
 | | What you get | Guide |
 |---|---|---|
-| **Talk to the Leader** | One conversation across Mind (⌘4), Telegram and `ashlr leader say`. Standing directives (`focus:`, `stop:`, `priority:`), answers to its questions, early approval or veto of its actions and Telegram buttons. In 3.15 it runs in founder mode: morning and evening briefs, an instant brief on "status", "go build X" turned into work under the grant, one question at a time, and a daily self-improvement pick. | [LEADER.md](https://github.com/ashlrai/phantom/blob/master/docs/LEADER.md) |
+| **Talk to the Leader** | One conversation across Mind (⌘4), Telegram and `phm leader say`. Steer work, answer single-choice, multiple-choice or short-answer questions, and interject without losing a question draft. The Leader produces briefs and plans useful work using eligible connected resources under the active grant. | [LEADER.md](https://github.com/ashlrai/phantom/blob/master/docs/LEADER.md) |
 | **Autonomy with custody** | A Touch ID standing grant names repos, engines, change-volume limits and spend. Verified changes follow gates G0–G7; eligible agents under a signed elite-direct policy land without a separate judge. Merges are SHA-pinned, watched and reverted if red. Work for me shows the current grant and rollout state. | [AUTHORITY.md](https://github.com/ashlrai/phantom/blob/master/docs/AUTHORITY.md) |
 | **A multi-seat workbench** | Claude Code, several Codex accounts, Grok, local models and Devin side by side, each pinned to its own profile. Auto seat, Compare, cheap-first and one-click handoff across seats. A panel of Terminal (command blocks, an Agent tab), Browser (observation by default; guarded actions under a separate grant), Changes (a checkpoint before every turn, Accept/Reject, Undo/Redo), Sources and Reasoning, plus focus mode. | [VERSE.md](https://github.com/ashlrai/phantom/blob/master/docs/VERSE.md) |
 | **Resources, ready or not** | ⌘. shows every account, local runtime, cloud credits and Devin, each with a "Chat: ready" and a "Fleet: ready · reserve kept" line and the command that fixes it. | [VERSE.md](https://github.com/ashlrai/phantom/blob/master/docs/VERSE.md#resources-the-drawer-and-the-bar-311) |
@@ -267,9 +267,10 @@ commands and next integration steps.
 | **Jev decisions** | One fast, typed decision layer with a rules fallback at every call site, advisory or escalate-only where safety is near. | [VERSE.md](https://github.com/ashlrai/phantom/blob/master/docs/VERSE.md#the-jev-decision-layer-315) |
 
 **Status, plainly.** Autonomy ships dormant and is macOS-only. It turns on
-only after you install the custody helper, sign a grant and start the resident
-daemon yourself. A new grant starts at stage 1 of 8, shadow, where nothing
-merges. A release that changes authority code pauses an existing grant until
+after you install the custody helper, sign a grant and start the resident
+daemon. The signed grant defines its stages and repository scope; a shadow
+stage proposes work without merging, while an eligible elite-direct stage can
+land verified changes. A release that changes authority code pauses an existing grant until
 Touch ID reapproval. Check the live grant, switch, Stop state and rollout stage
 with `ashlr authority status`; a source document cannot establish that the
 resident daemon is active on a particular Mac.
