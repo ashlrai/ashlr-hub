@@ -1,7 +1,9 @@
 # Dependency security policy
 
-Ashlr Hub's hosted Dependency Audit workflow is active, as verified on
-October 1, 2026. It audits the root and Raycast npm lockfiles plus
+Source reviewed on October 10, 2026 at
+`7cad2d08ac96055a3cfe24e8319d4e4caa90e850` configures Phantom's hosted
+[Dependency Audit](../.github/workflows/dependency-audit.yml) to audit the root
+and Raycast npm lockfiles plus
 `desktop/src-tauri/Cargo.lock` on pull requests, relevant `master` changes,
 its weekly schedule, and manual dispatch. Local releases must still reproduce
 every required lane before an exact-source receipt is accepted. The workflow
@@ -16,6 +18,30 @@ also fails the job. The fallback receives a process-created empty configuration
 from the runner's private temporary directory, so repository-controlled
 `osv-scanner.toml` ignore rules cannot weaken the required check. Each lane
 records its provider result in the job summary.
+
+## Universe example coverage gap
+
+At that source revision, `examples/universe-site/package-lock.json` resolves
+`braces 3.0.3` through both example toolchains:
+
+- `shadcn → fast-glob → micromatch → braces` (also through shadcn's
+  `ts-morph → @ts-morph/common → fast-glob` dependency).
+- `vinext → vite-plugin-commonjs → vite-plugin-dynamic-import → fast-glob →
+  micromatch → braces`.
+
+The [braces advisory](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm)
+identifies deeply nested patterns as a stack-exhaustion risk and lists no
+patched version as of the review date. The example lockfile does not mark braces
+as development-only. The root and Raycast lockfiles contain no braces, but the
+hosted workflow omits the example graph from its install/audit steps and omits
+its manifest and lockfile from `master` push path filters. A passing covered
+lane therefore does not establish that the example is clean.
+
+This review establishes lockfile ancestry and workflow scope, not installation,
+packaged or deployed contents, or attacker-controlled runtime reachability.
+Adding example audit coverage and qualifying a supported replacement across
+both toolchains remain separate follow-up work; this disclosure adds no audit
+exception or dependency override.
 
 ## Dependabot cooldown
 
@@ -66,11 +92,18 @@ entry: one exact dependency, a stated reason, and a stated lift condition.
 
 ## Desktop RustSec containment
 
+`desktop/src-tauri/Cargo.lock` still resolves crates.io `glib 0.18.5`, affected
+by [RUSTSEC-2024-0429](https://rustsec.org/advisories/RUSTSEC-2024-0429.html).
+RustSec identifies `glib >=0.20.0` as patched. Linux desktop builds are blocked
+by `desktop/src-tauri/build.rs`, and the release policy rejects Linux bundles.
+These source controls and the lockfile do not establish the compiled dependency
+graph or runtime reachability of an installed Mac or Windows artifact.
+
 The audit ignores exactly `RUSTSEC-2024-0429` while Linux desktop output remains
 quarantined. That exception does not resolve, dismiss, or downgrade
-`GHSA-wrw7-89jp-8q8g`; Dependabot alert 32 must remain open until the supported
-Tauri v3 / GTK4 migration resolves to `glib >=0.20` and the documented Linux
-desktop quarantine exit review succeeds. The root Linux CLI, Bun sidecar, and
+`GHSA-wrw7-89jp-8q8g`; Dependabot alert 32 must remain open until a supported
+Tauri v3 / GTK4 migration or another supported dependency chain resolves to
+`glib >=0.20` and the documented Linux desktop quarantine exit review succeeds. The root Linux CLI, Bun sidecar, and
 web dashboard remain supported.
 
 RustSec reports the existing warning-class findings in the Tauri v2 dependency
