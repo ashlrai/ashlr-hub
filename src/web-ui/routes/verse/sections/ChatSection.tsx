@@ -46,7 +46,7 @@ import type { ChatTask } from '../chat/tasks-model.js';
 import { requestTranscriptFind, requestTranscriptStep } from '../chat/transcript-jump.js';
 import { noteSessionSeen, useChatActivity } from '../chat/use-chat-activity.js';
 import { useSessionRoots } from '../chat/use-session-roots.js';
-import { ChatResizer, useChatPanelSizing } from '../ChatResizer.js';
+import { useChatPanelSizing } from '../use-chat-panel-sizing.js';
 import { CHAT_PANEL_RANGES, MIN_TRANSCRIPT_WIDTH, setChatPanelFit } from '../chat-panel-sizing.js';
 import { activateDockChat, clearDockRequests, closeDock, getDockState, openDockPane, requestTerminal, toggleDock, toggleDockPane, toggleDockPlacement, useDockValue } from '../dock/dock-store.js';
 import type { DockPaneId } from '../shell/dock-catalog.js';
@@ -92,6 +92,9 @@ const NewChatDialog = lazy(() => import('../NewChatDialog.js').then((m) => ({ de
 // 3.15: Stop in a Devin (cloud) chat asks "stop watching or terminate?" — lazy, never first paint.
 const DevinStopDialog = lazy(() => import('../devin/DevinStopDialog.js').then((m) => ({ default: m.DevinStopDialog })));
 
+// Panel widths are needed to paint the grid; drag/key handling can load in
+// parallel with its columns. Keep the resize gap while that control loads.
+const ResizerModule = preloadedModule(() => import('../ChatResizer.js').then((m) => m.ChatResizer));
 const WorkspaceModule = preloadedLazy<ComponentProps<typeof WorkspaceComponent>>(() => import('../Workspace.js').then((m) => m.Workspace));
 const Workspace = WorkspaceModule.Slot;
 const SidebarModule = preloadedLazy<ComponentProps<typeof SidebarComponent>>(() => import('../Sidebar.js').then((m) => m.Sidebar));
@@ -138,7 +141,7 @@ const NO_TURN_FILES: TurnFileChange[] = [];
  */
 export function preloadChatSurface(): Promise<unknown> {
   return Promise.all([
-    WorkspaceModule.ready(), SidebarModule.ready(), DeleteDialogModule.ready(), TokenDialogModule.ready(), DERIVATIONS.ready(), SEAT_MODEL.ready(),
+    WorkspaceModule.ready(), SidebarModule.ready(), ResizerModule.ready(), DeleteDialogModule.ready(), TokenDialogModule.ready(), DERIVATIONS.ready(), SEAT_MODEL.ready(),
   ]);
 }
 
@@ -328,6 +331,7 @@ export function ChatSection() {
   const pendingAction = useRef<{ run: () => void; cancel: () => void } | null>(null);
   const chatRef = useRef<HTMLDivElement>(null);
   const panels = useChatPanelSizing();
+  const ChatResizer = ResizerModule.useLoaded();
 
   const seats = useMemo(() => bootstrap.data?.seats ?? [], [bootstrap.data]);
   const projects = useMemo(() => bootstrap.data?.projects ?? [], [bootstrap.data]);
@@ -810,7 +814,10 @@ export function ChatSection() {
         onCollapse={() => setVerseSidebarCollapsed(true)} onDisconnect={() => { void clearReadSession(); }}
         activity={chatActivity.activity} selectedTerminal={selectedTerminal} meta={chatActivity.meta} metaError={chatActivity.metaError} localSeen={chatActivity.localSeen} actions={actions} />
       </Suspense>
-      {sidebarCollapsed ? null : <ChatResizer side="sidebar" label="Resize chat list" className={styles.resize} />}
+      {sidebarCollapsed ? null : (
+        ChatResizer ? <ChatResizer side="sidebar" label="Resize chat list" className={styles.resize} />
+          : <div className={styles.resize} data-verse-resizer="sidebar" aria-hidden="true" />
+      )}
       {/* At phone width the sidebar floats over the transcript; the scrim dismisses it. */}
       <button type="button" className={styles.scrim} aria-label="Close chat list" tabIndex={-1}
         onClick={() => setVerseSidebarCollapsed(true)} />

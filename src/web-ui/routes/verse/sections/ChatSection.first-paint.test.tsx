@@ -130,7 +130,7 @@ describe('check-first-paint-budget: a root folded into a group chunk', () => {
 describe('the heavy parts of Chat stay out of its first-paint chunk', () => {
   it('ChatSection has no static import of the workspace, chat list, dock derivations or verse-model', () => {
     const imports = staticImports(read('sections/ChatSection.tsx'));
-    for (const lazy of ['../Workspace.js', '../Sidebar.js', '../chat/tasks-model.js', '../chat/turn-files.js', '../chat/start-chat.js', '../verse-model.js', '../dock/DockHost.js', '../NewChatDialog.js', '../verse-events.js', '../verse-list-channel.js']) {
+    for (const lazy of ['../Workspace.js', '../Sidebar.js', '../ChatResizer.js', '../chat/tasks-model.js', '../chat/turn-files.js', '../chat/start-chat.js', '../verse-model.js', '../dock/DockHost.js', '../NewChatDialog.js', '../verse-events.js', '../verse-list-channel.js']) {
       expect(imports, lazy).not.toContain(lazy);
     }
   });
@@ -151,9 +151,74 @@ describe('ChatSection before its chunks land', () => {
     await act(async () => { await vi.dynamicImportSettled(); });
     vi.doUnmock('../Workspace.js');
     vi.doUnmock('../Sidebar.js');
+    vi.doUnmock('../ChatResizer.js');
     vi.doUnmock('../verse-list-channel.js');
     vi.resetModules();
     vi.unstubAllGlobals();
+  });
+
+  it('paints synchronous saved sizing and the columns while only the resize control is delayed', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
+    vi.stubGlobal('EventSource', class { close() {} addEventListener() {} removeEventListener() {} });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.resetModules();
+    vi.doMock('../Workspace.js', () => ({ Workspace: () => <main aria-label="Workspace loaded" /> }));
+    vi.doMock('../Sidebar.js', () => ({ Sidebar: () => <nav aria-label="Chats" /> }));
+    vi.doMock('../ChatResizer.js', async () => {
+      await gate;
+      return { ChatResizer: ({ label }: { label: string }) => <div role="separator" aria-label={label} /> };
+    });
+    const sizing = await import('../chat-panel-sizing.js');
+    sizing.resetChatPanelSizing();
+    sizing.setChatPanelWidth('sidebar', 280);
+    const { ChatSection } = await import('./ChatSection.js');
+    const { ToastProvider } = await import('../../../components/primitives/Toast.js');
+    const mounted = render(<ToastProvider><ChatSection /></ToastProvider>);
+    try {
+      expect(await screen.findByRole('main', { name: 'Workspace loaded' })).toBeInTheDocument();
+      expect(await screen.findByRole('navigation', { name: 'Chats' })).toBeInTheDocument();
+      expect(screen.queryByRole('separator', { name: 'Resize chat list' })).toBeNull();
+      const frame = mounted.container.querySelector('[data-sidebar="open"]') as HTMLElement;
+      expect(frame).not.toBeNull();
+      expect(frame.style.getPropertyValue('--verse-sidebar-width')).toBe('280px');
+      // The same marker carries phone/focus hiding and bottom-dock row span.
+      // It remains an inert grid gap, not a keyboard/screen-reader separator.
+      const gap = frame.querySelector('[data-verse-resizer="sidebar"]');
+      expect(gap).toHaveAttribute('aria-hidden', 'true');
+      expect(gap).not.toHaveAttribute('role');
+      expect(gap).not.toHaveAttribute('tabindex');
+      const { setFocusMode } = await import('../shell/focus-mode.js');
+      act(() => setFocusMode(true));
+      expect(frame).toHaveAttribute('data-focus', 'on');
+      expect(gap).toBeInTheDocument();
+      act(() => setFocusMode(false));
+      await act(async () => { release(); await gate; });
+      expect(await screen.findByRole('separator', { name: 'Resize chat list' })).toBeInTheDocument();
+      expect(frame.style.getPropertyValue('--verse-sidebar-width')).toBe('280px');
+    } finally {
+      release();
+      mounted.unmount();
+      sizing.resetChatPanelSizing();
+    }
+  });
+
+  it('keeps the chat columns usable if the optional resize control cannot load', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
+    vi.stubGlobal('EventSource', class { close() {} addEventListener() {} removeEventListener() {} });
+    vi.resetModules();
+    vi.doMock('../Workspace.js', () => ({ Workspace: () => <main aria-label="Workspace loaded" /> }));
+    vi.doMock('../Sidebar.js', () => ({ Sidebar: () => <nav aria-label="Chats" /> }));
+    vi.doMock('../ChatResizer.js', async () => { throw new Error('Synthetic optional chunk failure'); });
+    const { ChatSection } = await import('./ChatSection.js');
+    const { ToastProvider } = await import('../../../components/primitives/Toast.js');
+    const mounted = render(<ToastProvider><ChatSection /></ToastProvider>);
+    expect(await screen.findByRole('main', { name: 'Workspace loaded' })).toBeInTheDocument();
+    expect(await screen.findByRole('navigation', { name: 'Chats' })).toBeInTheDocument();
+    await act(async () => { await vi.dynamicImportSettled(); });
+    expect(screen.queryByRole('separator', { name: 'Resize chat list' })).toBeNull();
+    expect(screen.getByRole('main', { name: 'Workspace loaded' })).toBeInTheDocument();
+    mounted.unmount();
   });
 
   it('never acquires a metadata connection when Chat unmounts before its channel module arrives', async () => {
