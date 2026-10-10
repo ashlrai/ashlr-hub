@@ -76,6 +76,7 @@ export const AUTHORITY_SURFACE_ROOTS = Object.freeze([
   // Signed installation and its trust anchors change the admitted runtime.
   'dist/core/desktop/',
   'dist/cli/desktop-update.js',
+  'dist/cli/desktop.js',
   'scripts/local-app-transaction.mjs',
   'dist/core/daemon/activation-permit.js',
   'dist/core/daemon/tick-hooks.js',
