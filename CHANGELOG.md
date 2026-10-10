@@ -22,13 +22,16 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   38-case comparison ran about 6% faster; hosted gains remain unmeasured.
 - Let short Mac checks overlap unfinished general test lanes after the isolated
   lane settles. All 15 release gates remain required; hosted gains are unmeasured.
+- Remove one duplicate walk over the same captured release archive per fresh
+  verification, preserving complete validation and fresh source, byte and
+  signature checks. Wall-time savings remain unmeasured.
 - Explain dependency audit coverage, including the Universe example graph gap.
 
 ### Fixed
 - Describe a passed recorded access expiry without claiming the native CLI has
   signed out. Cached warnings remain non-blocking and suggest checking sign-in.
 
-## [3.29.8] — Unreleased
+## [3.29.8] — 2026-10-10
 
 ### Added
 - Install the signed Apple silicon desktop app with `phm desktop install`, using
@@ -3048,7 +3051,7 @@ discovered ID collision are in
 [`docs/MILESTONE-INDEX.md`](docs/MILESTONE-INDEX.md); the mechanics of
 turning any of this on — including four non-obvious gates that block
 unattended activation even after a grant — are in
-[`docs/RUNTIME-FLEET-ACTIVATION.md`](docs/RUNTIME-FLEET-ACTIVATION.md).
+`docs/RUNTIME-FLEET-ACTIVATION.md`.
 
 - **Daemon activation authority replaces its own denials (M470 — see
   collision note below).** Five hard-coded refusals — `DAEMON_ACTIVATION_TRUST_ROOTS`

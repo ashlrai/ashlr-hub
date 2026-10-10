@@ -2,7 +2,7 @@
 
 ## Current measurements and next experiment: 2026-10-10
 
-The 3.29.9 source candidate includes four independent performance changes.
+The 3.29.9 source candidate includes five independent performance changes.
 These are local measurements and a scheduling experiment, not published or
 installed performance claims.
 
@@ -12,6 +12,7 @@ installed performance claims.
 | Lightweight worker mock setup | Median local wall time fell from 4.173 s to 3.911 s; reported setup time fell from 427 ms to 71 ms. | Three serial baseline/head pairs over the same five modules and 120 cases with Node 22.22.3 and Vitest 4.1.11. Full-suite gains remain unmeasured. |
 | Load only the selected package smoke command | Local module wall time fell from 60.02 s to 56.40 s, about 6%. | One serial baseline/head pair with Node 22.23.2 on macOS. Both fresh compiled graphs and all 38 cases passed with identical case identities and statuses. Hosted gains remain unmeasured. |
 | Overlap short Mac checks with general lanes | Both short jobs become eligible after the isolated lane settles. | All 15 release gates, test membership, fixtures, deadlines and cache identities remain required. Runner contention can offset overlap; no hosted gain has been measured. |
+| Inspect the captured release archive once | One duplicate strict tar/member-hash walk is removed per fresh verification. | All 76 artifact-verification tests passed, including seven causal and malformed-archive cases. Identity parsing still follows complete archive validation; fresh source, byte and signature checks remain. Wall-time and percentage gains are unmeasured. |
 
 [CI run 38032235502](https://github.com/ashlrai/phantom/actions/runs/38032235502)
 passed all 15 jobs at `cc49a266ca5a94bd7ef4ab78df45178eb2613a88`.
