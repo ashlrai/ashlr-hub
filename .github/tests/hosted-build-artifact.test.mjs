@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { Hash } from 'node:crypto';
 import { URL, fileURLToPath } from 'node:url';
 import * as fs from 'node:fs';
 import { join } from 'node:path';
@@ -43,6 +44,62 @@ test('complete official coverage and three signed subjects permit exact transact
   assert.equal(fs.readFileSync(join(f.root, 'dist/api/core.js'), 'utf8'), 'built:api/core.js');
   assert.equal(f.git('status', '--porcelain'), ''); assert.throws(() => adoptArtifact(receipt), /live verified/);
 });
+test('fresh verification hashes each captured archive member once and still inspects independent npm members', (t) => {
+  const f = qualifiedFixture(t); const manifest = JSON.parse(fs.readFileSync(join(f.out, 'manifest.json')));
+  const member = Buffer.from('built:api/core.js'); let memberHashes = 0;
+  const update = Hash.prototype.update;
+  const observer = t.mock.method(Hash.prototype, 'update', function(data, ...args) {
+    if (Buffer.isBuffer(data) && data.equals(member)) memberHashes++;
+    return update.call(this, data, ...args);
+  });
+  let receipt;
+  try { receipt = verifyArtifact(f.options); } finally { observer.mock.restore(); }
+  // One dist.tar walk and the separate npm membership check hash this fixture's
+  // unique member. A second walk over the captured tar adds a third hash.
+  assert.equal(memberHashes, 2);
+  assert.equal(receipt.archiveSha256, digest(fs.readFileSync(join(f.out, 'dist.tar'))));
+  assert.equal(receipt.packageSha256, digest(fs.readFileSync(join(f.out, manifest.package.filename))));
+  assert.equal(receipt.manifestSha256, digest(fs.readFileSync(join(f.out, 'manifest.json'))));
+  assert.equal(receipt.qualificationSha256, digest(fs.readFileSync(join(f.out, 'qualification.json'))));
+  assert.deepEqual(receipt.source, {revision:f.sha, tree:f.git('rev-parse', 'HEAD^{tree}')});
+  assert.equal(f.calls.length, 3);
+});
+for (const kind of ['missing identity', 'mismatched identity', 'malformed identity', 'duplicate identity', 'corruption after malformed identity', 'membership mismatch with malformed identity']) {
+  test(`fresh verification refuses ${kind} before issuing any admission`, (t) => {
+    const f = qualifiedFixture(t); const path = join(f.out, 'dist.tar'); let archive = fs.readFileSync(path);
+    const members = [];
+    inspectTar(archive, undefined, (entry, data) => members.push({entry, offset:data.byteOffset - archive.byteOffset}));
+    const identity = members.find(row => row.entry.path === 'dist/build-identity.json');
+    const begin = identity.offset - 512, end = identity.offset + Math.ceil(identity.entry.bytes / 512) * 512;
+    let expected = /archive build identity differs/;
+    if (kind === 'missing identity') archive = Buffer.concat([archive.subarray(0, begin), archive.subarray(end)]);
+    else if (kind === 'mismatched identity') {
+      const changed = JSON.parse(archive.subarray(identity.offset, identity.offset + identity.entry.bytes)); changed.revision = '0'.repeat(40);
+      const bytes = Buffer.from(JSON.stringify(changed)); assert.equal(bytes.length, identity.entry.bytes); bytes.copy(archive, identity.offset);
+    } else if (kind === 'duplicate identity') {
+      archive = Buffer.concat([archive.subarray(0, -1024), archive.subarray(begin, end), Buffer.alloc(1024)]); expected = /duplicate archive member/;
+    } else {
+      archive.fill(32, identity.offset, identity.offset + identity.entry.bytes); archive[identity.offset] = 123;
+      expected = SyntaxError;
+    }
+    const manifestPath = join(f.out, 'manifest.json'); const manifest = JSON.parse(fs.readFileSync(manifestPath));
+    // Keep archive digests and otherwise valid membership coherent so refusal
+    // reaches the archive/identity checks rather than the outer digest gate.
+    if (kind !== 'duplicate identity') manifest.archive.entries = inspectTar(archive);
+    if (kind === 'corruption after malformed identity') {
+      const later = members.find(row => row.offset > identity.offset); assert.ok(later);
+      archive[later.offset - 512] ^= 1; expected = /noncanonical or corrupt archive header/;
+    }
+    if (kind === 'membership mismatch with malformed identity') {
+      manifest.archive.entries.at(-1).mode ^= 0o100; expected = /archive membership\/bytes\/modes differ/;
+    }
+    manifest.archive.sha256 = digest(archive); manifest.archive.bytes = archive.length;
+    fs.chmodSync(path, 0o600); fs.writeFileSync(path, archive);
+    fs.chmodSync(manifestPath, 0o600); fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    assert.throws(() => verifyArtifact(f.options), expected); assert.equal(f.calls.length, 0);
+    assert.equal(fs.existsSync(join(f.root, 'dist')), true);
+  });
+}
 for (const kind of ['failed official job', 'raw report changed', 'qualification changed', 'source changed', 'signature refused']) {
   test(`complete verification refuses ${kind}`, (t) => {
     const f = qualifiedFixture(t);
