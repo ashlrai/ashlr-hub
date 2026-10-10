@@ -114,11 +114,14 @@ not treat a saved receipt or an unfinished CI run as a passing gate.
 ## Fast development feedback
 
 Run the whole test modules affected by a change first. Use `npm run check:release`
-for publication, CLI and documentation contracts; use `node --test` with the
-affected `.github/tests` modules for workflow and packaging changes. Import-based
-related selection cannot discover every test that reads a workflow as text.
-The preflight includes the whole resident-service documentation and release-workflow
-modules so their display and activation contracts fail before the producer build.
+for source-only publication, CLI and documentation contracts before a build.
+After your normal local build, run `npm run check:release:fast` before pushing a
+release candidate. It runs the eight whole workflow and packaging Node modules,
+then the existing fourteen Vitest contract modules. The Node suite requires
+existing `dist` output; the source-only check does not. This catches workflow
+contracts that import-based related selection cannot discover. Hosted CI keeps
+the Node suite once in its original post-build capture step; its gate order and
+complete release qualification remain unchanged.
 
 Use `npm run gate -- --base <ref>` for broader feedback while coding. Before
 shipping, consolidate changes into one clean candidate and run its complete

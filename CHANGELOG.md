@@ -25,6 +25,9 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Remove one duplicate walk over the same captured release archive per fresh
   verification, preserving complete validation and fresh source, byte and
   signature checks. Wall-time savings remain unmeasured.
+- Add `check:release:fast` to run the existing workflow and packaging contracts
+  with local release checks before pushing a built candidate. Hosted CI runs
+  the packaging contracts once, with all 15 release gates still required.
 - Explain dependency audit coverage, including the Universe example graph gap.
 
 ### Fixed

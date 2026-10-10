@@ -195,8 +195,12 @@ test('overlapping short Mac gates cannot qualify a release before all fifteen so
   });
   const required = requiredJobPolicy(fileURLToPath(root));
   assert.equal(required.length, 15);
-  assert.equal(new Set(names).size, 15);
-  assert.deepEqual(required.map((job) => job.name).sort(), names.sort());
+  // PR lane selection adds two declarations, not release authority. Both
+  // must remain present alongside every one of the fifteen required gates.
+  const laneNames = ['Classify PR site lane', 'Site PR (ecosystem)'];
+  assert.equal(names.length, 17);
+  assert.equal(new Set(names).size, 17);
+  assert.deepEqual([...required.map((job) => job.name), ...laneNames].sort(), names.sort());
   const f = official();
   const completed = required.map((job, index) => ({ ...f.job, id: index + 10, name: job.name, labels: job.labels,
     steps: job.steps.map((name) => ({ name, status: 'completed', conclusion: 'success' })) }));

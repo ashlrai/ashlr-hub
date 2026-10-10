@@ -244,7 +244,11 @@ describe('M30 CI workflow', () => {
       expect(full).not.toContain('continue-on-error');
       expect(job.indexOf(observations[0])).toBeGreaterThan(job.indexOf(full));
     }
-    expect(ciYml).toContain('.github/tests/ci-impact-shadow.test.mjs');
+    const capture = workflowJob('ci').match(
+      /^ {6}- name: Capture pack smoke build snapshot[\s\S]*?(?=^ {6}- name:)/m,
+    )?.[0] ?? '';
+    expect(capture).toContain('npm run check:pack-contracts');
+    expect(pkg.scripts?.['check:pack-contracts']).toContain('.github/tests/ci-impact-shadow.test.mjs');
     expect(qualificationLane).not.toContain('shadow');
     const verifier = readFileSync(resolve(repoRoot, 'scripts/hosted-build-artifact.mjs'), 'utf8');
     expect(verifier).not.toContain('ci-impact-shadow');
