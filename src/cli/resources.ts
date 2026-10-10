@@ -188,6 +188,12 @@ export async function cmdResources(args: string[]): Promise<number> {
     const { cmdResourcePool } = await import('./resource-pool.js');
     return cmdResourcePool(args.slice(1));
   }
+  // Reject an unknown command before help or provider discovery. Otherwise a
+  // misspelled credit operation looks successful and may read unrelated accounts.
+  if (args.some(arg => !['--json', '--watch', '--help', '-h'].includes(arg)) || new Set(args).size !== args.length) {
+    process.stderr.write('Invalid resource arguments; use phm resources --help.\n');
+    return 2;
+  }
   if (args.includes('--help') || args.includes('-h')) {
     printResourcesHelp();
     return 0;
