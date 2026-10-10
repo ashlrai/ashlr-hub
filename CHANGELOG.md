@@ -18,6 +18,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   unmeasured.
 - Keep worker mock compatibility in a lightweight setup module instead of loading
   test tooling for each worker, preserving mock behavior and complete coverage.
+- Load only the selected command in package smoke fixtures. One complete local
+  38-case comparison ran about 6% faster; hosted gains remain unmeasured.
 - Let short Mac checks overlap unfinished general test lanes after the isolated
   lane settles. All 15 release gates remain required; hosted gains are unmeasured.
 - Explain dependency audit coverage, including the Universe example graph gap.

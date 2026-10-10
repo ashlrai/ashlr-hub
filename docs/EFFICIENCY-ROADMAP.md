@@ -10,6 +10,7 @@ installed performance claims.
 |---|---|---|
 | Defer onboarding imports until CLI dispatch | Compiled Node help, version and resource-help startup fell from 117–118 ms to 32–33 ms. | Five alternating fresh-process baseline/head pairs per command on macOS with Node 22.23.2; warm transform cache. Outputs and exit statuses matched. Installed native startup remains unmeasured. |
 | Lightweight worker mock setup | Median local wall time fell from 4.173 s to 3.911 s; reported setup time fell from 427 ms to 71 ms. | Three serial baseline/head pairs over the same five modules and 120 cases with Node 22.22.3 and Vitest 4.1.11. Full-suite gains remain unmeasured. |
+| Load only the selected package smoke command | Local module wall time fell from 60.02 s to 56.40 s, about 6%. | One serial baseline/head pair with Node 22.23.2 on macOS. Both fresh compiled graphs and all 38 cases passed with identical case identities and statuses. Hosted gains remain unmeasured. |
 | Overlap short Mac checks with general lanes | Both short jobs become eligible after the isolated lane settles. | All 15 release gates, test membership, fixtures, deadlines and cache identities remain required. Runner contention can offset overlap; no hosted gain has been measured. |
 
 [CI run 38032235502](https://github.com/ashlrai/phantom/actions/runs/38032235502)
