@@ -429,9 +429,14 @@ export function invalidatePrefix(prefix: string): void {
  * Re-running those fetchers on every 15-minute renewal was pure background
  * traffic through the same gate as the chat reads waiting on their retry.
  */
-export function invalidateObserved(prefix: string): void {
+export function invalidateObserved(prefix: string, force = false): void {
   for (const [key, e] of store) {
-    if (e.subscribers.size > 0 && key.startsWith(prefix)) invalidate(key);
+    if (e.subscribers.size > 0 && key.startsWith(prefix)) {
+      // A completed write needs a read issued afterwards, even if a pre-write
+      // read is still pending. Existing callers retain ordinary coalescing.
+      if (force && e.fetcher) void refetchQuery(key, e.fetcher, true);
+      else invalidate(key);
+    }
   }
 }
 

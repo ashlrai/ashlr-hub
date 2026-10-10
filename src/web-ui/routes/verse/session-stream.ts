@@ -42,9 +42,11 @@
  */
 import type { VerseEvent } from '../../data/api-types.js';
 import { getAuthSnapshot, getReadClientProof } from '../../data/auth-store.js';
+import { invalidateObserved } from '../../data/cache.js';
 import { isRemoteMobileMode } from '../../data/remote-mode.js';
 import { parseVerseEventFrame, VERSE_EVENT_TYPES } from './verse-event-frame.js';
 import { fetchVerseSessionDetail, invalidateVerseLists, verseSessionPath } from './verse-queries.js';
+import { MULTIMODEL_CONTEXT_KEY_PREFIX } from './multimodel/multimodel-queries.js';
 import {
   applyVerseEvents,
   getVerseSessionState,
@@ -164,8 +166,18 @@ class FrameQueue {
     if (this.queue.length === 0) return;
     const batch = this.queue;
     this.queue = [];
+    const before = getVerseSessionState(this.sessionId);
+    const completedLocalTurn = before.session?.engine === 'local' && batch.some(event =>
+      event.type === 'turn-done' && event.ok && Number.isFinite(event.durationMs) && event.durationMs > 0 &&
+      Number.isFinite(Date.parse(event.at)) && !before.events.some(saved => saved.seq === event.seq));
     const result = applyVerseEvents(this.sessionId, batch);
-    if (result.settled) invalidateVerseLists();
+    if (result.settled) {
+      invalidateVerseLists();
+      // Speed is model-wide, but context queries are scoped by chat/folder.
+      // Refresh mounted consumers once per completed batch, not on chunks,
+      // duplicate replay, or every daemon tick. The server validates evidence.
+      if (completedLocalTurn) invalidateObserved(MULTIMODEL_CONTEXT_KEY_PREFIX, true);
+    }
   }
 
   drop(): void {
