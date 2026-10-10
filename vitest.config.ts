@@ -5,6 +5,7 @@ import { defineConfig } from 'vitest/config';
 // (to keep certain modules observation-only / unreferenceable from shipped
 // tooling), and this list's own comments name several such test files.
 import { REAL_IO_LANE_TIMEOUT_MS, REAL_IO_TEST_FILES } from './test/config/realio-lane-membership.mjs';
+import { WeightedCalibrationSequencer } from './test/config/weighted-sequencer.mjs';
 
 const spyOnCompatKey = '__ASHLR_VITEST_3_SPY_ON_COMPAT__';
 const testGlobal = globalThis as typeof globalThis & { [spyOnCompatKey]?: boolean };
@@ -56,6 +57,9 @@ const BASE_EXCLUDE = [
 
 export default defineConfig({
   test: {
+    // Disabled by default: explicit calibration never changes case inventory.
+    ...(process.env['ASHLR_TEST_CI_WEIGHTED_PARTITION'] === '1'
+      ? { sequence: { sequencer: WeightedCalibrationSequencer } } : {}),
     // Make os.homedir() follow process.env.HOME on every platform (Windows
     // ignores $HOME natively). Without this, every HOME-isolated test resolves
     // to the developer's REAL ~/.ashlr on Windows — and the H1 fixture's

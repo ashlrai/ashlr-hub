@@ -6,6 +6,7 @@
  * to take with the evidence currently available?"
  */
 
+import { protectedPrOperationShape, protectedPrEvidenceMatchesRegistry } from './protected-pr-handoff.js';
 import type { AshlrConfig } from '../types.js';
 import {
   hasRequiredVerifierManifestBinding,
@@ -121,13 +122,26 @@ export function evaluateAutonomyPolicy(
     return refuse(`risk '${pack.riskClass}' exceeds configured maxRisk '${maxRisk(cfg)}'`);
   }
 
+  const prOperation = pack.gates.remoteProtection ? protectedPrOperationShape(pack.gates.remoteProtection) : 'legacy';
+  if (prOperation === 'invalid') return refuse('protected PR operation evidence is malformed');
+  const handoff = prOperation === 'handoff';
+  const registryMode = cfg.foundry?.autoMerge && Object.hasOwn(cfg.foundry.autoMerge, 'protectedRemotes');
+  if (pack.target === 'main' && (registryMode || handoff) && (
+    !handoff || cfg.foundry?.autoMerge?.pushToRemote !== true ||
+    !protectedPrEvidenceMatchesRegistry(pack.gates.remoteProtection, cfg.foundry.autoMerge.protectedRemotes)
+  )) return refuse('repository-bound PR handoff requires its current exact registry and remote route');
+  // Version2 is the existing in-memory draft before V3 sealing; no mutator
+  // admits it. Historical V1 cannot carry this operation.
+  if (handoff && (pack.version === 1 || pack.target !== 'main' || !pack.remotePreferred)) {
+    return refuse('PR handoff evidence cannot authorize local, direct-main or other operations');
+  }
   if (pack.target === 'branch') {
     return pack.remotePreferred
       ? allow('T3', 'open-ready-pr', 'branch-target evidence passed; open a ready PR for host review')
       : allow('T2', 'apply-local-branch', 'branch-target evidence passed; stage a local review branch');
   }
   if (pack.target === 'main') {
-    if (pack.trustBasis === 'evidence') {
+    if (pack.trustBasis === 'evidence' || handoff) {
       if (!pack.remotePreferred) {
         return refuse('evidence main merge requires protected remote PR handoff; local merge fallback is not permitted');
       }
@@ -155,6 +169,7 @@ export function evaluateAutonomyPolicy(
         return refuse('evidence main merge requires verification freshness metadata');
       }
     }
+    if (handoff) return allow('T3', 'open-ready-pr', 'repository-bound evidence authorizes protected PR opening only; landing requires independent host authority');
     return allow(
       'T4',
       'merge-main',

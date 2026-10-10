@@ -134,6 +134,17 @@ describe('schema/config.schema.json — foundry block (M340b)', () => {
     expect(autoMerge.maxAutomergeLines.maximum).toBe(MAX_AUTOMERGE_POLICY_LINES);
   });
 
+  it('declares the optional registry as PR-only exact identity rather than direct merge or bypass permission', () => {
+    const declared = foundrySchema(loadSchema())['properties'] as Record<string, any>;
+    const registry = declared.autoMerge.properties.protectedRemotes;
+    expect(registry.items.additionalProperties).toBe(false);
+    expect(registry.items.properties.operation.const).toBe('protected-pr-handoff-v1');
+    expect(registry.items.properties.repositoryId.description).toMatch(/GraphQL.*not.*REST/i);
+    expect(registry.items.properties.observedRulesetBypassActors.items.properties.actorType.const).toBe('RepositoryRole');
+    expect(registry.description).toMatch(/without a global fallback/);
+    expect(registry.description).toMatch(/Does not grant direct merge or bypass/);
+  });
+
   it('documents pushToRemote as protected PR handoff, never hosted merge authority', () => {
     const declared = foundrySchema(loadSchema())['properties'] as Record<string, any>;
     const description = String(declared.autoMerge.properties.pushToRemote.description);

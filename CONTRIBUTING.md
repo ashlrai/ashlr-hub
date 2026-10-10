@@ -6,7 +6,7 @@ ashlr-hub is the local kernel for Ashlr Universe, built contract-first in TypeSc
 
 ## Prerequisites
 
-- **Node.js 22.15+** for the package runtime. A release gate can require stricter, exact tool versions; use the [release policy](docs/RELEASING.md#local-verification-for-the-340-successor) for release verification.
+- **Node.js 22.15+** for the package runtime. A release gate can require stricter, exact tool versions; use the [release policy](docs/RELEASING.md#qualified-ci-build-handoff) for release verification.
 - **git** on `PATH`
 - `~/.local/bin` on your `PATH` if you want to install the CLI locally
 - Optional (only exercised at runtime by specific commands): `phantom`, `ollama`, LM Studio, `gh`, `vercel`, `claude`, `codex`. None are required to build or test.
@@ -94,6 +94,42 @@ The JSON reports whole-module import suggestions and unknown/global-input
 warnings. It runs no tests and cannot authorize release skips or result reuse;
 an empty suggestion list does not establish coverage.
 
+Duration-weighted Mac partition calibration is disabled by default. An explicit
+`ASHLR_TEST_CI_WEIGHTED_PARTITION=1` plus `ASHLR_TEST_CI_WEIGHTED_HINTS` pointing
+to a local `phantom-partition-hints/v1` JSON file enables the sequencer for
+general shards in a clean checkout at its committed source revision. The original
+sharder handles absent, invalid or incompatible
+hints; isolated acceptance always ignores these settings. No timing file is
+downloaded or supplied by default. Hints must retain their original successful
+run, source, runtime/config digest and observation time. Reporter spans are
+historical costs, not CPU measurements or promised wall time. New files remain
+included; hints cannot replace complete fresh tests or release qualification.
+To convert an independently accepted original capture into advisory hints, run:
+
+```sh
+node .github/scripts/ci-report-weight-hints.mjs CONVERSION-REQUEST.json > timing-hints.json
+```
+
+The request uses schema `phantom-original-report-conversion/v1`: absolute
+`root` and `bundle` paths, exact `source` (`revision`, `tree`), original `run`
+(`id`, `attempt`), `manifestSha256`, `qualificationSha256`, and
+`githubSnapshot` (`path`, `sha256`). The pinned snapshot uses
+`phantom-recorded-github-api/v1`, with a canonical `observedAt` timestamp and
+an endpoint-keyed `responses` object containing the previously accepted
+original run, all required jobs, commits and six artifact records. It makes no
+network requests and executes no code from the capture. Saved JSON is not
+authenticated by this command and grants no release admission; obtain and
+accept the original evidence through the existing qualification workflow.
+
+Conversion requires the complete successful original run/attempt and raw
+case inventory, and hashes calibration inputs from that exact clean source.
+Older captures lacking those inputs refuse instead of acquiring the current
+configuration digest. Output retains historical reporter spans, module hashes,
+original observation time and report provenance. Unknown runner image and
+hardware remain unknown. Source/transitive changes are not proof of fresh
+timings; review compatibility diagnostics before any explicit local experiment.
+No hint file is checked in, downloaded, or activated by this conversion.
+
 ### Definition of green
 
 For the complete local source release check, run the canonical script once:
@@ -111,7 +147,7 @@ Preserve meaningful coverage. Backend tests live under `test/`; DOM tests live
 beside the web features under `src/web-ui/`. Report skipped or unavailable
 platform checks separately. A passing source suite is not installed-artifact,
 provider, production or user-acceptance evidence. Release work also follows the
-[local production gate](docs/RELEASING.md#local-verification-for-the-340-successor).
+[qualified release handoff](docs/RELEASING.md#qualified-ci-build-handoff).
 
 ### Running tests hermetically on the local host
 

@@ -195,7 +195,7 @@ beforeEach(() => {
   outwardOwnsMock.mockReturnValue(true);
   proposal = makeProposal();
   evidenceTarget = 'main';
-  evidenceTrustBasis = 'evidence';
+  evidenceTrustBasis = 'tier';
   evidencePolicyAction = 'merge-main';
   readEvidenceMock.mockReset();
   readEvidenceMock.mockImplementation(() => ({
@@ -216,7 +216,13 @@ beforeEach(() => {
     trustBasis: evidenceTrustBasis,
     remotePreferred: true,
     riskClass: 'low',
-    gates: {},
+    gates: {
+      authority: { ok: true, detail: 'signed authority' },
+      provenance: { ok: true, detail: 'verified producer' },
+      verification: { ok: true, detail: 'fresh verification' },
+      risk: { ok: true, detail: 'low risk' },
+      scope: { ok: true, detail: 'bounded scope' },
+    },
     verification: {
       passed: true,
       detail: 'merge verification passed',
@@ -228,7 +234,7 @@ beforeEach(() => {
       source: 'fresh',
     },
     policy: {
-      tier: 'frontier',
+      tier: evidenceTarget === 'branch' ? 'T3' : 'T4',
       action: evidencePolicyAction,
       allowed: true,
       reason: 'safe protected remote',
@@ -265,6 +271,28 @@ beforeEach(() => {
 });
 
 describe('M420 URL-less remote handoff recovery', () => {
+  it.each([
+    ['evidence authority without a protection gate', 'evidence', undefined],
+    ['null protection gate', 'tier', null],
+    ['unknown operation', 'tier', { operation: 'unknown', observedRulesetBypassActors: [] }],
+    ['unpaired operation', 'tier', { operation: 'protected-pr-handoff-v1' }],
+    ['PR-only operation with a merge action', 'tier', {
+      operation: 'protected-pr-handoff-v1', observedRulesetBypassActors: [],
+    }],
+  ] as const)('refuses %s from minting direct-merge recovery authority', (_label, trustBasis, protection) => {
+    evidenceTrustBasis = trustBasis;
+    const original = readEvidenceMock.getMockImplementation()!;
+    readEvidenceMock.mockImplementation(() => {
+      const pack = original();
+      return { ...pack, gates: { ...pack.gates, remoteProtection: protection } };
+    });
+
+    expect(reconcileRemoteHandoffs()).toMatchObject({ checked: 1, unknown: 1 });
+    expect(proposal.status).toBe('awaiting-host-merge');
+    expect(setStatusMock).not.toHaveBeenCalled();
+    expect(autoMergeProposalMock).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['tier main', 'main', 'tier', 'merge-main'],
     ['verification main', 'main', 'verification', 'merge-main'],

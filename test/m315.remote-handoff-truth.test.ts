@@ -69,8 +69,8 @@ vi.mock('../src/core/git.js', async (importOriginal) => {
       remote: 'https://github.com/ashlrai/fixture.git',
       org: 'ashlrai',
     }),
-    resolveGitHubOriginAuthority: () => originAuthorityMock()?.nameWithOwner ?? null,
-    resolveGitHubOriginAuthorityDetails: () => originAuthorityMock(),
+    resolveGitHubOriginAuthority: (repo: string) => originAuthorityMock(repo)?.nameWithOwner ?? null,
+    resolveGitHubOriginAuthorityDetails: (repo: string) => originAuthorityMock(repo),
   };
 });
 
@@ -120,7 +120,7 @@ vi.mock('../src/core/inbox/store.js', async (importOriginal) => {
   };
 });
 
-import { autoMergeProposal } from '../src/core/inbox/merge.js';
+import { autoMergeProposal, submitVerifiedProtectedPr, evaluateEvidenceRemoteProtectionSignal, evaluateLiveProtectedRemoteAuthority } from '../src/core/inbox/merge.js';
 import { evidencePath, readAutonomyEvidencePack } from '../src/core/autonomy/evidence-pack.js';
 import { reconcileRemoteHandoffs } from '../src/core/inbox/remote-handoff.js';
 import { canonicalRealizedMergeIdentity } from '../src/core/inbox/realized-merge.js';
@@ -2272,4 +2272,134 @@ describe('M315 remote PR handoff truth', () => {
     expect(second).toEqual({ checked: 0, merged: 0, closed: 0, open: 0, unknown: 0 });
     expect(loadProposal(proposal.id)?.status).toBe('applied');
   }, 60_000);
+});
+
+
+describe('repository-bound protected PR handoff', () => {
+  function expectation(nameWithOwner = 'ashlrai/fixture', repositoryId = 'R_fixture', appId = '1') {
+    return { nameWithOwner, repositoryId, defaultBranch: 'main', operation: 'protected-pr-handoff-v1' as const,
+      branchProtection: true, requiredChecks: [{ context: 'ci/test', appId }],
+      observedRulesetBypassActors: [{ rulesetId: '101', sourceType: 'Repository' as const, source: nameWithOwner,
+        actorType: 'RepositoryRole' as const, actorId: '5', bypassMode: 'always' as const }] };
+  }
+  function registryCfg() {
+    const config = evidenceCfg();
+    config.foundry!.autoMerge!.protectedRemotes = [expectation()];
+    return config;
+  }
+  function currentPolicy(nameWithOwner = 'ashlrai/fixture', appId = '1') {
+    return { schemaVersion: 2 as const, classic: null, rulesets: [{ id: '101', sourceType: 'Repository' as const,
+      source: nameWithOwner, target: 'branch' as const, enforcement: 'active' as const,
+      bypassActors: [{ actorType: 'RepositoryRole' as const, actorId: '5', bypassMode: 'always' as const }],
+      conditions: { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } },
+      rules: [{ type: 'deletion', parameters: null }, { type: 'non_fast_forward', parameters: null },
+        { type: 'required_status_checks', parameters: { do_not_enforce_on_create: false,
+          required_status_checks: [{ context: 'ci/test', integration_id: Number(appId) }], strict_required_status_checks_policy: true } }],
+      requiredCheckBindings: [{ context: 'ci/test', appId }] }] };
+  }
+  function observe(nameWithOwner = 'ashlrai/fixture', repositoryId = 'R_fixture', appId = '1') {
+    return { ok: true, available: true, protected: true, branchProtection: true,
+      nameWithOwner, repositoryId, defaultBranch: 'main', branch: 'main', baseHead: git(tmpRepo, ['rev-parse', 'main']),
+      observedAt: new Date().toISOString(), requirements: ['required_status_checks'], requiredChecks: ['ci/test'],
+      requiredCheckBindings: [{ context: 'ci/test', appId }], sources: ['ruleset'], policySnapshot: currentPolicy(nameWithOwner, appId), detail: 'fixture current policy' };
+  }
+
+  it('selects independent App expectations by canonical repository and refuses ID, branch, actor and unavailable drift', async () => {
+    const config = registryCfg();
+    config.foundry!.autoMerge!.protectedRemotes!.push(expectation('ashlrai/second', 'R_second', '22'));
+    const second = path.join(tmpHome, 'second');
+    originAuthorityMock.mockImplementation((repo: string) => ({ nameWithOwner: repo === second ? 'ashlrai/second' : 'ashlrai/fixture',
+      fetchUrls: [bareRepo], pushUrls: [bareRepo], pushUrl: bareRepo }));
+    branchProtectionMock.mockImplementation(async (repo: string) => repo === second ? observe('ashlrai/second', 'R_second', '22') : observe());
+    expect(evaluateEvidenceRemoteProtectionSignal(config, tmpRepo, 'main').requiredCheckBindings).toEqual([{ context: 'ci/test', appId: '1' }]);
+    expect(evaluateEvidenceRemoteProtectionSignal(config, second, 'main').requiredCheckBindings).toEqual([{ context: 'ci/test', appId: '22' }]);
+    const head = git(tmpRepo, ['rev-parse', 'main']);
+    expect((await evaluateLiveProtectedRemoteAuthority(second, 'main', head, config)).authorized).toBe(true);
+    expect(evaluateEvidenceRemoteProtectionSignal(config, second, 'other').ok).toBe(false);
+    branchProtectionMock.mockResolvedValue(observe('ashlrai/second', 'R_wrong', '22'));
+    expect((await evaluateLiveProtectedRemoteAuthority(second, 'main', head, config)).authorized).toBe(false);
+    const changed = observe('ashlrai/second', 'R_second', '22');
+    changed.policySnapshot.rulesets[0]!.bypassActors[0]!.actorId = '6';
+    branchProtectionMock.mockResolvedValue(changed);
+    expect((await evaluateLiveProtectedRemoteAuthority(second, 'main', head, config)).authorized).toBe(false);
+    branchProtectionMock.mockResolvedValue({ ok: false, available: false, detail: 'HTTP 403 fixture' });
+    expect((await evaluateLiveProtectedRemoteAuthority(second, 'main', head, config)).authorized).toBe(false);
+    config.foundry!.autoMerge!.protectedRemotes = [expectation('ashlrai/other')];
+    expect(evaluateEvidenceRemoteProtectionSignal(config, second, 'main').ok).toBe(false); // no global fallback
+  });
+
+  it('opens the actual remote PR with signed T3 evidence while leaving local and remote main unchanged', async () => {
+    branchProtectionMock.mockImplementation(async () => observe());
+    const config = registryCfg();
+    const head = git(tmpRepo, ['rev-parse', 'main']);
+    const diff = addFileDiff('docs/registry.md', 'repository-specific PR only');
+    const hash = hashDiff(diff);
+    const proposal = createProposal({ repo: tmpRepo, origin: 'agent', kind: 'patch', title: 'PR only',
+      summary: 'bounded remote PR', diff, diffHash: hash, provenanceSig: signProvenance('local:qwen3-coder', 'local', hash),
+      engineModel: 'local:qwen3-coder', engineTier: 'local' });
+    const result = await autoMergeProposal(proposal.id, config);
+    expect(result, result.reason).toMatchObject({ ok: true, merged: false, handoff: true });
+    const pack = readAutonomyEvidencePack(proposal.id)!;
+    expect(pack.policy).toMatchObject({ tier: 'T3', action: 'open-ready-pr', allowed: true });
+    expect(pack.gates.remoteProtection).toMatchObject({ operation: 'protected-pr-handoff-v1',
+      observedRulesetBypassActors: expectation().observedRulesetBypassActors });
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(head);
+    expect(git(bareRepo, ['rev-parse', 'refs/heads/main'])).toBe(head);
+    expect(loadProposal(proposal.id)!.status).toBe('awaiting-host-merge');
+    expect(createPrMock).toHaveBeenCalledTimes(1);
+    const calls = fs.existsSync(ghCallsFile) ? fs.readFileSync(ghCallsFile, 'utf8') : '';
+    expect(calls).not.toContain('"merge"');
+    expect(calls).not.toContain('--admin');
+  }, 60_000);
+  it('refuses the registry local route and late remote-route drift before any PR or main mutation', async () => {
+    const config = cfg();
+    config.foundry!.autoMerge!.protectedRemotes = [expectation()];
+    branchProtectionMock.mockImplementation(async () => observe());
+    const head = git(tmpRepo, ['rev-parse', 'main']);
+    const diff = addFileDiff('docs/route.md', 'remote only');
+    const hash = hashDiff(diff);
+    const proposal = createProposal({ repo: tmpRepo, origin: 'agent', kind: 'patch', title: 'held local route',
+      summary: 'PR only', diff, diffHash: hash, provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', hash),
+      engineModel: 'codex:gpt-5.5', engineTier: 'frontier' });
+    // Leave main free in the real private fixture: the legacy checked-out-main
+    // safeguard must not be what protects this PR-only contract.
+    git(tmpRepo, ['checkout', '-b', 'operator']);
+    config.foundry!.autoMerge!.pushToRemote = false;
+    const local = await autoMergeProposal(proposal.id, config);
+    expect(local, local.reason).toMatchObject({ ok: false, merged: false });
+    expect(local.reason).toMatch(/repository-bound PR handoff cannot select a local/);
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(head);
+    expect(git(bareRepo, ['rev-parse', 'refs/heads/main'])).toBe(head);
+    config.foundry!.autoMerge!.pushToRemote = true;
+    branchProtectionMock.mockImplementation(async () => {
+      config.foundry!.autoMerge!.pushToRemote = false;
+      return observe();
+    });
+    const late = await autoMergeProposal(proposal.id, config);
+    expect(late).toMatchObject({ ok: false, merged: false });
+    expect(late.reason).toMatch(/route changed/);
+    expect(createPrMock).not.toHaveBeenCalled();
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(head);
+    expect(git(bareRepo, ['rev-parse', 'refs/heads/main'])).toBe(head);
+  }, 60_000);
+
+  it('reconstructs the explicit operator route from the selected registry rather than conflicting legacy checks', async () => {
+    const config = registryCfg();
+    config.foundry!.autoMerge!.enabled = false;
+    config.foundry!.autoMerge!.protectedRemote!.requiredChecks = [{ context: 'wrong/global', appId: '999' }];
+    branchProtectionMock.mockImplementation(async () => observe());
+    const head = git(tmpRepo, ['rev-parse', 'main']);
+    const diff = addFileDiff('docs/operator-registry.md', 'selected operator PR');
+    const hash = hashDiff(diff);
+    const proposal = createProposal({ repo: tmpRepo, origin: 'agent', kind: 'patch', title: 'operator PR',
+      summary: 'selected registry', diff, diffHash: hash, provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', hash),
+      engineModel: 'codex:gpt-5.5', engineTier: 'frontier' });
+    const result = await submitVerifiedProtectedPr(proposal.id, config, { confirmed: true });
+    expect(result, result.reason).toMatchObject({ ok: true, merged: false, handoff: true });
+    expect(readAutonomyEvidencePack(proposal.id)!.policy).toMatchObject({ action: 'open-ready-pr', tier: 'T3' });
+    expect(git(tmpRepo, ['rev-parse', 'main'])).toBe(head);
+    expect(git(bareRepo, ['rev-parse', 'refs/heads/main'])).toBe(head);
+  }, 60_000);
+
 });

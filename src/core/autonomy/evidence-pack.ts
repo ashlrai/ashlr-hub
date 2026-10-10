@@ -60,6 +60,9 @@ import {
   type PrivateStorageMode,
 } from '../util/private-storage.js';
 
+import { protectedPrOperationShape } from './protected-pr-handoff.js';
+import type { ProtectedPrObservedBypass } from '../types.js';
+
 export const READY_EVIDENCE_MAX_AGE_MS = 60 * 60 * 1000;
 export const READY_EVIDENCE_MAX_FUTURE_SKEW_MS = 60 * 1000;
 
@@ -86,6 +89,9 @@ export interface AutonomyRemoteProtectionEvidence extends AutonomyGateEvidence {
   requiredCheckBindings: Array<{ context: string; appId: string | null }>;
   policySources: Array<'classic' | 'ruleset'>;
   policyHash: string;
+  /** Signed PR-opening boundary; this is never default-branch merge authority. */
+  operation?: 'protected-pr-handoff-v1';
+  observedRulesetBypassActors?: ProtectedPrObservedBypass[];
 }
 
 export interface AutonomyDiffEvidence {
@@ -501,7 +507,7 @@ function strictRemoteProtectionEvidence(value: unknown): value is AutonomyRemote
   if (!hasOnlyKeys(record, [
     'ok', 'detail', 'live', 'nameWithOwner', 'repositoryId', 'branch', 'baseHead',
     'observedAt', 'requirements', 'requiredChecks', 'requiredCheckBindings',
-    'policySources', 'policyHash',
+    'policySources', 'policyHash', 'operation', 'observedRulesetBypassActors',
   ]) || !boundedTrimmedString(record['nameWithOwner'], 512) ||
     !/^[^/\s]+\/[^/\s]+$/.test(record['nameWithOwner']) ||
     !boundedNonEmptyString(record['repositoryId'], 256) ||
@@ -756,6 +762,9 @@ function strictEvidencePackV3Payload(value: unknown): value is AutonomyEvidenceP
     Date.parse(proposal['createdAt'] as string) > Date.parse(verification['verifiedAt'] as string)
   )) return false;
 
+  const prOperation = protectedPrOperationShape(gates['remoteProtection']);
+  const handoff = prOperation === 'handoff';
+  if (handoff && (record['target'] !== 'main' || record['remotePreferred'] !== true)) return false;
   const policy = record['policy'];
   if (policy !== undefined) {
     const p = jsonRecord(policy);
@@ -766,11 +775,12 @@ function strictEvidencePackV3Payload(value: unknown): value is AutonomyEvidenceP
     if (p['allowed'] === true) {
       const allowedTuple =
         (record['target'] === 'proposal' && p['tier'] === 'T1' && p['action'] === 'propose-only') ||
-        (record['target'] === 'branch' && record['remotePreferred'] === false &&
+        (record['target'] === 'branch' && !handoff && record['remotePreferred'] === false &&
           p['tier'] === 'T2' && p['action'] === 'apply-local-branch') ||
-        (record['target'] === 'branch' && record['remotePreferred'] === true &&
+        (record['target'] === 'branch' && !handoff && record['remotePreferred'] === true &&
           p['tier'] === 'T3' && p['action'] === 'open-ready-pr') ||
-        (record['target'] === 'main' && p['tier'] === 'T4' && p['action'] === 'merge-main') ||
+        (record['target'] === 'main' && !handoff && p['tier'] === 'T4' && p['action'] === 'merge-main') ||
+        (record['target'] === 'main' && handoff && record['remotePreferred'] === true && p['tier'] === 'T3' && p['action'] === 'open-ready-pr') ||
         (record['target'] === 'preview' && p['tier'] === 'T5' && p['action'] === 'deploy-preview');
       if (!allowedTuple || verification['passed'] !== true ||
         Object.values(gates).some((gate) => (gate as JsonRecord)['ok'] !== true)) return false;
@@ -812,7 +822,7 @@ function strictEvidencePackV3Payload(value: unknown): value is AutonomyEvidenceP
 
   if (policy !== undefined) {
     const p = policy as JsonRecord;
-    if (p['allowed'] === true && p['action'] === 'merge-main') {
+    if (p['allowed'] === true && (p['action'] === 'merge-main' || handoff)) {
       const requiredGates = ['authority', 'provenance', 'verification', 'risk', 'scope'];
       if (record['target'] !== 'main' ||
         (proposal['kind'] !== 'patch' && proposal['kind'] !== 'pr') ||
@@ -820,17 +830,19 @@ function strictEvidencePackV3Payload(value: unknown): value is AutonomyEvidenceP
         diff['hash'] === undefined ||
         (diff['files'] as string[]).length === 0 || diff['changedLines'] === 0 ||
         verification['passed'] !== true ||
-        (record['trustBasis'] === 'evidence' && (verification['commandKinds'] as string[]).length === 0) ||
+        ((record['trustBasis'] === 'evidence' || handoff) && (verification['commandKinds'] as string[]).length === 0) ||
         verification['baseBranch'] === undefined || verification['baseHead'] === undefined ||
         verification['diffHash'] !== diff['hash'] || verification['verifiedAt'] === undefined ||
         verification['source'] === undefined ||
         !requiredGates.every((key) => (gates[key] as JsonRecord)['ok'] === true)) return false;
-      if (record['trustBasis'] === 'evidence') {
+      if (record['trustBasis'] === 'evidence' || handoff) {
         const remote = jsonRecord(gates['remoteProtection']);
         if (record['remotePreferred'] !== true || !remote ||
+          (handoff && (typeof verification['requiredManifestDigest'] !== 'string' || !SHA256_RE.test(verification['requiredManifestDigest']) ||
+            !Number.isSafeInteger(verification['requiredCommandCount']) || (verification['requiredCommandCount'] as number) <= 0)) ||
           remote['branch'] !== verification['baseBranch'] ||
           remote['baseHead'] !== verification['baseHead'] ||
-          verification['source'] === 'manual' ||
+          (record['trustBasis'] === 'evidence' && verification['source'] === 'manual') ||
           Date.parse(remote['observedAt'] as string) < Date.parse(verification['verifiedAt'] as string) ||
           Date.parse(remote['observedAt'] as string) > Date.parse(record['generatedAt'] as string)) return false;
         const checks = remote['requiredChecks'] as string[];
@@ -1384,7 +1396,8 @@ export function isLiveRemoteProtectionEvidence(value: unknown): value is Autonom
         (binding['appId'] === null || typeof binding['appId'] === 'string');
     }) &&
     Array.isArray(record['policySources']) && record['policySources'].every((item) => item === 'classic' || item === 'ruleset') &&
-    typeof record['policyHash'] === 'string' && /^[0-9a-f]{64}$/.test(record['policyHash']);
+    typeof record['policyHash'] === 'string' && /^[0-9a-f]{64}$/.test(record['policyHash']) &&
+    protectedPrOperationShape(record) !== 'invalid';
 }
 
 function isAutonomyEvidencePackLegacy(value: unknown): value is AutonomyEvidencePackLegacy {
@@ -1524,7 +1537,8 @@ export function evidencePackMatchesLiveProposal(
     pack.target === 'main' &&
     pack.trustBasis === 'evidence' &&
     pack.policy?.allowed === true &&
-    pack.policy.action === 'merge-main' &&
+    (pack.policy.action === 'merge-main' && protectedPrOperationShape(pack.gates.remoteProtection) === 'legacy' ||
+      pack.policy.action === 'open-ready-pr' && pack.remotePreferred === true && protectedPrOperationShape(pack.gates.remoteProtection) === 'handoff') &&
     pack.verification.passed === true &&
     pack.verification.commandKinds.length > 0 &&
     evidenceVerifierManifestMatchesProposal(pack, proposal) &&

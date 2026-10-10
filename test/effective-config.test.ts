@@ -289,6 +289,20 @@ describe('effective config snapshot', () => {
     expect(legacy.foundry.autoMerge.protectedRemote.requiredCheckIdentity.value).toBe('legacy');
   });
 
+  it('shows repository registry mode separately from legacy global checks without retaining unknown nested data', () => {
+    const entry = { nameWithOwner: 'ashlrai/fixture', repositoryId: 'R_fixture', defaultBranch: 'main',
+      operation: 'protected-pr-handoff-v1' as const, branchProtection: true,
+      requiredChecks: [{ context: 'ci/test', appId: 15368 }], observedRulesetBypassActors: [] };
+    const config = makeCfg({ foundry: { autoMerge: { protectedRemotes: [entry] } } } as Partial<AshlrConfig>);
+    const snapshot = buildEffectiveConfigSnapshot(config);
+    expect(snapshot.foundry.autoMerge.protectedRemoteMode.value).toBe('per-repository');
+    expect(snapshot.foundry.autoMerge.protectedRemotes.value).toEqual([{ ...entry,
+      requiredChecks: [{ context: 'ci/test', appId: '15368' }] }]);
+    Object.assign(entry.requiredChecks[0]!, { privateUnknown: 'must-not-project' });
+    expect(buildEffectiveConfigSnapshot(config).foundry.autoMerge.protectedRemotes.value).toEqual([]);
+    expect(JSON.stringify(buildEffectiveConfigSnapshot(config))).not.toContain('must-not-project');
+  });
+
   it('GET /api/config/effective exposes the read-only snapshot', async () => {
     mkdirSync(fx.ashlrDir, { recursive: true });
     writeFileSync(

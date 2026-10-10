@@ -23,7 +23,7 @@ export function tinyTar(path, data) {
   h.write(`${h.reduce((a, b) => a + b, 0).toString(8).padStart(6, '0')}\0 `, 148);
   return Buffer.concat([h, data, Buffer.alloc((512 - data.length % 512) % 512), Buffer.alloc(1024)]);
 }
-export function fixture(t, complete = false, repository = hub.legacyName, packageName = repository === hub.renamedName ? '@ashlr/phantom' : '@ashlr/hub') {
+export function fixture(t, complete = false, repository = hub.legacyName, packageName = repository === hub.renamedName ? '@ashlr/phantom' : '@ashlr/hub', sourceFiles = {}) {
   const parent = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'ashlr-hosted-artifact-')));
   t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
   const root = join(parent, 'root'); fs.mkdirSync(root);
@@ -48,6 +48,11 @@ export function fixture(t, complete = false, repository = hub.legacyName, packag
     }
     git('add', '.');
   }
+  for (const [path, bytes] of Object.entries(sourceFiles)) {
+    assert.ok(!path.startsWith('/') && path.split('/').every(part => part && part !== '..' && part !== '.'));
+    fs.mkdirSync(join(root, path, '..'), { recursive: true }); fs.writeFileSync(join(root, path), bytes);
+  }
+  git('add', '.');
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'synthetic');
   const revision = git('rev-parse', 'HEAD'); process.env.ASHLR_CI_SOURCE_SHA = revision;
   const write = (path, bytes) => { const full = join(root, 'dist', path); fs.mkdirSync(join(full, '..'), { recursive: true }); fs.writeFileSync(full, bytes); };
@@ -68,7 +73,7 @@ export function fixture(t, complete = false, repository = hub.legacyName, packag
   return { ...options, options, write, git, parent };
 }
 
-function laneFiles(f, role, directory) {
+function laneFiles(f, role, directory, timings = false) {
   fs.mkdirSync(join(directory, 'reports'), { recursive: true });
   const scope = isolatedScope(f.root);
   const files = role === 'web' ? [{ file: 'web.json', module: 'src/web-ui/example.test.tsx' }] : role === 'mac-isolated' ?
@@ -80,7 +85,9 @@ function laneFiles(f, role, directory) {
       [{ fullName: 'parameterized case', status: 'passed', failureMessages: [] }, { fullName: 'parameterized case', status: 'passed', failureMessages: [] }];
     const raw = { success: true, numFailedTests: 0, numFailedTestSuites: 0, numTotalTests: rows.length, numPassedTests: rows.filter((r) => r.status === 'passed').length,
       numPendingTests: rows.filter((r) => r.status === 'skipped').length, numTodoTests: 0,
-      testResults: [{ name: join(f.root, module), status: 'passed', message: '', assertionResults: rows }] };
+      testResults: [{ name: join(f.root, module), status: 'passed', message: '', assertionResults: rows,
+        ...(timings ? { startTime: Date.parse('2026-10-06T00:00:00.000Z') + 10,
+          endTime: Date.parse('2026-10-06T00:00:00.000Z') + 110.25 } : {}) }] };
     const bytes = Buffer.from(JSON.stringify(raw)); fs.writeFileSync(join(directory, 'reports', file), bytes);
     const occurrences = new Map();
     return { file, bytes: bytes.length, sha256: digest(bytes), modules: [{ file: module, cases: rows.map((row) => {
@@ -92,8 +99,8 @@ function laneFiles(f, role, directory) {
     nodeVersion: 'v22.22.3', startedAt: '2026-10-06T00:00:00Z', finishedAt: '2026-10-06T00:00:01Z', exitCode: 0, reports };
   fs.writeFileSync(join(directory, 'lane.json'), JSON.stringify(lane)); return directory;
 }
-export function qualifiedFixture(t, { repository = hub.legacyName, schemaVersion = 2 } = {}) {
-  const f = fixture(t, true, repository); const web = laneFiles(f, 'web', join(f.parent, 'web')); f.options.reports = [join(web, 'lane.json')];
+export function qualifiedFixture(t, { repository = hub.legacyName, schemaVersion = 2, sourceFiles = {}, timings = false } = {}) {
+  const f = fixture(t, true, repository, undefined, sourceFiles); const web = laneFiles(f, 'web', join(f.parent, 'web'), timings); f.options.reports = [join(web, 'lane.json')];
   captureArtifact(f.options);
   if (schemaVersion === 1) {
     const path = join(f.out, 'manifest.json'); const manifest = JSON.parse(fs.readFileSync(path));
@@ -104,7 +111,7 @@ export function qualifiedFixture(t, { repository = hub.legacyName, schemaVersion
   const roles = ['mac-general-1', 'mac-general-2', 'mac-general-3', 'mac-general-4', 'mac-isolated'];
   const artifactMap = { producer: { id: 200, name: 'ashlr-build-100-1', digest: `sha256:${'d'.repeat(64)}` }, lanes: roles.map((role, i) =>
     ({ role, id: 201 + i, name: `ashlr-qualification-${role}-100-1`, digest: `sha256:${String(i + 1).repeat(64)}` })) };
-  for (const role of roles) laneFiles(f, role, join(f.out, 'coverage', role));
+  for (const role of roles) laneFiles(f, role, join(f.out, 'coverage', role), timings);
   const jobs = requiredJobPolicy(f.root).map((required, index) => ({ id: index + 10, run_id: 100, head_sha: f.sha, name: required.name, labels: required.labels,
     status: 'completed', conclusion: 'success', steps: required.steps.map((name) => ({ name, status: 'completed', conclusion: 'success' })) }));
   const api = { metadata: metadata(repository), producerRepo: metadata(repository), attestorRepo: metadata(repository) };
@@ -133,5 +140,5 @@ export function qualifiedFixture(t, { repository = hub.legacyName, schemaVersion
   };
   const options = { root: f.root, revision: f.sha, bundle: f.out, githubRead: read, attestRun,
     policy: { runId: 100, runAttempt: 1, attestorSha, attestorRun: 300, attestorAttempt: 1 } };
-  return { ...f, options, qualification, jobs, calls, api };
+  return { ...f, options, qualification, jobs, calls, api, read, artifactMap };
 }

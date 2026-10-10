@@ -8,9 +8,32 @@ import { join } from 'node:path';
 import ts from 'typescript';
 import { HUB_REPOSITORY_IDENTITY as hub, requireRepositoryMetadata, requireRepositoryReference, requireProducerEnvironment, requireManifestProducer } from '../scripts/github-repository-binding.mjs';
 import { captureBuild, packBuild } from '../scripts/ci-pack-smoke.mjs';
-import { auditGithub, captureArtifact, inspectTar, sourceBinding, verifyArtifact, adoptArtifact, validateAdoptedArtifact, verifyAttestation, npmCliPath, assertEffectiveManualProtection, assertManualAttestorAncestry, verifyPublishedManualArtifact } from '../../scripts/hosted-build-artifact.mjs';
+import { auditGithub, captureArtifact, inspectTar, sourceBinding, validateCoverage, isolatedScope, verifyArtifact, adoptArtifact, validateAdoptedArtifact, verifyAttestation, npmCliPath, assertEffectiveManualProtection, assertManualAttestorAncestry, verifyPublishedManualArtifact } from '../../scripts/hosted-build-artifact.mjs';
 
 import { metadata, digest, tinyTar, fixture, qualifiedFixture } from './helpers/hosted-artifact-fixture.mjs';
+
+test('independent coverage refuses coherent duplicate or isolated general reports regardless of scheduling hints', (t) => {
+  const f = qualifiedFixture(t);
+  for (const file of ['test/general-1.test.ts', isolatedScope(f.root).suites[0]]) {
+    const lanes = structuredClone(f.qualification.lanes);
+    const ref = lanes.find((lane) => lane.role === 'mac-general-2');
+    const lanePath = join(f.out, ref.path); const lane = JSON.parse(fs.readFileSync(lanePath));
+    const report = lane.reports[0]; const path = join(f.out, 'coverage', ref.role, 'reports', report.file);
+    const raw = JSON.parse(fs.readFileSync(path)); raw.testResults[0].name = join(f.root, file);
+    const occurrences = new Map();
+    report.modules = [{ file, cases: raw.testResults[0].assertionResults.map((row) => {
+      const occurrence = occurrences.get(row.fullName) ?? 0; occurrences.set(row.fullName, occurrence + 1);
+      return { id: digest(`${file}\0${row.fullName}\0${occurrence}`), name: row.fullName, state: row.status };
+    }) }];
+    const rawBytes = Buffer.from(JSON.stringify(raw)); fs.writeFileSync(path, rawBytes);
+    report.bytes = rawBytes.length; report.sha256 = digest(rawBytes);
+    const laneBytes = Buffer.from(JSON.stringify(lane)); fs.writeFileSync(lanePath, laneBytes);
+    ref.bytes = laneBytes.length; ref.sha256 = digest(laneBytes);
+    // Even self-consistent scheduling/receipt data cannot redefine source membership.
+    assert.throws(() => validateCoverage({ root: f.root, bundle: f.out, source: sourceBinding(f.root, f.sha),
+      producer: { runId: 100, runAttempt: 1, eventSha: 'b'.repeat(40) }, lanes }), /duplicate or isolated general module/);
+  }
+});
 
 test('complete official coverage and three signed subjects permit exact transactional adoption; JSON cannot authorize', (t) => {
   const f = qualifiedFixture(t); const receipt = verifyArtifact(f.options); assert.equal(f.calls.length, 3);

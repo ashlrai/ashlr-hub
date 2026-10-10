@@ -63,6 +63,28 @@ export type ProtectedRemoteRequiredCheckExpectation = string | {
   appId: string | number;
 };
 
+/** Observed policy metadata only; never permission to exercise bypass. */
+export interface ProtectedPrObservedBypass {
+  rulesetId: string;
+  sourceType: 'Repository' | 'Organization' | 'Enterprise';
+  source: string;
+  actorType: 'RepositoryRole';
+  actorId: string;
+  bypassMode: 'always' | 'pull_request';
+}
+
+/** Exact repository-bound expectation for opening a PR, never landing it. */
+export interface ProtectedRemoteRepositoryExpectation {
+  nameWithOwner: string;
+  /** Existing authenticated GitHub node ID; not a REST database ID. */
+  repositoryId: string;
+  defaultBranch: string;
+  operation: 'protected-pr-handoff-v1';
+  branchProtection: boolean;
+  requiredChecks: Array<Exclude<ProtectedRemoteRequiredCheckExpectation, string>>;
+  observedRulesetBypassActors: ProtectedPrObservedBypass[];
+}
+
 export type LearningSource =
   | 'proposal'
   | 'decision-ledger'
@@ -1228,6 +1250,8 @@ export interface AshlrConfig {
          */
         requiredChecks: ProtectedRemoteRequiredCheckExpectation[];
       };
+      /** Optional exact per-repository PR-only registry. Presence disables global fallback. */
+      protectedRemotes?: ProtectedRemoteRepositoryExpectation[];
       /**
        * M56 (v5): permit MID-tier (strong open model) proposals to auto-apply
        * to a BRANCH / PR — never to `main`. Separate, DEFAULT-OFF sub-flag, so

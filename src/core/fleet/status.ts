@@ -7088,7 +7088,7 @@ async function buildAutoMergeReadinessStatus(
   } = await import('../inbox/merge.js');
   const { hashDiff } = await import('../foundry/provenance.js');
   const riskOrder: Record<string, number> = { low: 0, medium: 1, high: 2 };
-  const remoteProtectionSignal = evaluateEvidenceRemoteProtectionSignal(cfg);
+  const legacyRemoteProtectionSignal = evaluateEvidenceRemoteProtectionSignal(cfg);
   const remoteMainProposals = pendingProposals.filter((proposal) =>
     trustBasis !== 'tier' || mergeTargetForTier(proposal.engineTier) === 'main');
   const remoteMainRepos = new Set(
@@ -7096,6 +7096,14 @@ async function buildAutoMergeReadinessStatus(
       .filter((repo): repo is string => typeof repo === 'string' && repo.length > 0)
       .map((repo) => resolve(repo)),
   );
+  const perRepository = Boolean(autoMerge && Object.hasOwn(autoMerge, 'protectedRemotes'));
+  const selectedSignals = perRepository ? [...remoteMainRepos].map((repo) => evaluateEvidenceRemoteProtectionSignal(cfg, repo)) : [];
+  const remoteProtectionSignal = perRepository ? {
+    ok: selectedSignals.length > 0 && selectedSignals.every((signal) => signal.ok),
+    expectationMode: selectedSignals.length > 0 && selectedSignals.every((signal) => signal.expectationMode === 'exact')
+      ? 'exact' as const : selectedSignals.some((signal) => signal.expectationMode === 'invalid') ? 'invalid' as const : 'missing' as const,
+    detail: selectedSignals.find((signal) => !signal.ok)?.detail ?? 'repository-bound protected PR expectations selected',
+  } : legacyRemoteProtectionSignal;
   const remoteDeliveryEnabled = enabled && autoMerge?.pushToRemote === true;
   const remoteProtectionRequired = remoteDeliveryEnabled && (
     pendingProposals.length === 0 || remoteMainProposals.length > 0
@@ -7144,7 +7152,7 @@ async function buildAutoMergeReadinessStatus(
       remoteProtection,
     };
   }
-  if (remoteProtectionRequired && remoteProtectionSignal.ok && remoteMainRepos.size > 0) {
+  if (remoteProtectionRequired && (remoteProtectionSignal.ok || perRepository) && remoteMainRepos.size > 0) {
     const targets = new Map<string, {
       repo: string;
       bindings: Map<string, { branch: string; baseHead: string | null }>;

@@ -888,6 +888,125 @@
                 }
               }
             },
+            "protectedRemotes": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100,
+              "description": "Optional exact repository-bound protected-pr-handoff-v1 expectations. Presence selects registry mode without a global fallback. Does not grant direct merge or bypass authority.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "nameWithOwner",
+                  "repositoryId",
+                  "defaultBranch",
+                  "operation",
+                  "branchProtection",
+                  "requiredChecks",
+                  "observedRulesetBypassActors"
+                ],
+                "properties": {
+                  "nameWithOwner": {
+                    "type": "string",
+                    "maxLength": 512
+                  },
+                  "repositoryId": {
+                    "type": "string",
+                    "maxLength": 256,
+                    "description": "Opaque authenticated GitHub GraphQL repository node ID, not the numeric REST ID."
+                  },
+                  "defaultBranch": {
+                    "type": "string",
+                    "maxLength": 256
+                  },
+                  "operation": {
+                    "const": "protected-pr-handoff-v1"
+                  },
+                  "branchProtection": {
+                    "type": "boolean"
+                  },
+                  "requiredChecks": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "context",
+                        "appId"
+                      ],
+                      "properties": {
+                        "context": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256
+                        },
+                        "appId": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[1-9][0-9]{0,19}$"
+                            },
+                            {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 9007199254740991
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "observedRulesetBypassActors": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "rulesetId",
+                        "sourceType",
+                        "source",
+                        "actorType",
+                        "actorId",
+                        "bypassMode"
+                      ],
+                      "properties": {
+                        "rulesetId": {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]{0,19}$"
+                        },
+                        "sourceType": {
+                          "enum": [
+                            "Repository",
+                            "Organization",
+                            "Enterprise"
+                          ]
+                        },
+                        "source": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 512
+                        },
+                        "actorType": {
+                          "const": "RepositoryRole"
+                        },
+                        "actorId": {
+                          "type": "string",
+                          "pattern": "^[1-9][0-9]{0,19}$"
+                        },
+                        "bypassMode": {
+                          "enum": [
+                            "always",
+                            "pull_request"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
             "midToBranch": {
               "type": "boolean",
               "description": "M56 (v5): permit mid-tier proposals to auto-apply to a branch/PR, never main. Default false."

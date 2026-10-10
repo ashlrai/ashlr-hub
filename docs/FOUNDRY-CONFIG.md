@@ -631,6 +631,34 @@ manifest-safety, and risk/scope evidence. Missing or stale diff binding triggers
 reverification/refusal. All modes still obey enrollment, kill switch, self-target
 guards, evidence-pack persistence, and the same final merge/PR execution gates.
 
+### Repository-specific protected PR handoff
+
+The optional `autoMerge.protectedRemotes` registry selects an exact expectation
+for each canonical GitHub origin and default branch. Its records contain
+`nameWithOwner`, the authenticated GraphQL `repositoryId`, `defaultBranch`,
+`operation: "protected-pr-handoff-v1"`, `branchProtection`, typed
+`requiredChecks` (`context` and GitHub App `appId`), and the complete observed
+`observedRulesetBypassActors` tuples. Those tuples retain ruleset ID, source
+and source type, RepositoryRole actor ID, and bypass mode; they describe server
+policy and never authorize the agent to use a bypass. Numeric REST repository
+IDs cannot substitute for GraphQL node IDs.
+
+When this registry is present, missing, invalid or mismatched targets are held
+rather than falling back to the legacy global `protectedRemote` expectation.
+Live qualification still requires complete current policy, exact check/App
+identities, the selected repository and branch, verified base/diff, and all
+normal grant, Stop, enrollment and execution gates. Only exact expected
+RepositoryRole ruleset metadata is supported; classic bypasses, other actor
+types, unknown/403 policy and empty server checks remain held.
+
+The signed operation permits only a **T3 protected PR opening**, including when
+the proposal targets the default branch. It cannot authorize local main writes,
+admin/bypass merge or direct hosted merge. Landing remains the independent host
+merge path with its current checks and authority. Legacy records without this
+operation retain their previous V1 policy and evidence behavior. A registry is
+configuration, not a live qualification receipt; this feature does not populate
+or activate one automatically.
+
 ---
 
 ## Adding a Backend (Config-Only Walkthrough)

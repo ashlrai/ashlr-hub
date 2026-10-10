@@ -19,11 +19,14 @@ vi.mock('node:child_process', async (importOriginal) => ({
 
 import { evaluateEvidenceRemoteProtectionSignal } from '../src/core/inbox/merge.js';
 import type { AshlrConfig } from '../src/core/types.js';
+import { normalizeProtectedRemoteRegistry } from '../src/core/autonomy/protected-pr-handoff.js';
 import {
   SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_EVALUATOR_ID,
   SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_EVALUATOR_VERSION,
   SAFE_MINIMUM_PROTECTED_REMOTE_POLICY_VERSION,
   buildCanonicalProtectedRemotePolicyDigestV1,
+  buildCanonicalProtectedPrHandoffPolicyDigest,
+  evaluateProtectedPrHandoffPolicy,
   evaluateSafeMinimumProtectedRemotePolicyV1,
   readBranchProtectionAttestation,
   type BranchProtectionPolicySnapshot,
@@ -2070,5 +2073,66 @@ describe('M429 safe-minimum protected-remote policy V1', () => {
     const checks = status.parameters!['required_status_checks'] as Array<Record<string, unknown>>;
     checks[0]!['integration_id'] = '9'.repeat(100_000);
     expectRefusal(snapshot, 'snapshot-schema-unsupported');
+  });
+});
+
+
+describe('repository-bound PR-only policy operation', () => {
+  it('refuses hidden authority fields, accessors and sparse registry inputs without evaluating them', () => {
+    const entry = () => ({ nameWithOwner: 'acme/widgets', repositoryId: 'R_fixture', defaultBranch: 'main',
+      operation: 'protected-pr-handoff-v1', branchProtection: true,
+      requiredChecks: [{ context: 'ci/test', appId: '1' }], observedRulesetBypassActors: [] });
+    expect(normalizeProtectedRemoteRegistry([entry()])).not.toBeNull();
+    const hidden = entry();
+    Object.defineProperty(hidden, 'allowAdmin', { value: true });
+    expect(normalizeProtectedRemoteRegistry([hidden])).toBeNull();
+    const symbol = entry();
+    Object.defineProperty(symbol, Symbol('allowAdmin'), { value: true, enumerable: true });
+    expect(normalizeProtectedRemoteRegistry([symbol])).toBeNull();
+
+    const getter = vi.fn(() => { throw new Error('authority getter must not run'); });
+    const check = { appId: '1', unexpected: true };
+    Object.defineProperty(check, 'context', { get: getter });
+    const accessor = entry();
+    Object.assign(accessor, { requiredChecks: [check] });
+    expect(normalizeProtectedRemoteRegistry([accessor])).toBeNull();
+    expect(getter).not.toHaveBeenCalled();
+    const sparse = [entry()];
+    sparse.length = 2;
+    expect(normalizeProtectedRemoteRegistry(sparse)).toBeNull();
+    const arrayAccessor = [entry()];
+    Object.defineProperty(arrayAccessor, '0', { get: getter, enumerable: true });
+    expect(normalizeProtectedRemoteRegistry(arrayAccessor)).toBeNull();
+    expect(getter).not.toHaveBeenCalled();
+  });
+
+  it('retains observed role actor metadata and V1 refusal while qualifying only the exact PR operation', () => {
+    const snapshot = rulesetSnapshot();
+    snapshot.rulesets[0]!.bypassActors = [{ actorType: 'RepositoryRole', actorId: '5', bypassMode: 'always' }];
+    const original = structuredClone(snapshot);
+    const actors = [{ rulesetId: '101', sourceType: 'Repository' as const, source: 'acme/widgets',
+      actorType: 'RepositoryRole' as const, actorId: '5', bypassMode: 'always' as const }];
+    const expectation = { nameWithOwner: 'acme/widgets', repositoryId: 'R_fixture', defaultBranch: 'main',
+      operation: 'protected-pr-handoff-v1' as const, branchProtection: true,
+      requiredChecks: structuredClone(CONFIGURED_BINDINGS), observedRulesetBypassActors: actors };
+    expect(evaluateSafeMinimumProtectedRemotePolicyV1(snapshot, CONFIGURED_BINDINGS).ok).toBe(false);
+    expect(buildCanonicalProtectedRemotePolicyDigestV1(snapshot, CONFIGURED_BINDINGS)).toBeNull();
+    expect(evaluateProtectedPrHandoffPolicy(snapshot, CONFIGURED_BINDINGS, actors).ok).toBe(true);
+    const digest = buildCanonicalProtectedPrHandoffPolicyDigest(snapshot, CONFIGURED_BINDINGS, expectation);
+    expect(digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(snapshot).toEqual(original);
+    expect(buildCanonicalProtectedPrHandoffPolicyDigest(snapshot, CONFIGURED_BINDINGS,
+      { ...expectation, repositoryId: 'R_other' })).not.toBe(digest);
+    expect(buildCanonicalProtectedPrHandoffPolicyDigest(snapshot, CONFIGURED_BINDINGS,
+      { ...expectation, requiredChecks: [{ context: 'foreign', appId: '1' }] })).toBeNull();
+
+    const changedActor = structuredClone(snapshot);
+    changedActor.rulesets[0]!.bypassActors[0]!.bypassMode = 'pull_request';
+    expect(evaluateProtectedPrHandoffPolicy(changedActor, CONFIGURED_BINDINGS, actors).ok).toBe(false);
+    expect(evaluateProtectedPrHandoffPolicy(snapshot, CONFIGURED_BINDINGS, []).ok).toBe(false);
+    const unsafe = structuredClone(snapshot);
+    unsafe.rulesets[0]!.rules = unsafe.rulesets[0]!.rules.filter((rule) => rule.type !== 'non_fast_forward');
+    expect(evaluateProtectedPrHandoffPolicy(unsafe, CONFIGURED_BINDINGS, actors).ok).toBe(false);
+    expect(evaluateProtectedPrHandoffPolicy(snapshot, [], actors).ok).toBe(false);
   });
 });

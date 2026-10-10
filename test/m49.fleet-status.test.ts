@@ -8754,6 +8754,50 @@ describe('buildFleetStatus — read-only aggregation (M49)', () => {
     expect(s.autonomyEffectiveness?.canAutoMergeNow).toBe(false);
     expect(s.nextActions?.map((action) => action.id)).not.toContain('drain-ready-auto-merges');
   });
+
+it('selects each remote target before fleetwide observation and retains a later unavailable target', async () => {
+  const first = join(tmpHome, 'repo');
+  const second = join(tmpHome, 'second');
+  const now = new Date().toISOString();
+  writeBacklogSnapshot(tmpHome, first, [], now);
+  mkdirSync(second, { recursive: true });
+  writeFileSync(join(tmpHome, '.ashlr', 'enrollment.json'), JSON.stringify({ repos: [first, second] }));
+  writeRunningDaemon(tmpHome, [], now);
+  const config = withFoundry({ autoMerge: { enabled: true, trustBasis: 'evidence', maxRisk: 'low', pushToRemote: true,
+    protectedRemotes: [first, second].map((_repo, index) => ({ nameWithOwner: `ashlrai/repo${index}`,
+      repositoryId: `R_${index}`, defaultBranch: 'main', operation: 'protected-pr-handoff-v1', branchProtection: true,
+      requiredChecks: [{ context: 'ci/test', appId: String(index + 1) }], observedRulesetBypassActors: [] })) } });
+  const selected: string[] = [];
+  const signalSpy = vi.spyOn(inboxMerge, 'evaluateEvidenceRemoteProtectionSignal').mockImplementation((_cfg, repo) => {
+    if (repo) selected.push(repo);
+    return { ok: Boolean(repo), expectationMode: repo ? 'exact' : 'missing', detail: 'fixture per-target selection',
+      requiredChecks: ['ci/test'], requiredCheckBindings: [{ context: 'ci/test', appId: repo === first ? '1' : '2' }] };
+  });
+  const head = 'a'.repeat(40);
+  const headSpy = vi.spyOn(inboxMerge, 'resolveRemoteBranchHead').mockReturnValue(head);
+  const liveSpy = vi.spyOn(inboxMerge, 'evaluateLiveProtectedRemoteAuthority').mockImplementation(async (repo) => ({
+    authorized: true, evidence: { ok: true, live: true, detail: 'observed fixture', nameWithOwner: 'ashlrai/fixture',
+      repositoryId: 'R_fixture', branch: 'main', baseHead: head, observedAt: now, requirements: ['required_status_checks'],
+      requiredChecks: ['ci/test'], requiredCheckBindings: [{ context: 'ci/test', appId: repo === first ? '1' : '2' }],
+      policySources: ['ruleset'], policyHash: 'b'.repeat(64), operation: 'protected-pr-handoff-v1', observedRulesetBypassActors: [] } }));
+  try {
+    const current = await buildFleetStatus(config);
+    expect(new Set(selected)).toEqual(new Set([first, second]));
+    expect(liveSpy.mock.calls.map(([repo]) => repo).sort()).toEqual([first, second].sort());
+    expect(current.autoMergeReadiness?.remoteProtection).toMatchObject({ configured: 'exact', live: 'protected',
+      coverage: 'complete', reposObserved: 2, reposRequired: 2, observedAt: now });
+    liveSpy.mockImplementation(async (repo) => repo === second ? { authorized: false, reason: 'live branch protection unavailable: HTTP 403 fixture' } : {
+      authorized: true, evidence: { ok: true, live: true, detail: 'observed fixture', nameWithOwner: 'ashlrai/fixture',
+        repositoryId: 'R_fixture', branch: 'main', baseHead: head, observedAt: now, requirements: ['required_status_checks'],
+        requiredChecks: ['ci/test'], requiredCheckBindings: [{ context: 'ci/test', appId: '1' }], policySources: ['ruleset'],
+        policyHash: 'b'.repeat(64), operation: 'protected-pr-handoff-v1', observedRulesetBypassActors: [] } });
+    const unavailable = await buildFleetStatus(config);
+    expect(unavailable.autoMergeReadiness?.remoteProtection).toMatchObject({ live: 'unavailable', coverage: 'complete',
+      reposObserved: 2, observedAt: null });
+    expect(unavailable.autonomyEffectiveness?.canAutoMergeNow).toBe(false);
+  } finally { signalSpy.mockRestore(); headSpy.mockRestore(); liveSpy.mockRestore(); }
+});
+
 });
 
 // ---------------------------------------------------------------------------
