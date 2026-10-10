@@ -1497,6 +1497,14 @@ overwrites an existing proposal and never deletes migration or collector records
 
 ### Upgrade a pool without resetting history
 
+Receipt readers preserve optional historical `universe-generation` origins only
+when their exact data-only identity derives the recorded task ID. This matches
+an earlier local source writer; it does not attest which binary wrote a receipt.
+Origins remain accounting provenance, never dispatch permission or engineering
+acceptance. New task manifests still reject `origin`. Existing task digests,
+configuration history, usage, account controls and acceptance status remain
+unchanged; malformed origins and unsupported fields still hold the ledger.
+
 `ashlr resources pool evolve` adds workers or supported quota annotations while
 preserving the shared ledger. It does not connect an account or refresh quota.
 Use a current built checkout: older binaries reject the upgraded ledger schema.
