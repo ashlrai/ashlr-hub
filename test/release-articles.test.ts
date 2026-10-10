@@ -12,6 +12,7 @@ import { configureReleaseArticles, importProposedRelease, publicArticleDraft, re
   RELEASE_ARTICLE_REPO, RELEASE_TEASER_REPO, defaultReleaseArticlesDeps, syncReleaseArticles, type ReleaseArticlesDeps } from '../src/core/release-articles.js';
 import { parseProposedRelease, RELEASE_CI_JOBS, releaseRequiredSteps, releaseRequiredLabels, verifyPublishedRelease, verifyLatestWorkbenchRelease, publicWorkbenchRelease, defaultReleasePublicReader, type ReleasePublicReader } from '../src/core/release-public-facts.js';
 import { runReleaseArticlesCli } from '../src/cli/release-articles.js';
+import { syncWebsiteReleaseMetadata, websiteReleaseMetadataPath, type WebsiteReleaseMetadataDeps } from '../src/core/website/release-metadata.js';
 
 const home = useTmpHome();
 const NOW = Date.parse('2026-10-07T06:00:00Z');
@@ -70,6 +71,102 @@ function deps(reader = fixtureReader()): ReleaseArticlesDeps {
     enqueue: vi.fn((input) => enqueueTask(input, { nowMs: NOW })), production: vi.fn(async () => false), teaserProduction: vi.fn(async () => false) };
 }
 beforeEach(() => home.setup()); afterEach(() => { vi.restoreAllMocks(); home.teardown(); });
+
+describe('independent website release metadata maintenance', () => {
+  function metadataDeps(): WebsiteReleaseMetadataDeps {
+    return { ...deps(fixtureReader(undefined, { repository: 'ashlrai/phantom', packageName: '@ashlr/phantom' })),
+      policy: () => makePolicy({ repos: [{ ...makePolicy().repos[0]!, nameWithOwner: RELEASE_TEASER_REPO }] }),
+      enrolled: () => [RELEASE_TEASER_REPO], publicationBinding: () => 'commissioned-auto-generation-1' };
+  }
+  it('queues only Phantom source metadata with the company watcher disabled and deduplicates later observations', async () => {
+    const ports = metadataDeps();
+    const first = await syncWebsiteReleaseMetadata(ports);
+    expect(first.phase).toBe('queued'); expect(readReleaseArticles().enabled).toBe(false);
+    const queue = readTaskQueue(); expect(queue.ok).toBe(true);
+    if (!queue.ok) throw new Error(queue.reason);
+    expect(queue.tasks).toHaveLength(1);
+    expect(queue.tasks[0]).toMatchObject({ repo: RELEASE_TEASER_REPO, dedupeKey: expect.stringMatching(/^website-release-metadata:/) });
+    expect(queue.tasks[0]!.detail).toContain('apps/web/src/lib/workbench-release.json');
+    expect(queue.tasks[0]!.detail).toContain('not original archive bytes');
+    expect(queue.tasks[0]!.detail).not.toContain('canonical company article');
+    const state = JSON.parse(readFileSync(websiteReleaseMetadataPath(), 'utf8'));
+    expect(state.attempts[0].observedAt).toBe(new Date(NOW).toISOString());
+    ports.now = () => NOW + 120_000;
+    expect(await syncWebsiteReleaseMetadata(ports)).toMatchObject({ phase: 'queued', taskId: first.taskId });
+    expect(ports.enqueue).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(readFileSync(websiteReleaseMetadataPath(), 'utf8')).attempts[0].observedAt).toBe(state.attempts[0].observedAt);
+  });
+  it('performs no public reads or queue writes without commissioned Auto, enrolled merge authority or with Stop', async () => {
+    for (const held of ['mode', 'enrollment', 'grant', 'stop']) {
+      const ports = metadataDeps();
+      if (held === 'mode') ports.publicationBinding = () => null;
+      if (held === 'enrollment') ports.enrolled = () => [];
+      if (held === 'grant') ports.policy = () => null;
+      if (held === 'stop') ports.stopped = () => true;
+      expect((await syncWebsiteReleaseMetadata(ports)).phase).toBe('held');
+      expect(ports.reader.github).not.toHaveBeenCalled(); expect(ports.enqueue).not.toHaveBeenCalled();
+    }
+    expect(existsSync(websiteReleaseMetadataPath())).toBe(false);
+  });
+  it('refuses late operating generation, Stop epoch and enrollment changes after fresh observation', async () => {
+    let turn = 0;
+    for (const change of ['generation', 'stop', 'enrollment', 'grant']) {
+      let current = true; const ports = metadataDeps();
+      const now = NOW + turn++ * 120_000;
+      ports.now = () => now;
+      if (change === 'generation') ports.publicationBinding = () => current ? 'generation-1' : 'generation-2';
+      if (change === 'stop') ports.stopEpoch = () => current ? 'stop-epoch-1' : 'stop-epoch-2';
+      if (change === 'enrollment') ports.enrolled = () => current ? [RELEASE_TEASER_REPO] : [];
+      if (change === 'grant') ports.policy = () => makePolicy({ grantSeq: current ? 1 : 2,
+        repos: [{ ...makePolicy().repos[0]!, nameWithOwner: RELEASE_TEASER_REPO }] });
+      const original = ports.reader.npm;
+      ports.reader.npm = async (...args) => { const value = await original(...args); current = false; return value; };
+      expect((await syncWebsiteReleaseMetadata(ports)).phase).toBe('held'); expect(ports.enqueue).not.toHaveBeenCalled();
+    }
+  });
+  it('withholds source work on unavailable fresh facts and avoids repeated per-tick public reads', async () => {
+    const ports = metadataDeps(); ports.reader.npm = vi.fn(async () => { throw new Error('private diagnostic'); });
+    expect(await syncWebsiteReleaseMetadata(ports)).toMatchObject({ phase: 'held', reason: expect.not.stringContaining('private diagnostic') });
+    expect(ports.enqueue).not.toHaveBeenCalled();
+    const count = vi.mocked(ports.reader.github).mock.calls.length;
+    ports.now = () => NOW + 15_000;
+    expect((await syncWebsiteReleaseMetadata(ports)).phase).toBe('waiting');
+    expect(vi.mocked(ports.reader.github).mock.calls).toHaveLength(count);
+    expect(JSON.parse(readFileSync(websiteReleaseMetadataPath(), 'utf8')).attempts).toEqual([]);
+  });
+  it('retains an unknown enqueue reservation after queue retention and never repeats the write', async () => {
+    const ports = metadataDeps(); ports.enqueue = vi.fn(() => { throw new Error('unknown contact'); });
+    expect((await syncWebsiteReleaseMetadata(ports)).reason).toContain('outcome is unknown');
+    ports.now = () => NOW + 120_000;
+    expect((await syncWebsiteReleaseMetadata(ports)).phase).toBe('awaiting-source');
+    expect(ports.enqueue).toHaveBeenCalledTimes(1);
+  });
+  it('does not treat finished or pruned source work as live publication or permission to replay', async () => {
+    const ports = metadataDeps(); const queued = await syncWebsiteReleaseMetadata(ports);
+    expect(queued.phase).toBe('queued');
+    recordTaskDispatch(queued.taskId!, { kind: 'produced', proposalId: null }, { nowMs: NOW + 1_000 });
+    ports.now = () => NOW + 120_000;
+    expect(await syncWebsiteReleaseMetadata(ports)).toMatchObject({ phase: 'awaiting-source', taskId: queued.taskId });
+    // Model ordinary finished-task retention removing the queue row; the
+    // separate durable reservation must survive it.
+    const queue = JSON.parse(readFileSync(taskQueuePath(), 'utf8'));
+    writeFileSync(taskQueuePath(), JSON.stringify({ ...queue, tasks: [] }));
+    ports.now = () => NOW + 240_000;
+    expect(await syncWebsiteReleaseMetadata(ports)).toMatchObject({ phase: 'awaiting-source', taskId: queued.taskId });
+    expect(ports.enqueue).toHaveBeenCalledTimes(1);
+  });
+  it('allows retry after a known refusal but holds failed existing work for review', async () => {
+    const ports = metadataDeps(); const original = ports.enqueue;
+    ports.enqueue = vi.fn(() => ({ ok: false, reason: 'queue full' }));
+    expect((await syncWebsiteReleaseMetadata(ports)).reason).toContain('was refused');
+    ports.enqueue = original; ports.now = () => NOW + 120_000;
+    const queued = await syncWebsiteReleaseMetadata(ports); expect(queued.phase).toBe('queued');
+    for (let i = 0; i < 3; i++) recordTaskDispatch(queued.taskId!, { kind: 'no-result', reason: 'fixture producer failed' }, { nowMs: NOW + 130_000 + i });
+    ports.now = () => NOW + 240_000;
+    expect(await syncWebsiteReleaseMetadata(ports)).toMatchObject({ phase: 'held', reason: expect.stringContaining('needs review'), taskId: queued.taskId });
+    expect(original).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('fresh public facts are data, not saved release authority', () => {
   it('projects only a fully verified canonical release and brackets latest discovery', async () => {
