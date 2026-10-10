@@ -16,6 +16,9 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   decorative elements do not imply a stale installed or published version.
 
 ### Fixed
+- Restore fresh public release facts after the site-only CI lane added two
+  ancillary jobs. The reader binds their names and results to the exact
+  candidate workflow while retaining all 15 required release gates.
 - Check the configured model through a bounded loopback `/models` probe before
   marking a keyless Ollama or llama-server fleet engine ready. Missing models and
   probe errors remain unavailable; a model listing does not claim completion.
