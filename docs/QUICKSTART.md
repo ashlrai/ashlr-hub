@@ -10,7 +10,7 @@ its work are distinct steps.
 The primary CLI is `phm`; `ashlr` remains compatible. Current source uses
 `@ashlr/phantom` in `ashlrai/phantom`. Find the current qualified release at
 [GitHub releases](https://github.com/ashlrai/phantom/releases/latest).
-This source tree targets version 3.29.7; check canonical release availability and exact matching assets before installation.
+This source tree targets version 3.29.8; check canonical release availability and exact matching assets before installation.
 The verified 3.25.3 compatibility release remains `@ashlr/hub`.
 Local routes remain `/verse/`, and the published macOS app is `Phantom.app`. See
 [the product naming guide](PHANTOM-BRAND.md).
@@ -48,7 +48,7 @@ installation, desktop installation and fleet activation are separate steps.
 ### Desktop app on Apple silicon Mac
 
 The source-only `phm desktop install [--apply]` first-install command is described
-in the [consumer installation notes](../desktop/README.md#consumer-first-install-source-implementation).
+in the [consumer installation notes](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#consumer-first-install-source-implementation).
 It is not available in the published release below; clean-Mac acceptance remains
 unverified.
 
