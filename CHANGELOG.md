@@ -28,6 +28,9 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Explain dependency audit coverage, including the Universe example graph gap.
 
 ### Fixed
+- Refresh displayed local-model speed after a successful completed local turn,
+  including when an older context read is still pending. Streaming chunks and
+  duplicate events do not trigger additional reads; token evidence stays server-owned.
 - Describe a passed recorded access expiry without claiming the native CLI has
   signed out. Cached warnings remain non-blocking and suggest checking sign-in.
 
