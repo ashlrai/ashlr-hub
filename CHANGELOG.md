@@ -9,7 +9,30 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.29.7] — Unreleased
+## [3.29.8] — Unreleased
+
+### Added
+- Install the signed Apple silicon desktop app with `phm desktop install`, using
+  the matching public app and CLI artifacts without a compiler or publisher key.
+  Preview the installation first; `--apply` installs into an absent app location.
+
+### Fixed
+- Keep newer observed chat activity when an older session snapshot arrives, and
+  settle sidebar activity only from a matching completed or cancelled turn.
+- Preserve unknown resource usage instead of inventing provider limits, check
+  credential prerequisites before cached readiness, and distinguish budget
+  headroom from provider quota.
+- Preserve queued work after an uncertain persistence result so release articles
+  and website metadata cannot be submitted twice by a retry.
+- Update Leader documentation, installation links and candidate version metadata.
+
+### Changed
+- Load chat resize interactions separately while retaining saved panel widths and
+  usable chat columns when the optional control is delayed or unavailable.
+- Display resource pulse metrics to two significant figures while retaining
+  exact accounting and reported, estimated or reserved provenance.
+
+## [3.29.7] — 2026-10-10
 
 ### Added
 - Optional repository-specific protected PR handoff qualification binds the repository, default branch, check identities and observed policy. Its signed operation permits PR opening; direct merge and bypass authority remain separate.
