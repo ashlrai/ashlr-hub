@@ -201,7 +201,11 @@ describe('production velocity profile', () => {
     }));
 
     const previousNimKey = process.env['NVIDIA_NIM_API_KEY'];
+    const previousKimiKey = process.env['MOONSHOT_API_KEY'];
+    // Both API resource sensors require a configured credential. These inert
+    // fixtures exercise local sensing only; no provider request is made.
     process.env['NVIDIA_NIM_API_KEY'] = 'm344-fake-nim-credential';
+    process.env['MOONSHOT_API_KEY'] = 'm344-fake-kimi-credential';
     try {
       await expect(getBackendResourceState('nim', effective)).resolves.toMatchObject({
         backend: 'nim',
@@ -218,6 +222,8 @@ describe('production velocity profile', () => {
     } finally {
       if (previousNimKey === undefined) delete process.env['NVIDIA_NIM_API_KEY'];
       else process.env['NVIDIA_NIM_API_KEY'] = previousNimKey;
+      if (previousKimiKey === undefined) delete process.env['MOONSHOT_API_KEY'];
+      else process.env['MOONSHOT_API_KEY'] = previousKimiKey;
     }
   });
 
