@@ -801,6 +801,42 @@ describe('M250 ResourceMonitor — graceful degradation when all sources fail', 
     expect(localCoder?.cap).toBe(3);
   });
 
+  it.each(['nim', 'kimi'] as const)('refreshes cached %s availability when the configured credential name changes', async (backend) => {
+    const key = backend === 'nim' ? 'NVIDIA_NIM_API_KEY' : 'MOONSHOT_API_KEY';
+    process.env[key] = 'inert-m250-cache-fixture';
+    const { getResourceSnapshot } = await import('../src/core/fabric/resource-monitor.js');
+    const { BUILTIN_ENGINE_REGISTRY } = await import('../src/core/run/engine-registry.js');
+    const cfg = withFoundry({ allowedBackends: [backend] });
+    const ready = await getResourceSnapshot(cfg);
+    expect(ready.backends.find(b => b.backend === backend)?.availability).toBe('open');
+    const changed = await getResourceSnapshot(withFoundry({ allowedBackends: [backend], engines: {
+      [backend]: { ...BUILTIN_ENGINE_REGISTRY[backend]!, api: { ...BUILTIN_ENGINE_REGISTRY[backend]!.api!, envKey: 'M250_MISSING_CUSTOM_KEY' } },
+    } }));
+    expect(changed).not.toBe(ready);
+    expect(changed.backends.find(b => b.backend === backend)?.availability).toBe('unreachable');
+  });
+
+  it.each(['nim', 'kimi'] as const)('refreshes cached %s availability when a credential is removed or becomes a placeholder', async (backend) => {
+    const key = backend === 'nim' ? 'NVIDIA_NIM_API_KEY' : 'MOONSHOT_API_KEY';
+    process.env[key] = 'inert-m250-cache-fixture';
+    const { getResourceSnapshot } = await import('../src/core/fabric/resource-monitor.js');
+    const cfg = withFoundry({ allowedBackends: [backend] });
+    const ready = await getResourceSnapshot(cfg);
+    expect(ready.backends.find(b => b.backend === backend)?.availability).toBe('open');
+    delete process.env[key];
+    const removed = await getResourceSnapshot(cfg);
+    expect(removed).not.toBe(ready);
+    expect(removed.backends.find(b => b.backend === backend)?.availability).toBe('unreachable');
+    process.env[key] = 'inert-m250-cache-fixture';
+    const restored = await getResourceSnapshot(cfg);
+    expect(restored.backends.find(b => b.backend === backend)?.availability).toBe('open');
+    process.env[key] = 'phm_placeholder_inert';
+    const placeholder = await getResourceSnapshot(cfg);
+    expect(placeholder).not.toBe(restored);
+    expect(placeholder.backends.find(b => b.backend === backend)?.availability).toBe('unreachable');
+    expect(JSON.stringify(placeholder)).not.toContain('phm_placeholder_inert');
+  });
+
   it('recordBackoff invalidates the cache', async () => {
     process.env['NVIDIA_NIM_API_KEY'] = FAKE_NIM_API_KEY;
     vi.doMock('../src/core/observability/codex-source.js', () => ({

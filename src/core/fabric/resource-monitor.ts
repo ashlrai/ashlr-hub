@@ -318,6 +318,12 @@ function resourceSnapshotCacheKey(cfg: unknown, backends: EngineId[]): string {
   const rcfg = extractResourceCfg(cfg);
   return JSON.stringify({
     backends,
+    // Recheck local credential readiness before accepting cached availability.
+    // Keep only names and booleans; never cache or hash credential values.
+    apiCredentials: backends.filter((backend): backend is 'nim' | 'kimi' => backend === 'nim' || backend === 'kimi').map(backend => {
+      try { return { backend, ...apiCredentialReadiness(backend, cfg as AshlrConfig) }; }
+      catch { return { backend, credentialName: null, credentialAvailable: false }; }
+    }),
     claude: rcfg.claude ?? null,
     overrides: rcfg.overrides ?? null,
     protectPct: rcfg.protectPct ?? null,
@@ -1065,6 +1071,15 @@ function senseReactiveApiState(
   };
 }
 
+function apiCredentialReadiness(backend: 'nim' | 'kimi', cfg: AshlrConfig): { credentialName: string; credentialAvailable: boolean } {
+  const spec = resolveEngineRegistry(cfg)[backend];
+  const envKey = spec?.kind === 'api-model' ? spec.api?.envKey : undefined;
+  return {
+    credentialName: typeof envKey === 'string' && envKey.length > 0 ? envKey : backend === 'nim' ? 'NVIDIA_NIM_API_KEY' : 'MOONSHOT_API_KEY',
+    credentialAvailable: typeof envKey === 'string' && envKey.length > 0 ? Boolean(resolveProviderKey(envKey, cfg)?.trim()) : false,
+  };
+}
+
 function senseCredentialedApiState(backend: 'nim' | 'kimi', cfg: unknown, rcfg: ResourceCfgShape): BackendResourceState {
   const now = new Date().toISOString();
   const typedCfg = cfg as AshlrConfig;
@@ -1072,16 +1087,9 @@ function senseCredentialedApiState(backend: 'nim' | 'kimi', cfg: unknown, rcfg: 
   const defaultCost = backend === 'nim' ? 0.42 : 0.7;
 
   try {
-    const spec = resolveEngineRegistry(typedCfg)[backend];
-    const envKey = spec?.kind === 'api-model' ? spec.api?.envKey : undefined;
-    const credentialAvailable = typeof envKey === 'string' && envKey.length > 0
-      ? Boolean(resolveProviderKey(envKey, typedCfg)?.trim())
-      : false;
+    const { credentialName, credentialAvailable } = apiCredentialReadiness(backend, typedCfg);
 
     if (!credentialAvailable) {
-      const credentialName = typeof envKey === 'string' && envKey.length > 0
-        ? envKey
-        : backend === 'nim' ? 'NVIDIA_NIM_API_KEY' : 'MOONSHOT_API_KEY';
       const maxConcurrent = positiveConcurrentCap(resourceCfg?.maxConcurrent);
       return {
         backend,
