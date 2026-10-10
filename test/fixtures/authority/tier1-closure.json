@@ -609,6 +609,7 @@
     "src/core/resources/quota-scope.ts",
     "src/core/resources/quota-shared-evidence.ts",
     "src/core/resources/reading-cache.ts",
+    "src/core/resources/task-origin.ts",
     "src/core/resources/worker.ts",
     "src/core/routing/budget-api.ts",
     "src/core/routing/budget-store.ts",
