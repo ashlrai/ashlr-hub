@@ -83,6 +83,58 @@
 .bar[data-expanded] .battery { flex: 1 1 auto; }
 .bar[data-expanded] .cell { flex: 1 1 auto; width: auto; min-width: 40px; }
 
+.densityToggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 24px;
+  padding: 0 var(--space-2);
+  font-size: var(--text-2xs-size, 11px);
+  color: var(--text-tertiary);
+  border-radius: var(--radius-sm);
+}
+.densityToggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+.densityToggle:focus-visible { outline: 2px solid var(--focus-ring, var(--accent-500)); outline-offset: -2px; }
+
+/* Density never changes the reading, account order or drawer. Full names,
+   credit balances and stale/unknown evidence remain in the focus/hover card. */
+.bar[data-compact] .orderItem { display: block; position: relative; }
+.bar[data-compact] .moveControls {
+  position: absolute;
+  top: 4px;
+  right: 0;
+  flex-direction: row;
+  background: var(--bg-surface);
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+}
+.bar[data-compact] .orderItem:hover .moveControls,
+.bar[data-compact] .orderItem:focus-within .moveControls { pointer-events: auto; }
+.bar[data-compact] .row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 80px);
+  align-items: center;
+  min-height: 32px;
+  gap: 4px;
+  padding: 4px var(--space-2);
+}
+.bar[data-compact] .name,
+.bar[data-compact] .value,
+.bar[data-compact] .credits {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+.bar[data-compact] .value { max-width: 100%; flex: 1 1 auto; }
+.bar[data-compact] .battery { flex: 0 0 14px; }
+.bar[data-compact] .cell { min-width: 0; width: 12px; }
+.bar[data-compact] [data-account-row] > .credits { display: none; }
+.bar[data-compact] .credits { display: block; text-align: right; }
+.bar[data-compact] .credits:has(.creditHold) { display: flex; }
+.bar[data-compact] .credits > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.bar[data-compact] .creditHold { margin-left: 4px; }
+
 .logo { flex: none; }
 .cloudLogo { position: relative; display: inline-flex; }
 .cloudLogo::after {

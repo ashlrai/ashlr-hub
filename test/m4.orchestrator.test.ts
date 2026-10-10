@@ -419,10 +419,11 @@ describe('planGoal — DAG decomposition', () => {
     const chat = vi.fn();
     const client: ProviderClient = { id: 'plugin-custom', supportsTools: false, chat };
 
+    const onUsage = vi.fn();
     const tasks = await planGoal(
       'Governed planning',
       client,
-      undefined,
+      onUsage,
       undefined,
       false,
       undefined,
@@ -430,6 +431,7 @@ describe('planGoal — DAG decomposition', () => {
     );
 
     expect(chat).not.toHaveBeenCalled();
+    expect(onUsage).toHaveBeenCalledExactlyOnceWith({ tokensIn: 0, tokensOut: 0, usageKnown: true, noContact: true });
     expect(tasks).toEqual([{ id: 't1', goal: 'Governed planning', deps: [], status: 'pending' }]);
   });
 });
@@ -1012,6 +1014,8 @@ describe('runGoal — deterministic usage accounting (single-writer)', () => {
     expect(reloaded.usage.tokensIn).toBe(35);
     expect(reloaded.usage.tokensOut).toBe(15);
     expect(reloaded.usage.steps).toBe(5);
+    expect(reloaded.usage.tokenEvidence).toMatchObject({input:{reported:35},output:{reported:15},requests:{reported:5}});
+    expect(state.steps.filter(step=>step.kind!=='tool').every(step=>step.usage?.tokenEvidence?.requests.reported===1)).toBe(true);
   });
 
   it('reserves parallel model steps atomically without whole-batch maxSteps overshoot', async () => {
@@ -1080,6 +1084,7 @@ describe('runGoal — deterministic usage accounting (single-writer)', () => {
       options: { num_predict: number };
     }> = [];
     let persistedTokensAtContact: number | undefined;
+    let persistedEvidenceAtContact: import('../src/core/types.js').RunTokenEvidence | undefined;
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string, init?: RequestInit) => {
       const u = String(url);
       if (u.includes('/api/tags')) {
@@ -1092,6 +1097,7 @@ describe('runGoal — deterministic usage accounting (single-writer)', () => {
       if (u.includes('/api/chat')) {
         chatBodies.push(JSON.parse(String(init?.body)) as typeof chatBodies[number]);
         const persisted = loadRun(resumeId);
+        persistedEvidenceAtContact = persisted?.usage.tokenEvidence;
         persistedTokensAtContact = persisted
           ? persisted.usage.tokensIn + persisted.usage.tokensOut
           : undefined;
@@ -1118,7 +1124,10 @@ describe('runGoal — deterministic usage accounting (single-writer)', () => {
     });
     const promptReservation = conservativeRequestTokenReservation(chatBodies[0]!.messages, []);
     expect(persistedTokensAtContact).toBe(promptReservation + 4_096);
+    expect(persistedEvidenceAtContact).toMatchObject({ input: { reserved: promptReservation }, output: { reserved: 4096 }, requests: { reserved: 1 } });
     expect(state.usage.tokensIn + state.usage.tokensOut).toBe(promptReservation + 4_096);
+    expect(state.usage.tokenEvidence).toMatchObject({input:{reserved:promptReservation},output:{reserved:4096},requests:{reserved:1}});
+    expect(loadRun(state.id)?.usage.tokenEvidence).toEqual(state.usage.tokenEvidence);
     expect(state.usage.tokensIn + state.usage.tokensOut).toBeLessThanOrEqual(50_000);
     expect(state.tasks[0]?.status).toBe('failed');
   });
@@ -1322,12 +1331,13 @@ describe('runGoal — resume edge cases', () => {
       usage: { tokensIn: 10, tokensOut: 5, steps: 2 },
     });
     expect(state.tasks.find((task) => task.id === 'legacy')).toMatchObject({ status: 'done' });
-    expect(state.usage).toEqual({
+    expect(state.usage).toMatchObject({
       tokensIn: priorUsage.tokensIn + 30,
       tokensOut: priorUsage.tokensOut + 15,
       steps: priorUsage.steps + 3,
       estCostUsd: priorUsage.estCostUsd,
     });
+    expect(state.usage.tokenEvidence).toMatchObject({unclassified:true,input:{unknown:100,reported:30},output:{unknown:50,reported:15}});
     expect(state.steps).toContainEqual(expect.objectContaining({
       taskId: 'cancelled',
       summary: 'Model call attempted and cancelled.',

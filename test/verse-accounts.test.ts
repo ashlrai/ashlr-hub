@@ -937,6 +937,70 @@ function lingeringChildAlive(pidFile: string): boolean {
 }
 
 describe('verse accounts — stranded native cleanup recovery', () => {
+  it.skipIf(NOT_MACOS).each([true, false])('close preserves the independent publication boundary (registered=%s)', async registered => {
+    fs.rmSync(path.join(root, 'quota-config.json'));
+    const ledger = accountsLedgerRoot(root);
+    const gate = path.join(root, 'hold-helper.mjs');
+    fs.writeFileSync(gate, 'await new Promise(()=>{});', { mode: 0o600 });
+    let child: childProcess.ChildProcess | undefined;
+    let stop!: () => void;
+    let ready!: () => void;
+    let failReady!: (error: unknown) => void;
+    const started = new Promise<void>((resolve, reject) => { ready = resolve; failReady = reject; });
+    const factory = vi.spyOn(connectionMonitor, 'createResourceConnectionMonitor').mockImplementation(options => {
+      const pending = options.coordinator!.run(async lifecycle => {
+        const launch = lifecycle!.prepare().launcher!;
+        expect(launch).toBeTruthy();
+        child = childProcess.spawn(launch.nodeExecutable,
+          [...(registered ? [] : ['--import', gate]), launch.scriptPath, launch.ticketPath], {
+            cwd: ledger, detached: true, stdio: ['ignore', 'ignore', 'ignore', 'pipe'],
+            env: { PATH: '/usr/bin:/bin', HOME: root, TMPDIR: root, LANG: 'C', LC_ALL: 'C' },
+          });
+        const closed = new Promise<void>(resolve => child!.once('close', () => resolve()));
+        const control = child.stdio[3] as import('node:stream').Duplex;
+        control.on('error', () => {});
+        await new Promise<void>((resolve, reject) => {
+          child!.once('error', reject);
+          if (registered) control.once('data', bytes => {
+            try { expect(String(bytes)).toBe(`${launch.ticketDigest}\n`); resolve(); } catch (error) { reject(error); }
+          });
+          else child!.once('spawn', () => resolve());
+        });
+        // Deliberately omit the parent's spawned callback and its go packet.
+        // The fixed helper's independent registration is the only positive proof.
+        const stopped = new Promise<void>(resolve => { stop = resolve; });
+        ready(); await stopped;
+        if (registered) control.destroy();
+        else child.kill('SIGKILL'); // Exact live child from this test's own spawn.
+        await closed;
+        expect(await processGroupGone(child.pid!)).toBe(true);
+        return { status: 'uncertain' };
+      }, () => false).catch(error => { failReady(error); });
+      return { snapshot: () => ({ sampledAt: new Date().toISOString(), refreshing: false, accounts: [] }),
+        isStopped: () => false, close: async () => { stop(); await pending; throw new Error('Unconfirmed parent registration'); } };
+    });
+    try {
+      collector = await startVerseAccountCollector({ accountsRoot: root });
+      await started;
+      const entries = activityReservations(ledger) as Array<{ phase: string; launchId: string }>;
+      expect(entries).toHaveLength(1); expect(entries[0]!.phase).toBe('preparing');
+      const registration = path.join(ledger, `.resource-quota-launch-${entries[0]!.launchId}.json.registered`);
+      expect(fs.existsSync(registration)).toBe(registered);
+      await collector.close(); collector = null;
+      expect(fs.existsSync(path.join(ledger, '.resource-quota-refresh-pending.json'))).toBe(!registered);
+      expect(activityReservations(ledger)).toHaveLength(registered ? 0 : 1);
+      expect(fs.existsSync(path.join(ledger, '.resource-quota-refresh.lock'))).toBe(false);
+      if (registered) {
+        held = await acquireResourceQuotaRefreshLease(ledger, { trackNativeActivity: true });
+        expect(held).toBeTruthy();
+      } else expect(fs.existsSync(registration)).toBe(false);
+    } finally {
+      stop?.();
+      if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      await collector?.close(); collector = null; factory.mockRestore();
+    }
+  }, 20_000);
+
   it.skipIf(NOT_MACOS)('holds the fence while the stranded group lives, then releases it on kernel-confirmed absence', async () => {
     const ledger = accountsLedgerRoot(root);
     held = await acquireResourceQuotaRefreshLease(ledger, { trackNativeActivity: true });
@@ -1029,11 +1093,12 @@ describe('verse accounts — stranded native cleanup recovery', () => {
     fs.mkdirSync(ledger, { mode: 0o700 });
     fs.chmodSync(ledger, 0o700);
     const marker = path.join(base, 'leaked-once');
+    const launches = path.join(base, 'completed-launches');
     const pidFile = path.join(base, 'lingering.pid');
     const launcher = path.join(base, 'launcher.mjs');
     fs.writeFileSync(launcher, [
       "import { spawn } from 'node:child_process';",
-      "import { existsSync, writeFileSync } from 'node:fs';",
+      "import { existsSync, writeFileSync, appendFileSync } from 'node:fs';",
       `const marker = ${JSON.stringify(marker)};`,
       `const pidFile = ${JSON.stringify(pidFile)};`,
       'if (!existsSync(marker)) {',
@@ -1042,6 +1107,7 @@ describe('verse accounts — stranded native cleanup recovery', () => {
       '  writeFileSync(pidFile, String(child.pid));',
       '  child.unref();',
       '}',
+      `appendFileSync(${JSON.stringify(launches)}, 'completed\\n');`,
       'process.exit(0);',
     ].join('\n'), { mode: 0o600 });
     writePrivate(path.join(base, 'pool.json'), POOL);
@@ -1085,6 +1151,11 @@ describe('verse accounts — stranded native cleanup recovery', () => {
       expect(lingeringChildAlive(pidFile)).toBe(false);
       expect(local.status().note).toContain('readings are live');
 
+      // Startup alone does not prove that the new v5 child completed. Observe
+      // its actual inert execution and settled reservation before clean close;
+      // helper death before identity publication remains intentionally held.
+      expect(await until(() => fs.existsSync(launches) &&
+        fs.readFileSync(launches, 'utf8').trim().split('\n').length >= 2 && activityReservations(ledger).length === 0, 40_000)).toBe(true);
       // 3. The lease is handed back cleanly: the fence was discharged by a
       //    confirmed witness, not preserved by an unresolved one.
       await local.close();

@@ -15,7 +15,7 @@ import { OutcomeManagerCoordinator, projectOutcomeManager, type OutcomeManagerAd
 import { managerGeneration, type OutcomeManagerRoute, type OutcomeManagerStage } from '../goals/outcome-manager-types.js';
 import { dirname } from 'node:path';
 import { readEnrollmentRegistry } from '../sandbox/policy.js';
-import { managerSessionTargetsMatch } from '../verse/manager-scope.js';
+import { managerSessionTargetsMatch, resolveManagerSessionTargets } from '../verse/manager-scope.js';
 import { inspectPrivateDirectory } from '../universe/artifacts.js';
 import { MAX_MISSION_GRAPH_NODES, MAX_MISSION_GRAPH_CANONICAL_BYTES, type MissionGraphInput } from '../vision/mission-graph.js';
 
@@ -45,7 +45,9 @@ export function readOutcomeManagerWorkItemContext(item: Pick<WorkItem, 'id' | 'r
 }
 function sessionTargetsMatch(roots: readonly string[], targets: readonly string[]): boolean {
   const enrollment = readEnrollmentRegistry();
-  return enrollment.state === 'ready' && managerSessionTargetsMatch(roots, enrollment.repos, targets);
+  if (enrollment.state !== 'ready') return false;
+  const executionTargets = resolveManagerSessionTargets(targets, enrollment.repos);
+  return executionTargets !== null && managerSessionTargetsMatch(roots, enrollment.repos, executionTargets);
 }
 export function readOutcomeManagerSession(input: { outcomeId: string; sessionId: string; roots: readonly string[] }): boolean {
   try {

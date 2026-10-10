@@ -9,6 +9,8 @@ import {
   reloadResourcesUiForTest,
   RESOURCES_STORAGE_KEY,
   setResourcesPinned,
+  setResourcesBar,
+  setResourcesCompact,
   setResourcesSummary,
   toggleResources,
 } from './resources-store.js';
@@ -77,5 +79,29 @@ describe('resources-store', () => {
     setResourcesSummary({ tone: 'alert', spoken: '1 spent' });
     expect(getResourcesUi()).toBe(first);
     expect(localStorage.getItem(RESOURCES_STORAGE_KEY)).toBeNull();
+  });
+
+  it('persists density independently of visibility and keeps old saved layouts expanded', () => {
+    localStorage.setItem(RESOURCES_STORAGE_KEY, JSON.stringify({ open: true, pinned: true, bar: true }));
+    reloadResourcesUiForTest();
+    expect(getResourcesUi().compact).toBe(false);
+    setResourcesCompact(true);
+    setResourcesBar(false);
+    reloadResourcesUiForTest();
+    expect(getResourcesUi()).toMatchObject({ open: true, pinned: true, bar: false, compact: true });
+    setResourcesBar(true);
+    expect(getResourcesUi().compact).toBe(true);
+    setResourcesCompact(false);
+    reloadResourcesUiForTest();
+    expect(getResourcesUi()).toMatchObject({ open: true, pinned: true, bar: true, compact: false });
+  });
+
+  it('changes density in memory when storage is unavailable and ignores malformed saved density', () => {
+    localStorage.setItem(RESOURCES_STORAGE_KEY, JSON.stringify({ compact: 'true' }));
+    reloadResourcesUiForTest();
+    expect(getResourcesUi().compact).toBe(false);
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('QuotaExceededError'); });
+    expect(() => setResourcesCompact(true)).not.toThrow();
+    expect(getResourcesUi().compact).toBe(true);
   });
 });

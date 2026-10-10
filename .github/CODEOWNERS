@@ -134,6 +134,10 @@
 /src/core/vision/leader-display-text.ts @masonwyatt23
 /src/core/authority/** @masonwyatt23
 /src/core/desktop/** @masonwyatt23
+/desktop/src-tauri/src/native_metadata_launch.rs @masonwyatt23
+/desktop/src-tauri/src/main.rs @masonwyatt23
+/desktop/src-tauri/src/lib.rs @masonwyatt23
+/src/core/run/desktop-metadata-launch-trust.ts @masonwyatt23
 /src/cli/desktop-update.ts @masonwyatt23
 /scripts/desktop-release-policy.mjs @masonwyatt23
 /scripts/finalize-desktop-update.mjs @masonwyatt23
@@ -267,6 +271,7 @@
 /test/decide-judge-manager-315.test.ts @masonwyatt23
 /test/decide-resource-choice.test.ts @masonwyatt23
 /test/desktop-artifact-installer.test.ts @masonwyatt23
+/test/desktop-metadata-launch-trust.test.ts @masonwyatt23
 /test/desktop-qualified-update.test.ts @masonwyatt23
 /test/desktop-update-cli.test.ts @masonwyatt23
 /test/desktop-update-manifest.test.ts @masonwyatt23
@@ -876,4 +881,7 @@
 /test/w1.run-window-loop.test.ts @masonwyatt23
 /test/web-console-sse-backpressure.test.ts @masonwyatt23
 /test/website-host-release.test.ts @masonwyatt23
+/test/website-output-materialization.test.ts @masonwyatt23
 /test/website-public-build-env.test.ts @masonwyatt23
+/test/website-stage-result.test.ts @masonwyatt23
+/test/website-stage-source-binding.test.ts @masonwyatt23

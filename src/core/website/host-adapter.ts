@@ -14,6 +14,7 @@ import { runSafeGit } from '../sandbox/safe-git.js';
 import { authorityDir } from '../authority/ledger.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { acquireOutwardMutationFenceAsync, releaseOutwardMutationFence } from '../sandbox/mutation-fence.js';
+import { materializeWebsiteOutput } from './output-materialization.js';
 import {
   WEBSITE_PROFILE, assertWebsiteAuthority, inventoryWebsiteOutput, websiteDigest, websiteToolsDir,
   type WebsiteCommission, type WebsiteHostAdapter, type WebsiteOperation, type WebsiteSource,
@@ -124,6 +125,47 @@ export async function readWebsitePublicBuildEnv(api: (endpoint: string) => Promi
   return values;
 }
 
+/** Prebuilt uploads have no Git checkout from which Vercel can infer runtime
+ * source identity. Bind only the operation's qualified merge, never a caller
+ * string or a project-global environment value shared by later deployments. */
+function qualifiedWebsiteMerge(op: Pick<WebsiteOperation, 'revision' | 'source'>): string {
+  const revision = sha(op.revision);
+  const merge = sha(op.source?.merge);
+  if (merge !== revision) throw new Error('Website qualified source does not match operation revision');
+  return merge;
+}
+export function websiteStageArgs(op: Pick<WebsiteOperation, 'revision' | 'source'>): string[] {
+  const merge = qualifiedWebsiteMerge(op);
+  return ['deploy', '--prebuilt', '--prod', '--skip-domain', '--yes',
+    '--env', `VERCEL_GIT_COMMIT_SHA=${merge}`, '--meta', `phantomSourceSha=${merge}`];
+}
+function websiteDeploymentUrl(value: unknown): string {
+  const url = string(value);
+  if (!/^https:\/\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.vercel\.app\/?$/.test(url)) throw new Error('Website deployment URL is invalid');
+  return new URL(url).origin;
+}
+/** CLI 63.1.0 always emits this JSON envelope under --non-interactive. Only
+ * deployment.url identifies the staged artifact; productionUrl is an alias. */
+export function parseWebsiteStageOutput(stdout: string): { id: string; url: string } {
+  if (Buffer.byteLength(stdout, 'utf8') > 64 * 1024) throw new Error('Website upload result is too large');
+  let result: Record<string, unknown>;
+  try { result = object(JSON.parse(stdout)); } catch { throw new Error('Website upload result is invalid JSON'); }
+  const deployed = object(result['deployment']);
+  if (result['status'] !== 'ok' || deployed['readyState'] !== 'READY' || deployed['target'] !== 'production' ||
+      typeof deployed['id'] !== 'string' || !/^dpl_[A-Za-z0-9]+$/.test(deployed['id'])) throw new Error('Website upload result is not exact READY production');
+  return { id: deployed['id'], url: websiteDeploymentUrl(deployed['url']) };
+}
+/** Provider readback, never CLI guidance, confirms the same staged artifact. */
+export function assertWebsiteDeployment(op: Pick<WebsiteOperation, 'revision' | 'source' | 'deploymentId' | 'deploymentUrl'>, teamId: string, observed: unknown): void {
+  const merge = qualifiedWebsiteMerge(op);
+  if (!op.deploymentId || !/^dpl_[A-Za-z0-9]+$/.test(op.deploymentId)) throw new Error('Website deployment ID is missing');
+  const result = object(observed);
+  if (result['id'] !== op.deploymentId || result['projectId'] !== WEBSITE_PROFILE.projectId || result['ownerId'] !== teamId ||
+      object(result['team'])['id'] !== teamId || result['target'] !== 'production' || result['readyState'] !== 'READY' ||
+      object(result['meta'])['phantomSourceSha'] !== merge) throw new Error('Website staged deployment is not exact READY production source');
+  if (websiteDeploymentUrl(`https://${string(result['url'])}`) !== websiteDeploymentUrl(op.deploymentUrl)) throw new Error('Website staged URL changed');
+}
+
 export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?: AbortSignal): WebsiteHostAdapter {
   const host = defaultHostMergeDeps();
   const assertRepositoryReadBuild = (): void => {
@@ -205,6 +247,7 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
   };
   const operationRoot = (op: WebsiteOperation): string => join(authorityDir(), 'website-operations', op.id);
   const output = (op: WebsiteOperation): string => join(operationRoot(op), 'upload', '.vercel', 'output');
+  const projectMetadata = JSON.stringify({ projectId: WEBSITE_PROFILE.projectId, orgId: commission.teamId, projectName: 'web', settings: commission.projectSettings });
   const routeContract = async (base: string): Promise<void> => {
     const origin = new URL(base);
     if (origin.protocol !== 'https:' || (!origin.hostname.endsWith('.vercel.app') && origin.hostname !== WEBSITE_PROFILE.primaryDomain)) throw new Error('Website route origin is invalid');
@@ -220,7 +263,7 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
   const deployment = async (op: WebsiteOperation): Promise<Record<string, unknown>> => {
     if (!op.deploymentId || !/^dpl_[A-Za-z0-9]+$/.test(op.deploymentId)) throw new Error('Website deployment ID is missing');
     const result = await api(`/v13/deployments/${op.deploymentId}`);
-    if (result['id'] !== op.deploymentId || result['projectId'] !== WEBSITE_PROFILE.projectId || result['ownerId'] !== commission.teamId || object(result['team'])['id'] !== commission.teamId || result['target'] !== 'production' || result['readyState'] !== 'READY') throw new Error('Website staged deployment is not exact READY production');
+    assertWebsiteDeployment(op, commission.teamId, result);
     return result;
   };
   return {
@@ -230,7 +273,7 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
       const root = operationRoot(op); privateDirectory(root);
       const sourceRoot = join(root, 'source');
       if (existsSync(sourceRoot)) throw new Error('Website build source already exists; no silent rebuild');
-      privateDirectory(sourceRoot); privateDirectory(join(root, 'upload'));
+      privateDirectory(sourceRoot); privateDirectory(join(root, 'upload')); privateDirectory(join(root, 'builder-output'));
       const mirror = await ensureMirror({ nameWithOwner: WEBSITE_PROFILE.repo, base: WEBSITE_PROFILE.branch }, { signal, githubToken: async () => (await host.token(WEBSITE_PROFILE.repo)).token });
       if (!mirror.ok || mirror.path !== mirrorPathFor(WEBSITE_PROFILE.repo) || mirror.headSha !== source.merge) throw new Error('Website trusted mirror is not the exact merge');
       const target = { workTree: mirror.path, gitDir: join(mirror.path, '.git'), layout: 'repo' as const };
@@ -265,7 +308,7 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
       }
       if (cursor !== blobs.length) throw new Error('Website binary source stream has trailing content');
       const prepared = join(root, 'prepared'); privateDirectory(prepared);
-      writeFileSync(join(prepared, 'project.json'), JSON.stringify({ projectId: WEBSITE_PROFILE.projectId, orgId: commission.teamId, projectName: 'web', settings: commission.projectSettings }), { mode: 0o600, flag: 'wx' });
+      writeFileSync(join(prepared, 'project.json'), projectMetadata, { mode: 0o600, flag: 'wx' });
       writeFileSync(join(prepared, '.env.production.local'), Object.entries(commission.publicBuildEnv).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join('\n'), { mode: 0o600, flag: 'wx' });
       const image = object(JSON.parse(await run(commission.toolchain.docker, ['image', 'inspect', commission.toolchain.image, '--format', '{{json .}}'], { env: hostEnv(), signal })));
       if (image['Id'] !== commission.toolchain.image || image['Os'] !== 'linux' || image['Architecture'] !== 'amd64') throw new Error('Website builder must be the commissioned Linux x64 image');
@@ -287,9 +330,13 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
         const container = `phantom-website-${op.id}`;
         let buildError: unknown = null; let cleanupError: unknown = null;
         try {
+          // npm's installed binaries and native Next.js modules run from the
+          // temporary worktree. Docker tmpfs defaults to noexec, which prevents
+          // this offline build even though source execution is already admitted
+          // inside a credential-free, network-isolated container.
           await run(commission.toolchain.docker, ['run', '--rm', '--name', container, '--pull=never', '--platform=linux/amd64', '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', `--user=${userInfo().uid}:${userInfo().gid}`,
             ...Object.entries(WEBSITE_OFFLINE_BUILD_ENV).flatMap(([key, value]) => ['-e', `${key}=${value}`]),
-        '--tmpfs=/tmp:rw,nosuid,nodev,mode=1777', '--mount', `type=bind,src=${sourceRoot},dst=/source,readonly`, '--mount', `type=bind,src=${prepared},dst=/prepared,readonly`, '--mount', `type=bind,src=${join(root, 'upload')},dst=/output`,
+        '--tmpfs=/tmp:rw,exec,nosuid,nodev,mode=1777', '--mount', `type=bind,src=${sourceRoot},dst=/source,readonly`, '--mount', `type=bind,src=${prepared},dst=/prepared,readonly`, '--mount', `type=bind,src=${join(root, 'builder-output')},dst=/output`,
         '-e', 'HOME=/tmp/home', '-e', 'CI=1', '-e', 'NEXT_TELEMETRY_DISABLED=1', '-e', 'VERCEL_TELEMETRY_DISABLED=1', commission.toolchain.image, '/bin/sh', '-c', script], { env: hostEnv(), signal: lease.signal, timeout: 30 * 60_000 });
         } catch (error) { buildError = error; } finally {
           try {
@@ -307,23 +354,29 @@ export function createWebsiteHostAdapter(commission: WebsiteCommission, signal?:
         if (cleanupError) throw cleanupError;
         if (buildError) throw buildError;
       }, { signal });
+      // The container is gone before host reads. Freeze internal Vercel aliases as regular
+      // copies so the original complete no-link inventory remains the publication gate.
+      privateDirectory(dirname(output(op)));
+      materializeWebsiteOutput(join(root, 'builder-output', '.vercel', 'output'), output(op));
+      writeFileSync(join(dirname(output(op)), 'project.json'), projectMetadata, { mode: 0o600, flag: 'wx' });
       const config = object(JSON.parse(readFileSync(join(output(op), 'config.json'), 'utf8')));
       if (config['version'] !== 3) throw new Error('Website build output version is unsupported');
       return inventoryWebsiteOutput(output(op)).digest;
     },
     stage: async (op, authorize) => {
+      const args = websiteStageArgs(op);
       const fence = await acquireOutwardMutationFenceAsync(2_000, { signal }); if (!fence) throw new Error('Website upload mutation fence unavailable');
       try {
         assertWebsiteAuthority(commission);
         if (inventoryWebsiteOutput(output(op)).digest !== op.outputDigest) throw new Error('Website output changed before upload');
+        if (fileDigest(join(dirname(output(op)), 'project.json')) !== createHash('sha256').update(projectMetadata).digest('hex')) throw new Error('Website upload project metadata changed');
         await authorize();
-        const url = await vc(['deploy', '--prebuilt', '--prod', '--skip-domain', '--yes'], join(operationRoot(op), 'upload'));
-        const parsed = new URL(url); if (parsed.protocol !== 'https:' || !parsed.hostname.endsWith('.vercel.app') || parsed.pathname !== '/') throw new Error('Website upload returned no exact deployment URL');
-        const observed = await api(`/v13/deployments/${encodeURIComponent(parsed.hostname)}`);
-        return { id: string(observed['id']), url: parsed.origin };
+        const staged = parseWebsiteStageOutput(await vc(args, join(operationRoot(op), 'upload')));
+        await deployment({ ...op, deploymentId: staged.id, deploymentUrl: staged.url });
+        return staged;
       } finally { releaseOutwardMutationFence(fence); }
     },
-    validateStage: async (op) => { const observed = await deployment(op); if (`https://${string(observed['url'])}` !== op.deploymentUrl) throw new Error('Website staged URL changed'); await routeContract(op.deploymentUrl!); },
+    validateStage: async (op) => { await deployment(op); await routeContract(op.deploymentUrl!); },
     promote: async (op, authorize) => {
       const fence = await acquireOutwardMutationFenceAsync(2_000, { signal }); if (!fence) throw new Error('Website promotion mutation fence unavailable');
       try { assertWebsiteAuthority(commission); await deployment(op); assertWebsiteAuthority(commission); await authorize(); await vc(['promote', op.deploymentId!, '--yes']); }

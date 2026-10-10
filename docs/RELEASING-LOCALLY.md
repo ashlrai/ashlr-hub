@@ -132,9 +132,10 @@ the previous candidate's results cannot qualify changed source.
 For canonical releases, these commands provide local feedback only. They
 do not replace mandatory exact-source hosted CI, Audit and attestor admission.
 
-Run these commands in order from the final clean release commit. Each stops on
-its own failure. A tarball publish does **not** run `prepublishOnly` on npm 11,
-so run it explicitly before packaging.
+Run these local feedback commands from the final clean source commit. Each stops
+on its own failure. Local packaging does not authorize canonical publication;
+use the [commissioned trusted publisher](#canonical-npm-trusted-publishing)
+with the original qualified hosted archive.
 
 ```sh
 npm ci
@@ -142,7 +143,6 @@ npm run check:release
 npm run prepublishOnly
 # If native desktop code changed: npm run build:binary; node desktop/scripts/prepare-sidecar.mjs; (cd desktop && cargo tauri build)
 npm run ship:local -- --native  # uses a PREBUILT native binary; verify it was copied
-npm publish <tarball> --access public   # the path ship:local printed; see Publishing
 ```
 
 Run `npm run check:release` before an expensive build or pushing release changes.

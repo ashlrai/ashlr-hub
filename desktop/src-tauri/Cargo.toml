@@ -1,6 +1,6 @@
 [package]
 name = "ashlr-desktop"
-version = "3.29.5"
+version = "3.29.6"
 description = "Phantom — engineering agent workbench"
 authors = ["Mason Wyatt <mason@evero-consulting.com>"]
 license = "MIT"

@@ -42,6 +42,8 @@ describe('PulseView', () => {
 
     await waitFor(() => expect(screen.getByText('under budget')).toBeInTheDocument());
 
+    expect(screen.getAllByText('Accounted tokens').length).toBeGreaterThan(0);
+    expect(screen.getByText(/Token provenance unknown/)).toBeInTheDocument();
     expect(screen.getAllByText('$13').length).toBeGreaterThan(0); // total cost KPI (+ table twin)
     expect(screen.getAllByText('4').length).toBeGreaterThan(0); // sessions KPI (+ table twin values)
     expect(screen.getAllByText('ashlr-hub').length).toBeGreaterThan(0); // top project bar label (+ table twin)

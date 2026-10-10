@@ -2131,6 +2131,28 @@ Read-only group-absence checks never restore signaling authority over an exited
 or recycled process. A budget expiring before native contact settles its local
 reservation without inventing a provider sample.
 
+In the Node CLI on macOS with Node's `execve`, normal collectors now create v5
+markers and schema-3 activity records. A fixed private metadata launcher publishes
+its own PID, process-start identity and process group before executing the native
+command. The collector verifies that registration before sending a one-use go
+packet over a separate control pipe. Provider stdin, argv and environment are not
+persisted in the ticket. Exec replaces the launcher in the same PID/group; it does
+not create a second unregistered command leader.
+
+If the collector exits before its callback, the surviving launcher can still
+publish registration. A closed control pipe without go records no-start evidence
+and exits. Later same-boot recovery requires the exact ticket/helper/marker/owner
+bindings and kernel-confirmed group absence; a no-start receipt alone is not
+absence proof. Recovery records the ticket and registration digests, then rechecks
+them before removing the matching pending marker. A live/recycled group, malformed
+or changed evidence, denied OS observation, or launcher death before publication
+retains the fence. These new records do not retroactively repair unknown v1–v4
+reservations. The existing different-boot recovery remains available after work
+has drained; sleep/wake still does not qualify. Unsupported runtimes keep the
+existing lifecycle. The compiled Bun desktop sidecar is not a Node interpreter.
+Its signed native extension is described below; unqualified desktop pairs remain
+held, and source qualification does not establish desktop recovery acceptance. No background service or provider session is added.
+
 For a normal helper close, the runner can observe a briefly lingering group for
 up to one second, within the original execution deadline. These are signal-zero
 checks only; no termination signal is sent after the leader exits. Fixed
@@ -2683,3 +2705,24 @@ cooperative cancellation; polling is bounded at 50 ms, not hard real-time.
 The absolute deadline is also rechecked synchronously under the resource ledger
 lock before new admission, so setup and capacity waiting cannot renew its window.
 Tests use inert HTTP/native fixtures, not live Codex, Claude or Grok accounts.
+
+
+### Signed Mac metadata launch extension
+
+The native metadata launcher adds a separate strict ticket format for the signed
+Mac host. It preserves the Node ticket format, current-account checks and group
+exit proof. Only a physically paired `/Applications/Phantom.app` host and Bun
+sidecar with the commissioned public signer and matching compiled release/source
+identity can use it. Qualification reads public signature/file metadata before
+acquiring the collector lease; each command rechecks the same pair under its
+existing deadline. Unknown or replaced pairs retain the collection hold.
+
+Source and inert compiled fixtures do not establish acceptance of a published
+signed app. The desktop release must also qualify the actual signed host and
+sidecar pair with harmless commands before claiming this extension is available.
+No provider balance, account, grant or spending permission follows from launcher
+qualification. Legacy pending records remain held under their original rules.
+
+### Installed desktop metadata self-check
+
+After installing the qualified signed app, run `/Applications/Phantom.app/Contents/MacOS/ashlr-desktop --_phantom-desktop-metadata-self-check`. This closed entry verifies the physical signed app, launches only its paired sidecar, and checks the sidecar’s actual native parent and embedded source identity before ordinary CLI boot. It returns a scalar `pass` or `held`. It does not acquire a collector lease, touch an old quota fence, contact providers, read credentials or authorize spending. A staged or unsigned fixture cannot establish this installed-host result. Existing signature verification and help/version checks remain narrower evidence.

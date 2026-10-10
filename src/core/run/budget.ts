@@ -1,3 +1,4 @@
+import { mergeTokenEvidence, validateTokenEvidence } from './token-evidence.js';
 /**
  * Budget accounting for `ashlr run`.
  *
@@ -130,7 +131,10 @@ export function addUsage(a: RunUsage, b: Partial<RunUsage>): RunUsage {
   const tokensOut = a.tokensOut + (b.tokensOut ?? 0);
   const steps = a.steps + (b.steps ?? 0);
   const estCostUsdVal = a.estCostUsd + (b.estCostUsd ?? 0);
-  return { tokensIn, tokensOut, steps, estCostUsd: estCostUsdVal };
+  const tokenEvidence = a.tokenEvidence === undefined && b.tokenEvidence === undefined ? undefined : b.tokensIn === undefined && b.tokensOut === undefined && b.tokenEvidence === undefined
+    ? validateTokenEvidence(a.tokenEvidence, a.tokensIn, a.tokensOut)
+    : mergeTokenEvidence(a, { tokensIn: b.tokensIn ?? 0, tokensOut: b.tokensOut ?? 0, tokenEvidence: b.tokenEvidence });
+  return { tokensIn, tokensOut, steps, estCostUsd: estCostUsdVal, ...(tokenEvidence ? { tokenEvidence } : {}) };
 }
 
 /**

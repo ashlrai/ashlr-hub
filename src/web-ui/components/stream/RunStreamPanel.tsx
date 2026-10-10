@@ -1,3 +1,5 @@
+import { formatMetric } from '../charts/format-metric.js';
+import { tokenEvidenceLabel } from '../../../core/run/token-evidence.js';
 /**
  * components/stream/RunStreamPanel.tsx — live view of one in-progress run:
  * current status, elapsed time/usage, and the step transcript as it builds
@@ -202,9 +204,10 @@ export function RunStreamPanel({ runId }: { runId: string }) {
               <dd>{formatElapsed(run.createdAt, run.status === 'running' ? undefined : run.updatedAt)}</dd>
             </div>
             <div>
-              <dt>Tokens</dt>
+              <dt>Accounted tokens</dt>
               <dd>
-                {run.usage.tokensIn.toLocaleString()} in / {run.usage.tokensOut.toLocaleString()} out
+                {formatMetric(run.usage.tokensIn)} in / {formatMetric(run.usage.tokensOut)} out
+                <small>{tokenEvidenceLabel(run.usage, formatMetric)}</small>
               </dd>
             </div>
             <div>
@@ -290,7 +293,7 @@ export function RunStreamPanel({ runId }: { runId: string }) {
                 <span className={styles.stepSummary}>{step.summary}</span>
                 {step.usage ? (
                   <span className={styles.stepUsage}>
-                    {(step.usage.tokensIn + step.usage.tokensOut).toLocaleString()} tok
+                    {formatMetric(step.usage.tokensIn + step.usage.tokensOut)} accounted tokens · {tokenEvidenceLabel(step.usage, formatMetric)}
                   </span>
                 ) : null}
               </div>

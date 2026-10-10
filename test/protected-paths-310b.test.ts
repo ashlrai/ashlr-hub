@@ -162,6 +162,14 @@ describe('G1 — ashlr-hub Tier-1 (self repo only)', () => {
     }
   });
 
+  it('keeps the closed native metadata entry and its Rust wiring in the owner lane independently of JS imports', () => {
+    const changes = ['desktop/src-tauri/src/native_metadata_launch.rs', 'desktop/src-tauri/src/main.rs', 'desktop/src-tauri/src/lib.rs'];
+    const hits = protectedPathHits(changes, SELF);
+    expect(hits).toHaveLength(3); expect(hits.every(hit => hit.ruleId === 'tier1-authority-code')).toBe(true);
+    expect(protectedPathHits(changes, OTHER)).toEqual([]);
+    expect(isTier1SourcePath(changes[0]!)).toBe(true);
+  });
+
   it('non-authority ashlr-hub code stays mergeable (merge-non-authority)', () => {
     for (const path of ['src/web-ui/routes/verse/Transcript.tsx', 'src/core/verse/session-engine.ts', 'docs/QUICKSTART.md', 'src/cli/verse.ts']) {
       expect(matchProtectedPath(path, SELF)).toBeNull();

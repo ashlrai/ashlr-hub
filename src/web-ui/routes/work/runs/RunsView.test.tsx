@@ -60,6 +60,8 @@ describe('RunsView', () => {
     );
 
     await waitFor(() => expect(screen.getByText('ashlr-hub: ship the thing')).toBeInTheDocument());
+    expect(screen.getAllByText('Token provenance unknown')).toHaveLength(2);
+    expect(screen.getByText(/Accounted tokens in\/out/)).toBeInTheDocument();
     expect(screen.getByText('other-repo: fix the bug')).toBeInTheDocument();
     expect(screen.getByRole('search', { name: /filter runs/i })).toBeInTheDocument();
   });

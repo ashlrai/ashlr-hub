@@ -2097,6 +2097,19 @@ mod macos {
             crash_after: Option<u8>,
             after_staging_create: &mut StagingHook<'_>,
         ) -> Result<Vec<u8>, BrokerError> {
+            let _lease_scope = crate::native_metadata_launch::TEST_FORK_LEASE_BARRIER
+                .read()
+                .unwrap();
+            execute_fixture_under_fork_barrier(fixture, crash_after, after_staging_create)
+        }
+
+        // Caller already holds the shared fork barrier. Keep this separate so
+        // the deliberate held-lease negative never recursively reads RwLock.
+        fn execute_fixture_under_fork_barrier(
+            fixture: &Fixture,
+            crash_after: Option<u8>,
+            after_staging_create: &mut StagingHook<'_>,
+        ) -> Result<Vec<u8>, BrokerError> {
             let stopped = fixture.request.stopped.clone();
             let mut observer = move |_: u32, _: &str| Ok(stopped.clone());
             run_claim_and_verify_foundation_inner(
@@ -2110,6 +2123,9 @@ mod macos {
         }
 
         fn recover_fixture(fixture: &Fixture) -> Result<RecoveryOutcome, BrokerError> {
+            let _lease_scope = crate::native_metadata_launch::TEST_FORK_LEASE_BARRIER
+                .read()
+                .unwrap();
             let stopped = fixture.request.stopped.clone();
             let mut observer = move |_: u32, _: &str| Ok(stopped.clone());
             recover_claim_and_verify_foundation_inner(
@@ -2465,13 +2481,20 @@ mod macos {
         #[test]
         fn lifecycle_lock_and_legacy_journal_fail_closed_before_mutation() {
             let locked = Fixture::new("lifecycle-locked");
-            let journal_root =
-                CustodyRoot::open_private(Path::new(&locked.request.journal_parent)).unwrap();
-            let _lease = journal_root.acquire_lifecycle_lease().unwrap();
-            assert!(matches!(
-                execute_fixture(&locked, None),
-                Err(BrokerError::Conflict("lifecycle-lock-busy"))
-            ));
+            {
+                let _lease_scope = crate::native_metadata_launch::TEST_FORK_LEASE_BARRIER
+                    .read()
+                    .unwrap();
+                let journal_root =
+                    CustodyRoot::open_private(Path::new(&locked.request.journal_parent)).unwrap();
+                let _lease = journal_root.acquire_lifecycle_lease().unwrap();
+                let mut after_staging_create =
+                    |_: &CustodyRoot, _: &str, _: &CustodyRoot, _: &str| Ok(());
+                assert!(matches!(
+                    execute_fixture_under_fork_barrier(&locked, None, &mut after_staging_create),
+                    Err(BrokerError::Conflict("lifecycle-lock-busy"))
+                ));
+            }
             assert_eq!(
                 locked.pointer_root.observe_pointer("current").unwrap(),
                 locked.request.expected_pointer
@@ -2718,17 +2741,22 @@ mod macos {
             };
             let mut after_staging_create =
                 |_: &CustodyRoot, _: &str, _: &CustodyRoot, _: &str| Ok(());
-            assert!(matches!(
-                run_claim_and_verify_foundation_inner(
-                    &fixture.frame,
-                    &keys(),
-                    NEW_PLIST,
-                    None,
-                    &mut observer,
-                    &mut after_staging_create,
-                ),
-                Err(BrokerError::Conflict("launchd-pre-mutation-state-mismatch"))
-            ));
+            {
+                let _lease_scope = crate::native_metadata_launch::TEST_FORK_LEASE_BARRIER
+                    .read()
+                    .unwrap();
+                assert!(matches!(
+                    run_claim_and_verify_foundation_inner(
+                        &fixture.frame,
+                        &keys(),
+                        NEW_PLIST,
+                        None,
+                        &mut observer,
+                        &mut after_staging_create,
+                    ),
+                    Err(BrokerError::Conflict("launchd-pre-mutation-state-mismatch"))
+                ));
+            }
             assert_eq!(
                 fixture.pointer_root.observe_pointer("current").unwrap(),
                 fixture.request.expected_pointer

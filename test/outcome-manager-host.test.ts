@@ -1,12 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { managerConversation, managerHostAdmission, type ManagerHostSources } from '../src/core/daemon/outcome-manager-host.js';
 import type { OutcomeState } from '../src/core/goals/outcome-types.js';
 import type { EffectivePolicy } from '../src/core/authority/types.js';
 import type { OutcomeManagerStage } from '../src/core/goals/outcome-manager-types.js';
 import type { MissionGraphInput } from '../src/core/vision/mission-graph.js';
 
+const privateRoots: string[] = [];
+afterEach(() => { for (const root of privateRoots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 function fixture() {
-  const root = '/fixture/repo';
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'manager-host-scope-'))); privateRoots.push(home);
+  const root = join(home, 'repo'); mkdirSync(root);
   const refs = [{ sessionId: 'chat-1', messageId: 'message-1', eventSeq: 8, revision: 1 }];
   const state = { id: 'outcome', scope: { targetRepos: [root] }, manager: { mode: 'interactive', sessionId: 'chat-1', interjections: refs } } as OutcomeState;
   let authorized = true;

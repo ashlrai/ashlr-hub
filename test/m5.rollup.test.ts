@@ -19,6 +19,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { requestTokenEvidence } from '../src/core/run/token-evidence.js';
 import type { UsageEvent, AshlrConfig } from '../src/core/types.js';
 
 // ---------------------------------------------------------------------------
@@ -119,6 +120,7 @@ function makeEvent(opts: Partial<UsageEvent> & { tokensIn: number; tokensOut: nu
     tokensOut: opts.tokensOut,
     cacheRead: opts.cacheRead ?? 0,
     cacheWrite: opts.cacheWrite ?? 0,
+    ...(opts.tokenEvidence ? { tokenEvidence: opts.tokenEvidence } : {}),
   };
 }
 
@@ -140,6 +142,22 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('buildRollup — totals', () => {
+  it('projects the same mixed provenance into totals, day, model and project without inventing request counts', () => {
+    mockCollect.mockReturnValue([
+      makeEvent({ tokensIn: 11, tokensOut: 0, tokenEvidence: requestTokenEvidence('reported', 11, 0) }),
+      makeEvent({ tokensIn: 20, tokensOut: 9, tokenEvidence: requestTokenEvidence('reserved', 20, 9) }),
+      makeEvent({ tokensIn: 5, tokensOut: 3 }),
+    ]);
+    const rollup = buildRollup('7d', makeConfig());
+    for (const row of [rollup.totals, rollup.byDay[0]!, rollup.byModel[0]!, rollup.byProject[0]!]) {
+      expect(row).toMatchObject({ tokensIn: 36, tokensOut: 12, tokenEvidence: {
+        input: { reported: 11, reserved: 20, unknown: 5 }, output: { reported: 0, reserved: 9, unknown: 3 },
+        requests: { reported: 1, reserved: 1, unknown: 0 }, unclassified: true,
+      } });
+    }
+    expect(rollup.budget.spentTokens).toBe(48);
+  });
+
   it('returns zero totals when no events', () => {
     mockCollect.mockReturnValue([]);
     const rollup = buildRollup('7d', makeConfig());

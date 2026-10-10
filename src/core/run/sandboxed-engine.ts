@@ -1,3 +1,5 @@
+import type { RunStep } from '../types.js';
+import { neutralTokenEvidence, requestTokenEvidence, tokenEvidenceFromSteps } from './token-evidence.js';
 import { assertSelectedOutcomeAdmission, selectedOutcomeAdmissionCurrent, SelectedOutcomeAdmissionRefusal } from './outcome-admission.js';
 import { observeRoleAccount, roleAccountEpoch, nativeLaunchEpoch } from './role-account.js';
 import { resolveNativeSeatLaunch, type NativeSeatLaunch } from '../resources/native-profile.js';
@@ -580,6 +582,7 @@ function withProposalOutcome(
     diffLines: diffLineCount(outcome) ?? actionCounts?.diffLines,
     tokensIn: state.usage.tokensIn,
     tokensOut: state.usage.tokensOut,
+    tokenEvidence: state.usage.tokenEvidence,
     costUsd: state.usage.estCostUsd,
     contextSummary: contextSummary ?? state.runEventSummary?.contextSummary,
     ...(actionCounts ? { actionCounts } : {}),
@@ -682,6 +685,7 @@ function writeSandboxedRunAgentAction(fields: {
       diffLines: diffLineCount(fields.outcome),
       tokensIn: fields.usage?.tokensIn,
       tokensOut: fields.usage?.tokensOut,
+      tokenEvidence: fields.usage?.tokenEvidence,
       costUsd: fields.usage?.estCostUsd,
       durationMs: fields.durationMs,
       contextSummary: fields.contextSummary,
@@ -779,6 +783,7 @@ function sandboxedProducerCausalMetadata(fields: {
     diffLines: diffLineCount(fields.outcome),
     tokensIn: fields.usage?.tokensIn,
     tokensOut: fields.usage?.tokensOut,
+    tokenEvidence: fields.usage?.tokenEvidence,
     costUsd: fields.usage?.estCostUsd,
     durationMs: fields.durationMs,
     contextSummary: fields.contextSummary,
@@ -3998,7 +4003,7 @@ export async function runApiModelSandboxed(
       maxSteps: opts.budget?.maxSteps ?? 40,
       allowCloud: false,
     };
-    const usage: RunUsage = newUsage();
+    const usage: RunUsage = { ...newUsage(), tokenEvidence: neutralTokenEvidence() };
     const steps: RunState['steps'] = [];
     const reserveModelStep: ReserveModelStep = (promptTokenReservation) => {
       const remainingTokens = budget.maxTokens - usage.tokensIn - usage.tokensOut;
@@ -4022,10 +4027,15 @@ export async function runApiModelSandboxed(
       usage.tokensOut += maxOutputTokens;
       usage.steps += 1;
 
+      const step: RunStep = { ts: new Date().toISOString(), taskId: 't1', kind: 'model', summary: 'Model call reserved.',
+        usage: { tokensIn: promptTokenReservation, tokensOut: maxOutputTokens, steps: 1, estCostUsd: 0,
+          tokenEvidence: requestTokenEvidence('reserved', promptTokenReservation, maxOutputTokens) } };
+      steps.push(step);
+      usage.tokenEvidence = tokenEvidenceFromSteps(usage, steps);
       let finalized = false;
       return {
         maxOutputTokens,
-        finalize(summary, reportedUsage) {
+        finalize(summary, reportedUsage, basis) {
           if (finalized) return;
           finalized = true;
           const usageIsExact = reportedUsage !== undefined
@@ -4037,13 +4047,10 @@ export async function runApiModelSandboxed(
             usage.tokensIn += tokensIn - promptTokenReservation;
             usage.tokensOut += tokensOut - maxOutputTokens;
           }
-          steps.push({
-            ts: new Date().toISOString(),
-            taskId: 't1',
-            kind: 'model',
-            summary,
-            usage: { tokensIn, tokensOut, steps: 1, estCostUsd: 0 },
-          });
+          step.summary = summary;
+          step.usage = { tokensIn, tokensOut, steps: 1, estCostUsd: 0,
+            tokenEvidence: requestTokenEvidence(usageIsExact ? basis ?? 'reported' : 'reserved', tokensIn, tokensOut) };
+          usage.tokenEvidence = tokenEvidenceFromSteps(usage, steps);
           emitSinkEvent(streamSink, {
             kind: 'log',
             taskId: 't1',

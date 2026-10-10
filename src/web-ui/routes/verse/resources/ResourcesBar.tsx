@@ -22,6 +22,7 @@ import { estimatedCreditValue, formatNativeCreditUnits, nativeCreditBalanceTitle
 import { useMemo, useState, type CSSProperties, type ReactNode } from 'react';
 import { formatMetric } from '../../../components/charts/format-metric.js';
 import { ProviderLogo } from '../../../components/primitives/ProviderLogo.js';
+import { IconChevronDown, IconChevronUp } from '../../../components/primitives/icons.js';
 import { Tooltip } from '../../../components/primitives/Tooltip.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { usedPercentText } from '../percent-text.js';
@@ -36,7 +37,7 @@ import { creditPoolsQuery } from './credit-pools-query.js';
 import { apiGrantDisplay } from './credit-pool-model.js';
 import { devinConsumptionEvidence, devinUsageEvidence, formatAcu } from '../devin/devin-model.js';
 import { DEVIN_POLL_MS, devinQuery } from '../devin/devin-queries.js';
-import { closeResources, openResources, useResourcesUi } from './resources-store.js';
+import { closeResources, openResources, setResourcesCompact, useResourcesUi } from './resources-store.js';
 import { moveResource, orderedResources, useResourceOrder } from './resource-order.js';
 import { proactiveProfilesQuery } from '../proactive/proactive-queries.js';
 import { setVerseSection } from '../verse-ui-store.js';
@@ -285,6 +286,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
             type="button"
             className={styles.row}
             data-level={row.level}
+            data-account-row
             aria-label={`${row.summary}. Open Resources`}
             title={nativeCreditBalanceTitle(row.exactCreditBalance) ?? undefined}
             onClick={() => openResources()}
@@ -293,7 +295,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
               <>
                 <span className={styles.line}>
                   <ProviderLogo engine={row.engine} size={14} className={styles.logo} />
-                  <span className={styles.name}>{row.name}</span>
+                  <span className={styles.name}>{row.engine === 'grok' && row.name === 'Grok' ? 'Grok Build' : row.name}</span>
                 </span>
                 <span className={styles.line}>
                   <Battery left={row.leftPercent} level={row.level} vertical={false} />
@@ -338,7 +340,7 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
             <ProviderLogo engine="grok" size={14} className={styles.logo} />
             {expanded ? <span className={styles.name}>{name}</span> : null}
           </span>
-          {expanded ? <span className={styles.credits}>{preference} · usage unknown</span> : null}
+          {expanded ? <span className={styles.credits}>{resources.compact ? 'Unknown' : `${preference} · usage unknown`}</span> : null}
         </button>
       </Tooltip>
     ) });
@@ -475,7 +477,13 @@ export function ResourcesBar({ expanded }: { expanded: boolean }) {
   };
   if (ordered.length === 0) return null;
   return (
-    <div className={styles.bar} data-expanded={expanded || undefined} role="group" aria-label="Resources at a glance" aria-busy={data.refreshing || undefined}>
+    <div className={styles.bar} data-expanded={expanded || undefined} data-compact={expanded && resources.compact || undefined} role="group" aria-label="Resources at a glance" aria-busy={data.refreshing || undefined}>
+      {expanded ? <button type="button" className={styles.densityToggle}
+        aria-label="Compact resources" aria-pressed={resources.compact}
+        title={resources.compact ? 'Expand resource details' : 'Compact resources; hover or focus for details'}
+        onClick={() => setResourcesCompact(!resources.compact)}>
+        <span>Resources</span>{resources.compact ? <IconChevronDown /> : <IconChevronUp />}
+      </button> : null}
       <span className={styles.visuallyHidden} role="status">{announcement}</span>
       {ordered.map((entry, index) => (
         <div key={entry.key} className={styles.orderItem} data-resource-id={entry.key}

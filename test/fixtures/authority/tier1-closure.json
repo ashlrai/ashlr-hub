@@ -107,6 +107,7 @@
     "src/core/routing/work-estimates.ts",
     "src/core/run/best-of-n-policy.ts",
     "src/core/run/best-of-n.ts",
+    "src/core/run/desktop-metadata-launch-trust.ts",
     "src/core/run/engine-registry.ts",
     "src/core/run/sandboxed-engine.ts",
     "src/core/sandbox/audit.ts",
@@ -141,7 +142,8 @@
     "src/core/vision/leader-seat.ts",
     "src/core/vision/leader.ts",
     "src/core/website/host-adapter.ts",
-    "src/core/website/host-release.ts"
+    "src/core/website/host-release.ts",
+    "src/core/website/output-materialization.ts"
   ],
   "closure": [
     "scripts/evaluators/preparation-verification-activity.mjs",
@@ -639,6 +641,7 @@
     "src/core/run/completeness-gate.ts",
     "src/core/run/context-window.ts",
     "src/core/run/delegation-scope.ts",
+    "src/core/run/desktop-metadata-launch-trust.ts",
     "src/core/run/diff-safety.ts",
     "src/core/run/diff.ts",
     "src/core/run/engine-registry.ts",
@@ -650,6 +653,7 @@
     "src/core/run/model-call-authority.ts",
     "src/core/run/model-catalog.ts",
     "src/core/run/model-profile.ts",
+    "src/core/run/native-metadata-launch.ts",
     "src/core/run/ollama-identity.ts",
     "src/core/run/orchestrator.ts",
     "src/core/run/outcome-admission.ts",
@@ -671,6 +675,7 @@
     "src/core/run/self-heal.ts",
     "src/core/run/spec-contract.ts",
     "src/core/run/streaming.ts",
+    "src/core/run/token-evidence.ts",
     "src/core/run/tool-path.ts",
     "src/core/run/verification-manifest.ts",
     "src/core/run/verify-commands.ts",
@@ -941,6 +946,7 @@
     "src/core/web/visibility.ts",
     "src/core/website/host-adapter.ts",
     "src/core/website/host-release.ts",
+    "src/core/website/output-materialization.ts",
     "src/planning/triviality.ts"
   ]
 }

@@ -573,6 +573,7 @@ export function buildOllamaClient(
         toolCalls,
         usage: { tokensIn, tokensOut },
         usageKnown,
+        ...(promptEval === undefined && evalCount === undefined ? { usageEstimated: true } : {}),
       };
     },
 
@@ -715,6 +716,7 @@ export function buildOllamaClient(
           toolCalls,
           usage: { tokensIn, tokensOut },
           usageKnown,
+          ...(exactTokensIn === undefined && exactTokensOut === undefined ? { usageEstimated: true } : {}),
         };
       } catch (err) {
         cleanupStream();

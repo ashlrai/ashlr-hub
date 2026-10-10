@@ -1,3 +1,4 @@
+import { requestTokenEvidence } from '../src/core/run/token-evidence.js';
 /**
  * m19.otlp.test.ts — hermetic unit tests for core/observability/otlp.ts
  *
@@ -277,6 +278,17 @@ describe('buildGenAiTrace — OTLP/HTTP-JSON shape', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildGenAiTrace — GenAI semantic-convention attributes', () => {
+  it('withholds generation attributes for legacy or reserved exposure, while reported zero is explicit', () => {
+    for (const span of [makeSpan(),makeSpan({tokenEvidence:requestTokenEvidence('reserved',1000,500)})]) {
+      const attrs=getSpanAttrMap(getAllSpans(buildGenAiTrace([span]))[0]!);
+      expect(attrs['gen_ai.usage.input_tokens']).toBeUndefined();
+      expect(attrs['gen_ai.usage.output_tokens']).toBeUndefined();
+      expect(Number(attrs['phantom.accounted.output_tokens'])).toBe(500);
+    }
+    const zero=getSpanAttrMap(getAllSpans(buildGenAiTrace([makeSpan({tokensIn:0,tokensOut:0,tokenEvidence:requestTokenEvidence('reported',0,0)})]))[0]!);
+    expect(Number(zero['gen_ai.usage.output_tokens'])).toBe(0);
+  });
+
   it('includes gen_ai.system attribute (provider)', () => {
     const trace = buildGenAiTrace([makeSpan({ provider: 'anthropic' })]) as OtlpTrace;
     const attrs = getSpanAttrMap(getAllSpans(trace)[0]!);
@@ -290,13 +302,13 @@ describe('buildGenAiTrace — GenAI semantic-convention attributes', () => {
   });
 
   it('includes gen_ai.usage.input_tokens attribute with correct numeric value', () => {
-    const trace = buildGenAiTrace([makeSpan({ tokensIn: 1234 })]) as OtlpTrace;
+    const trace = buildGenAiTrace([makeSpan({ tokensIn: 1234, tokenEvidence: requestTokenEvidence('reported',1234,500) })]) as OtlpTrace;
     const attrs = getSpanAttrMap(getAllSpans(trace)[0]!);
     expect(Number(attrs['gen_ai.usage.input_tokens'])).toBe(1234);
   });
 
   it('includes gen_ai.usage.output_tokens attribute with correct numeric value', () => {
-    const trace = buildGenAiTrace([makeSpan({ tokensOut: 567 })]) as OtlpTrace;
+    const trace = buildGenAiTrace([makeSpan({ tokensOut: 567, tokenEvidence: requestTokenEvidence('reported',1000,567) })]) as OtlpTrace;
     const attrs = getSpanAttrMap(getAllSpans(trace)[0]!);
     expect(Number(attrs['gen_ai.usage.output_tokens'])).toBe(567);
   });
@@ -364,8 +376,8 @@ describe('buildGenAiTrace — GenAI semantic-convention attributes', () => {
     const requiredKeys = [
       'gen_ai.system',
       'gen_ai.request.model',
-      'gen_ai.usage.input_tokens',
-      'gen_ai.usage.output_tokens',
+      'phantom.accounted.input_tokens',
+      'phantom.accounted.output_tokens',
       'gen_ai.usage.cost_usd',
       'ashlr.run.id',
       'ashlr.provider',
@@ -667,8 +679,8 @@ describe('spansFromRun -> buildGenAiTrace round-trip', () => {
       const attrs = getSpanAttrMap(span);
       expect(attrs['gen_ai.system']).toBeDefined();
       expect(attrs['gen_ai.request.model']).toBeDefined();
-      expect(attrs['gen_ai.usage.input_tokens']).toBeDefined();
-      expect(attrs['gen_ai.usage.output_tokens']).toBeDefined();
+      expect(attrs['phantom.accounted.input_tokens']).toBeDefined();
+      expect(attrs['phantom.accounted.output_tokens']).toBeDefined();
       expect(attrs['gen_ai.usage.cost_usd']).toBeDefined();
       expect(attrs['ashlr.run.id']).toBe(run.id);
     }
@@ -685,7 +697,7 @@ describe('spansFromRun -> buildGenAiTrace round-trip', () => {
 
     const attrs = getSpanAttrMap(allSpans[0]!);
     expect(attrs['ashlr.run.id']).toBe(swarm.id);
-    expect(Number(attrs['gen_ai.usage.input_tokens'])).toBe(400);
-    expect(Number(attrs['gen_ai.usage.output_tokens'])).toBe(180);
+    expect(Number(attrs['phantom.accounted.input_tokens'])).toBe(400);
+    expect(Number(attrs['phantom.accounted.output_tokens'])).toBe(180);
   });
 });

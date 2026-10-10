@@ -53,6 +53,7 @@ import {
 import { capacitySnapshotPath, readCapacitySnapshot, type CapacitySnapshot } from '../src/core/routing/budget-store.js';
 import { readCapacityHistory } from '../src/core/routing/capacity-history.js';
 import { assessSeat } from '../src/core/routing/headroom.js';
+import { inspectResourceQuotaRefreshPending } from '../src/core/resources/quota-refresh-lease.js';
 import type { AshlrConfig } from '../src/core/types.js';
 
 const DAY = 86_400_000;
@@ -268,6 +269,22 @@ describe('(c) the daemon\'s publisher samples Grok itself once an idle Verse han
     const cfg = config();
     collector = await startVerseAccountCollector({ accountsRoot, idleSuspendMs: 60_000, idleCheckMs: 20 });
     expect(collector.status()).toMatchObject({ mode: 'owned' });
+    // This case exercises idle hand-back after a completed sample. An owned
+    // startup can still be preparing the durable launch; cancelling unpublished
+    // work correctly preserves its fence instead of proving safe hand-back.
+    expect(await waitFor(() => grokRow(collector!)?.state === 'observed')).toBe(true);
+    const ledgerRoot = accountsLedgerRoot(accountsRoot);
+    const pending = inspectResourceQuotaRefreshPending(ledgerRoot);
+    expect(pending.state).toBe('pending');
+    const activityPath = path.join(ledgerRoot, '.resource-quota-refresh-activity.json');
+    if (pending.markerVersion === 1) {
+      // Hosts without native boot identity deliberately publish no activity.
+      expect(fs.existsSync(activityPath)).toBe(false);
+    } else {
+      expect([4, 5]).toContain(pending.markerVersion);
+      const activity = JSON.parse(fs.readFileSync(activityPath, 'utf8')) as { reservations: unknown[] };
+      expect(activity.reservations).toEqual([]);
+    }
 
     // Nobody looks at Verse for longer than its idle window: it pauses and
     // hands the lease back (#531). Its retained Grok row expires with it.

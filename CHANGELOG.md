@@ -9,7 +9,47 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
-## [3.29.5] — Unreleased
+## [3.29.6] — 2026-10-09
+
+### Added
+
+- Save a compact resource sidebar with one-line account readings. Hover or
+  keyboard focus retains credit balances, resets and connection details;
+  subscription allowances and API credits remain separate.
+- Distinguish reported, estimated, reserved and unknown token totals across run
+  details, usage charts and traces. Keep exact accounting and round display
+  values to two significant figures; routing learns token throughput only from
+  complete reported generation.
+- Launch desktop metadata collectors through the signed native host, and add a
+  credential-free check of the installed app and its paired CLI.
+
+### Fixed
+
+- Join overlapping Fleet refresh requests instead of superseding an unfinished
+  read on each polling interval.
+- Publish Node metadata-child process identity before execution so an interrupted
+  collector can recover without guessing whether unregistered work stopped.
+- Dispatch outcome Managers into their admitted workspaces while preserving
+  saved project targets. Resolve the same mapping for existing interactive chats.
+- Permit executable temporary build files in the isolated website builder and
+  materialize validated internal Vercel output aliases before publication.
+- Bind website runtime metadata to the qualified source revision and read the
+  CLI's deployment response as JSON, verifying the staged deployment before promotion.
+- Use current provider-neutral CLI help and explicit local model tags instead of
+  a stale example model recommendation.
+- Describe notification delivery from the actual delivery method rather than
+  inferring whether the app is unsigned.
+- Record the verified Phantom homepage and separate Secrets route. Website
+  deployment, hosted services and autonomous publisher commissioning remain
+  distinct.
+
+### Changed
+
+- Consolidate current release instructions and retain earlier procedures in a
+  historical archive. Capture buffered CI phase timings after fixture cleanup;
+  all release checks and original test deadlines remain intact.
+
+## [3.29.5] — 2026-10-09
 
 ### Added
 
@@ -104,7 +144,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   guide with package/native metadata. Preserve verified publication records and
   reject missing or duplicate markers before writing any file.
 
-Publication and installation of this candidate remain pending qualification.
+This entry describes the qualified source changes for that release; provider
+activation and resident work require their own current evidence.
 
 ## [3.29.2] — 2026-10-09
 

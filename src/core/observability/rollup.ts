@@ -1,3 +1,4 @@
+import { neutralTokenEvidence, mergeTokenEvidence } from '../run/token-evidence.js';
 /**
  * rollup.ts — build ActivityRollup from local usage events + git commit counts.
  *
@@ -445,6 +446,7 @@ export function buildRollup(
   // project key -> ProjectActivity accumulator
   const projectMap = new Map<string, {
     sessions: Set<string>;  // session file paths (for distinct count)
+    tokenEvidence?: import('../types.js').RunTokenEvidence;
     tokensIn: number;
     tokensOut: number;
     estCostUsd: number;
@@ -453,6 +455,7 @@ export function buildRollup(
 
   // YYYY-MM-DD -> DailyUsage accumulator
   const dayMap = new Map<string, {
+    tokenEvidence?: import('../types.js').RunTokenEvidence;
     tokensIn: number;
     tokensOut: number;
     estCostUsd: number;
@@ -463,6 +466,7 @@ export function buildRollup(
 
   // model id -> ModelUsage accumulator
   const modelMap = new Map<string, {
+    tokenEvidence?: import('../types.js').RunTokenEvidence;
     tokensIn: number;
     tokensOut: number;
     estCostUsd: number;
@@ -472,6 +476,7 @@ export function buildRollup(
   }>();
 
   // Grand totals
+  let totalTokenEvidence: import('../types.js').RunTokenEvidence | undefined = neutralTokenEvidence();
   let totalTokensIn  = 0;
   let totalTokensOut = 0;
   let totalCost      = 0;
@@ -482,6 +487,7 @@ export function buildRollup(
     const cost = estCostUsd(modelToProviderKey(ev.model), ev.tokensIn, ev.tokensOut);
 
     // Grand totals
+    totalTokenEvidence = mergeTokenEvidence({ tokensIn: totalTokensIn, tokensOut: totalTokensOut, tokenEvidence: totalTokenEvidence }, ev);
     totalTokensIn  += ev.tokensIn;
     totalTokensOut += ev.tokensOut;
     totalCost      += cost;
@@ -497,10 +503,11 @@ export function buildRollup(
     // ── Per-project ────────────────────────────────────────────────────────
     const proj = ev.project ?? '__unknown__';
     if (!projectMap.has(proj)) {
-      projectMap.set(proj, { sessions: new Set(), tokensIn: 0, tokensOut: 0, estCostUsd: 0, lastActive: null });
+      projectMap.set(proj, { sessions: new Set(), tokensIn: 0, tokensOut: 0, tokenEvidence: neutralTokenEvidence(), estCostUsd: 0, lastActive: null });
     }
     const pa = projectMap.get(proj)!;
     pa.sessions.add(sessionKey);
+    pa.tokenEvidence = mergeTokenEvidence(pa, ev);
     pa.tokensIn  += ev.tokensIn;
     pa.tokensOut += ev.tokensOut;
     pa.estCostUsd += cost;
@@ -510,9 +517,10 @@ export function buildRollup(
 
     // ── Per-day ────────────────────────────────────────────────────────────
     if (!dayMap.has(day)) {
-      dayMap.set(day, { tokensIn: 0, tokensOut: 0, estCostUsd: 0, sessions: new Set(), cacheRead: 0, cacheWrite: 0 });
+      dayMap.set(day, { tokensIn: 0, tokensOut: 0, tokenEvidence: neutralTokenEvidence(), estCostUsd: 0, sessions: new Set(), cacheRead: 0, cacheWrite: 0 });
     }
     const du = dayMap.get(day)!;
+    du.tokenEvidence = mergeTokenEvidence(du, ev);
     du.tokensIn  += ev.tokensIn;
     du.tokensOut += ev.tokensOut;
     du.estCostUsd += cost;
@@ -523,9 +531,10 @@ export function buildRollup(
     // ── Per-model ──────────────────────────────────────────────────────────
     const modelKey = ev.model || 'unknown';
     if (!modelMap.has(modelKey)) {
-      modelMap.set(modelKey, { tokensIn: 0, tokensOut: 0, estCostUsd: 0, calls: 0, cacheRead: 0, cacheWrite: 0 });
+      modelMap.set(modelKey, { tokensIn: 0, tokensOut: 0, tokenEvidence: neutralTokenEvidence(), estCostUsd: 0, calls: 0, cacheRead: 0, cacheWrite: 0 });
     }
     const mu = modelMap.get(modelKey)!;
+    mu.tokenEvidence = mergeTokenEvidence(mu, ev);
     mu.tokensIn  += ev.tokensIn;
     mu.tokensOut += ev.tokensOut;
     mu.estCostUsd += cost;
@@ -572,6 +581,7 @@ export function buildRollup(
       project: proj,
       sessions: pa.sessions.size,
       commits: commitsByProject.get(proj) ?? 0,
+      ...( pa.tokenEvidence ? { tokenEvidence: pa.tokenEvidence } : {}),
       tokensIn: pa.tokensIn,
       tokensOut: pa.tokensOut,
       estCostUsd: pa.estCostUsd,
@@ -593,6 +603,7 @@ export function buildRollup(
       : 0;
     byDay.push({
       day,
+      ...( du.tokenEvidence ? { tokenEvidence: du.tokenEvidence } : {}),
       tokensIn: du.tokensIn,
       tokensOut: du.tokensOut,
       estCostUsd: du.estCostUsd,
@@ -612,6 +623,7 @@ export function buildRollup(
       : 0;
     byModel.push({
       model,
+      ...( mu.tokenEvidence ? { tokenEvidence: mu.tokenEvidence } : {}),
       tokensIn: mu.tokensIn,
       tokensOut: mu.tokensOut,
       estCostUsd: mu.estCostUsd,
@@ -638,6 +650,7 @@ export function buildRollup(
     window,
     since: sinceIso,
     totals: {
+      ...(totalTokenEvidence ? { tokenEvidence: totalTokenEvidence } : {}),
       tokensIn:   totalTokensIn,
       tokensOut:  totalTokensOut,
       estCostUsd: totalCost,

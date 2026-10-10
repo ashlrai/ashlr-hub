@@ -27,6 +27,7 @@ import { RefreshIndicator } from '../../../components/primitives/RefreshIndicato
 import { Button } from '../../../components/primitives/Button.js';
 import { IconChevronRight } from '../../../components/primitives/icons.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
+import { runQuery } from '../../../data/cache.js';
 import { AutonomyOffState, useAutonomyOff } from '../autonomy/AutonomyOffState.js';
 import { overnightQuery } from '../autonomy/overnight-queries.js';
 import { useNow } from '../autonomy/use-ticker.js';
@@ -70,11 +71,14 @@ export function FleetSection() {
   const overnight = useQuery(overnightQuery);
   const budget = useQuery(budgetQuery, { freshMs: 15_000 });
   const preview = useQuery(budgetPreviewQuery, { freshMs: 15_000 });
-  const refetchFleet = useRefetch(fleetLiveQuery);
   const refetchOvernight = useRefetch(overnightQuery);
   const refetchPreview = useRefetch(budgetPreviewQuery);
   const refetchBudget = useRefetch(budgetQuery);
-  usePollWhileVisible(refetchFleet, FLEET_POLL_MS);
+  // Automatic polling lets slow or queued reads settle; superseding them on
+  // every tick can leave the last producing snapshot on screen indefinitely.
+  usePollWhileVisible(() => {
+    void runQuery(fleetLiveQuery.key, () => fleetLiveQuery.fetch());
+  }, FLEET_POLL_MS);
   usePollWhileVisible(() => {
     refetchOvernight();
     refetchPreview();

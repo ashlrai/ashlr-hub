@@ -218,14 +218,17 @@ describe('native metadata monitoring', () => {
       observedAt: '2026-09-08T12:01:00.000Z', windows: [{ usedPercent: 29 }] });
   });
   it.each(['codex', 'claude', 'grok'] as const)('forwards the durable lifecycle into %s without publishing it', async (provider) => {
-    const processGroupLifecycle = { prepare: vi.fn() }; const settled = vi.fn();
+    const prepared = { spawned: vi.fn(), settled: vi.fn() };
+    const processGroupLifecycle = { prepare: vi.fn(() => prepared) }; const settled = vi.fn();
     const coordinator = createNativeMetadataCoordinator({
       beginNativeActivity: () => ({ processGroupLifecycle, settle: settled }),
     });
     try {
       const handle = start({ config: config([provider]), coordinator }); await settle();
-      expect(probes[provider].mock.calls[0]![0].processGroupLifecycle).toBe(processGroupLifecycle);
+      const forwarded = probes[provider].mock.calls[0]![0].processGroupLifecycle;
+      expect(forwarded).toBeDefined();
       expect(processGroupLifecycle.prepare).not.toHaveBeenCalled();
+      expect(forwarded.prepare()).toBe(prepared);
       expect(settled).toHaveBeenCalledOnce();
       expect(JSON.stringify(handle.snapshot())).not.toMatch(/processGroupLifecycle|prepare/);
       await handle.close();

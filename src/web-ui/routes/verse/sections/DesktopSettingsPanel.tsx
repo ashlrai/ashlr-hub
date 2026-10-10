@@ -49,10 +49,10 @@ function notificationsNote(state: DesktopState): string {
   const base = state.notifications.enabled
     ? 'Finished and failed chats, and new items that need you — only while Phantom is in the background.'
     : 'Off. The tray and the Dock badge still show what needs you.';
-  // Unsigned local builds deliver through osascript (notify.rs): say so, or
-  // the operator goes looking for "Ashlr" in Notification settings.
+  // Describe native's actual delivery method. Script delivery alone does not
+  // establish whether the installed app has a valid release signature.
   if (state.notifications.delivery === 'script') {
-    return `${base} On this unsigned build banners appear as Script Editor, and clicking one opens Script Editor rather than Phantom.`;
+    return `${base} With this delivery method, banners appear as Script Editor; clicking one opens Script Editor rather than Phantom.`;
   }
   return base;
 }

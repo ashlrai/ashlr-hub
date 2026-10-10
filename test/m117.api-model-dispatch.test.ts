@@ -411,6 +411,7 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
       diffLines: 2,
       tokensIn: 11,
       tokensOut: 7,
+      tokenEvidence: { input: { reported: 11, reserved: 0 }, output: { reported: 7, reserved: 0 }, requests: { reported: 1, reserved: 0 } },
     });
     expect(proposal['runEventSummary']).toMatchObject({
       contextSummary: {

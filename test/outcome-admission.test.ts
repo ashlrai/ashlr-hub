@@ -50,7 +50,14 @@ describe('Caller-owned outcome admission', () => {
     await runTask(work, client, { budget, usage: newUsage(), onStep: () => {}, selectedOutcomeAdmission: () => current,
       reserveModelStep: () => { current = false; return { maxOutputTokens: 1024, finalize }; } });
     expect(fetchMock).not.toHaveBeenCalled(); expect(contacted).not.toHaveBeenCalled();
-    expect(finalize).toHaveBeenCalledWith(expect.any(String), { tokensIn: 0, tokensOut: 0 });
+    expect(finalize).toHaveBeenCalledWith(expect.any(String), { tokensIn: 0, tokensOut: 0 }, 'no-contact');
+    expect(work.usage?.tokenEvidence).toEqual({
+      schemaVersion: 1, scope: 'recorded-model-requests',
+      input: { reported: 0, estimated: 0, reserved: 0, unknown: 0 },
+      output: { reported: 0, estimated: 0, reserved: 0, unknown: 0 },
+      requests: { reported: 0, estimated: 0, reserved: 0, unknown: 0, noContact: 1 },
+      unclassified: false,
+    });
     expect(work.status).toBe('failed'); expect(work.usage).toMatchObject({ tokensIn: 0, tokensOut: 0 });
   });
 });
@@ -79,7 +86,15 @@ it('a retired streaming fallback retains unknown accounting for the contacted st
   await runTask(work, client, { budget, usage: newUsage(), onStep: () => {}, selectedOutcomeAdmission: () => current,
     reserveModelStep: () => ({ maxOutputTokens: 1024, finalize }) });
   expect(fallback).not.toHaveBeenCalled(); expect(work.error).toBe('Task cancelled.');
-  expect(finalize).toHaveBeenCalledWith(expect.any(String), undefined);
+  // Undefined usage retains the real reservation; this hint is not counter evidence.
+  expect(finalize).toHaveBeenCalledWith(expect.any(String), undefined, 'reported');
+  expect(work.usage?.tokenEvidence).toEqual({
+    schemaVersion: 1, scope: 'recorded-model-requests',
+    input: { reported: 0, estimated: 0, reserved: 0, unknown: 0 },
+    output: { reported: 0, estimated: 0, reserved: 0, unknown: 0 },
+    requests: { reported: 0, estimated: 0, reserved: 0, unknown: 1, noContact: 0 },
+    unclassified: false,
+  });
 });
 
 

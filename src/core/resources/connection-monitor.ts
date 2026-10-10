@@ -8,7 +8,7 @@ import { probeCodexResourceAccount } from './codex-account-probe.js';
 import { probeClaudeAccountUsage } from './claude-account-usage.js';
 import { probeGrokAccount } from './grok-account-probe.js';
 import type { ResourceAccountConnection, ResourceConnectionsSnapshot } from './connection-types.js';
-import { createNativeMetadataCoordinator, type NativeMetadataCoordinator } from './metadata-coordinator.js';
+import { createNativeMetadataCoordinator, withNativeMetadataAdmission, type NativeMetadataCoordinator } from './metadata-coordinator.js';
 import { RESOURCE_POOL_MANIFEST_MAX_BYTES } from './pool-policy.js';
 import type { ResourceReadingCache } from './reading-cache.js';
 
@@ -153,7 +153,10 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
         lastAttempt.set(index, Date.now());
         const work = inFlight.get(index);
         if (work) contacted.add(work);
-        const result = await operation(processGroupLifecycle);
+        const result = await operation(withNativeMetadataAdmission(processGroupLifecycle, () => {
+          owns();
+          if (abort.signal.aborted || !current(account)) throw new Error('Metadata account admission changed');
+        }));
         const status = record(result) ? Object.getOwnPropertyDescriptor(result, 'status') : undefined;
         if (!status || !('value' in status) || typeof status.value !== 'string' ||
           !['observed', 'failed', 'timed-out', 'cancelled', 'uncertain'].includes(status.value)) {

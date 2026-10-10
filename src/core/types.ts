@@ -255,6 +255,7 @@ export interface RunEventSummary {
   cacheHit?: boolean;
   /** Metadata-only context utilization/retrieval/compression signals. */
   contextSummary?: RunContextSummary;
+  tokenEvidence?: RunTokenEvidence;
   /** Metadata-only fixed-key sandbox/action counters. */
   actionCounts?: RunActionCounts;
 }
@@ -2038,10 +2039,22 @@ export interface RunBudget {
 }
 
 /** Token + step accounting for a task or whole run. */
+export type RunTokenBasis = 'reported' | 'estimated' | 'reserved' | 'unknown' | 'no-contact';
+/** Diagnostic accounting only; absence on legacy records means unknown. */
+export interface RunTokenEvidence {
+  schemaVersion: 1;
+  scope: 'recorded-model-requests';
+  input: Record<Exclude<RunTokenBasis, 'no-contact'>, number>;
+  output: Record<Exclude<RunTokenBasis, 'no-contact'>, number>;
+  requests: Record<Exclude<RunTokenBasis, 'no-contact'> | 'noContact', number>;
+  /** Unclassified legacy contributions, including zero; no request count invented. */
+  unclassified: boolean;
+}
+
 export interface RunUsage {
-  /** Prompt/input tokens consumed. */
+  /** Accounted input exposure; tokenEvidence distinguishes reported usage. */
   tokensIn: number;
-  /** Completion/output tokens produced. */
+  /** Accounted output exposure; may include retained reservations. */
   tokensOut: number;
   /** Number of steps taken. */
   steps: number;
@@ -2049,6 +2062,7 @@ export interface RunUsage {
   estCostUsd: number;
   /** Exact settled API charges and retained maximum exposure; never subscription quota. */
   apiBilling?: ApiBillingSummary;
+  tokenEvidence?: RunTokenEvidence;
 }
 
 export interface ApiBillingSummary {
@@ -2344,6 +2358,8 @@ export interface ChatResult {
    * governed token reservation.
    */
   usageKnown?: boolean;
+  /** Both fallback counts came from the existing local estimator, not normalized zeros. */
+  usageEstimated?: boolean;
   /** Present only after exact provider accounting and durable API settlement. */
   billing?: ApiMessageBilling;
 }
@@ -2424,6 +2440,7 @@ export interface ProviderClientAuthority {
  * runs ('run').
  */
 export interface UsageEvent {
+  tokenEvidence?: RunTokenEvidence;
   /** ISO timestamp of the event. */
   ts: string;
   /** Absolute project path this usage belongs to, or null if unknown. */
@@ -2444,6 +2461,7 @@ export interface UsageEvent {
 
 /** Per-project activity roll-up within a window. */
 export interface ProjectActivity {
+  tokenEvidence?: RunTokenEvidence;
   /** Absolute project path (or label). */
   project: string;
   /** Number of distinct sessions attributed to the project. */
@@ -2462,6 +2480,7 @@ export interface ProjectActivity {
 
 /** Per-day usage roll-up within a window. */
 export interface DailyUsage {
+  tokenEvidence?: RunTokenEvidence;
   /** Calendar day (YYYY-MM-DD). */
   day: string;
   /** Total input tokens for the day. */
@@ -2482,6 +2501,7 @@ export interface DailyUsage {
 
 /** Per-model usage roll-up within a window. */
 export interface ModelUsage {
+  tokenEvidence?: RunTokenEvidence;
   /** Model id. */
   model: string;
   /** Total input tokens. */
@@ -2526,6 +2546,7 @@ export interface ActivityRollup {
   since: string;
   /** Window totals across all projects/models. */
   totals: {
+    tokenEvidence?: RunTokenEvidence;
     tokensIn: number;
     tokensOut: number;
     estCostUsd: number;
@@ -3733,6 +3754,7 @@ export interface NotifyTarget {
  * shape that both the OTLP emitter and the local-file sink consume.
  */
 export interface GenAiSpan {
+  tokenEvidence?: RunTokenEvidence;
   /** Span name (e.g. the operation/task identifier — metadata, not content). */
   name: string;
   /** Owning run or swarm id this span belongs to. */
@@ -3743,9 +3765,9 @@ export interface GenAiSpan {
   provider: string;
   /** Routing tier (e.g. 'local' | 'cloud' or model-tier label). */
   tier: string;
-  /** Prompt/input tokens (maps to gen_ai.usage.input_tokens). */
+  /** Accounted input tokens; only reported provenance maps to gen_ai.usage.input_tokens. */
   tokensIn: number;
-  /** Completion/output tokens (maps to gen_ai.usage.output_tokens). */
+  /** Accounted output tokens; only reported provenance maps to gen_ai.usage.output_tokens. */
   tokensOut: number;
   /** Estimated USD cost for this span. */
   estCostUsd: number;

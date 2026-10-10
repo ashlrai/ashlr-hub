@@ -12,6 +12,7 @@
  *   - ctx.usage is mutated (accumulated) across steps.
  */
 
+import { buildOllamaClient } from '../src/core/run/provider-client.js';
 import { describe, it, expect, vi } from 'vitest';
 import type { ProviderClient, ChatMessage, ChatResult, RunTask, RunBudget, RunUsage, RunStep } from '../src/core/types.js';
 import { runTask } from '../src/core/run/agent-loop.js';
@@ -109,6 +110,61 @@ describe('runTask — plain chat completion', () => {
     const { onStep } = collectSteps();
     await runTask(task, client, { budget: makeBudget(), usage: newUsage(), onStep });
     expect(task.result).toBe('The answer is 4.');
+  });
+
+  it('identifies only actual Ollama estimator fallbacks, including streaming, without certifying a partial report', async () => {
+    const client = buildOllamaClient('http://127.0.0.1:11434', 'fixture', false);
+    const rows = [{ message: { content: 'done' }, prompt_eval_count: 0, eval_count: 0 },
+      { message: { content: 'done' } }, { message: { content: 'done' }, prompt_eval_count: 11 }];
+    const fetch = vi.fn(async () => new Response(JSON.stringify(rows.shift()), { status: 200 }));
+    vi.stubGlobal('fetch', fetch);
+    try {
+      const messages = [{ role: 'user' as const, content: 'brief fixture' }];
+      const reported = await client.chat(messages); const estimated = await client.chat(messages); const partial = await client.chat(messages);
+      expect(reported).toMatchObject({ usageKnown: true, usage: { tokensIn: 0, tokensOut: 0 } });
+      expect(reported.usageEstimated).toBeUndefined();
+      expect(estimated.usageKnown).toBe(false); expect(estimated.usageEstimated).toBe(true);
+      expect(estimated.usage.tokensOut).toBeGreaterThan(0);
+      expect(partial.usageKnown).toBe(false); expect(partial.usageEstimated).toBeUndefined();
+      fetch.mockImplementation(async () => new Response(JSON.stringify({ message: { content: 'done' }, done: true }) + '\n', { status: 200 }));
+      const stream = await client.chatStream!(messages, undefined, () => {});
+      expect(stream.usageKnown).toBe(false); expect(stream.usageEstimated).toBe(true);
+      expect(fetch).toHaveBeenCalledTimes(4);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it('keeps explicit reported zero, local estimates and unqualified numeric usage distinct', async () => {
+    const reported = makeTask(); const estimated = makeTask(); const unknown = makeTask();
+    for (const [task, result] of [[reported, { content: 'Done.', usage: { tokensIn: 0, tokensOut: 0 }, usageKnown: true }],
+      [estimated, { content: 'Done.', usage: { tokensIn: 11, tokensOut: 3 }, usageEstimated: true }],
+      [unknown, { content: 'Done.', usage: { tokensIn: 11, tokensOut: 3 } }]] as const) {
+      const { onStep } = collectSteps();
+      await runTask(task, mockClient([result]), { budget: makeBudget(), usage: newUsage(), onStep });
+    }
+    expect(reported.usage).toMatchObject({ tokensIn: 0, tokensOut: 0, tokenEvidence: { requests: { reported: 1, noContact: 0 } } });
+    expect(estimated.usage).toMatchObject({ tokensIn: 11, tokensOut: 3, tokenEvidence: { requests: { estimated: 1, reported: 0 } } });
+    expect(unknown.usage).toMatchObject({ tokensIn: 11, tokensOut: 3, tokenEvidence: { requests: { unknown: 1, reported: 0 } } });
+  });
+
+  it('records an outcome refusal after reservation as no contact without certifying generation', async () => {
+    const client = mockClient([textResult('must not run')]);
+    const task = makeTask();
+    const { onStep } = collectSteps();
+    const finalize = vi.fn();
+    let current = true;
+    await runTask(task, client, {
+      budget: makeBudget(), usage: newUsage(), onStep,
+      selectedOutcomeAdmission: () => current,
+      reserveModelStep: () => {
+        current = false;
+        return { maxOutputTokens: 100, finalize };
+      },
+    });
+    expect(client.chat).not.toHaveBeenCalled();
+    expect(finalize).toHaveBeenCalledOnce();
+    expect(finalize.mock.calls[0]?.slice(1)).toEqual([{ tokensIn: 0, tokensOut: 0 }, 'no-contact']);
+    expect(task.usage).toMatchObject({ tokensIn: 0, tokensOut: 0,
+      tokenEvidence: { requests: { noContact: 1, reported: 0 } } });
   });
 
   it('populates task.usage after completion', async () => {
@@ -606,7 +662,7 @@ describe('runTask — caller cancellation', () => {
     expect(task.error).toBe('Task cancelled.');
     expect(task.result).toBeUndefined();
     expect(usage).toMatchObject({ tokensIn: 0, tokensOut: 0, steps: 0 });
-    expect(task.usage).toMatchObject({ tokensIn: 37, tokensOut: 19, steps: 1 });
+    expect(task.usage).toMatchObject({ tokensIn: 37, tokensOut: 19, steps: 1, tokenEvidence: { input: { reported: 37 }, output: { reported: 19 }, requests: { reported: 1, noContact: 0 } } });
     expect(steps.filter((step) => step.kind === 'model')).toHaveLength(1);
     expect(chat).toHaveBeenCalledOnce();
   });

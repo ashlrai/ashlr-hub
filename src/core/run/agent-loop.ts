@@ -1,3 +1,4 @@
+import { neutralTokenEvidence, reportedTokenPair, requestTokenEvidence } from './token-evidence.js';
 import { selectedOutcomeAdmissionCurrent, SelectedOutcomeAdmissionRefusal, withSelectedOutcomeAdmission } from './outcome-admission.js';
 /**
  * agent-loop.ts — bounded ReAct-style loop for a single RunTask.
@@ -64,6 +65,7 @@ export interface ModelStepReservation {
   finalize(
     summary: string,
     usage?: { tokensIn: number; tokensOut: number },
+    basis?: 'reported' | 'no-contact',
   ): void;
 }
 
@@ -192,7 +194,7 @@ async function runTaskBody(
 ): Promise<RunTask> {
   client = withSelectedOutcomeAdmission(client, ctx.selectedOutcomeAdmission);
   // Track per-task usage delta so we can set task.usage at end.
-  let taskUsage: RunUsage = task.usage ? { ...task.usage } : newUsage();
+  let taskUsage: RunUsage = task.usage ? { ...task.usage } : { ...newUsage(), tokenEvidence: neutralTokenEvidence() };
   let stepCount = 0;
 
   // M11: resolve sink — default to nullSink when not provided.
@@ -265,10 +267,12 @@ async function runTaskBody(
     reservation: ModelStepReservation | undefined,
     summary: string,
     usage?: { tokensIn: number; tokensOut: number },
+    basis?: 'reported' | 'no-contact',
   ): void {
     if (!reservation) return;
     try {
-      reservation.finalize(summary, usage);
+      if (basis === undefined) reservation.finalize(summary, usage);
+      else reservation.finalize(summary, usage, basis);
     } catch {
       // Reservation persistence/progress reporting must never crash the loop.
     }
@@ -449,7 +453,9 @@ async function runTaskBody(
         // must not be charged as an unknown contacted request.
         const refusedBeforeContact = err instanceof SelectedOutcomeAdmissionRefusal && err.usageKnown === true;
         const reportedUsage = refusedBeforeContact ? { tokensIn: 0, tokensOut: 0 } : usageReportedBy(err);
-        if (reportedUsage) accumulateUsage(reportedUsage);
+        const basis = refusedBeforeContact ? 'no-contact' : usageAuthorityReportedBy(err) && reportedTokenPair(reportedUsage) ? 'reported' : 'unknown';
+        const tokenEvidence = requestTokenEvidence(basis, reportedUsage?.tokensIn ?? 0, reportedUsage?.tokensOut ?? 0);
+        accumulateUsage({ ...(reportedUsage ?? { tokensIn: 0, tokensOut: 0 }), ...(tokenEvidence ? { tokenEvidence } : {}) });
         const summary = ctx.signal?.aborted
           ? 'Model call attempted and cancelled.'
           : `Model call failed: ${truncate(String(err), 100)}`;
@@ -457,12 +463,14 @@ async function runTaskBody(
           ...newUsage(),
           ...(reportedUsage ?? {}),
           steps: 1,
+          ...(tokenEvidence ? { tokenEvidence } : {}),
         };
         if (reservation) {
           finalizeReservation(
             reservation,
             summary,
             refusedBeforeContact || usageAuthorityReportedBy(err) ? reportedUsage : undefined,
+            refusedBeforeContact ? 'no-contact' : 'reported',
           );
         } else {
           emitStep('model', summary, stepUsage);
@@ -479,6 +487,9 @@ async function runTaskBody(
         tokensIn: result.usage.tokensIn,
         tokensOut: result.usage.tokensOut,
       };
+      const tokenEvidence = requestTokenEvidence(result.usageKnown === true && reportedTokenPair(result.usage)
+        ? 'reported' : result.usageEstimated === true ? 'estimated' : 'unknown', result.usage.tokensIn, result.usage.tokensOut);
+      if (tokenEvidence) stepUsageDelta.tokenEvidence = tokenEvidence;
       accumulateUsage(stepUsageDelta);
 
       // Emit model step.

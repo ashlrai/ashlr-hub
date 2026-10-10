@@ -2,6 +2,20 @@
 import type { VerifyProcessGroupLifecycle } from '../run/verify-commands.js';
 
 type NativeActivity = { settle(): void; processGroupLifecycle?: VerifyProcessGroupLifecycle };
+/** Recheck the caller's original admission after delayed launcher registration,
+ * before the runner sends its one-use go packet. Nothing is persisted here. */
+export function withNativeMetadataAdmission(lifecycle: VerifyProcessGroupLifecycle | undefined,
+  assertCurrent: () => void): VerifyProcessGroupLifecycle | undefined {
+  if (!lifecycle) return undefined;
+  return Object.freeze({ ...(lifecycle.preflight ? { async preflight(signal: AbortSignal) { assertCurrent(); await lifecycle.preflight!(signal); assertCurrent(); } } : {}), prepare() {
+    const prepared = lifecycle.prepare();
+    const launcher = Object.getOwnPropertyDescriptor(prepared, 'launcher');
+    if (!launcher || !('value' in launcher) || !launcher.value) return prepared;
+    return Object.freeze({ launcher: launcher.value,
+      spawned(pgid: number): void { assertCurrent(); return prepared.spawned(pgid); },
+      settled(receipt: 'not-started' | 'group-exit-confirmed'): void { return prepared.settled(receipt); } });
+  } });
+}
 export interface NativeMetadataCoordinator {
   readonly signal: AbortSignal;
   run<T>(operation: (processGroupLifecycle?: VerifyProcessGroupLifecycle) => Promise<T>, settlementConfirmed?: (value: T) => boolean): Promise<T>;

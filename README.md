@@ -18,9 +18,9 @@
 
 ## Install
 
-Phantom 3.29.3 is published as `@ashlr/phantom` from `ashlrai/phantom`.
+Canonical Phantom releases use `@ashlr/phantom` from `ashlrai/phantom`.
 Install the canonical package's promoted release.
-This source tree targets version 3.29.5; check canonical release availability and exact matching assets before installation.
+This source tree targets version 3.29.6; check canonical release availability and exact matching assets before installation.
 
 ```sh
 npm install -g @ashlr/phantom   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
@@ -29,12 +29,13 @@ phm verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
 For a reproducible install of the published release verified on 2026-10-09,
-use `npm install -g @ashlr/phantom@3.29.3`. General release discovery is at
+use `npm install -g @ashlr/phantom@3.29.5`. General release discovery is at
 [GitHub releases](https://github.com/ashlrai/phantom/releases/latest).
 
-The [v3.29.3 release](https://github.com/ashlrai/phantom/releases/tag/v3.29.3)
-provides a signed macOS arm64 app archive and paired update manifest; it has no
-DMG. Existing installations use the qualified signed-update flow. Maintainer
+Find current desktop artifacts at [GitHub releases](https://github.com/ashlrai/phantom/releases/latest):
+the signed `Phantom_<version>_aarch64.app.tar.gz` archive and paired
+[`latest.json`](https://github.com/ashlrai/phantom/releases/latest/download/latest.json),
+rather than a DMG. Match them to the installed CLI version. Existing installations use the qualified signed-update flow. Maintainer
 artifact installation requires the original qualified bundle and prior
 Stop/drain and Quit; downloading the archive alone is not that installation.
 See [desktop installation](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install). The app is locally signed,
@@ -42,9 +43,10 @@ not Apple Developer ID notarized. The CLI includes the browser console on macOS,
 See [desktop installation](#the-desktop-app-macos) or the
 [first-run guide](docs/QUICKSTART.md#open-verse).
 
-As checked on 2026-10-09, [phm.dev](https://phm.dev) presents the separate
-[Phantom Secrets](https://github.com/ashlrai/phantom-secrets) credential tool.
-Use this repository and its versioned releases to install the Phantom workbench.
+[phm.dev](https://phm.dev) introduces the Phantom workbench;
+[phm.dev/secrets](https://phm.dev/secrets) introduces Phantom Secrets.
+Use this repository and its qualified releases to install the workbench.
+Website availability does not establish installed fleet or hosted-service readiness.
 
 ![Phantom 3.24.3 Work with me: read-only Demo chat with labeled sample accounts and provider-inactive conversation.](https://raw.githubusercontent.com/ashlrai/phantom/master/docs/images/verse-work-with-me-3.24.3-demo.jpg)
 
@@ -83,7 +85,7 @@ console is the Phantom kernel: the CLI, the Universe experiment runtime and
 account-aware resource pools.
 
 Phantom was formerly Ashlr Verse. The current source repository is `ashlrai/phantom`;
-the published 3.29.3 package is `@ashlr/phantom`. `phm` and compatible `ashlr`
+the canonical package is `@ashlr/phantom`. `phm` and compatible `ashlr`
 share the same entrypoint. Published 3.25.3 remains `@ashlr/hub`; its existing
 SDK imports, including `@ashlr/hub/universe`, retain their original identity.
 The canonical package provides the same five SDK surfaces under `@ashlr/phantom`.
@@ -95,7 +97,7 @@ See [Automatic work](docs/AUTOMATIC-OUTCOMES.md) for chat routing, editable outc
 
 <a id="whats-in-verse-324"></a>
 
-### What's in Phantom 3.25
+### What's in Phantom
 
 Choose **Manager** in a chat’s **Auto seat** menu, or **Enable manager** on a
 saved Fleet outcome, for planning, delegation and review under the fleet’s
@@ -288,14 +290,14 @@ separate Node.js install to run.
 
 ### Install
 
-Use the [v3.29.3 release](https://github.com/ashlrai/phantom/releases/tag/v3.29.3)
-for the original signed arm64 app archive and paired update manifest. No 3.29.3
-DMG was published; use the [desktop installation guide](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install)
+Use [GitHub releases](https://github.com/ashlrai/phantom/releases/latest)
+for the original signed arm64 app archive and paired update manifest, rather
+than a DMG. Match the artifacts to the installed CLI version and use the [desktop installation guide](https://github.com/ashlrai/phantom/blob/master/desktop/README.md#install)
 for the qualified update or maintainer artifact path. The app is locally signed,
 not Apple Developer ID notarized, so macOS may require **Open Anyway** on first launch. To build from source on a
 trusted macOS checkout, use the local release script with the stable
 "Ashlr Local" code-signing identity. The prerequisites, exact build order and
-verification steps are in [Releasing without CI](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md)
+verification steps are in [Releasing locally](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md)
 and [Desktop app](https://github.com/ashlrai/phantom/blob/master/docs/VERSE.md#desktop-app-macos). In short, from a clean
 repository root:
 

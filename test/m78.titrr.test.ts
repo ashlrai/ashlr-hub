@@ -27,6 +27,18 @@ import * as path from 'node:path';
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Legacy mock totals do not identify request boundaries or provider counters.
+function expectedUnclassifiedTokenEvidence(tokensIn: number, tokensOut: number) {
+  return {
+    schemaVersion: 1,
+    scope: 'recorded-model-requests',
+    input: { reported: 0, estimated: 0, reserved: 0, unknown: tokensIn },
+    output: { reported: 0, estimated: 0, reserved: 0, unknown: tokensOut },
+    requests: { reported: 0, estimated: 0, reserved: 0, unknown: 0, noContact: 0 },
+    unclassified: true,
+  };
+}
+
 function makeConfig(foundry?: AshlrConfig['foundry']): AshlrConfig {
   return {
     version: 1,
@@ -1280,7 +1292,8 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     expect(engineMockFn.mock.calls[1]?.[3]).toMatchObject({
       budget: { maxTokens: 999_998, maxSteps: 99, allowCloud: false },
     });
-    expect(state.usage).toEqual({ tokensIn: 2, tokensOut: 2, steps: 2, estCostUsd: 0 });
+    expect(state.usage).toEqual({ tokensIn: 2, tokensOut: 2, steps: 2, estCostUsd: 0,
+      tokenEvidence: expectedUnclassifiedTokenEvidence(2, 2) });
     expect(state.runEventSummary?.actionCounts).toMatchObject({
       modelSteps: 2,
       toolSteps: 1,
@@ -1318,7 +1331,8 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     expect(engineMockFn).toHaveBeenCalledTimes(2);
     expect(runVCMockFn).not.toHaveBeenCalled();
     expect(captureMockFn).toHaveBeenCalledTimes(1);
-    expect(state.usage).toEqual({ tokensIn: 2, tokensOut: 2, steps: 2, estCostUsd: 0 });
+    expect(state.usage).toEqual({ tokensIn: 2, tokensOut: 2, steps: 2, estCostUsd: 0,
+      tokenEvidence: expectedUnclassifiedTokenEvidence(2, 2) });
     expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
   });
 
@@ -1584,7 +1598,8 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
     expect(engineMockFn).toHaveBeenCalledTimes(1);
     expect(runVCMockFn).not.toHaveBeenCalled();
     expect(captureMockFn).toHaveBeenCalledTimes(1);
-    expect(state.usage).toEqual(exhausted.usage);
+    expect(state.usage).toEqual({ ...exhausted.usage,
+      tokenEvidence: expectedUnclassifiedTokenEvidence(5, 5) });
     expect(removeSandboxMockFn).toHaveBeenCalledTimes(1);
   });
 
@@ -1673,7 +1688,8 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
         expect(engineMockFn).toHaveBeenCalledTimes(contacts + 1);
         expect(notification).toHaveBeenCalledTimes(contacts);
         expect(state.usage).toEqual({ tokensIn: 0, tokensOut: 0,
-          steps: scenario === 'forged binding' ? 1 : contacts, estCostUsd: 0 });
+          steps: scenario === 'forged binding' ? 1 : contacts, estCostUsd: 0,
+          tokenEvidence: expectedUnclassifiedTokenEvidence(0, 0) });
         expect(removeSandboxMockFn).toHaveBeenCalledOnce();
       } finally {
         admission.resetDevinCliAdmissionForTest();

@@ -21,6 +21,7 @@ import type {
   VerseAccountsSnapshot,
 } from '../../../../core/verse/accounts.js';
 import type { VerseLocalModel, VerseLocalModelsSnapshot } from '../../../../core/verse/local-models.js';
+import { requestTokenEvidence } from '../../../../core/run/token-evidence.js';
 import type { DailyUsage } from '../../../../core/types.js';
 
 import {
@@ -282,6 +283,18 @@ describe('projectUsageSeries against the real {window, byDay, …} wrapper', () 
     { day: '2026-09-19', tokensIn: 100, tokensOut: 20, estCostUsd: 0.5, sessions: 2 },
     { day: '2026-09-18', tokensIn: 300, tokensOut: 60, estCostUsd: 1.5, sessions: 4 },
   ];
+
+  it('retains valid paired provenance and refuses mismatched or unsupported metadata without relabeling numbers', () => {
+    const original = { day: '2026-09-19', tokensIn: 11, tokensOut: 0, estCostUsd: 0, sessions: 1, tokenEvidence: requestTokenEvidence('reported', 11, 0) };
+    const bytes = JSON.stringify(original);
+    expect(projectUsageSeries({ byDay: [original] }, '7d')?.days[0]?.tokenEvidence).toEqual(original.tokenEvidence);
+    for (const row of [{ ...original, tokensOut: 1 }, { ...original, tokenEvidence: { ...original.tokenEvidence, schemaVersion: 2 } }]) {
+      const result = projectUsageSeries({ byDay: [row] }, '7d')!.days[0]!;
+      expect(result.tokensIn).toBe(11); expect(result.tokensOut).toBe(row.tokensOut);
+      expect(result.tokenEvidence).toBeUndefined();
+    }
+    expect(JSON.stringify(original)).toBe(bytes);
+  });
 
   it('reads `byDay`, which is the key the route actually sends', () => {
     // This is the seam that was broken: the projector only looked for `days`,

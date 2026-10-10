@@ -19,6 +19,8 @@
  *     to { ok:false } with the error captured in `output`.
  */
 
+import type { Duplex } from 'node:stream';
+import type { MetadataLaunchDescriptor } from './native-metadata-launch.js';
 import { spawn, spawnSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import type { SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
@@ -114,10 +116,13 @@ export interface VerifyCommandResult {
 }
 
 export interface VerifyProcessGroupLifecycle {
+  /** Optional signed-host content proof, under the existing command deadline. */
+  preflight?(signal: AbortSignal): Promise<void>;
   /** Synchronous durable reservation, before any subprocess can start. */
   prepare(): {
     spawned(pgid: number): void;
     settled(receipt: 'not-started' | 'group-exit-confirmed'): void;
+    launcher?: MetadataLaunchDescriptor;
   };
 }
 
@@ -128,8 +133,26 @@ function lifecycleShape(value: unknown, keys: string[]): boolean {
 }
 
 export function isVerifyProcessGroupLifecycle(value: unknown): value is VerifyProcessGroupLifecycle {
-  try { return lifecycleShape(value, ['prepare']); }
+  try { return lifecycleShape(value, ['prepare']) || lifecycleShape(value, ['prepare', 'preflight']); }
   catch { return false; }
+}
+
+function nativeLaunchLifecycleShape(value: unknown): boolean {
+  try {
+    if (!value || typeof value !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
+      Reflect.ownKeys(value).length !== 3 || ['spawned', 'settled'].some(key => typeof Object.getOwnPropertyDescriptor(value, key)?.value !== 'function')) return false;
+    const launch = Object.getOwnPropertyDescriptor(value, 'launcher')?.value as MetadataLaunchDescriptor | undefined;
+    if (!launch || Object.getPrototypeOf(launch) !== Object.prototype || Reflect.ownKeys(launch).length !== 4) return false;
+    const native = Object.getOwnPropertyDescriptor(launch, 'kind')?.value === 'signed-desktop';
+    if (native && Object.getOwnPropertyDescriptor(launch, 'hostExecutable')?.value !== '/Applications/Phantom.app/Contents/MacOS/ashlr-desktop') return false;
+    const paths = native ? ['hostExecutable', 'ticketPath'] : ['nodeExecutable', 'scriptPath', 'ticketPath'];
+    const keys = native ? ['kind', 'hostExecutable', 'ticketPath', 'ticketDigest'] : ['nodeExecutable', 'scriptPath', 'ticketPath', 'ticketDigest'];
+    return keys.every(key => Object.hasOwn(launch, key) && 'value' in Object.getOwnPropertyDescriptor(launch, key)!) && paths.every(key => {
+        const path: unknown = Object.getOwnPropertyDescriptor(launch, key)?.value;
+        return typeof path === 'string' && isAbsolute(path) && resolve(path) === path;
+      }) && typeof Object.getOwnPropertyDescriptor(launch, 'ticketDigest')?.value === 'string' &&
+      /^[a-f0-9]{64}$/.test(Object.getOwnPropertyDescriptor(launch, 'ticketDigest')!.value);
+  } catch { return false; }
 }
 
 export interface VerifySubprocessOptions {
@@ -849,6 +872,7 @@ export async function runVerifySubprocessAsync(
   if (argv.length === 0 || argv.some((arg) => typeof arg !== 'string')) {
     return emptyResult({ error: 'invalid argv: expected a non-empty string array' });
   }
+  argv = [...argv];
   if (opts.input !== undefined && (typeof opts.input !== 'string'
     || Buffer.byteLength(opts.input, 'utf8') > ASYNC_STDIN_MAX_BYTES)) {
     return emptyResult({ error: 'invalid stdin: expected a UTF-8 string of at most 1 MiB' });
@@ -888,6 +912,30 @@ export async function runVerifySubprocessAsync(
     });
   }
 
+  // Optional proof consumes the original budget. A hung proof cannot prepare
+  // a ticket or extend the provider deadline; no new cleanup fact is inferred.
+  let remainingTimeoutMs = opts.timeoutMs;
+  if (opts.processGroupLifecycle?.preflight) {
+    const started = performance.now(), controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const abort = () => controller.abort(); opts.signal?.addEventListener('abort', abort, { once: true });
+    try {
+      await Promise.race([
+        opts.processGroupLifecycle.preflight(controller.signal),
+        new Promise<never>((_, reject) => {
+          const refuse = () => reject(new Error('Native metadata preflight unavailable'));
+          controller.signal.addEventListener('abort', refuse, { once: true });
+          timer = setTimeout(abort, Math.max(1, opts.timeoutMs));
+          if (opts.signal?.aborted) abort();
+        }),
+      ]);
+      remainingTimeoutMs = opts.timeoutMs - (performance.now() - started);
+      if (opts.signal?.aborted || remainingTimeoutMs <= 0 || controller.signal.aborted) throw new Error();
+    } catch {
+      return emptyResult({ error: 'Native metadata preflight unavailable', cancelled: opts.signal?.aborted === true,
+        timedOut: !opts.signal?.aborted && performance.now() - started >= opts.timeoutMs });
+    } finally { if (timer) clearTimeout(timer); opts.signal?.removeEventListener('abort', abort); controller.abort(); }
+  }
   return await new Promise<VerifySubprocessResult>((resolveDone) => {
     const stdout = createBoundedStreamCapture(opts.maxOutputChars);
     const stderr = createBoundedStreamCapture(opts.maxOutputChars);
@@ -938,7 +986,7 @@ export async function runVerifySubprocessAsync(
     if (opts.processGroupLifecycle) {
       try {
         const prepared = opts.processGroupLifecycle.prepare();
-        if (!lifecycleShape(prepared, ['spawned', 'settled'])) {
+        if (!lifecycleShape(prepared, ['spawned', 'settled']) && !nativeLaunchLifecycleShape(prepared)) {
           synchronous(prepared); throw new Error(lifecycleError);
         }
         lifecycle = prepared;
@@ -950,10 +998,13 @@ export async function runVerifySubprocessAsync(
 
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawnImpl(argv[0]!, argv.slice(1), {
+      const launch = lifecycle?.launcher;
+      const native = launch && 'kind' in launch ? launch : undefined;
+      const node = launch && !('kind' in launch) ? launch : undefined;
+      child = spawnImpl(native?.hostExecutable ?? node?.nodeExecutable ?? argv[0]!, native ? ['--_phantom-native-metadata-launch'] : node ? [node.scriptPath, node.ticketPath] : argv.slice(1), {
         cwd: opts.cwd,
-        env: opts.env,
-        stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+        env: native ? { ...opts.env, PHANTOM_NATIVE_METADATA_TICKET: native.ticketPath } : opts.env,
+        stdio: [opts.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe', ...(launch ? ['pipe' as const] : [])],
         shell: platform === 'win32' && opts.windowsShell === true,
         windowsHide: true,
         ...(ownsProcessGroup ? { detached: true } : {}),
@@ -969,6 +1020,28 @@ export async function runVerifySubprocessAsync(
       ? child.pid
       : null;
     let ownedPgid = originalPgid;
+    const launchControl = lifecycle?.launcher ? child.stdio[3] as Duplex | null : null;
+    let launchNotice = '';
+    let launchGoDelivered = false;
+    const launchControlError = () => { if (launchGoDelivered) return; lifecycleFailed = true; requestTermination('cancelled'); };
+    const launchControlData = (bytes: Buffer) => {
+      if (settled || terminationRequested || lifecycleRegistered) return;
+      launchNotice += bytes.toString('utf8');
+      if (launchNotice.length > 65 || !/^[a-f0-9]*\n?$/.test(launchNotice)) { launchControlError(); return; }
+      if (!launchNotice.endsWith('\n')) return;
+      try {
+        const launch = lifecycle!.launcher!;
+        if (originalPgid === null || launchNotice !== `${launch.ticketDigest}\n` || opts.signal?.aborted) throw new Error();
+        synchronous(lifecycle!.spawned(originalPgid)); lifecycleRegistered = true;
+        const packet = JSON.stringify({ ticketDigest: launch.ticketDigest, pid: originalPgid, argv }) + '\n';
+        if (Buffer.byteLength(packet) > 1024 * 1024) throw new Error();
+        launchControl!.end(packet, () => { launchGoDelivered = true; if (!settled && !terminationRequested) deliverInput(); });
+      } catch { launchControlError(); }
+    };
+    if (lifecycle?.launcher) {
+      if (!launchControl || typeof launchControl.on !== 'function' || typeof launchControl.end !== 'function') launchControlError();
+      else { launchControl.on('data', launchControlData); launchControl.on('error', launchControlError); }
+    }
 
     function captured(): Pick<VerifySubprocessResult, 'stdout' | 'stderr' | 'outputTruncated'> {
       return {
@@ -989,6 +1062,10 @@ export async function runVerifySubprocessAsync(
     }
 
     function releaseProcessResources(): void {
+      launchControl?.removeListener('data', launchControlData);
+      launchControl?.removeListener('error', launchControlError);
+      launchControl?.on('error', () => { /* possible close-time EPIPE after settlement */ });
+      launchControl?.destroy();
       // Preserve the error listener until close: destroying a pending write can
       // queue EPIPE after settlement. The close listener removes it afterward.
       child.stdin?.destroy();
@@ -1317,7 +1394,7 @@ export async function runVerifySubprocessAsync(
         }
       }
     }
-    if (lifecycle) {
+    if (lifecycle && !lifecycle.launcher) {
       child.once('spawn', () => {
         if (settled) return;
         try {
@@ -1329,14 +1406,14 @@ export async function runVerifySubprocessAsync(
         }
         deliverInput();
       });
-    } else deliverInput();
+    } else if (!lifecycle?.launcher) deliverInput();
 
     opts.signal?.addEventListener('abort', onAbort, { once: true });
     if (opts.signal?.aborted) onAbort();
 
-    executionDeadlineMono = performance.now() + opts.timeoutMs;
-    executionDeadlineWall = Date.now() + opts.timeoutMs;
-    timeoutTimer = setTimeout(() => requestTermination('timeout'), opts.timeoutMs);
+    executionDeadlineMono = performance.now() + remainingTimeoutMs;
+    executionDeadlineWall = Date.now() + remainingTimeoutMs;
+    timeoutTimer = setTimeout(() => requestTermination('timeout'), remainingTimeoutMs);
     timeoutTimer.unref?.();
   });
 }

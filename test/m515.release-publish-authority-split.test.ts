@@ -508,7 +508,7 @@ describe('release publish authority split', () => {
   );
 
   it('documents the remaining same-workflow artifact trust boundary', () => {
-    const docs = readFileSync(join(repoRoot, 'docs/RELEASING.md'), 'utf8');
+    const docs = readFileSync(join(repoRoot, 'docs/RELEASING-HISTORICAL.md'), 'utf8');
     expect(docs).toContain('Candidate-controlled lifecycle and repository code');
     expect(docs).toMatch(/execute\s+only\s+in this unprivileged job/);
     expect(docs).toMatch(/does\s+not check out the repository/);

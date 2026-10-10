@@ -1,3 +1,5 @@
+import { formatMetric } from '../../../components/charts/format-metric.js';
+import { tokenEvidenceLabel } from '../../../../core/run/token-evidence.js';
 /**
  * routes/work/runs/RunsView.tsx — dispatched goal runs (GET /api/runs).
  *
@@ -274,7 +276,7 @@ export function RunsView() {
                 </th>
                 <th scope="col" className={styles.tokensCol}>
                   <button type="button" className={styles.sortHeader} onClick={() => toggleSort('tokens')}>
-                    Tokens in/out{sortIndicator('tokens')}
+                    Accounted tokens in/out{sortIndicator('tokens')}
                   </button>
                 </th>
                 <th scope="col" className={styles.costCol}>
@@ -324,7 +326,8 @@ export function RunsView() {
                   <td>{run.engine}</td>
                   <td>{run.provider}</td>
                   <td className={styles.numeric}>
-                    {run.usage.tokensIn.toLocaleString()} / {run.usage.tokensOut.toLocaleString()}
+                    {formatMetric(run.usage.tokensIn)} / {formatMetric(run.usage.tokensOut)}
+                    <small>{tokenEvidenceLabel(run.usage, formatMetric)}</small>
                   </td>
                   <td className={styles.numeric}>${run.usage.estCostUsd.toFixed(4)}</td>
                   <td className={styles.numeric}>{run.steps.length}</td>

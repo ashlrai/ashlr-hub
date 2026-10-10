@@ -122,6 +122,37 @@ describe('saved Grok Bot resource metadata', () => {
     expect(screen.getByText('72% left')).toBeVisible();
   });
 
+  it('remembers compact density while keeping Build allowance, Bot uncertainty, focus details and ordering independent', () => {
+    const view = render(<ResourcesBar expanded />);
+    const group = screen.getByRole('group', { name: 'Resources at a glance' });
+    const toggle = screen.getByRole('button', { name: 'Compact resources' });
+    const beforeOrder = ids(view.container);
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(toggle);
+    expect(group).toHaveAttribute('data-compact', 'true');
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('72% left')).toBeVisible();
+    const bot = screen.getByRole('button', { name: /bot-one · Grok Bot: configured, usage and reset unknown/ });
+    fireEvent.focus(bot);
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Separate from Grok Build and xAI API credits.');
+    fireEvent.blur(bot);
+    fireEvent.click(screen.getByRole('button', { name: 'Move bot-three · Grok Bot up' }));
+    const moved = ids(view.container);
+    expect(moved).not.toEqual(beforeOrder);
+    view.unmount(); reloadResourcesUiForTest(); reloadResourceOrderForTest();
+    const restored = render(<ResourcesBar expanded />);
+    expect(screen.getByRole('group', { name: 'Resources at a glance' })).toHaveAttribute('data-compact', 'true');
+    expect(ids(restored.container)).toEqual(moved);
+    restored.rerender(<ResourcesBar expanded={false} />);
+    expect(screen.queryByRole('button', { name: 'Compact resources' })).toBeNull();
+    expect(screen.getByRole('group', { name: 'Resources at a glance' })).not.toHaveAttribute('data-compact');
+    restored.rerender(<ResourcesBar expanded />);
+    fireEvent.click(screen.getByRole('button', { name: 'Compact resources' }));
+    expect(getResourcesUi().compact).toBe(false);
+    expect(screen.getByRole('group', { name: 'Resources at a glance' })).not.toHaveAttribute('data-compact');
+    expect(ids(restored.container)).toEqual(moved);
+  });
+
   it('uses only the shared local metadata GET and edit invalidation, with no hidden-bar fetch', async () => {
     evictAll();
     const hooks = await vi.importActual<typeof import('../../../data/hooks.js')>('../../../data/hooks.js');

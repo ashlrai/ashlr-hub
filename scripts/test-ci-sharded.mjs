@@ -93,11 +93,13 @@ const isolatedCases = [
 // Existing real-I/O acceptance phases describe work within a long-running case;
 // enable them without changing the wrapper's child-output idle deadline. Keep
 // explicit caller choices, including empty values, and leave the parent alone.
+// Acceptance elapsed summaries are buffered until fixture cleanup settles.
 const childEnvironment = {
   ...process.env,
   ASHLR_ENGINEERING_SETUP_PHASE_TIMING: process.env.ASHLR_ENGINEERING_SETUP_PHASE_TIMING ?? '1',
   ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING: process.env.ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING ?? '1',
   ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING: process.env.ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING ?? '1',
+  ASHLR_ACCEPTANCE_PHASE_TIMING: process.env.ASHLR_ACCEPTANCE_PHASE_TIMING ?? '1',
 };
 const children = new Map();
 let stopping = false;

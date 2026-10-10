@@ -91,6 +91,7 @@ import { readOutcomeWorkItemContext, materializeOutcomeIntents, outcomeDirectory
 import { OutcomeStore } from '../goals/outcome-store.js';
 import { readOutcomeInventory } from '../vision/leader-outcomes.js';
 import { OutcomeDispatch, isOutcomeWorkItem, reconcileOutcomeCompletions } from './outcome-dispatch.js';
+import { resolveManagerSessionTargets } from '../verse/manager-scope.js';
 import { OutcomeManagerDispatch, isOutcomeManagerWorkItem, outcomeManagerWorkItems, readOutcomeManagerWorkItemContext, readOutcomeManagerPrompt, reconcileOutcomeManagerTerminals } from './outcome-manager.js';
 import { managerConversation, managerHostAdmission } from './outcome-manager-host.js';
 import type { OutcomeManagerRoute } from '../goals/outcome-manager-types.js';
@@ -4956,7 +4957,17 @@ export async function tick(
             materializeOutcomeIntents(outcome.id, { stillAuthorized: authorized, cfg: routingCfg });
             const fresh = new OutcomeStore(outcomeDirectory(outcome.id)).read();
             if (fresh.sourceState === 'healthy' && authorized()) {
-              for (const candidate of outcomeManagerWorkItems([fresh.state], new Date().toISOString())) {
+              const registry = readEnrollmentRegistry();
+              const targets = registry.state === 'ready'
+                ? resolveManagerSessionTargets(fresh.state.scope.targetRepos, registry.repos) : null;
+              if (targets === null) continue;
+              for (const original of outcomeManagerWorkItems([fresh.state], new Date().toISOString())) {
+                // Saved scope stays the user's target; execution uses its unique
+                // current enrolled workspace (the mirror in the autonomous lane).
+                const executionRepo = registry.state === 'ready'
+                  ? resolveManagerSessionTargets([original.repo], registry.repos)?.[0] : undefined;
+                if (!executionRepo) continue;
+                const candidate = { ...original, repo: executionRepo };
                 const prepared = readPreparedManagerPrompt(candidate);
                 if (!prepared || !authorized()) continue;
                 const contextTokens = Math.ceil(prepared.prompt.length / 4) + ROUTING_SESSION_OVERHEAD_TOKENS;

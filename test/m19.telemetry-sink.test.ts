@@ -25,6 +25,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { requestTokenEvidence } from '../src/core/run/token-evidence.js';
 import type { AshlrConfig, GenAiSpan } from '../src/core/types.js';
 
 const credentialSpawn = vi.hoisted(() => vi.fn(() => { throw new Error('telemetry credential subprocess forbidden'); }));
@@ -595,7 +596,8 @@ describe('OtlpHttpSink — real HTTP delivery to local capture server', () => {
       const endpoint = `http://127.0.0.1:${port}/v1/traces`;
       const sink = getSink(makeConfig({ pulse: endpoint }));
       await sink.emit([
-        makeSpan({ tokensIn: 999, tokensOut: 444, model: 'test-model', provider: 'test-provider' }),
+        makeSpan({ tokensIn: 999, tokensOut: 444, model: 'test-model', provider: 'test-provider', tokenEvidence: requestTokenEvidence('reported', 999, 444) }),
+        makeSpan({ tokensIn: 999, tokensOut: 444, model: 'unknown-model', provider: 'test-provider' }),
       ]);
 
       const body = JSON.parse(captured[0]!.body);
@@ -610,6 +612,10 @@ describe('OtlpHttpSink — real HTTP delivery to local capture server', () => {
       expect(attrKeys).toContain('gen_ai.request.model');
       expect(attrKeys).toContain('gen_ai.usage.input_tokens');
       expect(attrKeys).toContain('gen_ai.usage.output_tokens');
+      const unknownKeys = (spans[1] as { attributes: { key: string }[] }).attributes.map(a => a.key);
+      expect(unknownKeys).toContain('phantom.accounted.input_tokens');
+      expect(unknownKeys).not.toContain('gen_ai.usage.input_tokens');
+      expect(unknownKeys).not.toContain('gen_ai.usage.output_tokens');
     } finally {
       await stopServer(server);
       delete process.env['ASHLR_PULSE_TOKEN'];

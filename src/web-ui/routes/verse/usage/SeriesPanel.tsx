@@ -1,3 +1,4 @@
+import { tokenEvidenceLabel } from '../../../../core/run/token-evidence.js';
 /**
  * routes/verse/usage/SeriesPanel.tsx — token output and spend over time.
  *
@@ -52,8 +53,9 @@ const WINDOWS: readonly SeriesWindow[] = ['7d', '30d'];
 
 const TOKEN_COLUMNS: TableColumn<DailyUsage>[] = [
   { key: 'day', label: 'Day', render: (r) => chartFormat.formatDayLabel(r.day) },
-  { key: 'in', label: 'Tokens in', numeric: true, render: (r) => chartFormat.formatCompact(r.tokensIn) },
-  { key: 'out', label: 'Tokens out', numeric: true, render: (r) => chartFormat.formatCompact(r.tokensOut) },
+  { key: 'in', label: 'Accounted tokens in', numeric: true, render: (r) => chartFormat.formatCompact(r.tokensIn) },
+  { key: 'out', label: 'Accounted tokens out', numeric: true, render: (r) => chartFormat.formatCompact(r.tokensOut) },
+  { key: 'evidence', label: 'Token evidence', render: (r) => tokenEvidenceLabel(r, chartFormat.formatCompact) },
   { key: 'sessions', label: 'Sessions', numeric: true, render: (r) => chartFormat.formatCompact(r.sessions) },
 ];
 
@@ -125,7 +127,7 @@ export function SeriesPanel({
     <section className={styles.panel} aria-labelledby="verse-usage-series">
       <div className={styles.panelHead}>
         <h3 id="verse-usage-series" className={styles.panelTitle}>
-          Token output and spend
+          Accounted tokens and spend
         </h3>
         <div className={styles.segmented} role="group" aria-label="Series window">
           {WINDOWS.map((w) => (
@@ -166,16 +168,16 @@ export function SeriesPanel({
         <>
           <div className={styles.tiles}>
             <StatTile
-              label={`Tokens in · ${window}`}
+              label={`Accounted tokens in · ${window}`}
               value={<span className={styles.num}>{chartFormat.formatCompact(totals?.tokensIn ?? 0)}</span>}
-              caption={`Across ${totals?.dayCount ?? 0} recorded days`}
+              caption={`Across ${totals?.dayCount ?? 0} recorded days · ${totals ? tokenEvidenceLabel(totals, chartFormat.formatCompact) : 'Token provenance unknown'}`}
               trend={sparklinePoints(series, (d) => d.tokensIn)}
               trendLabel="Tokens in per day"
             />
             <StatTile
-              label={`Tokens out · ${window}`}
+              label={`Accounted tokens out · ${window}`}
               value={<span className={styles.num}>{chartFormat.formatCompact(totals?.tokensOut ?? 0)}</span>}
-              caption="What the models actually produced"
+              caption="Accounted output; may include reserved exposure"
               trend={sparklinePoints(series, (d) => d.tokensOut)}
               trendLabel="Tokens out per day"
             />
@@ -224,13 +226,13 @@ export function SeriesPanel({
 
           <div className={styles.charts}>
             <ChartContainer
-              title="Tokens per day"
+              title="Accounted tokens per day"
               description={WINDOW_LABEL[window]}
               empty={!tokens.available}
               emptyMessage={tokens.available ? '' : tokens.reason}
               table={
                 <TableView
-                  caption="Tokens in and out per day"
+                  caption="Accounted tokens in and out per day"
                   columns={TOKEN_COLUMNS}
                   rows={series.days}
                   rowKey={(r) => r.day}

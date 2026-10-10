@@ -1,3 +1,5 @@
+import { validateTokenEvidence } from '../../../../core/run/token-evidence.js';
+import type { RunTokenEvidence } from '../../../../core/types.js';
 /**
  * routes/verse/usage/usage-contract.ts
  *
@@ -49,7 +51,7 @@
  *
  * Pure: no React, no I/O.
  */
-// EVERY import from src/core here MUST be type-only.
+// Collector imports must be type-only; token-evidence is a pure browser-safe projection.
 //
 // `core/verse/accounts.ts` is the server's collector: it pulls node:fs,
 // node:child_process, the quota lease and the connection monitor. A VALUE
@@ -324,6 +326,7 @@ export type SeriesWindow = '7d' | '30d';
 
 /** `buildRollup(window, cfg).byDay` — see docs/VERSE-TELEMETRY-V2.md. */
 export interface DailyUsage {
+  tokenEvidence?: RunTokenEvidence;
   /** YYYY-MM-DD. */
   day: string;
   tokensIn: number;
@@ -639,6 +642,7 @@ function projectDay(raw: unknown): DailyUsage | null {
     day,
     tokensIn: num(r, 'tokensIn') ?? 0,
     tokensOut: num(r, 'tokensOut') ?? 0,
+    ...(validateTokenEvidence(r['tokenEvidence'], num(r, 'tokensIn'), num(r, 'tokensOut')) ? { tokenEvidence: validateTokenEvidence(r['tokenEvidence'], num(r, 'tokensIn'), num(r, 'tokensOut')) } : {}),
     estCostUsd: num(r, 'estCostUsd') ?? 0,
     sessions: num(r, 'sessions') ?? 0,
     cacheRead: num(r, 'cacheRead'),

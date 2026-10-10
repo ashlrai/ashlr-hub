@@ -90,16 +90,19 @@ async function settle() { await vi.advanceTimersByTimeAsync(0); }
 describe('shared native metadata coordination across live collectors', () => {
   it('forwards distinct durable lifecycles into quota and connection probes', async () => {
     const transport = controlledTransport();
-    const hooks: Array<{ prepare: ReturnType<typeof vi.fn> }> = [];
+    const hooks: Array<{ prepare: ReturnType<typeof vi.fn>; prepared: { spawned: ReturnType<typeof vi.fn>; settled: ReturnType<typeof vi.fn> } }> = [];
     const f = fixture(() => {
-      const hook = { prepare: vi.fn() }; hooks.push(hook);
-      return { processGroupLifecycle: hook, settle: vi.fn() };
+      const prepared = { spawned: vi.fn(), settled: vi.fn() };
+      const hook = { prepare: vi.fn(() => prepared), prepared }; hooks.push(hook);
+      return { processGroupLifecycle: { prepare: hook.prepare }, settle: vi.fn() };
     });
     await settle(); f.connect(); await settle();
     expect(hooks).toHaveLength(2);
-    expect(transport.pending.get('admission-a')!.options.processGroupLifecycle).toBe(hooks[0]);
-    expect(transport.pending.get('connection-a')!.options.processGroupLifecycle).toBe(hooks[1]);
     for (const hook of hooks) expect(hook.prepare).not.toHaveBeenCalled();
+    expect(transport.pending.get('admission-a')!.options.processGroupLifecycle!.prepare()).toBe(hooks[0]!.prepared);
+    expect(hooks[0]!.prepare).toHaveBeenCalledOnce(); expect(hooks[1]!.prepare).not.toHaveBeenCalled();
+    expect(transport.pending.get('connection-a')!.options.processGroupLifecycle!.prepare()).toBe(hooks[1]!.prepared);
+    expect(hooks[0]!.prepare).toHaveBeenCalledOnce(); expect(hooks[1]!.prepare).toHaveBeenCalledOnce();
   });
 
   it.each(['quota', 'connections'] as const)('fences missing %s settlement before queued probes launch and awaits active peer cleanup', async (origin) => {
