@@ -17,6 +17,7 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Default-off duration-weighted test sequencing and an offline original-report converter retain exact source, inventory and environment provenance. Timing hints do not reuse test results or qualify release evidence.
 
 ### Fixed
+- Recover coherent signed historical tier/verification remote handoffs when their optional protection gate is absent. Malformed gates and PR-only operations do not gain direct-merge authority.
 - Preserve strict historical Universe resource-task origins without turning history into dispatch authority.
 - Clarify local-server connection privacy, model-catalog labels and canonical `phm` recovery examples.
 - Public release metadata links the versioned Apple silicon app archive when no valid historical DMG is present. A metadata link does not qualify downloaded bytes or install the app.

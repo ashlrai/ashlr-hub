@@ -190,6 +190,12 @@ function activeV3EvidenceMatches(proposal: Proposal): boolean {
       !proposal.diffHash || !verification) return false;
     const pack = readAutonomyEvidencePack(proposal.id);
     if (!pack || pack.version !== 3 || !verifyAutonomyEvidencePackV3(pack).ok) return false;
+    // Historical tier/verification packs can omit this optional gate. A
+    // present malformed gate or PR-only operation must never gain merge authority.
+    const operation = pack.gates.remoteProtection === undefined &&
+      (pack.trustBasis === 'tier' || pack.trustBasis === 'verification')
+      ? 'legacy'
+      : protectedPrOperationShape(pack.gates.remoteProtection);
     const diffHash = hashDiff(proposal.diff ?? '');
     return pack.sealedPackDigest === intent.evidencePackDigest &&
       intent.diffHash === diffHash && proposal.diffHash === diffHash &&
@@ -200,8 +206,8 @@ function activeV3EvidenceMatches(proposal: Proposal): boolean {
       pack.producer.engineTier === proposal.engineTier && pack.diff.hash === diffHash &&
       pack.remotePreferred === true && pack.policy?.allowed === true &&
       ((pack.target === 'main' && (
-        pack.policy.action === 'merge-main' && protectedPrOperationShape(pack.gates.remoteProtection) === 'legacy' ||
-        pack.policy.action === 'open-ready-pr' && protectedPrOperationShape(pack.gates.remoteProtection) === 'handoff')) ||
+        pack.policy.action === 'merge-main' && operation === 'legacy' ||
+        pack.policy.action === 'open-ready-pr' && operation === 'handoff')) ||
         (pack.target === 'branch' && pack.policy.action === 'open-ready-pr')) &&
       pack.verification.passed === verification.passed &&
       isDeepStrictEqual(

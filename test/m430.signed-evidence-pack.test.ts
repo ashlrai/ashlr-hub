@@ -333,6 +333,21 @@ describe('M430 signed evidence-pack v3 protocol', () => {
     expect(read?.version).toBe(3);
   });
 
+  it.each(['tier', 'verification'] as const)('preserves signed historical %s packs without an optional remote gate', (trustBasis) => {
+    const pack = legacy(`prop-historical-${trustBasis}`);
+    pack.trustBasis = trustBasis;
+    if (pack.evidenceOutcome) {
+      pack.evidenceOutcome.trustBasis = trustBasis;
+      pack.evidenceOutcome.policyTier = pack.policy!.tier;
+    }
+    expect(pack.gates.remoteProtection).toBeUndefined();
+    const sealed = sealAutonomyEvidencePackV3(pack);
+    expect(sealed).not.toBeNull();
+    expect(verifyAutonomyEvidencePackV3(sealed).ok).toBe(true);
+    expect(persistAutonomyEvidencePack(sealed!)).toBe(true);
+    expect(readAutonomyEvidencePack(pack.proposal.id)).toEqual(sealed);
+  });
+
   it('persists one canonical v3 transport and durably publishes an exclusive private temporary', () => {
     const pack = signed('prop-v3-transport');
     fsHarness.opens.length = 0;
