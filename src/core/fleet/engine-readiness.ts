@@ -33,7 +33,7 @@ export interface EngineReadiness {
   engine: EngineId;
   /** Trust tier: 'local' | 'mid' | 'frontier'. */
   tier: string;
-  /** True when the binary (or env key for api-model) is present. */
+  /** True when the binary, keyed API credential, or keyless model endpoint is present. */
   installed: boolean;
   /** Absolute path to the binary, when installed and resolvable. */
   binPath?: string;
@@ -59,6 +59,8 @@ export interface EngineReadiness {
 export interface ProbeOverrides {
   /** Override for engineInstalled() probe. */
   isInstalled?: (engine: EngineId, cfg?: AshlrConfig) => boolean;
+  /** Return a bounded /models HTTP response for the two approved loopback engines. */
+  localModelsResponse?: (url: string) => { statusCode: number; body: string } | null;
   /** Override for resolveBinAbsolute() probe. */
   resolveBin?: (bin: string) => string;
   /** Override for the codex login-status probe. */
@@ -86,6 +88,72 @@ function runProbe(bin: string, args: string[], timeoutMs = 2000): { stdout: stri
     };
   } catch {
     return { stdout: '', ok: false };
+  }
+}
+
+/** Keep doctor's keyless probe on the machine, even when config/env is changed. */
+function localModelsUrl(baseUrl: string): string | null {
+  try {
+    const url = new URL(baseUrl);
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') ||
+      !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) ||
+      url.username || url.password || url.search || url.hash) return null;
+    url.pathname = `${url.pathname.replace(/\/+$/, '')}/models`;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+/** A small, read-only GET in a bounded child; no redirects or arbitrary hosts. */
+function readLocalModels(url: string): { statusCode: number; body: string } | null {
+  const script = `
+    const u = new URL(process.argv[1]);
+    const h = require(u.protocol === 'https:' ? 'https' : 'http');
+    const req = h.get(u, {
+      timeout: 1500,
+      lookup: u.hostname === 'localhost'
+        ? (_host, options, callback) => options.all
+          ? callback(null, [{ address: '127.0.0.1', family: 4 }])
+          : callback(null, '127.0.0.1', 4)
+        : undefined,
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        body += chunk;
+        if (body.length > 131072) req.destroy();
+      });
+      res.on('end', () => process.stdout.write(JSON.stringify({ statusCode: res.statusCode, body })));
+    });
+    req.on('error', () => process.exit(1));
+    req.on('timeout', () => req.destroy());
+  `;
+  try {
+    const result = spawnSync(process.execPath, ['-e', script, url], {
+      encoding: 'utf8', timeout: 2500, maxBuffer: 262144,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    if (result.status !== 0 || result.error) return null;
+    const response = JSON.parse(result.stdout ?? '') as { statusCode?: unknown; body?: unknown };
+    return typeof response.statusCode === 'number' && typeof response.body === 'string'
+      ? { statusCode: response.statusCode, body: response.body }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function validModelsResponse(response: { statusCode: number; body: string } | null, modelId: string): boolean {
+  if (!response || response.statusCode < 200 || response.statusCode >= 300 || !modelId) return false;
+  try {
+    const payload = JSON.parse(response.body) as unknown;
+    if (payload === null || typeof payload !== 'object') return false;
+    const data = (payload as Record<string, unknown>)['data'];
+    return Array.isArray(data) && data.some((entry: unknown) => entry !== null &&
+      typeof entry === 'object' && (entry as Record<string, unknown>)['id'] === modelId);
+  } catch {
+    return false;
   }
 }
 
@@ -174,21 +242,52 @@ export function engineReadiness(
     };
   }
 
-  // ── api-model: "installed" = env key present ───────────────────────────────
+  // ── api-model: keyed cloud credential or keyless endpoint reachability ────
   if (spec?.kind === 'api-model') {
     const envKey = spec.api?.envKey ?? '';
-    const keyPresent = Boolean(getEnvFn(envKey)?.trim());
     if (!envKey) {
+      // Only these built-in local engines may be probed without a credential.
+      // A config/env override pointing either engine off loopback is refused
+      // before any network request. A 2xx model list still does not prove a
+      // usable model completion.
+      const localEngine = engine === 'local-coder' || engine === 'llama-server';
+      const baseUrlEnv = spec.api?.baseUrlEnv;
+      const baseUrl = (baseUrlEnv ? getEnvFn(baseUrlEnv)?.trim() : undefined) ||
+        spec.api?.defaultBaseUrl?.trim() || '';
+      const modelsUrl = localEngine ? localModelsUrl(baseUrl) : null;
+      if (!modelsUrl) {
+        return {
+          engine, tier, installed: false, authed: 'unknown', ready: false,
+          detail: 'Keyless endpoint preflight is limited to built-in local-coder and llama-server on loopback; no endpoint was contacted.',
+          fix: 'Use a loopback local model endpoint, or configure an API key for a remote api-model engine.',
+        };
+      }
+      // Match the model runApiModelSandboxed selects when no per-run model was
+      // supplied. An endpoint with some other model is not ready for this lane.
+      const modelId = cfg?.foundry?.models?.[engine] || spec.api?.defaultModel || '';
+      if (!modelId) {
+        return {
+          engine, tier, installed: false, authed: 'unknown', ready: false,
+          detail: 'No effective model ID is configured; no endpoint was contacted.',
+          fix: `Configure foundry.models.${engine} to the exact model ID served locally.`,
+        };
+      }
+      let response: { statusCode: number; body: string } | null = null;
+      try { response = (overrides?.localModelsResponse ?? readLocalModels)(modelsUrl); } catch { /* unavailable */ }
+      const reachable = validModelsResponse(response, modelId);
       return {
         engine,
         tier,
-        installed: false,
-        authed: false,
-        ready: false,
-        detail: 'api-model spec is missing api.envKey — cannot verify.',
-        fix: `Add api.envKey to the engine spec in cfg.foundry.engines.${engine}`,
+        installed: reachable,
+        authed: 'unknown',
+        ready: reachable,
+        detail: reachable
+          ? 'Local /models endpoint lists the configured model ID; authentication and model completion are unverified.'
+          : 'Local /models endpoint did not return a valid 2xx list containing the configured model ID; authentication and model completion are unverified.',
+        ...(!reachable ? { fix: 'Start or repair the local model server, then verify /v1/models lists the exact configured model ID.' } : {}),
       };
     }
+    const keyPresent = Boolean(getEnvFn(envKey)?.trim());
     if (!keyPresent) {
       return {
         engine,
