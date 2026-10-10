@@ -43,10 +43,7 @@ import { readCodexRateLimits } from '../observability/codex-source.js';
 import { readDecisions } from '../fleet/decisions-ledger.js';
 import { resolveProviderKey, explainProviderKey } from '../integrations/secrets.js';
 import { resolveEngineRegistry } from '../run/engine-registry.js';
-import {
-  readClaudeUsage,
-  DEFAULT_5H_MESSAGE_CAP_PRO,
-} from './claude-usage.js';
+import { readClaudeUsage } from './claude-usage.js';
 import { fetchClaudeUsageApi } from './usage-api.js';
 import {
   onClaudeRateLimitEventRecorded,
@@ -168,10 +165,8 @@ onClaudeRateLimitEventRecorded(invalidateResourceSnapshotCache);
 
 interface ClaudeResourceCfg {
   /**
-   * M253 TRANSCRIPT (ccusage): 5-hour message cap for Claude Code subscription.
-   * When set, transcript-based sensing uses this as the 5h window cap.
-   * Defaults to DEFAULT_5H_MESSAGE_CAP_PRO (900) when absent.
-   * Set to your plan's limit: ~900 (Pro), ~4500 (Max5), ~9000 (Max20).
+   * Operator-configured 5-hour transcript budget. This is not a provider quota;
+   * local messages cannot reveal usage on other Claude surfaces. No default.
    */
   fiveHourMessageCap?: number;
   /**
@@ -183,7 +178,7 @@ interface ClaudeResourceCfg {
   /**
    * M253 TRANSCRIPT (ccusage): 5-hour token cap override.
    * When set, tokens are used instead of message count for availability.
-   * Not typically set — message count is the correct subscription metric.
+   * This is a local budget, not an observed subscription limit.
    */
   fiveHourTokenCap?: number;
   /**
@@ -323,6 +318,12 @@ function resourceSnapshotCacheKey(cfg: unknown, backends: EngineId[]): string {
   const rcfg = extractResourceCfg(cfg);
   return JSON.stringify({
     backends,
+    // Recheck local credential readiness before accepting cached availability.
+    // Keep only names and booleans; never cache or hash credential values.
+    apiCredentials: backends.filter((backend): backend is 'nim' | 'kimi' => backend === 'nim' || backend === 'kimi').map(backend => {
+      try { return { backend, ...apiCredentialReadiness(backend, cfg as AshlrConfig) }; }
+      catch { return { backend, credentialName: null, credentialAvailable: false }; }
+    }),
     claude: rcfg.claude ?? null,
     overrides: rcfg.overrides ?? null,
     protectPct: rcfg.protectPct ?? null,
@@ -662,20 +663,9 @@ async function senseClaudeState(rcfg: ResourceCfgShape): Promise<BackendResource
   }
 
   // -------------------------------------------------------------------------
-  // M253 TRANSCRIPT PATH (ccusage): real subscription usage from JSONL files.
-  //
-  // This is the PRIMARY path for sensing actual Claude subscription headroom.
-  // It walks ~/.claude/projects/**/*.jsonl and sums message.usage token counts
-  // over a 5-hour rolling window (the subscription rate-limit window) and a
-  // 7-day window. No config required — defaults to Pro limits (~900 msgs/5h).
-  //
-  // Activated when: NOT in fleet-ledger mode (no weeklyTokenBudget/costBudget
-  // configured) AND there is no explicit opt-out (weeklyTokenBudget=0 is
-  // treated as "fleet-ledger mode with zero budget", not opt-out; to opt out
-  // set claudeResource.transcriptSensing: false — not yet implemented, TBD).
-  //
-  // The 5h window is the primary availability signal (matches the subscription
-  // rate-limit window). 7d is reported but not used for threshold decisions.
+  // Local transcripts measure local consumption, not subscription headroom.
+  // Only evaluate them against an explicit operator budget. Provider readings
+  // above remain authoritative; absent readings never imply an empty allowance.
   // -------------------------------------------------------------------------
   const weeklyTokenBudget = rcfg.claude?.weeklyTokenBudget ?? null;
   const weeklyCostBudgetUsd = rcfg.claude?.weeklyCostBudgetUsd ?? null;
@@ -686,8 +676,7 @@ async function senseClaudeState(rcfg: ResourceCfgShape): Promise<BackendResource
   //
   // Backward-compat rule: if only weeklyMessageCap is set (the M250 legacy config),
   // defer to the stats-cache path below so existing tests/configs are unaffected.
-  // Transcript sensing activates when either fiveHourMessageCap or fiveHourTokenCap
-  // is explicitly set, OR when no cap at all is configured (zero-config default).
+  // Transcript sensing requires an explicit, finite, positive local budget.
   const hasLegacyMessageCapOnly =
     (rcfg.claude?.weeklyMessageCap ?? null) !== null &&
     (rcfg.claude?.fiveHourMessageCap ?? null) === null &&
@@ -696,16 +685,17 @@ async function senseClaudeState(rcfg: ResourceCfgShape): Promise<BackendResource
   const useTranscriptSensing =
     weeklyTokenBudget === null &&
     weeklyCostBudgetUsd === null &&
-    !hasLegacyMessageCapOnly;
+    !hasLegacyMessageCapOnly &&
+    Number.isFinite(rcfg.claude?.fiveHourTokenCap ?? rcfg.claude?.fiveHourMessageCap) &&
+    (rcfg.claude?.fiveHourTokenCap ?? rcfg.claude?.fiveHourMessageCap ?? 0) > 0;
 
   if (useTranscriptSensing) {
     try {
       const usage = readClaudeUsage();
 
-      // Determine the cap: prefer explicit config, else default to Pro limits.
-      // fiveHourTokenCap overrides message-count sensing when set.
+      // The condition above requires an explicit budget; never invent a cap.
       const fiveHourTokenCap = rcfg.claude?.fiveHourTokenCap ?? null;
-      const fiveHourMessageCap = rcfg.claude?.fiveHourMessageCap ?? DEFAULT_5H_MESSAGE_CAP_PRO;
+      const fiveHourMessageCap = rcfg.claude?.fiveHourMessageCap ?? 0;
 
       let usedPct: number;
       let capVal: number;
@@ -721,7 +711,7 @@ async function senseClaudeState(rcfg: ResourceCfgShape): Promise<BackendResource
         usedLabel = `${usage.tokens5h.toLocaleString()} tokens`;
         capLabel = `${fiveHourTokenCap.toLocaleString()} tokens`;
       } else {
-        // Message-count-based 5h sensing (default — matches subscription metric)
+        // Local message count against the operator's configured budget.
         usedPct = Math.round((usage.messages5h / fiveHourMessageCap) * 100);
         capVal = fiveHourMessageCap;
         capUnit = 'messages';
@@ -731,7 +721,7 @@ async function senseClaudeState(rcfg: ResourceCfgShape): Promise<BackendResource
 
       usedPct = Math.max(0, Math.min(usedPct, 200)); // clamp to sensible range
 
-      const source5h = `(5h: ${usedLabel}/${capLabel}; 7d: ${usage.messages7d} msgs; ${usage.filesScanned} session files scanned)`;
+      const source5h = `(configured local transcript budget; provider quota unconfirmed; 5h: ${usedLabel}/${capLabel}; 7d: ${usage.messages7d} msgs; ${usage.filesScanned} session files scanned)`;
 
       let availability: BackendAvailability;
       let reason: string;
@@ -851,7 +841,7 @@ async function senseClaudeState(rcfg: ResourceCfgShape): Promise<BackendResource
         costPerMTokenOut: 0,
         p50LatencyMs: null,
         snapshotAt: now,
-        reason: `claude: stats-cache.json is stale — cannot trust message count; treating as open. Migrate to claudeResource.fiveHourMessageCap for reliable transcript-based sensing.`,
+        reason: 'claude: stats-cache.json is stale; subscription headroom unknown',
         backoffUntilMs: null,
       };
     }
@@ -905,7 +895,7 @@ async function senseClaudeState(rcfg: ResourceCfgShape): Promise<BackendResource
     costPerMTokenOut: 0,
     p50LatencyMs: null,
     snapshotAt: now,
-    reason: 'no claude budget configured (set claudeResource.weeklyTokenBudget or weeklyCostBudgetUsd) — treating as open',
+    reason: 'claude: no current provider reading or valid configured local budget; subscription headroom unknown',
     backoffUntilMs: null,
   };
 }
@@ -1024,7 +1014,7 @@ function senseCodexState(): BackendResourceState {
       costPerMTokenOut: 0,
       p50LatencyMs: null,
       snapshotAt: now,
-      reason: 'codex sensing failed — treating as open',
+      reason: 'codex sensing failed; subscription headroom unknown',
       backoffUntilMs: null,
     };
   }
@@ -1076,68 +1066,68 @@ function senseReactiveApiState(
     snapshotAt: now,
     reason: maxConcurrent !== null
       ? `${defaults.label}: no proactive quota signal; explicit maxConcurrent=${maxConcurrent}`
-      : `${defaults.label}: no proactive signal available — treating as open`,
+      : `${defaults.label}: credential resolved; provider quota unreported`,
     backoffUntilMs: null,
   };
 }
 
-function senseNimState(cfg: unknown, rcfg: ResourceCfgShape): BackendResourceState {
+function apiCredentialReadiness(backend: 'nim' | 'kimi', cfg: AshlrConfig): { credentialName: string; credentialAvailable: boolean } {
+  const spec = resolveEngineRegistry(cfg)[backend];
+  const envKey = spec?.kind === 'api-model' ? spec.api?.envKey : undefined;
+  return {
+    credentialName: typeof envKey === 'string' && envKey.length > 0 ? envKey : backend === 'nim' ? 'NVIDIA_NIM_API_KEY' : 'MOONSHOT_API_KEY',
+    credentialAvailable: typeof envKey === 'string' && envKey.length > 0 ? Boolean(resolveProviderKey(envKey, cfg)?.trim()) : false,
+  };
+}
+
+function senseCredentialedApiState(backend: 'nim' | 'kimi', cfg: unknown, rcfg: ResourceCfgShape): BackendResourceState {
   const now = new Date().toISOString();
   const typedCfg = cfg as AshlrConfig;
+  const resourceCfg = rcfg[backend];
+  const defaultCost = backend === 'nim' ? 0.42 : 0.7;
 
   try {
-    const spec = resolveEngineRegistry(typedCfg)['nim'];
-    const envKey = spec?.kind === 'api-model' ? spec.api?.envKey : undefined;
-    const credentialAvailable = typeof envKey === 'string' && envKey.length > 0
-      ? Boolean(resolveProviderKey(envKey, typedCfg)?.trim())
-      : false;
+    const { credentialName, credentialAvailable } = apiCredentialReadiness(backend, typedCfg);
 
     if (!credentialAvailable) {
-      const credentialName = typeof envKey === 'string' && envKey.length > 0
-        ? envKey
-        : 'NVIDIA_NIM_API_KEY';
-      const maxConcurrent = positiveConcurrentCap(rcfg.nim?.maxConcurrent);
+      const maxConcurrent = positiveConcurrentCap(resourceCfg?.maxConcurrent);
       return {
-        backend: 'nim',
+        backend,
         availability: 'unreachable',
         usedPct: null,
         cap: maxConcurrent,
         capUnit: maxConcurrent !== null ? 'concurrent' : null,
         capWindow: null,
         resetsAt: null,
-        costPerMTokenOut: rcfg.nim?.costPerMTokenOut ?? 0.42,
+        costPerMTokenOut: resourceCfg?.costPerMTokenOut ?? defaultCost,
         p50LatencyMs: null,
         snapshotAt: now,
-        reason: `nim credential unavailable: ${credentialName} (${explainProviderKey(credentialName, typedCfg)})`,
+        reason: `${backend} credential unavailable: ${credentialName} (${explainProviderKey(credentialName, typedCfg)})`,
         backoffUntilMs: null,
       };
     }
 
-    const override = overrideState('nim', rcfg.overrides?.['nim']);
+    const override = overrideState(backend, rcfg.overrides?.[backend]);
     if (override) return override;
   } catch {
-    const maxConcurrent = positiveConcurrentCap(rcfg.nim?.maxConcurrent);
+    const maxConcurrent = positiveConcurrentCap(resourceCfg?.maxConcurrent);
     return {
-      backend: 'nim',
+      backend,
       availability: 'unreachable',
       usedPct: null,
       cap: maxConcurrent,
       capUnit: maxConcurrent !== null ? 'concurrent' : null,
       capWindow: null,
       resetsAt: null,
-      costPerMTokenOut: rcfg.nim?.costPerMTokenOut ?? 0.42,
+      costPerMTokenOut: resourceCfg?.costPerMTokenOut ?? defaultCost,
       p50LatencyMs: null,
       snapshotAt: now,
-      reason: 'nim credential unavailable: credential resolution failed',
+      reason: `${backend} credential unavailable: credential resolution failed`,
       backoffUntilMs: null,
     };
   }
 
-  return senseReactiveApiState('nim', rcfg.nim, { costPerMTokenOut: 0.42, label: 'nim' });
-}
-
-function senseKimiState(rcfg: ResourceCfgShape): BackendResourceState {
-  return senseReactiveApiState('kimi', rcfg.kimi, { costPerMTokenOut: 0.7, label: 'kimi' });
+  return senseReactiveApiState(backend, resourceCfg, { costPerMTokenOut: defaultCost, label: backend });
 }
 
 /** Ping Ollama /api/ps with a 2-second timeout. Returns null on timeout/error. */
@@ -1404,7 +1394,7 @@ async function senseOllamaState(backend: EngineId, rcfg: ResourceCfgShape): Prom
     // Never block on Ollama health check failure — it's optional infrastructure
     return {
       backend,
-      availability: 'open',
+      availability: 'unknown',
       usedPct: null,
       cap: maxConcurrent,
       capUnit: 'concurrent',
@@ -1413,7 +1403,7 @@ async function senseOllamaState(backend: EngineId, rcfg: ResourceCfgShape): Prom
       costPerMTokenOut: 0,
       p50LatencyMs: null,
       snapshotAt: now,
-      reason: 'ollama health check failed — treating as open',
+      reason: 'ollama health check failed; local capacity unknown',
       backoffUntilMs: null,
     };
   }
@@ -1450,10 +1440,10 @@ export async function getBackendResourceState(
 ): Promise<BackendResourceState> {
   try {
     const rcfg = extractResourceCfg(cfg);
-    // NIM credentials are a hard dispatch prerequisite. Check them before an
+    // API credentials are a hard dispatch prerequisite. Check them before an
     // operator override so an "open" override cannot manufacture auth that the
     // executor would be unable to supply.
-    if (backend === 'nim') return senseNimState(cfg, rcfg);
+    if (backend === 'nim' || backend === 'kimi') return senseCredentialedApiState(backend, cfg, rcfg);
 
     const override = overrideState(backend, rcfg.overrides?.[backend]);
     if (override) return override;
@@ -1468,7 +1458,6 @@ export async function getBackendResourceState(
     switch (backend) {
       case 'claude':    return await senseClaudeState(rcfg);
       case 'codex':     return senseCodexState();
-      case 'kimi':      return senseKimiState(rcfg);
       case 'builtin':   return builtinState('builtin');
       case 'local-coder': return await senseOllamaState('local-coder', rcfg);
       default:          return builtinState(backend);
@@ -1485,7 +1474,7 @@ export async function getBackendResourceState(
       costPerMTokenOut: 0,
       p50LatencyMs: null,
       snapshotAt: new Date().toISOString(),
-      reason: 'sensing failed — treating as open',
+      reason: 'resource sensing failed; capacity unknown',
       backoffUntilMs: null,
     };
   }

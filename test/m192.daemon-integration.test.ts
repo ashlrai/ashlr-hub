@@ -185,7 +185,7 @@ import { onFleetEvent } from '../src/core/fleet/event-bus.js';
 import { setKill } from '../src/core/sandbox/policy.js';
 import {
   makeFixture,
-  makeCfg,
+  makeCfg as makeBaseCfg,
   type H1Fixture,
 } from './helpers/h1-fixture.js';
 
@@ -304,6 +304,18 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 // Helpers.
 // ---------------------------------------------------------------------------
+
+/** Keep hook fixtures on known resource headroom, separate from subscription admission. */
+function makeCfg(overrides?: Partial<AshlrConfig>): AshlrConfig {
+  if (!overrides?.foundry) return makeBaseCfg(overrides);
+  return makeBaseCfg({
+    ...overrides,
+    foundry: {
+      resourceOverrides: { claude: { availability: 'open', usedPct: 10 } },
+      ...overrides.foundry,
+    },
+  });
+}
 
 /** Enroll a repo and force routeBackend to return a non-builtin (frontier) backend. */
 function enrollFrontierRepo() {

@@ -1,30 +1,19 @@
 /**
- * claude-usage.ts — M253 real-time Claude subscription usage reader.
+ * claude-usage.ts — M253 local Claude transcript consumption reader.
  *
  * Reads ~/.claude/projects/**\/*.jsonl (the ccusage method) to compute actual
- * rolling token consumption over a 5-hour and 7-day window. This is the ONLY
- * programmatically-accessible source of Claude Code subscription usage —
- * stats-cache.json is dead on most machines.
+ * rolling token consumption over a 5-hour and 7-day window. These local files
+ * do not include other devices or Claude surfaces and cannot reveal remaining
+ * subscription allowance. Provider rate-limit events/readings supply that.
  *
  * TOKEN WEIGHTING:
  *   total = input_tokens + output_tokens
  *         + cache_creation_input_tokens + cache_read_input_tokens
  *
- *   All four fields count toward the subscription limit (Anthropic bills and
- *   rate-limits on the sum of all input variants plus output). cache_read is
- *   discounted by Anthropic on cost (~10x cheaper) but still consumes message
- *   quota, so we count it at 1:1 for conservative availability estimation.
- *   The ccusage project uses the same four-field sum.
- *
- * PUBLISHED CLAUDE CODE SUBSCRIPTION LIMITS (as of 2025, Anthropic docs):
- *   Pro  ($20/mo):  ~900 messages / 5h rolling window (varies by model)
- *   Max5 ($100/mo): ~5× Pro ≈ 4500 messages / 5h (Anthropic published "5x more")
- *   Max20($200/mo): ~20× Pro ≈ unlimited/"much higher" (Anthropic: "20x more")
- *
- *   Anthropic does NOT publish a per-5h TOKEN cap; the cap is message-count
- *   based. Token totals are still the best proxy: a high token session burns
- *   multiple "message credits" faster. We offer both token and message counting
- *   and default to messages (most conservative / most comparable to the plan).
+ *   This sum records reported token fields; it is not a conversion to plan
+ *   utilization or dollars. Usage depends on model, effort and context, with
+ *   allowance shared across Claude surfaces. There is no fixed message count:
+ *   https://support.claude.com/en/articles/11647753-how-do-usage-and-length-limits-work
  *
  *   Config overrides: foundry.claudeResource.{fiveHourTokenCap, weeklyTokenCap,
  *   fiveHourMessageCap, weeklyMessageCap, protectPct}
@@ -47,21 +36,19 @@ import * as path from 'path';
 import * as os from 'os';
 
 // ---------------------------------------------------------------------------
-// Published default limits (Anthropic Claude Code subscription, 2025)
+// Historical exports retained for API compatibility, not provider quotas.
 // ---------------------------------------------------------------------------
 
 /**
- * Default 5-hour message caps by plan tier.
- * Source: Anthropic support docs + ccusage community calibration.
- * Pro ≈ 900 msgs/5h; Max5 ≈ 4500; Max20 ≈ "very high" (we use 9000 as floor).
+ * @deprecated Historical estimates. Do not use these as provider limits or
+ * zero-config routing defaults; use observed provider readings instead.
  */
 export const DEFAULT_5H_MESSAGE_CAP_PRO   = 900;
 export const DEFAULT_5H_MESSAGE_CAP_MAX5  = 4500;
 export const DEFAULT_5H_MESSAGE_CAP_MAX20 = 9000;
 
 /**
- * Default 7-day message caps (conservative weekly limits).
- * Not officially published; derived as 7 × 24/5 × 5h cap (rolling windows overlap).
+ * @deprecated Historical extrapolations, not observed weekly allowances.
  */
 export const DEFAULT_7D_MESSAGE_CAP_PRO   = DEFAULT_5H_MESSAGE_CAP_PRO   * Math.floor((7 * 24) / 5); // ≈30k
 export const DEFAULT_7D_MESSAGE_CAP_MAX5  = DEFAULT_5H_MESSAGE_CAP_MAX5  * Math.floor((7 * 24) / 5); // ≈150k

@@ -795,6 +795,10 @@ describe('SharedWorkQueueCoordinator two-machine disjoint', () => {
       daemon: { dailyBudgetUsd: 10, perTickItems: 1, parallel: 1, intervalMs: 100 },
       foundry: {
         allowedBackends: ['claude'],
+        // Resource direction has its own monitor, separate from the fresh
+        // subscription reading below. Keep this inert fixture on Claude so it
+        // reaches quota reservation instead of the unknown-headroom local clamp.
+        resourceOverrides: { claude: { availability: 'open', usedPct: 10 } },
         // The observational router retains its historical fallback for unknown
         // windows. The final effect-boundary reservation must reject this
         // configuration instead of turning that advisory fallback into launch

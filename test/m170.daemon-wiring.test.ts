@@ -239,6 +239,9 @@ function makeFrontierCfg(extra: Partial<AshlrConfig['foundry']> = {}): AshlrConf
   return makeCfg({
     foundry: {
       allowedBackends: ['claude' as import('../src/core/types.js').EngineId],
+      // The resource monitor is independent of the mocked subscription gate.
+      // Supply inert headroom so these tests exercise their frontier dispatch.
+      resourceOverrides: { claude: { availability: 'open', usedPct: 10 } },
       ...extra,
     },
   });
