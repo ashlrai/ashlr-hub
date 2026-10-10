@@ -2,10 +2,11 @@
 
 Phantom is the local execution and observation kernel for [Phantom](NORTH-STAR.md).
 It ships a TypeScript/ESM CLI and SDK plus a React web console, with Node 22.15+
-as the package runtime floor. The backend primarily uses Node builtins and bundles
-three declared runtime dependencies: MCP transport (`@modelcontextprotocol/sdk`),
-Markdown analysis (`marked`) and archive handling (`tar`). The manifest and lockfile
-are the canonical inventory, not this overview.
+as the package runtime floor. The backend primarily uses Node builtins and uses
+its declared runtime dependencies for transport, authentication, document parsing,
+archive handling and notifications. The [package manifest](https://github.com/ashlrai/phantom/blob/master/package.json) and
+lockfile are the canonical dependency inventory; this overview does not duplicate
+their changing counts or versions.
 
 ## Current runtime map
 
@@ -29,7 +30,7 @@ artifact, not merely a successful process or a populated fleet map.
 Ecosystem products retain their repositories and product boundaries. Shared
 contracts connect capabilities; their presence in an architecture map is not proof
 that a provider, desktop controller or cross-product runtime is commissioned.
-See the [source ecosystem design](https://github.com/ashlrai/ashlr-hub/blob/master/docs/AGENT-NATIVE-ECOSYSTEM.md).
+See the [source ecosystem design](https://github.com/ashlrai/phantom/blob/master/docs/AGENT-NATIVE-ECOSYSTEM.md).
 
 ## Legacy fleet activation boundary
 

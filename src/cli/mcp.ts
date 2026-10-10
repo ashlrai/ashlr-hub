@@ -11,7 +11,8 @@
  * interactively with the real target paths. In tests, always pass --config to a temp file.
  */
 
-import { readFileSync, writeFileSync, existsSync, copyFileSync, lstatSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, copyFileSync, accessSync, constants, statSync, realpathSync, lstatSync, renameSync, unlinkSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { resolve, join, dirname, delimiter, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +20,8 @@ import { mkdirSync } from 'node:fs';
 
 import type { McpRegistry, McpServerSpec, McpServerHealth } from '../core/types.js';
 import { locusServerSpec } from '../core/integrations/locus.js';
+import { lexiconServerSpec, pathWithinProject } from '../core/integrations/lexicon-mcp.js';
+import { discoverCompanionProjectMcp } from '../core/integrations/companion-project-mcp.js';
 import { companionExecutableCandidates, companionExecutableKind } from '../core/companion-inventory.js';
 
 // ---------------------------------------------------------------------------
@@ -99,7 +102,26 @@ function fleetEngineMcpIsolationEnabled(): boolean {
   return process.env['ASHLR_MCP_HOST'] === FLEET_ENGINE_MCP_HOST;
 }
 
-function discoverRegistryForMcpHost(discoverMcpServers: () => McpRegistry): McpRegistry {
+function discoverRegistryForMcpHost(discoverMcpServers: () => McpRegistry, args: string[] = []): McpRegistry {
+  const values = new Map<string, string>();
+  let jsonSeen = false;
+  for (let index = 0; index < args.length; index++) {
+    const flag = args[index]!;
+    if (flag === '--json') {
+      if (jsonSeen) throw new Error('Duplicate --json option');
+      jsonSeen = true;
+      continue;
+    }
+    if (!['--project', '--client', '--config'].includes(flag) || values.has(flag)) throw new Error('Unknown or duplicate scoped MCP option');
+    const value = args[++index];
+    if (!value || value.startsWith('--')) throw new Error(`${flag} requires a value`);
+    values.set(flag, value);
+  }
+  if (values.size) {
+    if (values.size !== 3) throw new Error('Scoped MCP requires --project <absolute root> --client <id> --config <absolute project config>');
+    if (fleetEngineMcpIsolationEnabled()) throw new Error('Project-scoped MCP is unavailable inside the fleet gateway');
+    return discoverCompanionProjectMcp({ project: values.get('--project')!, client: values.get('--client')!, config: values.get('--config')! });
+  }
   // The sandboxed fleet's strict Claude MCP config launches only `ashlr mcp`.
   // That nested gateway must not re-scan the user's global/home MCP configs.
   if (fleetEngineMcpIsolationEnabled()) return { servers: [] };
@@ -110,12 +132,13 @@ function discoverRegistryForMcpHost(discoverMcpServers: () => McpRegistry): McpR
 // Subcommand: run (default)
 // ---------------------------------------------------------------------------
 
-async function cmdMcpRun(): Promise<number> {
+async function cmdMcpRun(args: string[] = []): Promise<number> {
   // Pure stdio — log only to stderr, never stdout
   try {
+    if (args.includes('--json')) throw new Error('--json is supported by list and doctor only');
     const { discoverMcpServers } = await importRegistry();
     const { startGateway } = await importGateway();
-    const registry = discoverRegistryForMcpHost(discoverMcpServers);
+    const registry = discoverRegistryForMcpHost(discoverMcpServers, args);
     process.stderr.write(`[ashlr mcp] starting gateway with ${registry.servers.length} discovered server(s)\n`);
     await startGateway(registry);
     return 0;
@@ -136,8 +159,9 @@ async function cmdMcpList(args: string[]): Promise<number> {
   const { discoverMcpServers } = await importRegistry();
   const { getToolsRegistry } = await importToolsRegistry();
 
-  const registry = discoverRegistryForMcpHost(discoverMcpServers);
-  const toolsReg = getToolsRegistry();
+  const registry = discoverRegistryForMcpHost(discoverMcpServers, args);
+  const scoped = args.includes('--project');
+  const toolsReg = scoped ? { tools: [], state: 'not-inspected' } : getToolsRegistry();
 
   // M31: native ashlr tools served by the gateway itself (no probe needed).
   const { nativeToolDefs } = await import('../core/mcp-native.js');
@@ -156,6 +180,7 @@ async function cmdMcpList(args: string[]): Promise<number> {
           servers: safe,
           tools: toolsReg,
           native: native.map(t => ({ name: t.name, safety: t.safety })),
+          ...(scoped ? { scope: { companion: 'lexicon', runtime: 'not-probed', vocabularyTrust: 'not-inspected', nativeGatewayToolsAvailable: true } } : {}),
         },
         null,
         2,
@@ -219,6 +244,10 @@ async function cmdMcpList(args: string[]): Promise<number> {
   }
 
   // Tools registry summary
+  if (scoped) {
+    console.log(dim('  Scoped Lexicon registration only; handshake and vocabulary trust unverified. Ecosystem inventory omitted.'));
+    return 0;
+  }
   const installed = toolsReg.tools.filter(t => t.installed);
   console.log(bold('  Ecosystem tools') + gray(`  — ${installed.length}/${toolsReg.tools.length} installed`));
   console.log('');
@@ -262,7 +291,7 @@ async function cmdMcpDoctor(args: string[]): Promise<number> {
   const { discoverMcpServers } = await importRegistry();
   const { probeServer } = await importGateway();
 
-  const registry = discoverRegistryForMcpHost(discoverMcpServers);
+  const registry = discoverRegistryForMcpHost(discoverMcpServers, args);
 
   if (!jsonMode) {
     console.log('');
@@ -328,9 +357,10 @@ async function cmdMcpDoctor(args: string[]): Promise<number> {
   }
 
   // Exit 1 if any REQUIRED server is down
-  const anyRequiredDown = healths.some(h => REQUIRED_SERVERS.has(h.name) && !h.ok);
+  const anyRequiredDown = healths.some(h => (REQUIRED_SERVERS.has(h.name) || args.includes('--project')) && !h.ok);
   if (anyRequiredDown && !jsonMode) {
-    console.log(red('  One or more required servers (ashlr, phantom-secrets, locus) are down.'));
+    console.log(red(args.includes('--project') ? '  The selected project/client Lexicon server is down.'
+      : '  One or more required servers (ashlr, phantom-secrets, locus) are down.'));
     console.log('');
   }
 
@@ -549,6 +579,13 @@ const ECOSYSTEM_SERVERS: EcosystemServer[] = [
     args: [],
     label: 'Locus (identity plane)',
   },
+  {
+    name: 'lexicon',
+    probe: 'lexicon-mcp',
+    command: 'lexicon-mcp',
+    args: [],
+    label: 'Lexicon (project vocabulary)',
+  },
 ];
 
 /**
@@ -574,7 +611,7 @@ export function buildEcosystemMcpEntry(srv: EcosystemMcpEntry): {
 } {
   if (srv.name === 'locus') {
     const spec = locusServerSpec({
-      client: 'ashlr-hub',
+      client: srv.env?.['LOCUS_CLIENT'] ?? 'ashlr-hub',
       command: srv.command || undefined,
       locusHome: srv.env?.['LOCUS_HOME'],
       sessionId: srv.env?.['LOCUS_SESSION_ID'],
@@ -584,6 +621,14 @@ export function buildEcosystemMcpEntry(srv: EcosystemMcpEntry): {
       args: spec.args ?? [],
       env: spec.env,
     };
+  }
+  if (srv.name === 'lexicon') {
+    const project = srv.env?.['LEXICON_CWD'];
+    const vocabulary = srv.env?.['LEXICON_PATH'];
+    if (!project || !vocabulary || !isAbsolute(project) || !isAbsolute(vocabulary)
+        || !pathWithinProject(project, vocabulary) || !isAbsolute(srv.command)) {
+      throw new Error('Lexicon registration requires an explicit project/client binding');
+    }
   }
   return {
     command: srv.command,
@@ -648,6 +693,16 @@ export function mergeEcosystemServers(
   detected: EcosystemMcpEntry[],
   settingsPath: string,
 ): string[] {
+  let present = false;
+  try {
+    const metadata = lstatSync(settingsPath);
+    if (!metadata.isFile() || metadata.nlink !== 1) throw new Error('Refusing to replace a non-regular or multiply linked MCP config. ' + SETTINGS_REFUSAL);
+    present = true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  const before = present ? readFileSync(settingsPath, 'utf8') : undefined;
+  // Preserve owner validation of every existing server/environment before any write.
   const existing = loadAshlrSettings(settingsPath);
   const existingServers = existing.mcpServers ?? {};
 
@@ -659,9 +714,15 @@ export function mergeEcosystemServers(
     const prev = mergedServers[srv.name];
 
     if (prev) {
+      if (srv.name === 'lexicon' && (prev.command !== entry.command
+          || JSON.stringify(prev.args ?? []) !== JSON.stringify(entry.args)
+          || prev.env?.['LEXICON_CWD'] !== entry.env?.['LEXICON_CWD']
+          || prev.env?.['LEXICON_PATH'] !== entry.env?.['LEXICON_PATH'])) {
+        throw new Error('Existing Lexicon registration has a different binding; preserving it. Choose a separate project/client config.');
+      }
       // Upgrade incomplete locus (command-only) so env is present.
       if (srv.name === 'locus' && !locusEntryHasRequiredEnv(prev)) {
-        mergedServers[srv.name] = entry;
+        mergedServers[srv.name] = buildEcosystemMcpEntry({ ...srv, env: { ...srv.env, ...prev.env } });
         added.push(srv.name);
       }
       continue; // already present with good shape — skip
@@ -676,15 +737,75 @@ export function mergeEcosystemServers(
     mcpServers: mergedServers,
   };
 
+  if (added.length === 0 && present) return added;
+  // Atomic publication must not expand an existing config's write permissions.
+  if (present) accessSync(settingsPath, constants.W_OK);
+
   const dir = dirname(settingsPath);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(settingsPath, JSON.stringify(merged, null, 2) + '\n', 'utf8');
+  const temporary = join(dir, `.phantom-mcp-${randomUUID()}.tmp`);
+  try {
+    writeFileSync(temporary, JSON.stringify(merged, null, 2) + '\n', { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    if (existsSync(settingsPath) !== present || (present && readFileSync(settingsPath, 'utf8') !== before)) {
+      throw new Error('MCP config changed during onboarding; preserving the newer config');
+    }
+    renameSync(temporary, settingsPath);
+  } finally {
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
   return added;
 }
 
 async function cmdMcpEcosystem(args: string[]): Promise<number> {
   const writeMode = args.includes('--write');
-  const settingsPath = ashlrSettingsPath();
+  const value = (flag: string): string | undefined => {
+    const index = args.indexOf(flag);
+    if (index === -1) return undefined;
+    const next = args[index + 1];
+    if (!next || next.startsWith('--')) throw new Error(`${flag} requires a value`);
+    return next;
+  };
+  let settingsPath = ashlrSettingsPath();
+  let lexiconBinding: { projectRoot: string; client: string } | undefined;
+  let only: string | undefined;
+  const canonicalPath = (candidate: string): string => {
+    let ancestor = candidate;
+    while (!existsSync(ancestor)) {
+      try {
+        lstatSync(ancestor);
+        throw new Error('Refusing an existing dangling path link during onboarding');
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+      ancestor = dirname(ancestor);
+    }
+    return resolve(realpathSync(ancestor), candidate.slice(ancestor.length).replace(/^[/\\]+/, ''));
+  };
+  try {
+    only = value('--only');
+    const project = value('--project');
+    const client = value('--client');
+    const config = value('--config');
+    if (only !== undefined && only !== 'lexicon') throw new Error('--only currently supports lexicon');
+    if (only || project || client || config) {
+      if (only !== 'lexicon' || !project || !client || !config || !isAbsolute(project) || !isAbsolute(config)) {
+        throw new Error('Scoped onboarding requires --only lexicon --project <absolute root> --client <id> --config <absolute project config>');
+      }
+      const projectRoot = realpathSync(project);
+      if (!statSync(projectRoot).isDirectory()) throw new Error('Project root must be a directory');
+      // Resolve existing ancestors too, so a symlink cannot send a project write into HOME.
+      const canonicalConfig = canonicalPath(config);
+      if (!pathWithinProject(projectRoot, canonicalConfig)) throw new Error('MCP config must remain inside the explicit project root');
+      settingsPath = canonicalConfig;
+      lexiconBinding = { projectRoot, client };
+      const vocabulary = lexiconServerSpec({ ...lexiconBinding, command: resolve(projectRoot, 'lexicon-mcp'), launch: 'stdio' }).env['LEXICON_PATH']!;
+      const canonicalVocabulary = canonicalPath(vocabulary);
+      if (!pathWithinProject(projectRoot, canonicalVocabulary)) throw new Error('Lexicon vocabulary/trust paths must remain inside the explicit project root');
+    }
+  } catch (err) {
+    console.error(red('error: ') + (err instanceof Error ? err.message : String(err)));
+    return 2;
+  }
 
   console.log('');
   console.log(bold('  ashlr mcp ecosystem') + gray('  — unified MCP surface (M66)'));
@@ -696,13 +817,22 @@ async function cmdMcpEcosystem(args: string[]): Promise<number> {
   const refused: Array<{ server: EcosystemServer; reason: 'ambiguous' | 'unsupported-launcher' }> = [];
   const directories = (process.env['PATH'] ?? '').split(delimiter).filter(isAbsolute);
 
-  for (const srv of ECOSYSTEM_SERVERS) {
-    const candidates = companionExecutableCandidates(srv.probe, directories);
+  for (const srv of ECOSYSTEM_SERVERS.filter(s => !only || s.name === only)) {
+    let candidates = companionExecutableCandidates(srv.probe, directories);
+    let cliLaunch = false;
+    if (srv.name === 'lexicon' && candidates.length === 0) {
+      candidates = companionExecutableCandidates('lexicon', directories);
+      cliLaunch = true;
+    }
     if (candidates.length === 0) missing.push(srv);
     else if (candidates.length > 1) refused.push({ server: srv, reason: 'ambiguous' });
-    else if (companionExecutableKind(candidates[0]!) !== 'native') {
-      refused.push({ server: srv, reason: 'unsupported-launcher' });
-    } else detected.push({ ...srv, resolvedBin: candidates[0]! });
+    else {
+      const kind = companionExecutableKind(candidates[0]!);
+      if (kind !== 'native' && !(srv.name === 'lexicon' && kind === 'script')) {
+        refused.push({ server: srv, reason: 'unsupported-launcher' });
+      } else detected.push({ ...srv, command: candidates[0]!,
+        args: cliLaunch ? ['mcp'] : srv.args, resolvedBin: candidates[0]! });
+    }
   }
 
   // Load current settings to check registration state.
@@ -720,8 +850,9 @@ async function cmdMcpEcosystem(args: string[]): Promise<number> {
     console.log('');
     for (const srv of detected) {
       const isRegistered = Boolean(currentServers[srv.name]);
-      const regStr = isRegistered ? green('registered') : yellow('not registered');
-      const cmdStr = dim([srv.resolvedBin, ...srv.args].join(' '));
+      const regStr = isRegistered ? green('registered (handshake unverified)')
+        : srv.name === 'lexicon' && !lexiconBinding ? yellow('needs explicit project/client binding') : yellow('not registered');
+      const cmdStr = dim([srv.command, ...srv.args].join(' '));
       console.log(
         '    ' + cyan(pad(srv.label, nameW)) +
         '  ' + regStr +
@@ -744,24 +875,36 @@ async function cmdMcpEcosystem(args: string[]): Promise<number> {
   if (refused.length > 0) {
     console.log(bold('  Not selected (skipped):'));
     for (const { server, reason } of refused) {
-      console.log('    ' + dim(server.label) + gray(` — ${reason}; choose one installed native executable through PATH.`));
+      const executable = server.name === 'lexicon' ? 'native or Node' : 'native';
+      console.log('    ' + dim(server.label) + gray(` — ${reason}; choose one installed ${executable} executable through PATH.`));
     }
     console.log('');
   }
 
   if (!writeMode) {
-    console.log(
+    if (lexiconBinding) {
+      console.log(dim(`  Plan only: ${settingsPath}; add --write to register in this project config.`));
+      console.log(dim('  Point the intended MCP client at this JSON config. This does not install a client or grant project trust.'));
+    } else console.log(
       dim('  Run ') + cyan('ashlr mcp ecosystem --write') +
       dim(' to register available servers into ~/.ashlr/settings.json.')
     );
-    console.log(dim('  The gateway then aggregates them automatically on next start.'));
+    if (!lexiconBinding) console.log(dim('  The gateway discovers registered entries on next start; handshake remains unverified.'));
+    if (detected.some(s => s.name === 'lexicon') && !lexiconBinding) {
+      console.log(dim('  Lexicon requires: ecosystem --only lexicon --project <absolute root> --client <id> --config <absolute project config> [--write]'));
+    }
     console.log('');
     return 0;
   }
 
+  if (detected.some(s => s.name === 'lexicon') && !lexiconBinding) {
+    console.log(yellow('  Lexicon skipped: explicit project/client binding is required; no vocabulary trust was granted.'));
+  }
+
   // --write: merge detected servers into ~/.ashlr/settings.json.
-  if (detected.length === 0) {
-    console.log(yellow('  Nothing to register — no ecosystem servers found in PATH.'));
+  const registerable = detected.filter(s => s.name !== 'lexicon' || lexiconBinding);
+  if (registerable.length === 0) {
+    console.log(yellow('  Nothing to register — no available servers with the required binding.'));
     console.log('');
     return 0;
   }
@@ -769,7 +912,12 @@ async function cmdMcpEcosystem(args: string[]): Promise<number> {
   let added: string[];
   try {
     added = mergeEcosystemServers(
-      detected.map(s => ({ name: s.name, command: s.resolvedBin, args: s.args })),
+      registerable.map(s => ({
+        name: s.name,
+        ...(s.name === 'lexicon' && lexiconBinding
+          ? lexiconServerSpec({ ...lexiconBinding, command: s.command, launch: s.args.length ? 'cli' : 'stdio' })
+          : { command: s.command, args: s.args }),
+      })),
       settingsPath,
     );
   } catch (error) {
@@ -786,10 +934,11 @@ async function cmdMcpEcosystem(args: string[]): Promise<number> {
       console.log('    ' + cyan('+ ' + name));
     }
     console.log('');
-    console.log(
-      dim('  Agents pointed at ') + cyan('ashlr mcp') +
-      dim(' now get all registered ecosystem tools automatically.')
-    );
+    if (lexiconBinding) console.log(dim('  Point the intended MCP client at this project JSON config; handshake and project trust remain unverified.'));
+    else console.log(
+        dim('  Agents pointed at ') + cyan('ashlr mcp') +
+        dim(' can discover these entries; MCP handshake remains unverified.')
+      );
   }
   console.log('');
 
@@ -811,10 +960,12 @@ function printHelp(): void {
     ['(default)',                       'Run the aggregation gateway on stdio. Point any agent here.'],
     ['list [--json]',                   'Print discovered servers + ecosystem tools summary.'],
     ['doctor [--json]',                 'Probe each server; exit 1 if required servers (ashlr/phantom/locus) are down.'],
+    ['[run|list|doctor] --project <root> --client <id> --config <file>', 'Consume only matching Lexicon registration; no HOME scan or vocabulary trust grant. Native gateway tools remain available.'],
     ['install <claude|ashlrcode>',      'Idempotently add the ashlr gateway to a target config (backs up first).'],
     ['install <target> --config <path>', 'Install to a specific config path (use in tests to avoid real configs).'],
     ['ecosystem',                        'Detect installed ecosystem MCP servers + show registration status.'],
     ['ecosystem --write',                'Register detected servers into ~/.ashlr/settings.json (idempotent).'],
+    ['ecosystem --only lexicon --project <root> --client <id> --config <file> [--write]', 'Plan/register Lexicon in an explicit project config; does not grant vocabulary trust.'],
   ];
 
   const cmdW = Math.max(...cmds.map(([c]) => c.length));
@@ -868,16 +1019,18 @@ export async function cmdMcp(args: string[]): Promise<number> {
   }
 
   // Default / explicit "run"
-  if (!sub || sub === 'run') {
-    return cmdMcpRun();
+  if (!sub || sub === 'run' || sub.startsWith('--')) {
+    return cmdMcpRun(sub === 'run' ? args.slice(1) : args);
   }
 
   if (sub === 'list') {
-    return cmdMcpList(args.slice(1));
+    try { return await cmdMcpList(args.slice(1)); }
+    catch (err) { console.error(red('error: ') + (err instanceof Error ? err.message : String(err))); return 2; }
   }
 
   if (sub === 'doctor') {
-    return cmdMcpDoctor(args.slice(1));
+    try { return await cmdMcpDoctor(args.slice(1)); }
+    catch (err) { console.error(red('error: ') + (err instanceof Error ? err.message : String(err))); return 2; }
   }
 
   if (sub === 'install') {

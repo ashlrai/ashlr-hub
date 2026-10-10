@@ -100,6 +100,213 @@ existing identity-environment repair. Unreadable, empty or malformed existing se
 writing, so repair the file first. Valid unrelated keys and server entries are
 preserved. Registration alone does not initialize a vault or prove a handshake.
 
-This helper does not register Lexicon. Its project-bound stdio MCP server and the
-desktop's separately configured native voice service have different setup and
-trust requirements; neither is started by companion inventory.
+Default registration does not add Lexicon globally. Use the explicit project and
+client setup below for its stdio MCP server. The desktop's native voice service
+has separate configuration and trust requirements; neither service is started
+by companion inventory.
+
+## Inspect shipped artifact pins
+
+```sh
+phm companions catalog --json
+```
+
+The package ships review records and exact manifest text for `secrets-native`
+(Secrets 0.7.9 native files) and `lexicon-mcp` (Lexicon 0.5.4 bundled MCP component).
+The records cover macOS arm64 only. They bind the original archive integrity,
+component mapping, expanded file hashes/modes and complete manifest digest.
+Catalog inspection performs no installation or runtime discovery. Companion
+binaries and a Python/Node runtime are not bundled by this catalog.
+
+Its evidence covers disposable installation and Secrets CLI identity or Lexicon
+MCP initialize/tools discovery. It does not establish signed companion build
+provenance, a complete Lexicon CLI, vocabulary trust or working provider access.
+Locus is explicitly unqualified; other platforms have no selectable record.
+
+Supply the reviewed expanded files and their exact manifest. `manifestText` in
+catalog JSON can be materialized explicitly after reviewing the package and
+record; formatting and the final newline are part of the pinned digest. Neither
+catalog selection nor the installer downloads or extracts the source archive.
+Use a shipped pin instead of manually supplying `--sha256`:
+
+```sh
+phm companions plan --catalog lexicon-mcp --artifacts /absolute/reviewed-files \
+  --root /absolute/existing-private-root --json
+phm companions install --catalog lexicon-mcp --artifacts /absolute/reviewed-files \
+  --root /absolute/existing-private-root --python /usr/bin/python3 --json
+```
+
+Catalog mode defaults to `manifest.json`; `--manifest` may select a different
+relative filename with the same exact contents. `--catalog` and `--sha256` are
+mutually exclusive. Unsupported hosts refuse without a fallback. An explicit
+manual digest remains available for separately reviewed artifact records.
+
+## Verify a local provisioning plan
+
+An operator can review an expanded local artifact file set against an
+independently verified manifest SHA256 before planning installation:
+
+```sh
+phm companions plan --artifacts /absolute/reviewed-artifacts \
+  --manifest manifest.json --sha256 VERIFIED_MANIFEST_SHA256 \
+  --root /absolute/existing-destination-parent --json
+```
+
+Both roots must already exist as canonical absolute directories without
+symlink components. The manifest path is relative to the artifact root. Obtain
+the complete manifest digest from a separately reviewed release record; taking
+it from the unverified artifact directory itself provides no independent trust.
+The manifest must bind the exact reviewed product version/source/release URL,
+host platform, explicit file names, sizes, SHA256 values and intended modes.
+It must mark the artifact qualified; a declaration alone is not release evidence.
+No manifest or qualification assertion is generated from installed versions.
+
+The command checks complete file bytes, refuses unsafe links and unexpected
+destination contents, and reports `create`, `replace` or `retain` observations.
+Existing file hashes describe before images; no backup or installation occurs.
+`installed:false`, `runtimeCapability:"not-inspected"`, `effects:[]` and required
+revalidation remain explicit. Exit 0 means a verified plan, exit 1 a blocked
+plan, and exit 2 bad usage. There is no download, archive extraction, source-build
+fallback or apply flag. A plan does not authorize applying its observations.
+The separate explicit installer below accepts only a fresh destination slot.
+
+Locus 0.5.0 release archives lack published checksum sidecars. Do not invent a
+qualified manifest or execute its unpinned source fallback to fill that gap.
+Cross-platform artifacts, installation and clean-machine MCP acceptance remain
+separate qualification steps.
+
+## Install verified local files explicitly
+
+The installer uses supplied local files without downloading companions or running
+a package manager. Review an expanded local file set,
+its independent complete manifest digest, the target root and an existing Python
+runtime before authorizing this filesystem mutation:
+
+```sh
+phm companions install --artifacts /absolute/reviewed-artifacts \
+  --manifest manifest.json --sha256 VERIFIED_MANIFEST_SHA256 \
+  --root /absolute/private-companions \
+  --python /absolute/canonical/python3 --json
+```
+
+The destination root must already exist, belong to the invoking user, and have
+no group or other permissions. The runtime must be a canonical absolute regular
+executable with no group/other write permission. Additional hard links are
+accepted only for a root-owned system runtime. No runtime is selected from PATH
+or installed automatically. macOS and Linux
+require the corresponding exclusive native rename operation. Unsupported
+runtimes, platforms and filesystems are blocked without a fallback.
+
+The installer rechecks the pinned manifest and complete source bytes/modes,
+copies files into private staging using descriptor-relative operations, and
+publishes a complete fresh `<tool>-<version>-<platform>` directory exclusively.
+It never overlays, updates or removes an existing installation. Another process
+publishing the same slot wins or loses without overwriting the winner. Files
+remain data throughout installation: no version/help probe, configuration write,
+credential retrieval, trust grant, MCP handshake or service startup occurs.
+
+The returned anchor identifies the destination directory inode. This protects
+operations from pathname redirection; it is not a sandbox against a hostile
+process with the same user identity that can relocate or mutate owned files.
+`installed:true` establishes the copied file set only, and
+`runtimeCapability:"not-inspected"` remains explicit. Exit 0 means installed,
+exit 1 blocked, exit 2 bad usage and exit 3 uncertain completion. For uncertain
+completion, inspect the destination and preserved staging evidence before
+retrying; no automatic rollback removes a possibly published directory.
+
+A manifest may select a reviewed component such as a bundled MCP server rather
+than the complete companion CLI. Record that distinction in its independent
+qualification evidence. A synthetic test manifest or the manifest's own
+`qualified` declaration cannot establish public artifact provenance. A shipped
+qualified artifact catalog and platform-wide clean-install acceptance are still
+required for automatic out-of-box provisioning.
+
+## Register Lexicon for one project and client
+
+Read-only ecosystem discovery now includes Lexicon. It reports service state
+as unverified and does not register Lexicon into global workbench settings.
+Select an existing project and an intended client explicitly:
+
+```sh
+phm mcp ecosystem --only lexicon --project /absolute/project \
+  --client intended-client --config /absolute/project/.mcp.json
+```
+
+After reviewing the selected installed executable and project binding, adding
+`--write` creates or extends only that project-local config. Existing unrelated
+entries are preserved. Malformed, mismatched, escaping or dangling symlinked,
+or multiply linked configurations are refused. An existing in-project symlink
+resolves to its canonical target; repeating the same registration makes no write.
+The direct `lexicon-mcp` entry uses no arguments, while a selected `lexicon`
+CLI uses `mcp`. The entry has explicit `LEXICON_CWD` and a project/client-scoped
+`LEXICON_PATH` under `.phantom/lexicon`. No vocabulary is opened, project trust
+granted or MCP server started by registration.
+
+Point the intended MCP client at that project config. Registration alone does
+not prove client identity, MCP initialize/tools discovery, vocabulary acceptance
+or provider availability. No identity is re-pinned and no resident grant is
+changed.
+
+## Consume the selected Lexicon config through Phantom
+
+Use the same explicit project, client and config for gateway discovery:
+
+```sh
+phm mcp list --project /absolute/project --client intended-client \
+  --config /absolute/project/.mcp.json --json
+phm mcp --project /absolute/project --client intended-client \
+  --config /absolute/project/.mcp.json
+```
+
+The first command validates metadata without starting Lexicon. The second starts
+the gateway and selected downstream stdio process when invoked by an MCP client.
+`phm mcp doctor` accepts the same binding flags and performs a real bounded
+initialize/tools-list probe. These commands read only that selected Lexicon
+registration, with no fallback to home configs. The exact installed executable,
+launch arguments and project/client vocabulary paths must match; extra server
+environment variables, including Lexicon's trust-bypass option, are refused.
+For the reviewed Lexicon 0.5.x contract, the selected project must have its own
+existing `.git` file or directory: Lexicon otherwise searches ancestor folders
+for vocabulary before checking trust. Vocabulary and client trust/hit-state
+paths must remain regular single-link files inside their selected scope;
+redirecting state symlinks are refused without reading those files.
+The downstream receives scoped HOME/XDG paths, an explicit project working
+directory and a narrow runtime PATH, without provider configuration bridging.
+
+This selects Lexicon's downstream binding. Native Phantom tools remain exposed
+by the gateway under their existing authority rules; the binding does not create
+an overall project authorization sandbox. A handshake or tools listing does not
+grant vocabulary trust or prove a correction/provider workflow.
+
+## Plan packaged client wiring explicitly
+
+After installing the catalog's Lexicon MCP component, plan two separate entries:
+
+```sh
+phm companions client-plan --installation /absolute/private-companions \
+  --project /absolute/project --client intended-client \
+  --registry /absolute/project/.phantom-mcp.json \
+  --config /absolute/project/.mcp.json --json
+```
+
+`--installation` is the private parent passed to the installer, not the version
+slot. The planner selects and rechecks the complete installed component against
+shipped catalog hashes and modes. Changed, missing, extra or linked payload
+files refuse. Both explicit JSON paths must be distinct, project-local and
+outside Lexicon state. A project-root Git marker is required.
+
+The internal registry patch contains the directly installed Lexicon server. The
+client patch contains only Phantom's gateway, with the current absolute Node
+runtime, this package's `bin/ashlr`, explicit scope arguments and a narrow PATH.
+Point the intended MCP client at the client config, keeping the internal registry
+separate. Existing matching entries are retained; conflicting or malformed
+configuration refuses. Output contains entry patches and before-image hashes,
+without printing unrelated configuration or environment values.
+
+This command is inert: it creates neither file and starts neither process.
+Review and merge each patch into its indicated file, preserving unrelated fields
+and entries. Revalidate the component and configurations before applying or
+executing. The wrapper requires the actual Node host; native/Bun launcher support
+is not qualified here. The external client's inherited environment is not
+sandboxed. Downstream Lexicon isolation and native Phantom authority retain the
+boundaries described above; no vocabulary trust or provider access is granted.

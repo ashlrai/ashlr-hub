@@ -40,6 +40,7 @@ import { listFirmResources, listFirmResourceTemplates, readFirmResource } from '
 import { hasSecretLikeArgv, redactedCommand } from './mcp-argv-safety.js';
 import { scrubSecrets } from './util/scrub.js';
 import { getLocusJobEnv, hasInheritedLocusSession, hasLocusJobEnv, withLocusJobChildEnv } from './integrations/locus-job-env.js';
+import { companionProjectRuntime } from './integrations/companion-project-mcp.js';
 
 // ---------------------------------------------------------------------------
 // M105: Browser MCP probe + tool-call helpers
@@ -246,6 +247,11 @@ async function withDeadline<T>(operation: Promise<T>, ms: number, label: string)
 }
 
 function downstreamEnv(spec: McpServerSpec, cfg?: ReturnType<typeof loadConfig>): Record<string, string> {
+  const scoped = companionProjectRuntime(spec);
+  if (scoped) {
+    refuseSharedJobGateway();
+    return { ...scoped.env, [GATEWAY_ENV_MARKER]: '1' };
+  }
   // Validate AFTER the per-server override. A declared HOME/LOCUS scope must
   // never replace a delegated job's captured identity at the final spawn.
   const merged = withLocusJobChildEnv({
@@ -283,6 +289,7 @@ async function connectDownstream(spec: McpServerSpec, timeoutMs: number, cfg?: R
   const transport = new StdioClientTransport({
     command: spec.command,
     args: spec.args,
+    cwd: companionProjectRuntime(spec)?.cwd,
     // Persistent recovery reuses the exact captured startup environment. One-off
     // job probes validate the final configured override against their snapshot.
     env: capturedEnv ? { ...capturedEnv } : downstreamEnv(spec, cfg),
@@ -340,7 +347,9 @@ export async function probeServer(
   // M10: load config once so probeServer also bridges env into probed children.
   // loadConfig() is lightweight (fs read + merge); safe to call per-probe.
   let cfgForProbe: ReturnType<typeof loadConfig> | undefined;
-  try { cfgForProbe = loadConfig(); } catch { /* non-fatal: fall back to process.env */ }
+  if (!companionProjectRuntime(spec)) {
+    try { cfgForProbe = loadConfig(); } catch { /* non-fatal: fall back to process.env */ }
+  }
   let client: Client | null = null;
   try {
     client = await connectDownstream(spec, timeoutMs, cfgForProbe);
@@ -405,7 +414,9 @@ export async function startGateway(
 ): Promise<void> {
   refuseSharedJobGateway();
   let gatewayCfg: ReturnType<typeof loadConfig> | undefined;
-  try { gatewayCfg = loadConfig(); } catch { /* non-fatal; retain narrow child env */ }
+  if (!registry.servers.length || registry.servers.some(spec => !companionProjectRuntime(spec))) {
+    try { gatewayCfg = loadConfig(); } catch { /* non-fatal; retain narrow child env */ }
+  }
 
   const downstreams: Downstream[] = registry.servers.filter((spec) => {
     if (!isSelfGateway(spec)) return true;
