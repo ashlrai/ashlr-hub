@@ -27,8 +27,8 @@
  *  8. CACHE: repeated calls within 30s return same readAt (cache hit).
  *     invalidateClaudeUsageCache() resets it.
  *
- *  9. DEFAULT CAP: when no fiveHourMessageCap configured, defaults to
- *     DEFAULT_5H_MESSAGE_CAP_PRO (900).
+ *  9. NO INVENTED CAP: absent provider readings and explicit local budgets
+ *     leave headroom unknown; transcript totals remain separately measurable.
  *
  * 10. NO-REGRESSION: m250 stats-cache + codex + nim + gateway tests still pass.
  */
@@ -108,7 +108,6 @@ function writeTranscript(projectDir: string, lines: string[]): void {
   writeFileSync(join(projectPath, 'session.jsonl'), lines.join('\n') + '\n');
 }
 
-const MS_5H = 5 * 60 * 60 * 1000;
 const MS_7D = 7 * 24 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
@@ -540,12 +539,11 @@ describe('M253 readClaudeUsage — cache', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 8. Default cap (Pro = 900)
+// 8. Missing or invalid local budgets must not invent provider quotas.
 // ---------------------------------------------------------------------------
 
-describe('M253 senseClaudeState — default cap is Pro (900 messages/5h)', () => {
-  it('uses DEFAULT_5H_MESSAGE_CAP_PRO when fiveHourMessageCap not configured', async () => {
-    // 450 messages = 50% of 900
+describe('M253 senseClaudeState — no inferred subscription cap', () => {
+  it('keeps headroom unknown even when transcripts contain measured messages', async () => {
     writeTranscript('proj-a', Array.from({ length: 450 }, () =>
       makeAssistantLine({ tsOffsetMs: -60_000, inputTokens: 10, outputTokens: 5 })
     ));
@@ -555,7 +553,6 @@ describe('M253 senseClaudeState — default cap is Pro (900 messages/5h)', () =>
     }));
 
     const { getBackendResourceState } = await import('../src/core/fabric/resource-monitor.js');
-    // No fiveHourMessageCap → uses default 900
     const cfg = {
       version: 1, roots: ['/tmp'], editor: 'cursor', staleDays: 30,
       categories: {}, tidyRules: [], keepers: [], models: { lmstudio: '', ollama: '', providerChain: [] },
@@ -564,9 +561,21 @@ describe('M253 senseClaudeState — default cap is Pro (900 messages/5h)', () =>
     };
 
     const state = await getBackendResourceState('claude', cfg);
-    expect(state.availability).toBe('open'); // 50% < 75% threshold
-    expect(state.usedPct).toBe(50);
-    expect(state.cap).toBe(900);
+    expect(state.availability).toBe('unknown');
+    expect(state.usedPct).toBeNull();
+    expect(state.cap).toBeNull();
+    expect(state.resetsAt).toBeNull();
+    expect(state.reason).toContain('subscription headroom unknown');
+    const { readClaudeUsage } = await import('../src/core/fabric/claude-usage.js');
+    expect(readClaudeUsage().messages5h).toBe(450);
+  });
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])('rejects an invalid configured local cap %s', async (fiveHourMessageCap) => {
+    const { getBackendResourceState } = await import('../src/core/fabric/resource-monitor.js');
+    const state = await getBackendResourceState('claude', { foundry: { claudeResource: { fiveHourMessageCap } } });
+    expect(state.availability).toBe('unknown');
+    expect(state.usedPct).toBeNull();
+    expect(state.cap).toBeNull();
   });
 
   it('DEFAULT_5H_MESSAGE_CAP_PRO is exported and equals 900', async () => {

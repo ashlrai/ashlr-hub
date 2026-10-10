@@ -40,6 +40,7 @@ import { join } from 'node:path';
 let tmpHome: string;
 let origHome: string | undefined;
 let origNimApiKey: string | undefined;
+let origMoonshotApiKey: string | undefined;
 
 const FAKE_NIM_API_KEY = 'm250-fake-nim-credential';
 
@@ -49,8 +50,10 @@ beforeEach(() => {
   mkdirSync(join(tmpHome, '.claude'), { recursive: true });
   origHome = process.env['HOME'];
   origNimApiKey = process.env['NVIDIA_NIM_API_KEY'];
+  origMoonshotApiKey = process.env['MOONSHOT_API_KEY'];
   process.env['HOME'] = tmpHome;
   delete process.env['NVIDIA_NIM_API_KEY'];
+  delete process.env['MOONSHOT_API_KEY'];
   // Reset module registry so each test gets a fresh resource-monitor
   // (clears the in-memory snapshot cache and backoff store).
   vi.resetModules();
@@ -60,6 +63,8 @@ afterEach(() => {
   process.env['HOME'] = origHome;
   if (origNimApiKey === undefined) delete process.env['NVIDIA_NIM_API_KEY'];
   else process.env['NVIDIA_NIM_API_KEY'] = origNimApiKey;
+  if (origMoonshotApiKey === undefined) delete process.env['MOONSHOT_API_KEY'];
+  else process.env['MOONSHOT_API_KEY'] = origMoonshotApiKey;
   rmSync(tmpHome, { recursive: true, force: true });
   vi.restoreAllMocks();
   vi.resetModules();
@@ -324,10 +329,7 @@ describe('M250 ResourceMonitor — Claude stats-cache 7d sum', () => {
     expect(state.availability).toBe('open');
   });
 
-  it('uses transcript sensing (not unknown) when no weeklyMessageCap configured', async () => {
-    // M253: with no weeklyMessageCap, transcript sensing (5h window, default Pro cap)
-    // is the primary path — it never returns 'unknown'. (Supersedes the old M250
-    // stats-cache-only behavior where no cap meant unknown.)
+  it('keeps headroom unknown without a provider reading or configured local budget', async () => {
     writeStatsCache([{ daysAgo: 0, messageCount: 500 }]);
 
     vi.doMock('../src/core/observability/codex-source.js', () => ({
@@ -338,8 +340,10 @@ describe('M250 ResourceMonitor — Claude stats-cache 7d sum', () => {
     const cfg = withFoundry({ allowedBackends: ['claude'] as EngineId[] });
 
     const state = await getBackendResourceState('claude', cfg);
-    expect(state.availability).not.toBe('unknown');
-    expect(['open', 'near', 'throttled', 'exhausted']).toContain(state.availability);
+    expect(state.availability).toBe('unknown');
+    expect(state.usedPct).toBeNull();
+    expect(state.cap).toBeNull();
+    expect(state.reason).toContain('subscription headroom unknown');
   });
 
   it('returns open (0%) gracefully when stats-cache.json is missing', async () => {
@@ -606,6 +610,54 @@ describe('M250 ResourceMonitor — NIM backoff store', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Kimi must use the same executor credential prerequisite as other API engines.
+describe('Kimi resource credential parity', () => {
+  it('does not let an open override or concurrency setting manufacture a credential', async () => {
+    const { getBackendResourceState } = await import('../src/core/fabric/resource-monitor.js');
+    const state = await getBackendResourceState('kimi', withFoundry({
+      kimi: { maxConcurrent: 8 },
+      resourceOverrides: { kimi: { availability: 'open' } },
+    }));
+    expect(state.availability).toBe('unreachable');
+    expect(state.usedPct).toBeNull();
+    expect(state.reason).toContain('MOONSHOT_API_KEY');
+  });
+
+  it('resolves the configured engine credential instead of assuming the default key exists', async () => {
+    process.env['MOONSHOT_API_KEY'] = 'm250-fake-kimi-credential';
+    const { getBackendResourceState } = await import('../src/core/fabric/resource-monitor.js');
+    const { BUILTIN_ENGINE_REGISTRY } = await import('../src/core/run/engine-registry.js');
+    const state = await getBackendResourceState('kimi', withFoundry({
+      engines: { kimi: { ...BUILTIN_ENGINE_REGISTRY.kimi!, api: { ...BUILTIN_ENGINE_REGISTRY.kimi!.api!, envKey: 'M250_MISSING_CUSTOM_KEY' } } },
+    }));
+    expect(state.availability).toBe('unreachable');
+    expect(state.reason).toContain('M250_MISSING_CUSTOM_KEY');
+    expect(state.reason).not.toContain('m250-fake-kimi-credential');
+  });
+
+  it('rejects a vault placeholder without leaking it in diagnostics', async () => {
+    process.env['MOONSHOT_API_KEY'] = 'phm_placeholder_token';
+    const { getBackendResourceState } = await import('../src/core/fabric/resource-monitor.js');
+    const state = await getBackendResourceState('kimi', baseCfg());
+    expect(state.availability).toBe('unreachable');
+    expect(state.reason).not.toContain('phm_placeholder_token');
+  });
+
+  it('keeps real backoff with a resolved credential and reports unknown quota separately', async () => {
+    process.env['MOONSHOT_API_KEY'] = 'm250-fake-kimi-credential';
+    const { getBackendResourceState, recordBackoff, clearBackoff } = await import('../src/core/fabric/resource-monitor.js');
+    recordBackoff('kimi', 30_000, '429 rate limit');
+    expect((await getBackendResourceState('kimi', baseCfg())).availability).toBe('throttled');
+    clearBackoff('kimi');
+    const state = await getBackendResourceState('kimi', baseCfg());
+    expect(state.availability).toBe('open');
+    expect(state.usedPct).toBeNull();
+    expect(state.resetsAt).toBeNull();
+    expect(state.reason).toContain('provider quota unreported');
+    expect(state.reason).not.toContain('m250-fake-kimi-credential');
+  });
+});
+
 // 4. Ollama health check — test the never-throw contract
 // ---------------------------------------------------------------------------
 
