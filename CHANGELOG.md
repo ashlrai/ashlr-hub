@@ -3051,7 +3051,7 @@ discovered ID collision are in
 [`docs/MILESTONE-INDEX.md`](docs/MILESTONE-INDEX.md); the mechanics of
 turning any of this on — including four non-obvious gates that block
 unattended activation even after a grant — are in
-`docs/RUNTIME-FLEET-ACTIVATION.md`.
+[`docs/RUNTIME-FLEET-ACTIVATION.md`](docs/RUNTIME-FLEET-ACTIVATION.md).
 
 - **Daemon activation authority replaces its own denials (M470 — see
   collision note below).** Five hard-coded refusals — `DAEMON_ACTIVATION_TRUST_ROOTS`
