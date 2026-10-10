@@ -9,6 +9,23 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.29.9] — Unreleased
+
+### Changed
+- Load doctor, init and setup only for their selected CLI commands. Local
+  fresh-process measurements reduced compiled Node help, version and resource-help
+  startup from about 120 ms to 32–33 ms; installed native and full CI gains remain
+  unmeasured.
+- Keep worker mock compatibility in a lightweight setup module instead of loading
+  test tooling for each worker, preserving mock behavior and complete coverage.
+- Let short Mac checks overlap unfinished general test lanes after the isolated
+  lane settles. All 15 release gates remain required; hosted gains are unmeasured.
+- Explain dependency audit coverage, including the Universe example graph gap.
+
+### Fixed
+- Describe a passed recorded access expiry without claiming the native CLI has
+  signed out. Cached warnings remain non-blocking and suggest checking sign-in.
+
 ## [3.29.8] — Unreleased
 
 ### Added

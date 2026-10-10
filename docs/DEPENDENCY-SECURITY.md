@@ -1,7 +1,7 @@
 # Dependency security policy
 
 Source reviewed on October 10, 2026 at
-`7cad2d08ac96055a3cfe24e8319d4e4caa90e850` configures Phantom's hosted
+`6a731457c7c7d8ad20af4e40cb09132f9270fead` configures Phantom's hosted
 [Dependency Audit](../.github/workflows/dependency-audit.yml) to audit the root
 and Raycast npm lockfiles plus
 `desktop/src-tauri/Cargo.lock` on pull requests, relevant `master` changes,

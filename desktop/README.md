@@ -85,7 +85,7 @@ For routine drift detection, `node scripts/sync-candidate-version.mjs --check`
 uses the root package version as the expected value; writing still requires an
 explicit version.
 
-This source tree targets version 3.29.8; check canonical release availability and exact matching assets before installation.
+This source tree targets version 3.29.9; check canonical release availability and exact matching assets before installation.
 
 Canonical releases use `ashlrai/phantom` and `@ashlr/phantom`.
 Its fixed discovery endpoint is

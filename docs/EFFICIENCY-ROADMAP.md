@@ -1,5 +1,29 @@
 # Phantom efficiency roadmap
 
+## Current measurements and next experiment: 2026-10-10
+
+The 3.29.9 source candidate includes three independent performance changes.
+These are local measurements and a scheduling experiment, not published or
+installed performance claims.
+
+| Change | Observation | Scope |
+|---|---|---|
+| Defer onboarding imports until CLI dispatch | Compiled Node help, version and resource-help startup fell from 117–118 ms to 32–33 ms. | Five alternating fresh-process baseline/head pairs per command on macOS with Node 22.23.2; warm transform cache. Outputs and exit statuses matched. Installed native startup remains unmeasured. |
+| Lightweight worker mock setup | Median local wall time fell from 4.173 s to 3.911 s; reported setup time fell from 427 ms to 71 ms. | Three serial baseline/head pairs over the same five modules and 120 cases with Node 22.22.3 and Vitest 4.1.11. Full-suite gains remain unmeasured. |
+| Overlap short Mac checks with general lanes | Both short jobs become eligible after the isolated lane settles. | All 15 release gates, test membership, fixtures, deadlines and cache identities remain required. Runner contention can offset overlap; no hosted gain has been measured. |
+
+[CI run 38032235502](https://github.com/ashlrai/phantom/actions/runs/38032235502)
+passed all 15 jobs at `cc49a266ca5a94bd7ef4ab78df45178eb2613a88`.
+Its elapsed time was 54m41s. One general Mac lane waited 19m07s for a runner;
+the final short Mac gate added 4m43s after the exhaustive lanes finished.
+The isolated lane finished 19m56s before the last general lane. These timings
+motivate the overlap experiment; they do not predict a guaranteed speedup.
+This historical run is not qualification of a later source revision.
+
+Compare natural hosted runs after the experiment, recording queue time and
+execution time separately. Reuse the original qualified build for publication
+and installation; avoid rebuilding it simply to move it between release stages.
+
 ## Earlier release feedback: 2026-10-08
 
 The 3.25.3 candidate runs nine whole modules through the existing
