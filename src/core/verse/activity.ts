@@ -320,7 +320,7 @@ function accountItems(view: HealthView, nowIso: string): NeedsYouItem[] {
         source: 'accounts',
         kind: 'reconnect',
         severity: signedOut ? 'high' : 'warn',
-        title: clip(signedOut ? `${label} is signed out` : `${label} sign-in expires soon`, NEEDS_YOU_TITLE_MAX),
+        title: clip(signedOut ? `${label} is signed out` : `${label}: check sign-in`, NEEDS_YOU_TITLE_MAX),
         detail,
         since,
         expiresAt: signedOut ? null : report.credentialExpiresAt,

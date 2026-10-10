@@ -41,6 +41,18 @@ describe('seat health model', () => {
     expect(issuesHeadline([])).toBe('All seats are connected.');
   });
 
+  it('does not describe a cached expiry warning as a future event after its deadline', () => {
+    const report = healthReport('codex-personal', {
+      engine: 'codex', connection: 'expiring', credentialExpiresAt: new Date(NOW).toISOString(),
+    });
+    for (const now of [NOW - 1, NOW, NOW + 1]) {
+      const issue = seatHealthIssues([report], [], now)[0]!;
+      expect(issue.word).toBe('check sign-in');
+      expect(issue.tone).toBe('warning');
+      expect(issuesHeadline([issue])).toBe('codex-personal needs attention.');
+    }
+  });
+
   it('renders an argv as a copyable command, keeping ~ expandable and quoting anything else', () => {
     expect(shellCommandText(['ashlr', 'resources', 'profile', 'repin', '--directory', '~/.ashlr/native-profiles/codex-a',
       '--executable', '/Applications/ChatGPT.app/Contents/Resources/codex'])).toBe(

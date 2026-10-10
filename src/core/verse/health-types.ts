@@ -18,7 +18,7 @@ import type { VerseEngine } from './types.js';
 
 /**
  * - `connected`    — signed in, credential valid, CLI build usable.
- * - `expiring`     — signed in, but the credential expires soon (from its timestamp).
+ * - `expiring`     — recorded access expiry is near or past; current native refresh is unconfirmed.
  * - `signed-out`   — the CLI reports no usable login.
  * - `exhausted`    — signed in, but the subscription window is spent (e.g. codex `limitReached`).
  * - `binary-skew`  — the seat is pinned to an older CLI than the newest installed build.

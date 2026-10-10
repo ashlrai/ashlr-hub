@@ -447,6 +447,30 @@ describe('buildSeatHealthReports', () => {
     expect(credentialExpiring('claude', { expiresAt: grokKey, lastRefreshAt: null, refreshable: false }, NOW)).toBe(false);
   });
 
+  it('distinguishes an upcoming recorded expiry from a passed observation without refusing a native turn', () => {
+    const expiresAt = new Date(NOW).toISOString();
+    const s = seat('codex-personal', 'codex');
+    const snap = snapshot([facts(s.id, 'codex', {
+      credential: { expiresAt, lastRefreshAt: new Date(NOW - 86_400_000).toISOString(), refreshable: true },
+    })]);
+    for (const offset of [0, 1, -1]) {
+      const now = NOW + offset;
+      const report = buildSeatHealthReports({ seats: [s], snapshot: snap, now })[0]!;
+      expect(report.connection).toBe('expiring');
+      expect(report.credentialExpiresAt).toBe(expiresAt);
+      expect(report.reasons[0]).toContain(offset < 0 ? 'recorded access credential expires' : 'recorded access expiry passed');
+      expect(report.reasons[0]).not.toContain('before then');
+      if (offset >= 0) expect(report.reasons[0]).toContain('Current access validity and native refresh are unconfirmed');
+      expect(seatReadiness(s.id, [s], [report], now).ready).toBe(true);
+    }
+    const invalid = snapshot([facts(s.id, 'codex', {
+      credential: { expiresAt: 'not-a-date', lastRefreshAt: null, refreshable: true },
+    })]);
+    expect(reportOf([s], invalid, s.id).connection).toBe('connected');
+    const signedOut = snapshot([{ ...snap.accounts.get(s.id)!, loggedIn: false }]);
+    expect(reportOf([s], signedOut, s.id).connection).toBe('signed-out');
+  });
+
   it('reports binary skew with a copyable, home-relative repin command and warns about floating installs', () => {
     const home = os.homedir();
     const f = facts('codex-personal', 'codex', {

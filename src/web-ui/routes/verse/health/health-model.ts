@@ -17,7 +17,9 @@ export type HealthTone = 'danger' | 'warning' | 'neutral' | 'success';
 
 export const CONNECTION_WORD: Record<SeatConnection, string> = {
   connected: 'connected',
-  expiring: 'sign-in expiring',
+  // The recorded access expiry can pass while a cached report is displayed;
+  // it does not establish the native CLI's current refresh or login state.
+  expiring: 'check sign-in',
   'signed-out': 'signed out',
   exhausted: 'out of usage',
   'binary-skew': 'older CLI pinned',

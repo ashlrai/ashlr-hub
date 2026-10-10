@@ -209,7 +209,7 @@ function paidChat(seat: VerseSeat | null, account: ReadinessAccount | null, inpu
     return verdict(false, 'blocked', 'No runnable model', seat.notes?.[0] ?? "None of this seat's models can run on its pinned CLI.", repin);
   }
   if (report?.connection === 'expiring') {
-    return verdict(true, 'warn', 'Ready', 'Its sign-in expires soon — reconnect before it lapses.', reconnect(seat.id));
+    return verdict(true, 'warn', 'Ready', 'A recorded access expiry needs checking. The native CLI may refresh when you use this seat; reconnect if it asks.', reconnect(seat.id));
   }
   if (report?.connection === 'binary-skew' && report.fix.kind === 'repin' && report.fix.command) {
     return verdict(true, 'warn', 'Ready', 'Pinned to an older CLI build than the newest installed one.', command('Re-pin the CLI', report.fix.command.join(' ')));
