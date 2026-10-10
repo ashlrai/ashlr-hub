@@ -66,8 +66,6 @@ import { VERSE_MCP_STDIO_COMMAND } from '../core/verse/verse-mcp-stdio-invocatio
 import { planTidy, applyTidy } from '../core/tidy.js';
 import { openInEditor } from './open.js';
 import { pick } from './picker.js';
-import { cmdDoctor, cmdInit } from './doctor-init.js';
-import { cmdSetup } from './setup.js';
 import { pad, makeColors } from './ui.js';
 import type { AshlrConfig, AshlrIndex, IndexedItem, GitStatus, ToolsRegistry, McpRegistry } from '../core/types.js';
 
@@ -1864,9 +1862,12 @@ async function main(): Promise<void> {
         await cmdConfig(rest);
         break;
 
-      case 'doctor':
+      case 'doctor': {
+        // Keep onboarding and its provider/service graph off unrelated CLI startup.
+        const { cmdDoctor } = await import('./doctor-init.js');
         process.exitCode = await cmdDoctor(rest);
         break;
+      }
 
       case 'companions': {
         const cmdCompanions = await loadCompanionsCmd();
@@ -1874,13 +1875,17 @@ async function main(): Promise<void> {
         break;
       }
 
-      case 'init':
+      case 'init': {
+        const { cmdInit } = await import('./doctor-init.js');
         process.exitCode = await cmdInit(rest);
         break;
+      }
 
-      case 'setup':
+      case 'setup': {
+        const { cmdSetup } = await import('./setup.js');
         process.exitCode = await cmdSetup(rest);
         break;
+      }
 
       case 'mcp': {
         const cmdMcp = await loadMcpCmd();
