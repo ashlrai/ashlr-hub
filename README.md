@@ -20,7 +20,7 @@
 
 Canonical Phantom releases use `@ashlr/phantom` from `ashlrai/phantom`.
 Install the canonical package's promoted release.
-This source tree targets version 3.29.6; check canonical release availability and exact matching assets before installation.
+This source tree targets version 3.29.7; check canonical release availability and exact matching assets before installation.
 
 ```sh
 npm install -g @ashlr/phantom   # `phm` and compatible `ashlr`; Node.js 22.15+ and Git; macOS, Linux, Windows
@@ -28,9 +28,10 @@ phm --version             # report the installed version
 phm verse                 # start the console at http://127.0.0.1:7777/verse/
 ```
 
-For a reproducible install of the published release verified on 2026-10-09,
-use `npm install -g @ashlr/phantom@3.29.5`. General release discovery is at
-[GitHub releases](https://github.com/ashlrai/phantom/releases/latest).
+Current installation uses the promoted npm `latest` release. For a reproducible
+install, select a published version from
+[GitHub releases](https://github.com/ashlrai/phantom/releases/latest) and pin
+`@ashlr/phantom@<version>`; the source candidate is not proof of publication.
 
 Find current desktop artifacts at [GitHub releases](https://github.com/ashlrai/phantom/releases/latest):
 the signed `Phantom_<version>_aarch64.app.tar.gz` archive and paired
