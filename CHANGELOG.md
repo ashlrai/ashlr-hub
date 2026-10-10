@@ -9,6 +9,17 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ---
 
+## [3.29.10] — Unreleased
+
+### Fixed
+- Check the configured model through a bounded loopback `/models` probe before
+  marking a keyless Ollama or llama-server fleet engine ready. Missing models and
+  probe errors remain unavailable; a model listing does not claim completion.
+- Keep a standing Codex judge off an unpinned native seat, allow another admitted
+  independent judge family when available, and record a CLI launch refusal as
+  unavailable instead of a malformed verdict. Genuine malformed replies still
+  receive the strict retry.
+
 ## [3.29.9] — Unreleased
 
 ### Changed
