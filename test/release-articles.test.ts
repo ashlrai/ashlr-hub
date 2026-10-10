@@ -81,6 +81,30 @@ describe('fresh public facts are data, not saved release authority', () => {
     expect((reader.github as ReturnType<typeof vi.fn>).mock.calls.filter(([path]) => path.endsWith('/releases/latest'))).toHaveLength(2);
     expect(() => publicWorkbenchRelease({ ...record } as never)).toThrow();
   });
+  it('projects the published seven-asset Mac archive through the full latest verifier', async () => {
+    const names = [`Phantom_${proposed.version}_aarch64.app.tar.gz`, `Phantom_${proposed.version}_aarch64.app.tar.gz.sig`,
+      `ashlr-phantom-${proposed.version}.tgz`, `ashlr-phantom-${proposed.version}.tgz.sig`, 'manifest.json', 'manifest.json.sig', 'latest.json'];
+    const reader = fixtureReader((endpoint, value) => endpoint.includes('/releases/') ? {
+      ...(value as object), assets: names.map(name => ({ name, size: 30, digest: `sha256:${'d'.repeat(64)}`,
+        state: 'uploaded', browser_download_url: `https://github.com/ashlrai/phantom/releases/download/v${proposed.version}/${name}` })),
+    } : value, { repository: 'ashlrai/phantom', packageName: '@ashlr/phantom' });
+    const record = await verifyLatestWorkbenchRelease(reader, NOW);
+    expect(record.macDownloadUrl).toBe(`https://github.com/ashlrai/phantom/releases/download/v${proposed.version}/${names[0]}`);
+    expect(record.installCommand).toBe(`npm install -g @ashlr/phantom@${proposed.version}`);
+    expect((reader.github as ReturnType<typeof vi.fn>).mock.calls.filter(([path]) => path.endsWith('/releases/latest'))).toHaveLength(2);
+  });
+  it('retains a qualified historical DMG preference and refuses unqualified or wrong-version Mac assets', async () => {
+    const facts = await verifyPublishedRelease({ ...proposed, repository: 'ashlrai/phantom' },
+      fixtureReader(undefined, { repository: 'ashlrai/phantom', packageName: '@ashlr/phantom' }), NOW);
+    const archive = { name: `Phantom_${proposed.version}_aarch64.app.tar.gz`, bytes: 30, digest: `sha256:${'d'.repeat(64)}` };
+    const dmg = { ...archive, name: `Phantom_${proposed.version}_aarch64.dmg` };
+    expect(publicWorkbenchRelease({ ...facts, assets: [archive, dmg] }).macDownloadUrl).toBe(`https://github.com/ashlrai/phantom/releases/download/v${proposed.version}/${dmg.name}`);
+    expect(publicWorkbenchRelease({ ...facts, assets: [{ ...dmg, digest: null }, archive] }).macDownloadUrl).toBe(`https://github.com/ashlrai/phantom/releases/download/v${proposed.version}/${archive.name}`);
+    expect(publicWorkbenchRelease({ ...facts, assets: [{ ...archive, bytes: 0 }] }).macDownloadUrl).toBeNull();
+    expect(publicWorkbenchRelease({ ...facts, assets: [{ ...archive, digest: null }] }).macDownloadUrl).toBeNull();
+    expect(publicWorkbenchRelease({ ...facts, assets: [{ ...archive, digest: 'sha256:invalid' }] }).macDownloadUrl).toBeNull();
+    expect(publicWorkbenchRelease({ ...facts, assets: [{ ...archive, name: 'Phantom_3.24.4_aarch64.app.tar.gz' }] }).macDownloadUrl).toBeNull();
+  });
   it('withholds public metadata if latest moves or registry verification fails', async () => {
     let latest = 0;
     const reader = fixtureReader((endpoint, value) => endpoint.endsWith('/releases/latest') && ++latest === 2

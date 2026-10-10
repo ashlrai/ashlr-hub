@@ -197,13 +197,15 @@ export function publicWorkbenchRelease(facts: PublishedReleaseFacts): PublicWork
   hash(facts.sourceSha); iso(facts.publishedAt); iso(facts.observedAt);
   const { observedAt: _observedAt, ...stable } = facts;
   const releaseUrl = `https://github.com/ashlrai/phantom/releases/tag/v${facts.version}`;
-  const macAsset = `Phantom_${facts.version}_aarch64.dmg`;
-  const mac = facts.assets.find((asset) => asset.name === macAsset && asset.bytes > 0 && /^sha256:[a-f0-9]{64}$/.test(asset.digest ?? ''));
+  // Keep historical DMG preference; current signed releases publish an app archive.
+  const mac = [`Phantom_${facts.version}_aarch64.dmg`, `Phantom_${facts.version}_aarch64.app.tar.gz`]
+    .map(name => facts.assets.find(asset => asset.name === name && asset.bytes > 0 && /^sha256:[a-f0-9]{64}$/.test(asset.digest ?? '')))
+    .find(asset => asset !== undefined);
   return { v: 1, product: 'workbench', repository: 'ashlrai/phantom', packageName: '@ashlr/phantom', version: facts.version,
     sourceSha: facts.sourceSha, publishedAt: facts.publishedAt, observedAt: facts.observedAt, releaseUrl,
     registryUrl: `https://www.npmjs.com/package/@ashlr/phantom/v/${facts.version}`,
     installCommand: `npm install -g @ashlr/phantom@${facts.version}`,
-    macDownloadUrl: mac ? `https://github.com/ashlrai/phantom/releases/download/v${facts.version}/${macAsset}` : null,
+    macDownloadUrl: mac ? `https://github.com/ashlrai/phantom/releases/download/v${facts.version}/${mac.name}` : null,
     factsDigest: createHash('sha256').update(JSON.stringify(stable)).digest('hex') };
 }
 
