@@ -460,6 +460,32 @@ describe('source-bound release package identity', () => {
 });
 
 describe('durable article maintenance uses the normal task lane', () => {
+  it.each(['article', 'teaser'])('preserves %s reservations after a persisted enqueue failure and retention', async kind => {
+    configureReleaseArticles(true, REPO);
+    const ports = deps(); ports.production = async () => kind === 'teaser';
+    ports.enrolled = () => [RELEASE_ARTICLE_REPO, RELEASE_TEASER_REPO];
+    ports.policy = () => makePolicy({ repos: [RELEASE_ARTICLE_REPO, RELEASE_TEASER_REPO].map((nameWithOwner) => ({ ...makePolicy().repos[0]!, nameWithOwner })) });
+    const writer = preferences.writePrivateFileAtomic;
+    const fault = vi.spyOn(preferences, 'writePrivateFileAtomic').mockImplementation((file, ...args) => {
+      writer(file, ...args);
+      if (file === taskQueuePath()) throw new Error('post-persistence fixture failure');
+    });
+    const first = await syncReleaseArticles(ports);
+    fault.mockRestore();
+    const record = kind === 'article' ? first.records[0]! : first.records[0]!.teaser;
+    expect(record).toMatchObject({ attempted: true, state: 'awaiting-production' });
+    const queue = readTaskQueue();
+    expect(queue.ok).toBe(true);
+    if (!queue.ok) throw new Error(queue.reason);
+    expect(queue.tasks).toHaveLength(1);
+    expect(queue.tasks[0]!.repo).toBe(kind === 'article' ? RELEASE_ARTICLE_REPO : RELEASE_TEASER_REPO);
+    recordTaskDispatch(queue.tasks[0]!.id, { kind: 'produced', proposalId: null }, { nowMs: NOW + 1_000 });
+    writeFileSync(taskQueuePath(), JSON.stringify({ v: 1, tasks: [], updatedAt: new Date(NOW).toISOString() }));
+    ports.now = () => NOW + 120_000;
+    const next = await syncReleaseArticles(ports);
+    expect(kind === 'article' ? next.records[0]!.state : next.records[0]!.teaser.state).toBe('awaiting-production');
+    expect(ports.enqueue).toHaveBeenCalledTimes(1);
+  });
   it('fresh core defaults are canonical without changing saved legacy settings or history', async () => {
     const ports = deps();
     expect(readReleaseArticles()).toEqual({ v: 1, enabled: false, repository: 'ashlrai/phantom', records: [], observation: null });

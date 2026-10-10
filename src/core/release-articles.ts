@@ -274,7 +274,8 @@ function queueTeaser(manifest: ReleaseArticleManifest, row: ArticleRecord, draft
       detail: `The canonical company article is freshly observed at ${draft.canonical}. Add a concise accessible release-news teaser linking to it on the existing phm.dev landing surface. Refresh apps/web/src/lib/workbench-release.json from the host-owned read-only phm release-articles metadata --json command, which freshly verifies the canonical latest public workbench release; do not substitute a candidate version or saved receipt if observation fails. Preserve the independent Secrets public-release.ts record. Use normal source/PR/check/deploy controls. No newsletter, social outreach, paid artwork or duplicate full article. Preserve existing product/account flows and SEO canonical choices. Exact public release source: ${draft.sources[0]}. Task completion is not live deployment.`,
       difficulty: 'low', value: 3, dedupeKey });
     if (result.ok) row.teaser = { digest: draft.factsDigest, taskId: result.task.id, state: 'queued', attempted: true };
-    else { row.teaser.state = 'ready'; row.teaser.attempted = false; }
+    else if (result.writeAttempted === false) { row.teaser.state = 'ready'; row.teaser.attempted = false; }
+    else { row.teaser.state = 'awaiting-production'; row.reason = 'Teaser enqueue outcome is unknown; reconcile existing work before retrying.'; }
   } finally { releaseOutwardMutationFence(fence); }
 }
 
@@ -348,7 +349,8 @@ export async function syncReleaseArticles(deps: ReleaseArticlesDeps = defaultRel
       const result = deps.enqueue({ repo: RELEASE_ARTICLE_REPO, source: 'backlog', requestedBy: 'daemon', title: draft.title,
         detail: taskBrief(draft), difficulty: 'medium', value: 4, dedupeKey });
       if (result.ok) { row.state = 'queued'; row.taskId = result.task.id; }
-      else { row.state = 'ready'; row.attempted = false; row.reason = 'The existing fleet task queue refused this article.'; }
+      else if (result.writeAttempted === false) { row.state = 'ready'; row.attempted = false; row.reason = 'The existing fleet task queue refused this article before persistence.'; }
+      else { row.state = 'awaiting-production'; row.reason = 'Article enqueue outcome is unknown; reconcile existing work before retrying.'; }
     } finally { releaseOutwardMutationFence(fence); }
     return manifest;
   });
