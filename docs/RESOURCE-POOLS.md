@@ -1,18 +1,40 @@
 # Account-aware resource pools
 
-Use `ashlr resources pool` to assign an explicit engineering task to one enrolled
+Use `phm resources pool` to assign an explicit engineering task to one enrolled
 Codex, Claude Code, or local-model worker. Admission combines quota evidence,
 operator task limits, and shared-account concurrency. Each assignment is durably
 recorded before launch. This is a foreground task runner, not a resident scheduler
 or an extension of the legacy daemon's authority. The scoped operations console
 adds a durable queue and visual dispatch controls for that same pool.
 
-This source feature is not yet a published registry release. Native adapter
+The resource pool is included in the published Phantom package. Native adapter
 flag and event contracts were checked against Codex CLI 0.136.0 and Claude Code
 2.1.257 on September 7, 2026. This is not proof of model compatibility: the exact
 CLI/model pair needs an explicit authenticated canary with the enrolled account.
 Fixture-based tests use inert executables and loopback responses; they do not
 establish authenticated multi-account production acceptance.
+
+## Readings, local consumption and credits
+
+Phantom distinguishes account-bound provider readings from local transcript
+consumption and operator-configured budgets. Local Claude messages and tokens do
+not include work on other devices or Claude surfaces, so they cannot establish a
+subscription percentage or reset. The legacy `phm resources` routing snapshot
+does not invent a default Claude message allowance when provider readings are
+missing. Explicit local transcript budgets remain available and are labeled as
+configured budgets; they do not verify remaining subscription allowance.
+
+API connection readiness also requires the credential the actual executor will
+use. An `open` resource override or concurrency setting cannot substitute for a
+missing Kimi or NIM credential. Resolved credentials and absent backoff indicate
+connection readiness, not verified credit balance or spending permission.
+Purchased credits, promotional-credit expiry and subscription reset windows
+remain separate in account-aware scheduling. Unknown balances or expiry do not
+authorize promotional-credit spending.
+
+Anthropic explains that usage depends on model, effort, context and features,
+and is shared across Claude surfaces; there is no fixed message count. See
+[Claude usage and length limits](https://support.claude.com/en/articles/11647753-how-do-usage-and-length-limits-work).
 
 Workers now consult the existing global `~/.ashlr/KILL` policy immediately before
 transport and poll it every 50 ms during execution. Active or unreadable policy

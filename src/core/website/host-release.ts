@@ -249,7 +249,22 @@ function patchOperation(op: WebsiteOperation, patch: Partial<WebsiteOperation>):
 let active: Promise<void> | null = null;
 export function scheduleWebsitePublication(signal?: AbortSignal): Promise<void> {
   if (!active) active = import('./host-adapter.js').then(async ({ createWebsiteHostAdapter }) => {
-    const commission = readWebsiteCommission(); if (commission) await drainWebsitePublication(createWebsiteHostAdapter(commission, signal), signal);
+    const commission = readWebsiteCommission();
+    if (!commission) return;
+    // Source maintenance uses public metadata only, independently of company
+    // articles. Its failure must not block already-qualified source publication.
+    const maintainMetadata = async (): Promise<void> => {
+      try {
+        const metadata = await import('./release-metadata.js');
+        await metadata.syncWebsiteReleaseMetadata(metadata.defaultWebsiteReleaseMetadataDeps(() => {
+          const fresh = readWebsiteCommission();
+          if (!fresh || fresh.profileDigest !== commission.profileDigest) return null;
+          assertWebsiteAuthority(fresh);
+          return websiteDigest({ profileDigest: fresh.profileDigest, generation: readState().generation });
+        }), signal);
+      } catch { /* Metadata maintenance remains separate from deployment qualification. */ }
+    };
+    await Promise.all([maintainMetadata(), drainWebsitePublication(createWebsiteHostAdapter(commission, signal), signal)]);
   }).catch(() => undefined).finally(() => { active = null; });
   return active;
 }

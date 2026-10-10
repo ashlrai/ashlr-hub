@@ -1,5 +1,5 @@
 /**
- * `ashlr pulse` — rich local observability dashboard.
+ * `phm pulse` — rich local observability dashboard.
  *
  * Flags:
  *   --json                  machine-readable ActivityRollup
@@ -16,6 +16,7 @@
 
 import type { ActivityRollup, BudgetAlert, CostForecast, GovernanceStatus } from '../core/types.js';
 import type { AshlrConfig } from '../core/types.js';
+import { tokenEvidenceLabel } from '../core/run/token-evidence.js';
 
 // ---------------------------------------------------------------------------
 // ANSI helpers (non-TTY safe)
@@ -143,19 +144,16 @@ function parsePulseArgs(args: string[]): ParsedPulseArgs {
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
-/** Format token count as compact string (e.g. 1.2M, 340K, 512). */
+const compactMetric = new Intl.NumberFormat('en-US', { notation: 'compact', maximumSignificantDigits: 2 });
+const costMetric = new Intl.NumberFormat('en-US', { maximumSignificantDigits: 2 });
+/** Display precision only; JSON and accounting retain original values. */
 function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000)     return `${(n / 1_000).toFixed(0)}K`;
-  return String(n);
+  return Number.isFinite(n) ? compactMetric.format(n) : '—';
 }
 
 /** Format USD cost. */
 function fmtUsd(n: number): string {
-  if (n === 0) return '$0.00';
-  if (n < 0.01) return `$${n.toFixed(5)}`;
-  if (n < 1)    return `$${n.toFixed(3)}`;
-  return `$${n.toFixed(2)}`;
+  return Number.isFinite(n) ? `${n < 0 ? '-' : ''}$${costMetric.format(Math.abs(n))}` : '—';
 }
 
 /** Format a project path for display — show basename or last 2 segments. */
@@ -278,7 +276,7 @@ function renderDashboard(rollup: ActivityRollup, forecast?: CostForecast | null,
   // ── Header ────────────────────────────────────────────────────────────────
   console.log('');
   console.log(
-    bold('  ashlr pulse') +
+    bold('  phm pulse') +
     gray(`  —  ${fmtWindow(win)}`) +
     dim(`  (since ${fmtDate(since)})`),
   );
@@ -290,7 +288,9 @@ function renderDashboard(rollup: ActivityRollup, forecast?: CostForecast | null,
   console.log(`  ${bold('Tokens')}   in ${cyan(fmtTokens(totals.tokensIn))}  ` +
     `out ${cyan(fmtTokens(totals.tokensOut))}  ` +
     `total ${bold(cyan(fmtTokens(totalTok)))}`);
-  console.log(`  ${bold('Cost')}     ${bold(cyan(fmtUsd(totals.estCostUsd)))}`);
+  console.log(`  ${dim(tokenEvidenceLabel(totals, fmtTokens))}`);
+  console.log(`  ${bold('Est. cost')} ${bold(cyan(fmtUsd(totals.estCostUsd)))}`);
+  console.log(dim('  Estimated model cost; billing and credit balances are separate.'));
   if (forecast) {
     console.log(`  ${bold('Savings')}  ${renderForecastLine(forecast)}`);
   }
@@ -311,7 +311,7 @@ function renderDashboard(rollup: ActivityRollup, forecast?: CostForecast | null,
     const sessW    = 5;
     const commitW  = 7;
     const tokW     = 8;
-    const costW    = 8;
+    const costW    = 9;
 
     console.log(`  ${bold('By Project')}`);
     console.log('');
@@ -320,7 +320,7 @@ function renderDashboard(rollup: ActivityRollup, forecast?: CostForecast | null,
       `${bold(pad('Sess', sessW, 'right'))}  ` +
       `${bold(pad('Commits', commitW, 'right'))}  ` +
       `${bold(pad('Tokens', tokW, 'right'))}  ` +
-      `${bold(pad('Cost', costW, 'right'))}`,
+      `${bold(pad('Est. cost', costW, 'right'))}`,
     );
     console.log(
       `  ${'─'.repeat(projW)}  ${'─'.repeat(sessW)}  ` +
@@ -356,7 +356,7 @@ function renderDashboard(rollup: ActivityRollup, forecast?: CostForecast | null,
     const modelW = Math.min(44, Math.max(10, ...byModel.slice(0, 8).map(m => m.model.length)));
     const callsW = 6;
     const tokW2  = 8;
-    const costW2 = 8;
+    const costW2 = 9;
 
     console.log(`  ${bold('Top Models')}`);
     console.log('');
@@ -364,7 +364,7 @@ function renderDashboard(rollup: ActivityRollup, forecast?: CostForecast | null,
       `  ${bold(pad('Model', modelW))}  ` +
       `${bold(pad('Calls', callsW, 'right'))}  ` +
       `${bold(pad('Tokens', tokW2, 'right'))}  ` +
-      `${bold(pad('Cost', costW2, 'right'))}`,
+      `${bold(pad('Est. cost', costW2, 'right'))}`,
     );
     console.log(
       `  ${'─'.repeat(modelW)}  ${'─'.repeat(callsW)}  ` +
@@ -415,7 +415,7 @@ function renderDashboard(rollup: ActivityRollup, forecast?: CostForecast | null,
 // ---------------------------------------------------------------------------
 
 /**
- * `ashlr pulse` — rich local observability dashboard.
+ * `phm pulse` — rich local observability dashboard.
  *
  * Flags:
  *   --json                  machine-readable ActivityRollup
@@ -435,7 +435,7 @@ export async function cmdPulse(args: string[]): Promise<number> {
     return cmdPulseExport(args.slice(1));
   }
 
-  // M91: dispatch `test` subcommand (also reachable via `ashlr pulse-test`)
+  // M91: dispatch `test` subcommand (also reachable via `phm pulse-test`)
   if (args[0] === 'test') {
     return cmdPulseTest();
   }
@@ -544,11 +544,11 @@ export async function cmdPulse(args: string[]): Promise<number> {
 
 function printPulseHelp(): void {
   console.log('');
-  console.log(bold('  ashlr pulse') + dim(' — local-first observability dashboard'));
+  console.log(bold('  phm pulse') + dim(' — local-first observability dashboard'));
   console.log('');
   console.log('  ' + bold('Usage:'));
   console.log('');
-  console.log(`    ashlr pulse [options]`);
+  console.log(`    phm pulse [options]`);
   console.log('');
   console.log('  ' + bold('Options:'));
   console.log('');
@@ -578,9 +578,9 @@ function printPulseHelp(): void {
   console.log('');
   console.log('  ' + bold('Budget caps + spend governance (M19):'));
   console.log('');
-  console.log(`    ${dim('Set in config: ashlr config set telemetry.budgetUsd 10.00')}`);
-  console.log(`    ${dim('               ashlr config set telemetry.budgetWindow 7d')}`);
-  console.log(`    ${dim('               ashlr config set telemetry.govAction warn   # or block')}`);
+  console.log(`    ${dim('Set in config: phm config set telemetry.budgetUsd 10.00')}`);
+  console.log(`    ${dim('               phm config set telemetry.budgetWindow 7d')}`);
+  console.log(`    ${dim('               phm config set telemetry.govAction warn   # or block')}`);
   console.log(`    ${dim('Governance: ok <80% cap, warn >=80%, over >cap.')}`);
   console.log(`    ${dim('Advisory by default; use --over-budget to proceed when govAction=block.')}`);
   console.log('');
@@ -592,19 +592,19 @@ function printPulseHelp(): void {
   console.log('');
   console.log('  ' + bold('Examples:'));
   console.log('');
-  console.log(`    ${cyan('ashlr pulse')}                         ${dim('# 7-day dashboard')}`);
-  console.log(`    ${cyan('ashlr pulse --window 1d')}             ${dim('# today')}`);
-  console.log(`    ${cyan('ashlr pulse --project ashlr-hub')}     ${dim('# single project')}`);
-  console.log(`    ${cyan('ashlr pulse --json | jq .totals')}     ${dim('# machine-readable')}`);
+  console.log(`    ${cyan('phm pulse')}                         ${dim('# 7-day dashboard')}`);
+  console.log(`    ${cyan('phm pulse --window 1d')}             ${dim('# today')}`);
+  console.log(`    ${cyan('phm pulse --project <name>')}     ${dim('# single project')}`);
+  console.log(`    ${cyan('phm pulse --json | jq .totals')}     ${dim('# machine-readable')}`);
   console.log('');
 }
 
 // ---------------------------------------------------------------------------
-// M89: `ashlr pulse export` / `ashlr pulse-export` — fleet→pulse OTLP export
+// M89: `phm pulse export` / `phm pulse-export` — fleet→pulse OTLP export
 // ---------------------------------------------------------------------------
 
 /**
- * `ashlr pulse export [--since <iso>] [--dry-run]`
+ * `phm pulse export [--since <iso>] [--dry-run]`
  *
  * Reads fleet state (daemon ticks + inbox proposals) and exports them as
  * OTLP/JSON spans to ashlr-pulse. Requires:
@@ -704,12 +704,12 @@ async function cmdPulseExport(args: string[]): Promise<number> {
 
 function printExportHelp(): void {
   console.log('');
-  console.log(`${bold('  ashlr pulse export')}${dim(' — fleet→pulse OTLP exporter (M89)')}`);
+  console.log(`${bold('  phm pulse export')}${dim(' — fleet→pulse OTLP exporter (M89)')}`);
   console.log('');
   console.log(`  ${bold('Usage:')}`);
   console.log('');
-  console.log(`    ashlr pulse export [--since <iso>] [--dry-run]`);
-  console.log(`    ashlr pulse-export [--since <iso>] [--dry-run]`);
+  console.log(`    phm pulse export [--since <iso>] [--dry-run]`);
+  console.log(`    phm pulse-export [--since <iso>] [--dry-run]`);
   console.log('');
   console.log(`  ${bold('Options:')}`);
   console.log('');
@@ -726,18 +726,18 @@ function printExportHelp(): void {
   console.log('');
   console.log(`  ${bold('Examples:')}`);
   console.log('');
-  console.log(`    ${cyan('ashlr pulse-export --dry-run')}                  ${dim('# preview payload')}`);
-  console.log(`    ${cyan('ashlr pulse-export --since 2026-06-01T00:00:00Z')}  ${dim('# backfill')}`);
-  console.log(`    ${cyan('ashlr pulse-export')}                            ${dim('# export all history')}`);
+  console.log(`    ${cyan('phm pulse-export --dry-run')}                  ${dim('# preview payload')}`);
+  console.log(`    ${cyan('phm pulse-export --since 2026-06-01T00:00:00Z')}  ${dim('# backfill')}`);
+  console.log(`    ${cyan('phm pulse-export')}                            ${dim('# export all history')}`);
   console.log('');
 }
 
 // ---------------------------------------------------------------------------
-// M91: `ashlr pulse-test` / `ashlr pulse test` — connectivity + auth check
+// M91: `phm pulse-test` / `phm pulse test` — connectivity + auth check
 // ---------------------------------------------------------------------------
 
 /**
- * `ashlr pulse-test`
+ * `phm pulse-test`
  *
  * POSTs a single probe span to cfg.pulse.endpoint with the PAT and reports:
  *   ✓ connected (HTTP 200)
@@ -776,7 +776,7 @@ export async function cmdPulseTest(): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// M62: `ashlr pulse connect` — hub→pulse bridge configuration + test
+// M62: `phm pulse connect` — hub→pulse bridge configuration + test
 // ---------------------------------------------------------------------------
 
 import { spawnSync } from 'node:child_process';
@@ -787,7 +787,7 @@ const PHANTOM_BIN = 'phantom';
 const DEFAULT_PULSE_ENDPOINT = 'https://pulse.ashlr.ai/api/otlp/v1/traces';
 
 /**
- * `ashlr pulse connect` — configure and test the hub→pulse OTLP bridge.
+ * `phm pulse connect` — configure and test the hub→pulse OTLP bridge.
  *
  * Routes:
  *   connect [<endpoint>] [--token <pat>]   — set endpoint and/or store PAT
@@ -874,13 +874,13 @@ async function connectSet(args: string[]): Promise<number> {
   // Next steps
   console.log('');
   if (!endpoint) {
-    console.log(`  ${C.dim}Tip: set an endpoint with:  ashlr pulse connect ${DEFAULT_PULSE_ENDPOINT}${C.reset}`);
+    console.log(`  ${C.dim}Tip: set an endpoint with:  phm pulse connect ${DEFAULT_PULSE_ENDPOINT}${C.reset}`);
   }
   if (!token) {
-    console.log(`  ${C.dim}Tip: store your PAT with:   ashlr pulse connect --token <pat>${C.reset}`);
+    console.log(`  ${C.dim}Tip: store your PAT with:   phm pulse connect --token <pat>${C.reset}`);
   }
-  console.log(`  Run ${C.cyan}ashlr pulse connect --status${C.reset} to verify configuration.`);
-  console.log(`  Run ${C.cyan}ashlr pulse connect --test${C.reset}   to send a test span.`);
+  console.log(`  Run ${C.cyan}phm pulse connect --status${C.reset} to verify configuration.`);
+  console.log(`  Run ${C.cyan}phm pulse connect --test${C.reset}   to send a test span.`);
   return 0;
 }
 
@@ -933,7 +933,7 @@ async function connectStatus(): Promise<number> {
   const sinkName = endpoint && hasPat ? 'OtlpHttpSink' : 'LocalFileSink';
 
   console.log('');
-  console.log(`${C.bold}  ashlr pulse — bridge status${C.reset}`);
+  console.log(`${C.bold}  phm pulse — bridge status${C.reset}`);
   console.log('');
   console.log(`  Endpoint   ${endpoint ? `${C.green}configured${C.reset}  ${C.dim}${endpoint}${C.reset}` : `${C.yellow}not configured${C.reset}`}`);
   console.log(`  PAT        ${hasPat ? `${C.green}available${C.reset}` : `${C.yellow}not found${C.reset}  ${C.dim}(set the existing ASHLR_PULSE_TOKEN environment route)${C.reset}`}`);
@@ -941,13 +941,13 @@ async function connectStatus(): Promise<number> {
   console.log('');
 
   if (!endpoint) {
-    console.log(`  ${C.dim}Run: ashlr pulse connect ${DEFAULT_PULSE_ENDPOINT}${C.reset}`);
+    console.log(`  ${C.dim}Run: phm pulse connect ${DEFAULT_PULSE_ENDPOINT}${C.reset}`);
   }
   if (!hasPat) {
-    console.log(`  ${C.dim}Run: ashlr pulse connect --token <your-pulse-pat>${C.reset}`);
+    console.log(`  ${C.dim}Run: phm pulse connect --token <your-pulse-pat>${C.reset}`);
   }
   if (endpoint && hasPat) {
-    console.log(`  ${C.green}Ready.${C.reset} Run ${C.cyan}ashlr pulse connect --test${C.reset} to verify end-to-end.`);
+    console.log(`  ${C.green}Ready.${C.reset} Run ${C.cyan}phm pulse connect --test${C.reset} to verify end-to-end.`);
   }
   console.log('');
 
@@ -972,7 +972,7 @@ async function connectTest(): Promise<number> {
 
   if (!cfg.telemetry?.pulse) {
     console.log(`${C.yellow}not configured${C.reset} — no OTLP endpoint set.`);
-    console.log(`  Run: ${C.cyan}ashlr pulse connect ${DEFAULT_PULSE_ENDPOINT}${C.reset}`);
+    console.log(`  Run: ${C.cyan}phm pulse connect ${DEFAULT_PULSE_ENDPOINT}${C.reset}`);
     return 1;
   }
 
@@ -1010,7 +1010,7 @@ async function connectTest(): Promise<number> {
   } else {
     console.log(`${C.red}fail${C.reset}   sink=${result.sink}  detail=${result.detail}`);
     if (result.detail === 'PAT unavailable') {
-      console.log(`  ${C.dim}Store your PAT: ashlr pulse connect --token <pat>${C.reset}`);
+      console.log(`  ${C.dim}Store your PAT: phm pulse connect --token <pat>${C.reset}`);
     }
     return 1;
   }
@@ -1049,15 +1049,15 @@ async function connectDisconnect(): Promise<number> {
 
 function printConnectHelp(): void {
   console.log('');
-  console.log(`${C.bold}  ashlr pulse connect${C.reset}${C.dim} — configure the hub→pulse OTLP bridge (M62)${C.reset}`);
+  console.log(`${C.bold}  phm pulse connect${C.reset}${C.dim} — configure the hub→pulse OTLP bridge (M62)${C.reset}`);
   console.log('');
   console.log(`  ${C.bold}Usage:${C.reset}`);
   console.log('');
-  console.log(`    ashlr pulse connect <endpoint>          Set OTLP endpoint`);
-  console.log(`    ashlr pulse connect --token <pat>       Store PAT in vault; sending needs env`);
-  console.log(`    ashlr pulse connect --status            Show config + active sink`);
-  console.log(`    ashlr pulse connect --test              Send one test span`);
-  console.log(`    ashlr pulse connect --disconnect        Clear endpoint`);
+  console.log(`    phm pulse connect <endpoint>          Set OTLP endpoint`);
+  console.log(`    phm pulse connect --token <pat>       Store PAT in vault; sending needs env`);
+  console.log(`    phm pulse connect --status            Show config + active sink`);
+  console.log(`    phm pulse connect --test              Send one test span`);
+  console.log(`    phm pulse connect --disconnect        Clear endpoint`);
   console.log('');
   console.log(`  ${C.bold}Default endpoint:${C.reset}`);
   console.log(`    ${DEFAULT_PULSE_ENDPOINT}`);
@@ -1069,11 +1069,11 @@ function printConnectHelp(): void {
   console.log('');
   console.log(`  ${C.bold}Examples:${C.reset}`);
   console.log('');
-  console.log(`    ${C.cyan}ashlr pulse connect${C.reset}                                        ${C.dim}# quick-start with default endpoint${C.reset}`);
-  console.log(`    ${C.cyan}ashlr pulse connect https://pulse.ashlr.ai/api/otlp/v1/traces${C.reset}  ${C.dim}# explicit endpoint${C.reset}`);
-  console.log(`    ${C.cyan}ashlr pulse connect --token <pat>${C.reset}                          ${C.dim}# store PAT only${C.reset}`);
-  console.log(`    ${C.cyan}ashlr pulse connect --status${C.reset}                               ${C.dim}# verify config${C.reset}`);
-  console.log(`    ${C.cyan}ashlr pulse connect --test${C.reset}                                 ${C.dim}# live end-to-end test${C.reset}`);
-  console.log(`    ${C.cyan}ashlr pulse connect --disconnect${C.reset}                           ${C.dim}# revert to local file sink${C.reset}`);
+  console.log(`    ${C.cyan}phm pulse connect${C.reset}                                        ${C.dim}# quick-start with default endpoint${C.reset}`);
+  console.log(`    ${C.cyan}phm pulse connect https://pulse.ashlr.ai/api/otlp/v1/traces${C.reset}  ${C.dim}# explicit endpoint${C.reset}`);
+  console.log(`    ${C.cyan}phm pulse connect --token <pat>${C.reset}                          ${C.dim}# store PAT only${C.reset}`);
+  console.log(`    ${C.cyan}phm pulse connect --status${C.reset}                               ${C.dim}# verify config${C.reset}`);
+  console.log(`    ${C.cyan}phm pulse connect --test${C.reset}                                 ${C.dim}# live end-to-end test${C.reset}`);
+  console.log(`    ${C.cyan}phm pulse connect --disconnect${C.reset}                           ${C.dim}# revert to local file sink${C.reset}`);
   console.log('');
 }

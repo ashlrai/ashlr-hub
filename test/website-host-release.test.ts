@@ -5,8 +5,10 @@ import { join } from 'node:path';
 import type { EffectivePolicy } from '../src/core/authority/types.js';
 import { makeGrant } from './helpers/authority-310b.js';
 import { canonicalJson } from '../src/core/authority/canonical-json.js';
+import * as metadata from '../src/core/website/release-metadata.js';
+import * as hostAdapter from '../src/core/website/host-adapter.js';
 import { parseStandingGrantPayload, standingGrantSigningBytes, describeGrantScope, buildReapprovalGrantPayload } from '../src/core/authority/standing-grant.js';
-import { WEBSITE_PROFILE, drainWebsitePublication, inventoryWebsiteOutput, readWebsiteCommission, requestWebsitePublication, saveWebsiteCommission, setWebsiteMode, websiteDigest, websiteScope, websiteStatus, type WebsiteCommission, type WebsiteHostAdapter, type WebsiteSource } from '../src/core/website/host-release.js';
+import { WEBSITE_PROFILE, drainWebsitePublication, inventoryWebsiteOutput, readWebsiteCommission, requestWebsitePublication, saveWebsiteCommission, setWebsiteMode, scheduleWebsitePublication, websiteDigest, websiteScope, websiteStatus, type WebsiteCommission, type WebsiteHostAdapter, type WebsiteSource } from '../src/core/website/host-release.js';
 const live = vi.hoisted(() => ({ policy: null as EffectivePolicy | null, kill: false }));
 vi.mock('../src/core/authority/effective-config.js', () => ({ evaluateStandingAuthority: () => ({ policy: live.policy }), currentStandingPolicy: () => live.policy }));
 vi.mock('../src/core/sandbox/policy.js', () => ({ killSwitchOn: () => live.kill }));
@@ -28,6 +30,26 @@ beforeEach(() => {
   live.kill = false; setWebsiteMode('auto'); output = join(home, 'output'); mkdirSync(output); writeFileSync(join(output, 'config.json'), '{"version":3}'); writeFileSync(join(output, 'page.html'), 'Phantom');
 });
 afterEach(() => { process.env['HOME'] = oldHome; if (oldHome === undefined) delete process.env['HOME']; rmSync(home, { recursive: true, force: true }); vi.restoreAllMocks(); });
+describe('shared website scheduling', () => {
+  it('keeps current source publication independent of slow metadata maintenance and binds its current Auto generation', async () => {
+    const host = adapter();
+    vi.spyOn(hostAdapter, 'createWebsiteHostAdapter').mockReturnValue(host);
+    let settle!: () => void;
+    const pending = new Promise<void>((resolve) => { settle = resolve; });
+    let selected!: metadata.WebsiteReleaseMetadataDeps;
+    const maintenance = vi.spyOn(metadata, 'syncWebsiteReleaseMetadata').mockImplementation(async (deps) => {
+      selected = deps; await pending; return { phase: 'waiting', reason: null, taskId: null };
+    });
+    const scheduled = scheduleWebsitePublication();
+    try {
+      await vi.waitFor(() => expect(websiteStatus().phase).toBe('published'));
+      expect(host.stage).toHaveBeenCalledTimes(1); expect(maintenance).toHaveBeenCalledTimes(1);
+      expect(selected.publicationBinding()).toMatch(/^[a-f0-9]{64}$/);
+      setWebsiteMode('paused');
+      expect(() => selected.publicationBinding()).toThrow('held');
+    } finally { settle(); await scheduled; }
+  });
+});
 describe('website signed scope', () => {
   it('keeps absent payload bytes unchanged and accepts only the closed optional scope', () => {
     const grant = makeGrant(); const oldBytes = standingGrantSigningBytes(grant);

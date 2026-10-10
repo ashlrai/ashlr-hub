@@ -68,6 +68,24 @@ are pruned. Corrections reuse the canonical article URL, wait for an active
 producer and preserve its original publication date. An ambiguous crash is
 held for inspection rather than silently duplicating work.
 
+Phantom's website release metadata is maintained independently of company
+articles. When the existing website publisher is commissioned and set to Auto,
+and `ashlrai/phantom-secrets` has current enrolled merge authority, the host
+checks the latest public workbench release at most once per minute. It queues
+a normal source task to update `apps/web/src/lib/workbench-release.json`, which
+drives the website version, npm command, release links and structured data.
+The company article watcher can remain disabled. Website Pause/Off and Stop
+hold this maintenance; normal PR checks, protected merge and the host publisher
+still apply. Unknown enqueue outcomes retain their reservation after queue
+retention, and failed tasks need review instead of automatic duplicate work.
+
+`phm release-articles metadata --json` freshly checks public GitHub release,
+source/tree, CI, Audit, npm version/integrity and asset metadata. These are
+presentation facts, not independent original-archive byte comparison, installer
+authority or installed acceptance. Unavailable fresh facts leave prior website
+metadata unchanged. A queued or completed task does not prove live deployment;
+the publisher separately checks the resulting production routes.
+
 Rollback uses a normal reviewed source correction/removal and deployment;
 withdrawing a database story alone cannot remove an authored source article.
 This section documents successor source, not activation in the installed

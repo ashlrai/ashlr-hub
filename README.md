@@ -573,12 +573,13 @@ switch, backends, sandboxing, the command reference, the safety model, the
 | **3.17** | Local module map, scalable account/model rosters, portable efficiency-plugin connection and phone reliability | [3.17.2 release](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.17.2) |
 | **3.16** | Native Agents workbench and guarded computer tools; optional authenticated phone gateway; reviewable learning evidence; Devin CLI SWE-2 High default; local signing and release fixes | [3.16.1 published](https://github.com/ashlrai/ashlr-hub/releases/tag/v3.16.1) |
 
-CLI archives are built by hosted CI. The commissioned trusted publisher published
-`@ashlr/phantom@3.28.0` in [run 37910835113, attempt 2](https://github.com/ashlrai/phantom/actions/runs/37910835113/attempts/2),
+CLI archives are built by hosted CI. As a dated release example, the commissioned trusted publisher published
+`@ashlr/phantom@3.29.7` on October 10, 2026 in [run 38025950740, attempt 1](https://github.com/ashlrai/phantom/actions/runs/38025950740/attempts/1),
 with public registry-byte, provenance, consumer and `latest` checks. The signed
 macOS app was finalized and installed separately from the same qualified source.
 See the [release procedure](https://github.com/ashlrai/phantom/blob/master/docs/RELEASING-LOCALLY.md).
-Website commissioning and connected-provider activation remain separate and incomplete.
+The [public website](https://phm.dev) shows the Phantom workbench; [Phantom Secrets](https://phm.dev/secrets) has its own page.
+Automatic website publisher commissioning and connected-provider activation remain separate acceptance steps.
 A legacy `@ashlr/hub` response does not prove canonical publication.
 GitHub release assets require their own public download and checksum verification;
 repository or changelog state alone is not publication evidence.

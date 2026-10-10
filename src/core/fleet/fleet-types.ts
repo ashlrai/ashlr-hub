@@ -449,7 +449,7 @@ export interface FleetTask {
 
 export type EnqueueTaskResult =
   | { ok: true; task: FleetTask; deduped: boolean }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; /** Absent means unknown; false proves persistence was never entered. */ writeAttempted?: boolean };
 
 /** Input to cancelTask (fleet/task-source.ts, U5). Only queued / parked tasks can be cancelled. */
 export interface CancelTaskRequest {

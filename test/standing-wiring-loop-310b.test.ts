@@ -86,7 +86,13 @@ function cfgFor(foundry: Record<string, unknown> = {}): AshlrConfig {
   return makeCfg({
     daemon: { dailyBudgetUsd: 1.0, perTickItems: 1, parallel: 1, intervalMs: 20, idleBackoffMs: 1 } as AshlrConfig['daemon'],
     // builtin only: master's real router then takes the swarm path for these items.
-    foundry: { allowedBackends: ['builtin'], ...foundry } as AshlrConfig['foundry'],
+    foundry: {
+      allowedBackends: ['builtin'],
+      // Resource direction senses separately from the mocked seat gate. Keep
+      // this inert dispatch fixture on Claude rather than unknown-headroom local.
+      resourceOverrides: { claude: { availability: 'open', usedPct: 10 } },
+      ...foundry,
+    } as AshlrConfig['foundry'],
   });
 }
 

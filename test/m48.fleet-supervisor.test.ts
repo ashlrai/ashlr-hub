@@ -392,7 +392,10 @@ describe('M48 tick — QUOTA FALLBACK (frontier over rate cap → builtin)', () 
 
   it('falls back to runSwarm (builtin) when claude is over its rate cap', async () => {
     const cfg = makeCfg({
-      foundry: { limits: { claude: { window: '1h', max: 1 } } },
+      foundry: {
+        resourceOverrides: { claude: { availability: 'open', usedPct: 10 } },
+        limits: { claude: { window: '1h', max: 1 } },
+      },
     } as Partial<AshlrConfig>);
     expect(reserveFleetQuotaUse('claude', cfg, 'm48-exhaust-claude-1')).toMatchObject({
       kind: 'reserved',
@@ -408,7 +411,10 @@ describe('M48 tick — QUOTA FALLBACK (frontier over rate cap → builtin)', () 
 
   it('records the dispatch under builtin (not claude) when over cap', async () => {
     const cfg = makeCfg({
-      foundry: { limits: { claude: { window: '1h', max: 1 } } },
+      foundry: {
+        resourceOverrides: { claude: { availability: 'open', usedPct: 10 } },
+        limits: { claude: { window: '1h', max: 1 } },
+      },
     } as Partial<AshlrConfig>);
     expect(reserveFleetQuotaUse('claude', cfg, 'm48-exhaust-claude-2')).toMatchObject({
       kind: 'reserved',
@@ -421,9 +427,14 @@ describe('M48 tick — QUOTA FALLBACK (frontier over rate cap → builtin)', () 
   });
 
   it('does NOT fall back when claude is UNDER its rate cap', async () => {
+    // Resource direction is separate from the fresh subscription reading.
+    // Give this quota fixture known headroom so the rate-cap gate is exercised.
     // A generous cap leaves claude within limit ⇒ frontier path is taken.
     const cfg = makeCfg({
-      foundry: { limits: { claude: { window: '1h', max: 100 } } },
+      foundry: {
+        resourceOverrides: { claude: { availability: 'open', usedPct: 10 } },
+        limits: { claude: { window: '1h', max: 100 } },
+      },
     } as Partial<AshlrConfig>);
 
     await tick(cfg, { dryRun: false });

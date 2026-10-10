@@ -236,6 +236,15 @@ describe('foreground resource task result, output and cancellation', () => {
     expect(output.mock.calls.flat().join('\n')).toContain('ashlr remains compatible');
     expect(backend.run).not.toHaveBeenCalled();
   });
+
+  it.each([['credits', '--help'], ['credits', '--json'], ['--unknown'], ['--json', '--json']])(
+    'rejects unsupported top-level arguments %j without account discovery', async (...args) => {
+      const { cmdResources } = await import('../src/cli/resources.js');
+      expect(await cmdResources(args)).toBe(2);
+      expect(backend.config).not.toHaveBeenCalled();
+      expect(backend.monitor).not.toHaveBeenCalled();
+      expect(backend.run).not.toHaveBeenCalled();
+    });
 });
 
 describe('owner-supplied quota export normalization CLI', () => {

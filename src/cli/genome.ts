@@ -1,27 +1,27 @@
 /**
- * `ashlr recall`, `ashlr learn`, and `ashlr genome` CLI commands (M7 + M16).
+ * `phm recall`, `phm learn`, and `phm genome` CLI commands (M7 + M16).
  *
  * Commands:
- *   ashlr recall "<query>" [--limit N] [--no-embeddings] [--json]
+ *   phm recall "<query>" [--limit N] [--no-embeddings] [--json]
  *     Search the aggregated genome and print ranked hits.
  *
- *   ashlr learn "<text>" [--title <t>] [--project <p>] [--tags a,b] [--json]
+ *   phm learn "<text>" [--title <t>] [--project <p>] [--tags a,b] [--json]
  *     Append a memory entry to ~/.ashlr/genome/hub.jsonl.
  *
- *   ashlr genome [--json]
+ *   phm genome [--json]
  *     Print genome health panel (entry counts, projects, size, staleness,
  *     embeddings availability).
  *
- *   ashlr genome --teach "<note>" [--title <t>] [--project <p>] [--json]
+ *   phm genome --teach "<note>" [--title <t>] [--project <p>] [--json]
  *     Append a high-value explicit memory tagged 'teach'.
  *
- *   ashlr genome consolidate [--json]
+ *   phm genome consolidate [--json]
  *     Merge near-duplicate genome entries (backup-first, no data loss).
  *
- *   ashlr genome export <file> [--format json|md] [--json]
+ *   phm genome export <file> [--format json|md] [--json]
  *     Export the full genome to a portable JSON or Markdown file.
  *
- *   ashlr genome playbook "<goal>" [--limit N] [--json]
+ *   phm genome playbook "<goal>" [--limit N] [--json]
  *     Synthesize a playbook from past genome entries for a goal.
  *
  * Exit codes:
@@ -180,7 +180,7 @@ function snippet(text: string, maxChars = 120): string {
 }
 
 // ---------------------------------------------------------------------------
-// `ashlr recall "<query>" [--limit N] [--no-embeddings] [--json]`
+// `phm recall "<query>" [--limit N] [--no-embeddings] [--json]`
 // ---------------------------------------------------------------------------
 
 interface ParsedRecallArgs {
@@ -228,7 +228,7 @@ function parseRecallArgs(args: string[]): ParsedRecallArgs {
 
   if (!result.query.trim()) {
     result.usageError =
-      'Usage: ashlr recall "<query>" [--limit N] [--no-embeddings] [--json]';
+      'Usage: phm recall "<query>" [--limit N] [--no-embeddings] [--json]';
   }
 
   return result;
@@ -238,7 +238,7 @@ function printRecallHuman(hits: RecallHit[], query: string): void {
   if (hits.length === 0) {
     out('');
     out(`  ${dim(`No genome entries matched "${query}".`)}`);
-    out(`  ${dim('Add entries with: ashlr learn "<text>"')}`);
+    out(`  ${dim('Add entries with: phm learn "<text>"')}`);
     out('');
     return;
   }
@@ -249,7 +249,7 @@ function printRecallHuman(hits: RecallHit[], query: string): void {
   const projectW = 18;
 
   out('');
-  out(bold('  ashlr recall') + gray(`  — ${hits.length} hit(s) for "${query}"`));
+  out(bold('  phm recall') + gray(`  — ${hits.length} hit(s) for "${query}"`));
   out('');
   out(
     `  ${bold(pad('#', 3))}  ` +
@@ -302,13 +302,13 @@ function printRecallHuman(hits: RecallHit[], query: string): void {
   out('');
   out(
     dim(`  ${hits.length} result(s)  ·  source: local genome  ·  `) +
-    dim('ashlr learn "<text>" to add more'),
+    dim('phm learn "<text>" to add more'),
   );
   out('');
 }
 
 /**
- * `ashlr recall "<query>" [--limit N] [--no-embeddings] [--json]`
+ * `phm recall "<query>" [--limit N] [--no-embeddings] [--json]`
  *
  * Exit codes: 0 success, 1 module/runtime error, 2 bad usage.
  */
@@ -379,7 +379,7 @@ export async function cmdRecall(args: string[]): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// `ashlr learn "<text>" [--title <t>] [--project <p>] [--tags a,b] [--json]`
+// `phm learn "<text>" [--title <t>] [--project <p>] [--tags a,b] [--json]`
 // ---------------------------------------------------------------------------
 
 interface ParsedLearnArgs {
@@ -444,14 +444,14 @@ function parseLearnArgs(args: string[]): ParsedLearnArgs {
 
   if (!result.text.trim()) {
     result.usageError =
-      'Usage: ashlr learn "<text>" [--title <title>] [--project <name>] [--tags a,b] [--json]';
+      'Usage: phm learn "<text>" [--title <title>] [--project <name>] [--tags a,b] [--json]';
   }
 
   return result;
 }
 
 /**
- * `ashlr learn "<text>" [--title <t>] [--project <p>] [--tags a,b] [--json]`
+ * `phm learn "<text>" [--title <t>] [--project <p>] [--tags a,b] [--json]`
  *
  * Appends a GenomeEntry to ~/.ashlr/genome/hub.jsonl. Never overwrites.
  * Confirms what was stored — does NOT print secrets or full text verbatim
@@ -518,7 +518,7 @@ export async function cmdLearn(args: string[]): Promise<number> {
   // Human output: confirm title + id + path; do NOT echo text back (avoids
   // accidental secret exposure if text was pasted from a sensitive context).
   out('');
-  out(bold('  ashlr learn') + gray('  — entry stored'));
+  out(bold('  phm learn') + gray('  — entry stored'));
   out('');
   out(`  ${bold('Title:')}    ${cyan(entry.title)}`);
   out(`  ${bold('ID:')}       ${dim(entry.id)}`);
@@ -533,7 +533,7 @@ export async function cmdLearn(args: string[]): Promise<number> {
   out(`  ${bold('At:')}       ${relativeTime(entry.ts)}`);
   out('');
   out(
-    dim('  Use `ashlr recall "') + dim(entry.title.slice(0, 40)) + dim('"` to find it later.'),
+    dim('  Use `phm recall "') + dim(entry.title.slice(0, 40)) + dim('"` to find it later.'),
   );
   out('');
 
@@ -541,7 +541,7 @@ export async function cmdLearn(args: string[]): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// `ashlr genome [subcommand] [options]`
+// `phm genome [subcommand] [options]`
 //
 // M16 subcommands routed from cmdGenome:
 //   --teach "<note>"   — genome --teach
@@ -625,7 +625,7 @@ function parseTeachArgs(args: string[]): ParsedTeachArgs {
 
   if (!result.note.trim()) {
     result.usageError =
-      'Usage: ashlr genome --teach "<note>" [--title <title>] [--project <name>] [--json]';
+      'Usage: phm genome --teach "<note>" [--title <title>] [--project <name>] [--json]';
   }
 
   return result;
@@ -684,7 +684,7 @@ async function runTeach(
   }
 
   out('');
-  out(bold('  ashlr genome --teach') + gray('  — high-value memory stored'));
+  out(bold('  phm genome --teach') + gray('  — high-value memory stored'));
   out('');
   out(`  ${bold('Title:')}    ${cyan(entry.title)}`);
   out(`  ${bold('ID:')}       ${dim(entry.id)}`);
@@ -771,7 +771,7 @@ async function runConsolidate(
   const savedCount = before - after;
 
   out('');
-  out(bold('  ashlr genome consolidate') + gray('  — deduplication complete'));
+  out(bold('  phm genome consolidate') + gray('  — deduplication complete'));
   out('');
 
   const labelW = 22;
@@ -849,7 +849,7 @@ function parseExportArgs(args: string[]): ParsedExportArgs {
 
   if (!result.dest.trim()) {
     result.usageError =
-      'Usage: ashlr genome export <file> [--format json|md] [--json]';
+      'Usage: phm genome export <file> [--format json|md] [--json]';
     return result;
   }
 
@@ -893,7 +893,7 @@ async function runExport(
 
   out('');
   if (result.ok) {
-    out(bold('  ashlr genome export') + gray('  — genome exported'));
+    out(bold('  phm genome export') + gray('  — genome exported'));
     out('');
     const labelW = 14;
     function row(label: string, value: string): void {
@@ -905,7 +905,7 @@ async function runExport(
     out('');
     out(dim(`  Portable export — no lock-in. ${result.count} entries written.`));
   } else {
-    out(bold('  ashlr genome export') + red('  — export failed'));
+    out(bold('  phm genome export') + red('  — export failed'));
     out('');
     out(`  ${red('Failed to write to:')} ${gray(parsed.dest)}`);
     process.stderr.write(
@@ -963,7 +963,7 @@ function parsePlaybookArgs(args: string[]): ParsedPlaybookArgs {
 
   if (!result.goal.trim()) {
     result.usageError =
-      'Usage: ashlr genome playbook "<goal>" [--limit N] [--json]';
+      'Usage: phm genome playbook "<goal>" [--limit N] [--json]';
   }
 
   return result;
@@ -971,12 +971,12 @@ function parsePlaybookArgs(args: string[]): ParsedPlaybookArgs {
 
 function printPlaybookHuman(p: Playbook, text: string): void {
   out('');
-  out(bold('  ashlr genome playbook') + gray(`  — "${p.goal}"`));
+  out(bold('  phm genome playbook') + gray(`  — "${p.goal}"`));
   out('');
 
   if (p.entries.length === 0) {
     out(`  ${dim('No past entries found for this goal.')}`);
-    out(`  ${dim('Run more goals or use `ashlr learn` to build the genome.')}`);
+    out(`  ${dim('Run more goals or use `phm learn` to build the genome.')}`);
     out('');
     return;
   }
@@ -992,7 +992,7 @@ function printPlaybookHuman(p: Playbook, text: string): void {
   out('');
   out(
     dim(`  ${p.entries.length} source(s)  ·  local genome  ·  `) +
-    dim('`ashlr recall` to search manually'),
+    dim('`phm recall` to search manually'),
   );
   out('');
 }
@@ -1085,7 +1085,7 @@ function printGenomeHuman(health: GenomeHealth): void {
     : green('ok');
 
   out('');
-  out(bold('  ashlr genome') + gray('  — shared memory health'));
+  out(bold('  phm genome') + gray('  — shared memory health'));
   out('');
 
   const labelW = 22;
@@ -1113,20 +1113,20 @@ function printGenomeHuman(health: GenomeHealth): void {
 
   if (totalEntries === 0) {
     out(`  ${dim('Genome is empty. Add entries with:')}`);
-    out(`  ${cyan('ashlr learn "<text>"')}`);
+    out(`  ${cyan('phm learn "<text>"')}`);
   } else {
-    out(`  ${dim('Search:')}   ${cyan('ashlr recall "<query>"')}`);
-    out(`  ${dim('Add:')}      ${cyan('ashlr learn "<text>" [--project <name>] [--tags a,b]')}`);
-    out(`  ${dim('Teach:')}    ${cyan('ashlr genome --teach "<note>"')}`);
-    out(`  ${dim('Playbook:')} ${cyan('ashlr genome playbook "<goal>"')}`);
-    out(`  ${dim('Export:')}   ${cyan('ashlr genome export <file.json|file.md>')}`);
+    out(`  ${dim('Search:')}   ${cyan('phm recall "<query>"')}`);
+    out(`  ${dim('Add:')}      ${cyan('phm learn "<text>" [--project <name>] [--tags a,b]')}`);
+    out(`  ${dim('Teach:')}    ${cyan('phm genome --teach "<note>"')}`);
+    out(`  ${dim('Playbook:')} ${cyan('phm genome playbook "<goal>"')}`);
+    out(`  ${dim('Export:')}   ${cyan('phm genome export <file.json|file.md>')}`);
   }
 
   out('');
 }
 
 /**
- * `ashlr genome [subcommand] [options]`
+ * `phm genome [subcommand] [options]`
  *
  * M16 subcommands:
  *   --teach "<note>"     — store a high-value explicit memory tagged 'teach'
@@ -1220,11 +1220,11 @@ export async function cmdGenome(args: string[]): Promise<number> {
 
 function printRecallHelp(): void {
   out('');
-  out(bold('  ashlr recall') + dim(' — search the shared genome'));
+  out(bold('  phm recall') + dim(' — search the shared genome'));
   out('');
   out('  ' + bold('Usage:'));
   out('');
-  out(`    ashlr recall ${cyan('"<query>"')} [options]`);
+  out(`    phm recall ${cyan('"<query>"')} [options]`);
   out('');
   out('  ' + bold('Options:'));
   out('');
@@ -1243,10 +1243,10 @@ function printRecallHelp(): void {
   out('');
   out('  ' + bold('Examples:'));
   out('');
-  out(`    ${cyan('ashlr recall "typescript module resolution"')}`);
-  out(`    ${cyan('ashlr recall "ollama embeddings" --limit 10')}`);
-  out(`    ${cyan('ashlr recall "scaffold" --no-embeddings')}`);
-  out(`    ${cyan('ashlr recall "genome" --json')}`);
+  out(`    ${cyan('phm recall "typescript module resolution"')}`);
+  out(`    ${cyan('phm recall "ollama embeddings" --limit 10')}`);
+  out(`    ${cyan('phm recall "scaffold" --no-embeddings')}`);
+  out(`    ${cyan('phm recall "genome" --json')}`);
   out('');
   out('  ' + bold('Notes:'));
   out('');
@@ -1259,11 +1259,11 @@ function printRecallHelp(): void {
 
 function printLearnHelp(): void {
   out('');
-  out(bold('  ashlr learn') + dim(' — store a memory in the genome'));
+  out(bold('  phm learn') + dim(' — store a memory in the genome'));
   out('');
   out('  ' + bold('Usage:'));
   out('');
-  out(`    ashlr learn ${cyan('"<text>"')} [options]`);
+  out(`    phm learn ${cyan('"<text>"')} [options]`);
   out('');
   out('  ' + bold('Options:'));
   out('');
@@ -1283,10 +1283,10 @@ function printLearnHelp(): void {
   out('');
   out('  ' + bold('Examples:'));
   out('');
-  out(`    ${cyan('ashlr learn "Use NodeNext module resolution with .js import extensions"')}`);
-  out(`    ${cyan('ashlr learn "Ollama runs on :11434; /api/embeddings for vectors" --project ashlr-hub')}`);
-  out(`    ${cyan('ashlr learn "deploy to Vercel via CLI" --tags vercel,deploy,cli')}`);
-  out(`    ${cyan('ashlr learn "M7 genome contract" --title "Genome types" --json')}`);
+  out(`    ${cyan('phm learn "Use NodeNext module resolution with .js import extensions"')}`);
+  out(`    ${cyan('phm learn "Ollama runs on :11434; /api/embeddings for vectors" --project ashlr-hub')}`);
+  out(`    ${cyan('phm learn "deploy to Vercel via CLI" --tags vercel,deploy,cli')}`);
+  out(`    ${cyan('phm learn "M7 genome contract" --title "Genome types" --json')}`);
   out('');
   out('  ' + bold('Notes:'));
   out('');
@@ -1299,11 +1299,11 @@ function printLearnHelp(): void {
 
 function printGenomeHelp(): void {
   out('');
-  out(bold('  ashlr genome') + dim(' — shared memory health + compounding genome (M16)'));
+  out(bold('  phm genome') + dim(' — shared memory health + compounding genome (M16)'));
   out('');
   out('  ' + bold('Usage:'));
   out('');
-  out(`    ashlr genome [subcommand] [options]`);
+  out(`    phm genome [subcommand] [options]`);
   out('');
   out('  ' + bold('Subcommands:'));
   out('');
@@ -1328,15 +1328,15 @@ function printGenomeHelp(): void {
   out('');
   out('  ' + bold('Examples:'));
   out('');
-  out(`    ${cyan('ashlr genome')}`);
-  out(`    ${cyan('ashlr genome --teach "Always use --no-capture on dry-run flows"')}`);
-  out(`    ${cyan('ashlr genome --teach "..." --title "Dry-run tip" --project ashlr-hub')}`);
-  out(`    ${cyan('ashlr genome consolidate')}`);
-  out(`    ${cyan('ashlr genome consolidate --json')}`);
-  out(`    ${cyan('ashlr genome export ~/genome-backup.json')}`);
-  out(`    ${cyan('ashlr genome export ~/genome-backup.md --format md')}`);
-  out(`    ${cyan('ashlr genome playbook "scaffold a new CLI command"')}`);
-  out(`    ${cyan('ashlr genome playbook "deploy to vercel" --limit 8 --json')}`);
+  out(`    ${cyan('phm genome')}`);
+  out(`    ${cyan('phm genome --teach "Always use --no-capture on dry-run flows"')}`);
+  out(`    ${cyan('phm genome --teach "..." --title "Dry-run tip" --project ashlr-hub')}`);
+  out(`    ${cyan('phm genome consolidate')}`);
+  out(`    ${cyan('phm genome consolidate --json')}`);
+  out(`    ${cyan('phm genome export ~/genome-backup.json')}`);
+  out(`    ${cyan('phm genome export ~/genome-backup.md --format md')}`);
+  out(`    ${cyan('phm genome playbook "scaffold a new CLI command"')}`);
+  out(`    ${cyan('phm genome playbook "deploy to vercel" --limit 8 --json')}`);
   out('');
   out('  ' + bold('Notes:'));
   out('');
@@ -1347,7 +1347,7 @@ function printGenomeHelp(): void {
   out('');
   out('  ' + bold('Related commands:'));
   out('');
-  out(`    ${cyan('ashlr recall "<query>"')}  ${dim('— search the genome')}`);
-  out(`    ${cyan('ashlr learn "<text>"')}    ${dim('— add an entry')}`);
+  out(`    ${cyan('phm recall "<query>"')}  ${dim('— search the genome')}`);
+  out(`    ${cyan('phm learn "<text>"')}    ${dim('— add an entry')}`);
   out('');
 }
